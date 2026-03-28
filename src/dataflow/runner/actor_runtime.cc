@@ -26,6 +26,7 @@
 #include "src/dataflow/runtime/job_master.h"
 #include "src/dataflow/runtime/observability.h"
 #include "src/dataflow/serial/serializer.h"
+#include "src/dataflow/sql/sql_parser.h"
 #include "src/dataflow/transport/ipc_transport.h"
 
 namespace dataflow {
@@ -92,6 +93,16 @@ std::string summarizeTable(const Table& table) {
     out << ", first_row=" << summarizeRow(table.rows.front());
   }
   return out.str();
+}
+
+std::string nextDashboardJobId() {
+  static std::atomic<std::uint64_t> seq{1};
+  return "dashboard_job_" + std::to_string(seq.fetch_add(1));
+}
+
+bool isSelectSql(const std::string& sql) {
+  const auto statement = sql::SqlParser::parse(sql);
+  return statement.kind == sql::SqlStatementKind::Select;
 }
 
 Table makeDemoInputTable(const std::string& payload) {
@@ -366,6 +377,7 @@ struct RpcJobSnapshot {
   std::string state = "SUBMITTED";
   std::string status_code = "JOB_SUBMITTED";
   std::string payload;
+  std::string sql;
   std::string result_payload;
   RpcChainSnapshot chain;
   RpcTaskSnapshot task;
@@ -392,6 +404,7 @@ std::string snapshotToJson(const RpcJobSnapshot& snapshot) {
       field("client_node", snapshot.client_node),
       field("worker_node", snapshot.worker_node),
       field("payload", snapshot.payload),
+      field("sql", snapshot.sql),
       field("result_payload", snapshot.result_payload),
       field("chain", chain_json, true),
       field("task", task_json, true),
@@ -529,9 +542,58 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
                                const std::string& sql,
                                std::string* job_id_out,
                                std::string* summary_out) -> bool {
+    const auto set_immediate_snapshot = [&](RpcJobSnapshot& snapshot,
+                                           const std::string& plan_result) {
+      snapshot.job_id = nextDashboardJobId();
+      snapshot.client_node = "dashboard";
+      snapshot.worker_node = "scheduler";
+      snapshot.payload = flattenText(sql);
+      snapshot.sql = sql;
+      snapshot.result_payload = plan_result;
+      snapshot.state = "FINISHED";
+      snapshot.status_code = "JOB_FINISHED";
+      snapshot.chain.chain_id = snapshot.job_id + ":chain_1";
+      snapshot.chain.state = "SUCCEEDED";
+      snapshot.chain.status_code = "CHAIN_SUCCEEDED";
+      snapshot.chain.task_ids = {snapshot.job_id + ":task_1"};
+      snapshot.task.task_id = snapshot.job_id + ":task_1";
+      snapshot.task.state = "SUCCEEDED";
+      snapshot.task.status_code = "TASK_SUCCEEDED";
+      snapshot.task.worker_id = "scheduler";
+    };
+
+    if (!sql.empty()) {
+      try {
+        if (!isSelectSql(sql)) {
+          const auto dml_df = buildSqlPlan(sql, payload_input);
+          const Table dml_result = dml_df.toTable();
+          RpcJobSnapshot snapshot;
+          set_immediate_snapshot(snapshot, summarizeTable(dml_result));
+          const std::string job_id = snapshot.job_id;
+          if (job_id_out) {
+            *job_id_out = job_id;
+          }
+          if (summary_out) {
+            summary_out->assign(snapshot.result_payload);
+          }
+          job_snapshots[job_id] = snapshot;
+          emitSnapshotEvent(snapshot);
+          return true;
+        }
+      } catch (const std::exception& e) {
+        if (job_id_out) job_id_out->clear();
+        if (summary_out) summary_out->assign(e.what());
+        return false;
+      }
+    }
+
     if (workers.empty()) {
-      if (job_id_out) job_id_out->clear();
-      if (summary_out) summary_out->assign("scheduler reject: no worker available");
+      if (job_id_out) {
+        job_id_out->clear();
+      }
+      if (summary_out) {
+        summary_out->assign("scheduler reject: no worker available");
+      }
       emitRpcEvent("actor_scheduler", "dashboard_submit", config.node_id,
                    "JOB_SUBMIT_REJECTED", "",
                    {observability::field("reason", "no worker available")});
@@ -553,6 +615,7 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
     RpcJobSnapshot snapshot;
     snapshot.job_id = job_id;
     snapshot.client_node = "dashboard";
+    snapshot.sql = sql;
     snapshot.payload = flattenText(sql.empty() ? plan_df.explain() : sql);
     snapshot.state = "SUBMITTED";
     snapshot.status_code = "JOB_SUBMITTED";
@@ -579,6 +642,11 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
 
     if (method == "GET" && (path == "/" || path == "/index.html" || path == "/app.js" || path == "/app.ts")) {
       serveDashboardAsset(fd, path);
+      return;
+    }
+
+    if (method == "GET" && path.rfind("/api/", 0) != 0 && path.find('.') == std::string::npos) {
+      serveDashboardAsset(fd, "/index.html");
       return;
     }
 
@@ -626,9 +694,10 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
       const std::string detail = observability::object({
           observability::field("ok", true),
           observability::field("job_id", job_id),
-          observability::field("state", "SUBMITTED"),
-          observability::field("status_code", "JOB_SUBMITTED"),
+          observability::field("state", job_snapshots[job_id].state),
+          observability::field("status_code", job_snapshots[job_id].status_code),
           observability::field("payload", summary),
+          observability::field("result_payload", job_snapshots[job_id].result_payload),
       });
       sendHttpResponse(fd, 200, "OK", detail, "application/json");
       emitRpcEvent("actor_scheduler", "dashboard_submit", config.node_id, "JOB_SUBMITTED", job_id,

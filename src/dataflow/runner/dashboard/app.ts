@@ -9,6 +9,7 @@ interface JobSnapshot {
   client_node: string;
   worker_node: string;
   payload: string;
+  sql: string;
   result_payload: string;
   chain: {
     chain_id: string;
@@ -29,7 +30,39 @@ interface JobListPayload {
   jobs: JobSnapshot[];
 }
 
+interface SubmitResult {
+  ok: boolean;
+  job_id: string;
+  state?: string;
+  status_code?: string;
+  payload?: string;
+  message?: string;
+}
+
 const { useEffect, useCallback, useState, createElement: h } = React;
+
+const sqlPresets = [
+  {
+    name: '默认聚合',
+    sql: 'SELECT token, SUM(score) AS total_score FROM rpc_input GROUP BY token',
+  },
+  {
+    name: '按 SQL 过滤',
+    sql: 'SELECT token, SUM(score) AS total_score FROM rpc_input WHERE score > 0 GROUP BY token',
+  },
+  {
+    name: '创建表',
+    sql: 'CREATE TABLE users (id,name,score)',
+  },
+  {
+    name: '插入一条',
+    sql: 'INSERT INTO users VALUES (1, "alice", 10)',
+  },
+  {
+    name: '按列插入',
+    sql: 'INSERT INTO users (id, name, score) VALUES (2, "bob", 20)',
+  },
+];
 
 const api = {
   async listJobs(): Promise<JobListPayload> {
@@ -46,7 +79,7 @@ const api = {
     }
     return (await response.json()) as JobSnapshot;
   },
-  async submit(payload: string, sql: string): Promise<{ job_id: string }> {
+  async submit(payload: string, sql: string): Promise<SubmitResult> {
     const params = new URLSearchParams();
     params.set('payload', payload);
     params.set('sql', sql);
@@ -55,11 +88,11 @@ const api = {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: params.toString(),
     });
-    const body = await response.json();
+    const body = (await response.json()) as SubmitResult & { message?: string };
     if (!response.ok || !body.ok) {
       throw new Error(body.message || `提交失败: ${response.status}`);
     }
-    return body as { job_id: string };
+    return body;
   },
 };
 
@@ -67,6 +100,12 @@ function stateClassName(state: string): string {
   return state === 'FINISHED' || state === 'SUCCEEDED' || state === 'JOB_FINISHED'
       ? 'ok'
       : 'warn';
+}
+
+function shorten(value: string | undefined, maxLength: number): string {
+  if (!value) return '-';
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength)}...`;
 }
 
 function JobList({
@@ -90,10 +129,10 @@ function JobList({
           null,
           h('th', null, 'JobId'),
           h('th', null, 'State'),
+          h('th', null, 'SQL'),
           h('th', null, 'Worker'),
-          h('th', null, 'Chain'),
-          h('th', null, '任务摘要'),
-          h('th', null, 'Task'),
+          h('th', null, '链路/任务'),
+          h('th', null, '结果摘要')
         )
       ),
       h(
@@ -124,15 +163,15 @@ function JobList({
               h('div', { className: stateClassName(job.state) }, job.state),
               h('div', { className: 'tiny' }, job.status_code)
             ),
+            h('td', null, shorten(job.sql || job.payload, 52)),
             h('td', null, job.worker_node || '-'),
             h(
               'td',
               null,
-              job.chain.chain_id || '-',
-              h('div', { className: 'tiny' }, `${(job.chain.task_ids || []).length} tasks`)
+              h('div', null, job.chain.chain_id || '-'),
+              h('div', { className: 'tiny' }, `${job.task.task_id || '-'} / ${job.chain.task_ids.length} tasks`)
             ),
-            h('td', null, job.result_payload || job.payload || '-'),
-            h('td', null, job.task.task_id || '-')
+            h('td', null, shorten(job.result_payload || '-', 80))
           )
         )
       )
@@ -147,6 +186,7 @@ function App() {
   const [statusText, setStatusText] = useState('ready');
   const [hintText, setHintText] = useState('');
   const [detailText, setDetailText] = useState('');
+  const [selectedJobId, setSelectedJobId] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -177,9 +217,12 @@ function App() {
         return;
       }
       const result = await api.submit(payload, sql);
-      setStatusText(`任务已提交：${result.job_id}`);
+      const stateText = result.state || 'SUBMITTED';
+      const statusCode = result.status_code || 'JOB_SUBMITTED';
+      setStatusText(`任务已提交：${result.job_id}（${stateText}/${statusCode}）`);
       await refresh();
       const detail = await api.getJob(result.job_id);
+      setSelectedJobId(result.job_id);
       setDetailText(JSON.stringify(detail, null, 2));
     } catch (error: unknown) {
       setStatusText(error instanceof Error ? error.message : String(error));
@@ -191,10 +234,16 @@ function App() {
   const showDetail = async (jobId: string) => {
     try {
       const detail = await api.getJob(jobId);
+      setSelectedJobId(jobId);
       setDetailText(JSON.stringify(detail, null, 2));
     } catch (error: unknown) {
       setDetailText(error instanceof Error ? error.message : String(error));
     }
+  };
+
+  const applyPreset = (nextSql: string) => {
+    setSql(nextSql);
+    setStatusText(`已加载 SQL 模板`);
   };
 
   return h(
@@ -204,9 +253,8 @@ function App() {
       'div',
       { className: 'panel' },
       h('h3', null, '提交任务'),
-      h(
-        'div',
-        { className: 'row', style: { marginBottom: '10px' } },
+      h('div', { className: 'row', style: { marginBottom: '10px' } },
+        h('label', { className: 'tiny', style: { display: 'block', width: '100%' } }, 'Payload（用于 rpc_input / 调试）'),
         h('input', {
           className: 'small',
           value: payload,
@@ -214,12 +262,10 @@ function App() {
             const target = event.target as HTMLInputElement | null;
             if (target) setPayload(target.value);
           },
-          placeholder: 'payload（示例：demo payload）'
+          placeholder: 'demo payload'
         })
       ),
-      h(
-        'div',
-        { style: { marginBottom: '10px' } },
+      h('div', { style: { marginBottom: '10px' } },
         h('label', { htmlFor: 'sqlInput' }, 'SQL（可选）'),
         h('textarea', {
           id: 'sqlInput',
@@ -229,7 +275,23 @@ function App() {
             if (target) setSql(target.value);
           },
           placeholder: 'SELECT token, SUM(score) AS total_score FROM rpc_input GROUP BY token'
-        })
+        }),
+        h('div', { className: 'tiny', style: { marginTop: '4px' } }, '支持 CREATE TABLE / INSERT / SELECT 常用语法')
+      ),
+      h(
+        'div',
+        { className: 'row', style: { marginBottom: '10px' } },
+        ...sqlPresets.map((item) =>
+          h(
+            'button',
+            {
+              type: 'button',
+              onClick: () => applyPreset(item.sql),
+              style: { minWidth: 'auto', paddingLeft: '12px', paddingRight: '12px' },
+            },
+            item.name
+          )
+        )
       ),
       h(
         'div',
@@ -251,15 +313,18 @@ function App() {
       h(
         'div',
         { className: 'muted', style: { marginBottom: '6px' } },
-        `${jobs.length} 条作业`
+        `${jobs.length} 条作业（最近排序）`
       ),
       h(JobList, { jobs, onSelect: showDetail })
     ),
     h(
       'div',
       { className: 'panel' },
-      h('h3', null, '运行详情'),
-      h('pre', { className: 'code' }, detailText || '点击任务行可查看详情 JSON')
+      h('h3', null, '作业详情'),
+      h('div', { className: 'muted', style: { marginBottom: '6px' } },
+        selectedJobId ? `JobId: ${selectedJobId}` : '点击任务行查看详情，或提交后自动展开'
+      ),
+      h('pre', { className: 'code' }, detailText || '暂无详情')
     )
   );
 }

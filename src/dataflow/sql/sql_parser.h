@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "src/dataflow/sql/sql_ast.h"
 #include "src/dataflow/sql/sql_errors.h"
@@ -10,7 +11,7 @@ namespace sql {
 
 class SqlParser {
  public:
-  static SqlQuery parse(const std::string& sql);
+  static SqlStatement parse(const std::string& sql);
 };
 
 }  // namespace sql

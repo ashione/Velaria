@@ -35,7 +35,8 @@ bool isClauseKeyword(const std::string& value) {
   const auto u = toUpper(value);
   return u == "FROM" || u == "WHERE" || u == "GROUP" || u == "BY" || u == "HAVING" ||
          u == "LIMIT" || u == "JOIN" || u == "INNER" || u == "LEFT" || u == "ON" || u == "AS" ||
-         u == "SELECT";
+         u == "SELECT" || u == "CREATE" || u == "TABLE" || u == "INSERT" || u == "INTO" ||
+         u == "VALUES" || u == "USING" || u == "OPTIONS";
 }
 
 bool isJoinKeyword(const std::string& value) {
@@ -112,7 +113,8 @@ std::vector<Token> tokenize(const std::string& sql) {
         continue;
       }
     }
-    if (c == ',' || c == '(' || c == ')' || c == '.' || c == '*' || c == '=' || c == '>' || c == '<') {
+    if (c == ',' || c == '(' || c == ')' || c == '.' || c == '*' || c == '=' || c == '>' ||
+        c == '<') {
       out.push_back(Token(std::string(1, c), false, false));
       ++i;
       continue;
@@ -149,18 +151,14 @@ class ParseState {
   }
   Token expectToken() { return take(); }
   void expectWord(const std::string& w) {
-    if (!consumeWord(w)) {
-      throw SQLSyntaxError("expected keyword: " + w);
-    }
+    if (!consumeWord(w)) throw SQLSyntaxError("expected keyword: " + w);
   }
   void expectSymbol(const std::string& s) {
     if (!consumeSymbol(s)) {
       throw SQLSyntaxError("expected symbol: " + s);
     }
   }
-  bool isIdentifier() const {
-    return !isEnd() && !peek().is_string && !peek().is_number;
-  }
+  bool isIdentifier() const { return !isEnd() && !peek().is_string && !peek().is_number; }
 
  private:
   std::vector<Token> tokens_;
@@ -169,21 +167,19 @@ class ParseState {
 
 bool isAliasCandidate(const Token& token) {
   return !token.text.empty() && !token.is_number && !token.is_string && !isClauseKeyword(token.text) &&
-         token.text != "," && token.text != "(" && token.text != ")" && token.text != "." && token.text != "*" &&
-         token.text != "=" && token.text != "<" && token.text != ">" && token.text != "<=" &&
-         token.text != ">=" && token.text != "!=" && token.text != "<>";
+         token.text != "," && token.text != "(" && token.text != ")" && token.text != "." &&
+         token.text != "*" && token.text != "=" && token.text != "<" && token.text != ">" &&
+         token.text != "<=" && token.text != ">=" && token.text != "!=" && token.text != "<>";
 }
 
 bool isJoinStart(const ParseState& state) {
   return !state.isEnd() && isJoinKeyword(state.peek().text);
 }
 
-Value parseValueLiteral(const Token& token) {
+Value parseValueToken(const Token& token) {
   if (token.is_number) {
     try {
-      if (token.text.find('.') != std::string::npos) {
-        return Value(std::stod(token.text));
-      }
+      if (token.text.find('.') != std::string::npos) return Value(std::stod(token.text));
       return Value(std::stoll(token.text));
     } catch (...) {
       throw SQLSyntaxError("invalid numeric literal: " + token.text);
@@ -191,6 +187,8 @@ Value parseValueLiteral(const Token& token) {
   }
   if (token.is_string) return Value(token.text);
   if (isKeyword(token.text, "NULL")) return Value();
+  if (isKeyword(token.text, "TRUE")) return Value(static_cast<int64_t>(1));
+  if (isKeyword(token.text, "FALSE")) return Value(static_cast<int64_t>(0));
   return Value(token.text);
 }
 
@@ -252,7 +250,7 @@ FromItem parseFrom(ParseState& state) {
     auto token = state.peek();
     if (!isKeyword(token.text, "ON") && !isKeyword(token.text, "WHERE") &&
         !isKeyword(token.text, "GROUP") && !isKeyword(token.text, "HAVING") &&
-        !isKeyword(token.text, "LIMIT") && token.text != ",") {
+        !isKeyword(token.text, "LIMIT") && token.text != "," && !isClauseKeyword(token.text)) {
       out.alias = state.expectToken().text;
     }
   }
@@ -264,19 +262,15 @@ Predicate parsePredicate(ParseState& state) {
   out.lhs = parseColumn(state);
   out.op = parseOperator(state);
   Token rhs = state.expectToken();
-  if (rhs.text == "(" || rhs.text == ")" || rhs.text == ",") {
-    throw SQLSyntaxError("invalid predicate");
-  }
+  if (rhs.text == "(" || rhs.text == ")" || rhs.text == ",") throw SQLSyntaxError("invalid predicate");
   if (rhs.is_string) {
     out.rhs = Value(rhs.text);
   } else if (rhs.is_number) {
-    out.rhs = parseValueLiteral(rhs);
-  } else if (isKeyword(rhs.text, "NULL")) {
-    out.rhs = Value();
+    out.rhs = parseValueToken(rhs);
   } else if (isClauseKeyword(rhs.text)) {
     throw SQLSyntaxError("unsupported predicate literal");
   } else {
-    out.rhs = Value(rhs.text);
+    out.rhs = parseValueToken(rhs);
   }
   return out;
 }
@@ -297,7 +291,8 @@ void parseOptionalAlias(ParseState& state, std::string* alias) {
   } else if (!state.isEnd() && isAliasCandidate(state.peek())) {
     if (!isKeyword(state.peek().text, "FROM") && !isKeyword(state.peek().text, "WHERE") &&
         !isKeyword(state.peek().text, "GROUP") && !isKeyword(state.peek().text, "HAVING") &&
-        !isKeyword(state.peek().text, "LIMIT") && state.peek().text != ",") {
+        !isKeyword(state.peek().text, "LIMIT") && state.peek().text != "," && state.peek().text != ")" &&
+        !isClauseKeyword(state.peek().text)) {
       *alias = state.expectToken().text;
     }
   }
@@ -315,7 +310,7 @@ SelectItem parseSelectItem(ParseState& state) {
   Token first = state.expectToken();
   if (first.is_number || first.is_string || isKeyword(first.text, "NULL")) {
     item.is_literal = true;
-    item.literal = parseValueLiteral(first);
+    item.literal = parseValueToken(first);
     parseOptionalAlias(state, &item.alias);
     return item;
   }
@@ -374,19 +369,16 @@ JoinItem parseJoin(ParseState& state) {
   return out;
 }
 
-}  // namespace
-
-SqlQuery SqlParser::parse(const std::string& sql) {
-  ParseState state(tokenize(sql));
+SqlQuery parseSelectQuery(ParseState& state, bool alreadyConsumedSelect) {
   SqlQuery out;
+  if (!alreadyConsumedSelect) {
+    state.expectWord("SELECT");
+  }
 
-  state.expectWord("SELECT");
   while (true) {
     out.select_items.push_back(parseSelectItem(state));
     if (state.consumeSymbol(",")) {
-      if (state.isEnd()) {
-        throw SQLSyntaxError("unexpected end while parsing select list");
-      }
+      if (state.isEnd()) throw SQLSyntaxError("unexpected end while parsing select list");
       continue;
     }
     if (state.consumeWord("FROM")) {
@@ -426,14 +418,121 @@ SqlQuery SqlParser::parse(const std::string& sql) {
 
   if (state.consumeWord("LIMIT")) {
     Token t = state.expectToken();
-    if (!t.is_number) {
-      throw SQLSyntaxError("LIMIT must be numeric");
-    }
+    if (!t.is_number) throw SQLSyntaxError("LIMIT must be numeric");
     try {
       out.limit = std::stoul(t.text);
     } catch (...) {
       throw SQLSyntaxError("invalid LIMIT: " + t.text);
     }
+  }
+
+  return out;
+}
+
+SqlColumnDef parseCreateColumn(ParseState& state) {
+  SqlColumnDef out;
+  out.name = state.expectToken().text;
+  out.type = state.expectToken().text;
+  return out;
+}
+
+void consumeCreateOptions(ParseState& state) {
+  if (state.consumeWord("USING")) {
+    state.expectToken();
+  }
+  if (state.consumeWord("OPTIONS")) {
+    state.expectSymbol("(");
+    int depth = 1;
+    while (!state.isEnd() && depth > 0) {
+      Token token = state.take();
+      if (token.text == "(") ++depth;
+      if (token.text == ")") --depth;
+    }
+    if (depth != 0) {
+      throw SQLSyntaxError("unterminated OPTIONS()");
+    }
+  }
+}
+
+SqlStatement parseCreateTable(ParseState& state) {
+  SqlStatement out;
+  out.kind = SqlStatementKind::CreateTable;
+  state.expectWord("TABLE");
+  out.create.table = state.expectToken().text;
+  state.expectSymbol("(");
+  if (state.consumeSymbol(")")) {
+    throw SQLSyntaxError("CREATE TABLE requires at least one column");
+  }
+  while (true) {
+    out.create.columns.push_back(parseCreateColumn(state));
+    if (state.consumeSymbol(")")) break;
+    state.expectSymbol(",");
+  }
+  consumeCreateOptions(state);
+  return out;
+}
+
+std::vector<Value> parseValuesRow(ParseState& state) {
+  std::vector<Value> row;
+  row.push_back(parseValueToken(state.expectToken()));
+  while (state.consumeSymbol(",")) {
+    row.push_back(parseValueToken(state.expectToken()));
+  }
+  return row;
+}
+
+SqlStatement parseInsertStatement(ParseState& state) {
+  SqlStatement out;
+  out.insert.select_from = false;
+  state.expectWord("INTO");
+  out.insert.table = state.expectToken().text;
+
+  if (state.consumeSymbol("(")) {
+    if (state.consumeSymbol(")")) {
+      throw SQLSyntaxError("INSERT INTO with empty column list");
+    }
+    out.insert.columns.push_back(state.expectToken().text);
+    while (state.consumeSymbol(",")) {
+      out.insert.columns.push_back(state.expectToken().text);
+    }
+    state.expectSymbol(")");
+  }
+
+  if (state.consumeWord("VALUES")) {
+    out.kind = SqlStatementKind::InsertValues;
+    do {
+      state.expectSymbol("(");
+      out.insert.values.push_back(parseValuesRow(state));
+      state.expectSymbol(")");
+    } while (state.consumeSymbol(","));
+    return out;
+  }
+
+  if (state.consumeWord("SELECT")) {
+    out.kind = SqlStatementKind::InsertSelect;
+    out.insert.select_from = true;
+    out.insert.query = parseSelectQuery(state, true);
+    return out;
+  }
+
+  throw SQLSyntaxError("INSERT expected VALUES or SELECT");
+}
+
+}  // namespace
+
+SqlStatement SqlParser::parse(const std::string& sql) {
+  ParseState state(tokenize(sql));
+  SqlStatement out;
+
+  if (state.consumeWord("SELECT")) {
+    out.kind = SqlStatementKind::Select;
+    out.query = parseSelectQuery(state, true);
+  } else if (state.consumeWord("CREATE")) {
+    out = parseCreateTable(state);
+  } else if (state.consumeWord("INSERT")) {
+    out = parseInsertStatement(state);
+  } else {
+    throw SQLSyntaxError("unsupported statement");
   }
 
   if (!state.isEnd()) {

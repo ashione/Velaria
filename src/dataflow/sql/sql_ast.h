@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "src/dataflow/core/table.h"
 #include "src/dataflow/core/value.h"
 
 namespace dataflow {
@@ -54,6 +55,11 @@ struct Predicate {
   BinaryOperatorKind op = BinaryOperatorKind::Eq;
 };
 
+struct SqlColumnDef {
+  std::string name;
+  std::string type;
+};
+
 struct SqlQuery {
   std::vector<SelectItem> select_items;
   bool has_from = false;
@@ -63,6 +69,28 @@ struct SqlQuery {
   std::vector<ColumnRef> group_by;
   std::optional<Predicate> having;
   std::optional<std::size_t> limit;
+};
+
+enum class SqlStatementKind { Select, CreateTable, InsertValues, InsertSelect };
+
+struct CreateTableStmt {
+  std::string table;
+  std::vector<SqlColumnDef> columns;
+};
+
+struct InsertStmt {
+  std::string table;
+  std::vector<std::string> columns;
+  SqlQuery query;
+  std::vector<Row> values;
+  bool select_from = false;
+};
+
+struct SqlStatement {
+  SqlStatementKind kind = SqlStatementKind::Select;
+  SqlQuery query;
+  CreateTableStmt create;
+  InsertStmt insert;
 };
 
 }  // namespace sql

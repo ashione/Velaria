@@ -122,8 +122,8 @@ bazel run //:actor_rpc_client -- --connect 127.0.0.1:61000 --payload "demo paylo
 ### Dashboard（TypeScript + React）
 
 - 访问地址：`http://127.0.0.1:8080`
-- 前端代码只维护 `src/dataflow/runner/dashboard/app.ts`，每次运行前会执行
-  `./scripts/build_dashboard_frontend.sh` 生成 `src/dataflow/runner/dashboard/app.js`，避免重复修改两份文件。
+- 前端代码只维护 `src/dataflow/runner/dashboard/app.ts`，通过 Bazel 目标
+  `//:dashboard_app_js` 自动编译并输出 `src/dataflow/runner/dashboard/app.js`，避免重复维护两份代码。
 - 页面能力：  
   - 通过 `payload` / `SQL` 触发任务提交
   - 查看 `/api/jobs` 与 `/api/jobs/{id}` 的任务历史/详情
@@ -134,7 +134,7 @@ bazel run //:actor_rpc_client -- --connect 127.0.0.1:61000 --payload "demo paylo
 ./scripts/run_actor_rpc_scheduler.sh -- --listen 127.0.0.1:61000 --node-id scheduler --dashboard-enabled --dashboard-listen 127.0.0.1:8080
 ```
 
-如果你已经手动编译过且希望跳过 TS 编译：
+如果你已经编译过且希望跳过 TS 编译：
 
 ```bash
 BUILD_DASHBOARD=0 ./scripts/run_actor_rpc_scheduler.sh -- --listen 127.0.0.1:61000 --node-id scheduler --dashboard-enabled --dashboard-listen 127.0.0.1:8080
@@ -161,7 +161,7 @@ DO_BUILD=1 ./scripts/run_actor_rpc_e2e.sh --sql "SELECT 1 AS x"
 - `PAYLOAD`：默认 payload（默认 `demo payload`）
 - `TIMEOUT_SECONDS`：超时（默认 `20`）
 - `DO_BUILD`：是否先构建（`1`/`0`，默认 `0`）
-- `BUILD_DASHBOARD`：是否先构建 dashboard TS（`1`/`0`，默认 `1`）
+- `BUILD_DASHBOARD`：是否先构建 dashboard TS（`1`/`0`，默认 `1`，底层调用 `bazel build //:dashboard_app_js`）
 
 提交时若未发现可用 worker，Dashboard 接口会返回 `503 Service Unavailable`
 并带有 `message: "scheduler reject: no worker available"`，说明任务尚未进入可执行调度队列。

@@ -142,7 +142,22 @@ cc_library(
 cc_binary(
     name = "actor_rpc_scheduler",
     srcs = ["src/dataflow/examples/actor_rpc_scheduler.cc"],
+    data = [
+        ":dashboard_app_js",
+        "src/dataflow/runner/dashboard/index.html",
+    ],
     deps = [":dataflow_actor_runner"],
+)
+
+genrule(
+    name = "dashboard_app_js",
+    srcs = [
+        "src/dataflow/runner/dashboard/app.ts",
+        "scripts/build_dashboard_frontend.sh",
+    ],
+    outs = ["src/dataflow/runner/dashboard/app.js"],
+    cmd = "$(location scripts/build_dashboard_frontend.sh) $(location src/dataflow/runner/dashboard/app.ts) $@",
+    tools = ["scripts/build_dashboard_frontend.sh"],
 )
 
 cc_binary(

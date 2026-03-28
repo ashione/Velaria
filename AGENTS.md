@@ -51,6 +51,7 @@ bazel run //:actor_rpc_smoke
 ./scripts/run_actor_rpc_scheduler.sh -- --listen 127.0.0.1:61000 --node-id scheduler --dashboard-enabled --dashboard-listen 127.0.0.1:8080
 bazel run //:actor_rpc_worker -- --connect 127.0.0.1:61000 --node-id worker-1
 bazel run //:actor_rpc_client -- --connect 127.0.0.1:61000 --payload "demo payload"
+bazel build //:dashboard_app_js
 ```
 
 ### 一次 build/smoke 摘要

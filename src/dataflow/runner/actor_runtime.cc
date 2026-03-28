@@ -282,6 +282,25 @@ std::string dashboardRoot() {
       }
       return std::string();
     };
+    auto tryCandidate = [&](const std::string& candidate) -> std::string {
+      if (!candidate.empty()) {
+        const auto hit = testCandidate(candidate);
+        if (!hit.empty()) return hit;
+      }
+      return std::string();
+    };
+
+    auto testRunfile = [&](const std::string& runfileRoot) -> std::string {
+      const std::string workspaceRoot = runfileRoot + "/src/dataflow/runner/dashboard";
+      const std::string mainAliasRoot = runfileRoot + "/__main__/src/dataflow/runner/dashboard";
+      const std::string workspace = getenv("TEST_WORKSPACE") ? getenv("TEST_WORKSPACE") : "cpp-dataflow-distributed-engine";
+      const std::string wsAliasRoot = runfileRoot + "/" + workspace + "/src/dataflow/runner/dashboard";
+      const auto hit = testCandidate(workspaceRoot);
+      if (!hit.empty()) return hit;
+      const auto hit2 = testCandidate(mainAliasRoot);
+      if (!hit2.empty()) return hit2;
+      return testCandidate(wsAliasRoot);
+    };
 
     std::string source_file(__FILE__);
     const std::size_t sep = source_file.find_last_of("/\\");
@@ -292,9 +311,35 @@ std::string dashboardRoot() {
     }
 
     if (const char* workspace = std::getenv("BUILD_WORKSPACE_DIRECTORY")) {
-      const std::string candidate = appendDash(workspace);
-      const std::string hit = testCandidate(candidate);
+      const std::string hit = tryCandidate(appendDash(std::string(workspace)));
       if (!hit.empty()) return hit;
+      const std::string hit_bin = tryCandidate(std::string(workspace) + "/bazel-bin/src/dataflow/runner/dashboard");
+      if (!hit_bin.empty()) return hit_bin;
+      const std::string hit_bin2 = tryCandidate(std::string(workspace) + "/bazel-out/bin/src/dataflow/runner/dashboard");
+      if (!hit_bin2.empty()) return hit_bin2;
+    }
+
+    if (const char* test_srcdir = std::getenv("TEST_SRCDIR")) {
+      const std::string hit = tryCandidate(appendDash(std::string(test_srcdir)));
+      if (!hit.empty()) return hit;
+      const std::string hit_workspace = tryCandidate(std::string(test_srcdir) + "/cpp-dataflow-distributed-engine/src/dataflow/runner/dashboard");
+      if (!hit_workspace.empty()) return hit_workspace;
+    }
+
+    if (const char* runfiles = std::getenv("RUNFILES_DIR")) {
+      const std::string runfiles_root = runfiles;
+      const std::string hit = testRunfile(runfiles_root);
+      if (!hit.empty()) return hit;
+    }
+
+    if (const char* test_tmpdir = std::getenv("TEST_TMPDIR")) {
+      const std::string base = test_tmpdir;
+      const auto slash = base.find_last_of("/\\");
+      if (slash != std::string::npos) {
+        const std::string root = base.substr(0, slash);
+        const std::string hit = tryCandidate(appendDash(root));
+        if (!hit.empty()) return hit;
+      }
     }
 
     const std::string cwd = std::filesystem::current_path().string();

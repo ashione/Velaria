@@ -67,7 +67,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 if [[ "${BUILD_DASHBOARD}" != "0" ]]; then
-  ./scripts/build_dashboard_frontend.sh
+  bazel build //:dashboard_app_js
 fi
 
 if [[ "${DO_BUILD}" == "1" ]]; then

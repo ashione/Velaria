@@ -6,6 +6,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TS_SOURCE="${1:-${PROJECT_ROOT}/src/dataflow/runner/dashboard/app.ts}"
 TS_OUTPUT="${2:-${PROJECT_ROOT}/src/dataflow/runner/dashboard/app.js}"
+NPM_CACHE_DIR="${NPM_CONFIG_CACHE:-${TMPDIR:-/tmp}/cpp-dataflow-dashboard-npm-cache}"
+
+mkdir -p "${NPM_CACHE_DIR}"
+export NPM_CONFIG_CACHE="${NPM_CACHE_DIR}"
+export npm_config_cache="${NPM_CACHE_DIR}"
 
 if [[ ! -f "${TS_SOURCE}" ]]; then
   echo "[dashboard-ts] source not found: ${TS_SOURCE}" >&2

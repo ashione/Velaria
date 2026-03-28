@@ -45,5 +45,23 @@ int main() {
       "LIMIT 20");
   complex_query.show();
 
+  auto create_rollup = session.sql(
+      "CREATE TABLE people_rollup (dept STRING, name STRING, total_score INT)");
+  create_rollup.show();
+
+  auto load_rollup = session.sql(
+      "INSERT INTO people_rollup "
+      "SELECT a.dept AS dept, a.name AS name, SUM(a.score) AS total_score "
+      "FROM people a "
+      "INNER JOIN bonus b ON a.dept = b.dept "
+      "WHERE a.score > 10 "
+      "GROUP BY a.dept, a.name "
+      "HAVING total_score > 20");
+  load_rollup.show();
+
+  auto final_report = session.sql(
+      "SELECT dept, name, total_score FROM people_rollup WHERE total_score >= 30 LIMIT 10");
+  final_report.show();
+
   return 0;
 }

@@ -7,9 +7,9 @@ int main() {
   dataflow::Table t;
   t.schema = dataflow::Schema({"word", "count"});
   t.rows = {
-      {dataflow::Value("spark"), dataflow::Value(int64_t(1))},
+      {dataflow::Value("cpp"), dataflow::Value(int64_t(1))},
       {dataflow::Value("cpp"), dataflow::Value(int64_t(2))},
-      {dataflow::Value("spark"), dataflow::Value(int64_t(3))},
+      {dataflow::Value("cpp"), dataflow::Value(int64_t(3))},
   };
 
   auto df = dataflow::DataFrame(t);

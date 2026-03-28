@@ -568,8 +568,11 @@ PyObject* pyProgressFromNative(const df::StreamingQueryProgress& progress) {
   PyObject* out = PyDict_New();
   setDictItem(out, "query_id", PyUnicode_FromString(progress.query_id.c_str()));
   setDictItem(out, "status", PyUnicode_FromString(progress.status.c_str()));
+  setDictItem(out, "requested_execution_mode",
+              PyUnicode_FromString(progress.requested_execution_mode.c_str()));
   setDictItem(out, "execution_mode", PyUnicode_FromString(progress.execution_mode.c_str()));
   setDictItem(out, "execution_reason", PyUnicode_FromString(progress.execution_reason.c_str()));
+  setDictItem(out, "transport_mode", PyUnicode_FromString(progress.transport_mode.c_str()));
   setDictItem(out, "batches_pulled", PyLong_FromUnsignedLongLong(progress.batches_pulled));
   setDictItem(out, "batches_processed", PyLong_FromUnsignedLongLong(progress.batches_processed));
   setDictItem(out, "blocked_count", PyLong_FromUnsignedLongLong(progress.blocked_count));
@@ -588,6 +591,30 @@ PyObject* pyProgressFromNative(const df::StreamingQueryProgress& progress) {
               PyUnicode_FromString(progress.last_source_offset.c_str()));
   PyDict_SetItemString(out, "backpressure_active",
                        progress.backpressure_active ? Py_True : Py_False);
+  PyDict_SetItemString(out, "actor_eligible", progress.actor_eligible ? Py_True : Py_False);
+  PyDict_SetItemString(out, "used_actor_runtime",
+                       progress.used_actor_runtime ? Py_True : Py_False);
+  PyDict_SetItemString(out, "used_shared_memory",
+                       progress.used_shared_memory ? Py_True : Py_False);
+  PyDict_SetItemString(out, "has_stateful_ops",
+                       progress.has_stateful_ops ? Py_True : Py_False);
+  PyDict_SetItemString(out, "has_window", progress.has_window ? Py_True : Py_False);
+  PyDict_SetItemString(out, "sink_is_blocking",
+                       progress.sink_is_blocking ? Py_True : Py_False);
+  PyDict_SetItemString(out, "source_is_bounded",
+                       progress.source_is_bounded ? Py_True : Py_False);
+  setDictItem(out, "estimated_partitions",
+              PyLong_FromUnsignedLongLong(progress.estimated_partitions));
+  setDictItem(out, "projected_payload_bytes",
+              PyLong_FromUnsignedLongLong(progress.projected_payload_bytes));
+  setDictItem(out, "sampled_batches", PyLong_FromUnsignedLongLong(progress.sampled_batches));
+  setDictItem(out, "sampled_rows_per_batch",
+              PyLong_FromUnsignedLongLong(progress.sampled_rows_per_batch));
+  setDictItem(out, "average_projected_payload_bytes",
+              PyLong_FromUnsignedLongLong(progress.average_projected_payload_bytes));
+  setDictItem(out, "actor_speedup", PyFloat_FromDouble(progress.actor_speedup));
+  setDictItem(out, "compute_to_overhead_ratio",
+              PyFloat_FromDouble(progress.compute_to_overhead_ratio));
   return out;
 }
 

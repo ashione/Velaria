@@ -132,6 +132,7 @@ std::shared_ptr<StateStore> makeStateStore(
     const std::unordered_map<std::string, std::string>& options = {});
 
 enum class StreamingExecutionMode { SingleProcess, LocalWorkers, ActorCredit, Auto };
+enum class StreamingTransportMode { InProcess, RpcCopy, SharedMemory, Auto };
 
 struct StreamingAutoExecutionOptions {
   size_t sample_batches = 2;
@@ -177,11 +178,55 @@ struct StreamPullContext {
   bool backpressure_active = false;
 };
 
+struct StreamSourceContext {
+  std::string query_id;
+  uint64_t trigger_interval_ms = 0;
+  size_t max_inflight_batches = 0;
+  size_t max_queued_partitions = 0;
+  std::string checkpoint_path;
+  bool source_is_bounded = true;
+};
+
+struct StreamSinkContext {
+  std::string query_id;
+  std::string checkpoint_path;
+  std::string requested_execution_mode;
+};
+
+struct StreamCheckpointMarker {
+  std::string query_id;
+  std::string source_offset;
+  size_t batches_processed = 0;
+};
+
+struct StreamingStrategyDecision {
+  std::string requested_execution_mode = "single-process";
+  std::string resolved_execution_mode = "single-process";
+  std::string transport_mode = "inproc";
+  std::string reason;
+  bool actor_eligible = false;
+  bool used_actor_runtime = false;
+  bool used_shared_memory = false;
+  bool has_stateful_ops = false;
+  bool has_window = false;
+  bool sink_is_blocking = false;
+  bool source_is_bounded = true;
+  size_t estimated_partitions = 1;
+  size_t projected_payload_bytes = 0;
+  size_t sampled_batches = 0;
+  size_t sampled_rows_per_batch = 0;
+  size_t average_projected_payload_bytes = 0;
+  double actor_speedup = 0.0;
+  double compute_to_overhead_ratio = 0.0;
+};
+
 struct StreamingQueryProgress {
   std::string query_id;
   std::string status = "created";
+  std::string requested_execution_mode = "single-process";
   std::string execution_mode = "single-process";
   std::string execution_reason;
+  std::string transport_mode = "inproc";
   size_t batches_pulled = 0;
   size_t batches_processed = 0;
   size_t blocked_count = 0;
@@ -193,11 +238,26 @@ struct StreamingQueryProgress {
   uint64_t last_state_latency_ms = 0;
   std::string last_source_offset;
   bool backpressure_active = false;
+  bool actor_eligible = false;
+  bool used_actor_runtime = false;
+  bool used_shared_memory = false;
+  bool has_stateful_ops = false;
+  bool has_window = false;
+  bool sink_is_blocking = false;
+  bool source_is_bounded = true;
+  size_t estimated_partitions = 1;
+  size_t projected_payload_bytes = 0;
+  size_t sampled_batches = 0;
+  size_t sampled_rows_per_batch = 0;
+  size_t average_projected_payload_bytes = 0;
+  double actor_speedup = 0.0;
+  double compute_to_overhead_ratio = 0.0;
 };
 
 class StreamSource {
  public:
   virtual ~StreamSource() = default;
+  virtual void open(const StreamSourceContext& context) { (void)context; }
   virtual bool nextBatch(const StreamPullContext& context, Table& batch) = 0;
   virtual bool bounded() const { return true; }
   virtual std::string currentOffsetToken() const { return ""; }
@@ -205,6 +265,8 @@ class StreamSource {
     (void)token;
     return false;
   }
+  virtual void checkpoint(const StreamCheckpointMarker& marker) { (void)marker; }
+  virtual void close() {}
   virtual std::string describe() const { return "stream-source"; }
 };
 
@@ -212,6 +274,7 @@ class MemoryStreamSource : public StreamSource {
  public:
   explicit MemoryStreamSource(std::vector<Table> batches);
 
+  void open(const StreamSourceContext& context) override;
   bool nextBatch(const StreamPullContext& context, Table& batch) override;
   std::string currentOffsetToken() const override;
   bool restoreOffsetToken(const std::string& token) override;
@@ -226,6 +289,7 @@ class DirectoryCsvStreamSource : public StreamSource {
  public:
   explicit DirectoryCsvStreamSource(std::string directory, char delimiter = ',');
 
+  void open(const StreamSourceContext& context) override;
   bool nextBatch(const StreamPullContext& context, Table& batch) override;
   bool bounded() const override { return false; }
   std::string currentOffsetToken() const override;
@@ -242,8 +306,11 @@ class DirectoryCsvStreamSource : public StreamSource {
 class StreamSink {
  public:
   virtual ~StreamSink() = default;
+  virtual void open(const StreamSinkContext& context) { (void)context; }
   virtual void write(const Table& table) = 0;
   virtual void flush() {}
+  virtual void checkpoint(const StreamCheckpointMarker& marker) { (void)marker; }
+  virtual void close() {}
   virtual std::string name() const { return "sink"; }
 };
 
@@ -261,6 +328,7 @@ class FileAppendStreamSink : public StreamSink {
  public:
   explicit FileAppendStreamSink(std::string path, char delimiter = ',');
 
+  void open(const StreamSinkContext& context) override;
   void write(const Table& table) override;
   void flush() override;
   std::string name() const override { return "file_append"; }
@@ -394,6 +462,7 @@ class StreamingQuery {
   std::string snapshotJson() const;
 
  private:
+  void applyStrategyDecision(const StreamingStrategyDecision& decision);
   void updateProgress(const std::function<void(StreamingQueryProgress&)>& update);
   bool loadCheckpoint();
   void persistCheckpoint(const StreamingQueryProgress& progress) const;
@@ -408,6 +477,7 @@ class StreamingQuery {
   bool execution_decided_ = false;
   StreamingExecutionMode resolved_execution_mode_ = StreamingExecutionMode::SingleProcess;
   std::string execution_reason_;
+  StreamingStrategyDecision strategy_decision_;
 };
 
 }  // namespace dataflow

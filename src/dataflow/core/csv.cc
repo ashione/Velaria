@@ -30,7 +30,7 @@ bool isDouble(const std::string& s) {
 Value parseCell(const std::string& cell) {
   if (cell.empty()) return Value();
   if (isInt(cell)) {
-    return Value(std::stoll(cell));
+    return Value(static_cast<int64_t>(std::stoll(cell)));
   }
   if (isDouble(cell)) {
     return Value(std::stod(cell));

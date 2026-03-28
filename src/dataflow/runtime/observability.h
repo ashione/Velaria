@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace dataflow {
@@ -55,11 +56,11 @@ inline std::string field(const std::string& key, const std::string& value, bool 
 
 inline std::string field(const std::string& key, const char* value) { return field(key, std::string(value)); }
 inline std::string field(const std::string& key, bool value) { return quote(key) + ":" + boolJson(value); }
-inline std::string field(const std::string& key, size_t value) { return quote(key) + ":" + std::to_string(value); }
-inline std::string field(const std::string& key, uint64_t value) { return quote(key) + ":" + std::to_string(value); }
-inline std::string field(const std::string& key, uint32_t value) { return quote(key) + ":" + std::to_string(value); }
-inline std::string field(const std::string& key, int value) { return quote(key) + ":" + std::to_string(value); }
-inline std::string field(const std::string& key, int64_t value) { return quote(key) + ":" + std::to_string(value); }
+template <typename Int,
+          typename = std::enable_if_t<std::is_integral_v<Int> && !std::is_same_v<Int, bool>>>
+inline std::string field(const std::string& key, Int value) {
+  return quote(key) + ":" + std::to_string(value);
+}
 
 inline std::string object(const std::vector<std::string>& fields) {
   std::ostringstream out;

@@ -634,7 +634,8 @@ StreamingDataFrame DataflowSession::streamSql(const std::string& sql) {
   if (statement.kind != sql::SqlStatementKind::Select) {
     throw SQLSyntaxError("stream SQL only supports SELECT");
   }
-  return buildStreamingSelect(statement.query, stream_views_);
+  sql::SqlPlanner planner;
+  return planner.planStream(statement.query, stream_views_);
 }
 
 StreamingQuery DataflowSession::startStreamSql(const std::string& sql,
@@ -651,7 +652,8 @@ StreamingQuery DataflowSession::startStreamSql(const std::string& sql,
     throw SQLSemanticError("startStreamSql does not support INSERT column list");
   }
 
-  auto query = buildStreamingSelect(statement.insert.query, stream_views_)
+  sql::SqlPlanner planner;
+  auto query = planner.planStream(statement.insert.query, stream_views_)
                    .writeStream(sink_it->second, options);
   query.start();
   return query;

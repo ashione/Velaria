@@ -1,0 +1,14 @@
+# Bazel generated files
+bazel-*
+
+# Ignore local Bazel symlink directory if present
+/bazel-cpp-dataflow-distributed-engine-research
+
+# Frontend generated artifacts
+src/dataflow/runner/dashboard/app.js
+src/dataflow/runner/dashboard/*.js.map
+
+# Common temporary files
+*.log
+*.tmp
+*.temp

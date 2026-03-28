@@ -82,6 +82,11 @@ class Value {
 
   int compare(const Value& rhs) const {
     if (type_ != rhs.type_) {
+      if (isNumber() && rhs.isNumber()) {
+        const auto lhs = asDouble();
+        const auto rr = rhs.asDouble();
+        return (lhs < rr) ? -1 : (lhs > rr ? 1 : 0);
+      }
       throw std::runtime_error("type mismatch in compare");
     }
     switch (type_) {

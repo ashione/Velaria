@@ -1,5 +1,6 @@
 #include "src/dataflow/sql/sql_planner.h"
 
+#include <memory>
 #include <algorithm>
 #include <unordered_set>
 #include <vector>
@@ -64,7 +65,7 @@ std::string defaultAggregateAlias(AggregateFunctionKind fn, const std::string& a
 struct RelationView {
   std::string sourceName;
   std::string alias;
-  const Schema* schema = nullptr;
+  std::shared_ptr<const Schema> schema;
   std::size_t offset = 0;
 };
 
@@ -74,7 +75,7 @@ class RelationContext {
     RelationView v;
     v.sourceName = item.name;
     v.alias = item.alias.empty() ? item.name : item.alias;
-    v.schema = &schema;
+    v.schema = std::make_shared<Schema>(schema);
     v.offset = offset;
     relations_.push_back(v);
     aliases_[v.alias] = relations_.size() - 1;
@@ -148,7 +149,8 @@ DataFrame SqlPlanner::plan(const SqlQuery& query, const ViewCatalog& catalog) co
   DataFrame current = catalog.getView(query.from.name);
   RelationContext ctx;
   auto leftSchema = current.schema();
-  ctx.addRelation(query.from, leftSchema, 0);
+  const auto baseLeftSchema = leftSchema;
+  ctx.addRelation(query.from, baseLeftSchema, 0);
 
   std::size_t leftWidth = leftSchema.fields.size();
 
@@ -170,8 +172,7 @@ DataFrame SqlPlanner::plan(const SqlQuery& query, const ViewCatalog& catalog) co
 
     leftSchema = current.schema();
     ctx.clear();
-    const auto leftBase = catalog.getView(query.from.name).schema();
-    ctx.addRelation(query.from, leftBase, 0);
+    ctx.addRelation(query.from, baseLeftSchema, 0);
     ctx.addRelation(rightView, rightSchema, leftWidth);
   }
 

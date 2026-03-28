@@ -21,12 +21,12 @@
 
 ## 命名与术语约束
 
-不要再引入 `spark` / `Spark` 命名。统一替代为：
+不要再引入外部框架专名。统一使用仓库内部术语：
 
-- `SparkSession` -> `DataflowSession`
-- `spark.sql(...)` -> `session.sql(...)`
-- `spark.read...` -> `session.read...`
-- `Spark-like compatibility` -> `语义对齐` 或 `外部接口语义参考`
+- `Session` 风格命名统一使用 `DataflowSession`
+- SQL 入口统一使用 `session.sql(...)`
+- 读取入口统一使用 `session.read(...)`
+- `compatibility` 表达统一改为 `语义对齐` 或 `接口语义参考`
 
 如果需要描述兼容关系，使用“语义对齐”“接口映射”“外部行为参考”，不要把外部框架名直接放进仓库主接口或注释里。
 

@@ -1,0 +1,59 @@
+load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@pypi//:requirements.bzl", "requirement")
+
+py_library(
+    name = "velaria_py",
+    srcs = ["velaria/__init__.py"],
+    imports = ["."],
+    deps = [
+        requirement("pyarrow"),
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_binary(
+    name = "demo_stream_sql",
+    srcs = ["demo_stream_sql.py"],
+    main = "demo_stream_sql.py",
+    deps = [":velaria_py"],
+)
+
+py_package(
+    name = "velaria_pkg",
+    packages = ["velaria"],
+    deps = [":velaria_py"],
+)
+
+py_wheel(
+    name = "velaria_whl",
+    distribution = "velaria",
+    python_tag = "py3",
+    version = "0.1.0",
+    deps = [":velaria_pkg"],
+    requires = [
+        "pyarrow",
+    ],
+)
+
+genrule(
+    name = "velaria_native_whl",
+    srcs = [
+        ":velaria_whl",
+        "//:velaria_pyext",
+        "//scripts:build_native_wheel.py",
+        "@velaria_local_python//:python_tag.txt",
+        "@velaria_local_python//:abi_tag.txt",
+        "@velaria_local_python//:platform_tag.txt",
+    ],
+    outs = ["velaria-0.1.0-native.whl"],
+    cmd = "python3 $(location //scripts:build_native_wheel.py) "
+        + "$(location :velaria_whl) "
+        + "$(location //:velaria_pyext) "
+        + "$(location @velaria_local_python//:python_tag.txt) "
+        + "$(location @velaria_local_python//:abi_tag.txt) "
+        + "$(location @velaria_local_python//:platform_tag.txt) "
+        + "velaria $@",
+    tools = ["//scripts:build_native_wheel.py"],
+)

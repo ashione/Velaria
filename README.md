@@ -59,6 +59,7 @@ client
 - 本地 SQL 主链路：`SqlParser -> SqlPlanner -> DataFrame`
 - 流式 SQL 最小闭环：`streamSql(SELECT ...)`、`startStreamSql(INSERT INTO ... SELECT ...)`
 - 流式 SQL CSV 表：`CREATE SOURCE TABLE ... USING csv`、`CREATE SINK TABLE ... USING csv`
+- Python wrapper（v1）：`Session / DataFrame / StreamingDataFrame / StreamingQuery`
 - 临时视图：`createTempView / resolve`
 - actor/rpc 最小闭环：`scheduler / worker / client / smoke`
 
@@ -70,6 +71,7 @@ client
 - 当前版本不扩展 `UNION` 相关能力。
 - `JOIN` 仅保留现有最小能力，不在本轮继续做更复杂 join 语义扩展。
 - 流式 SQL 当前不支持 `JOIN / AVG / MIN / MAX / window SQL / INSERT ... VALUES`。
+- Python wrapper 当前通过仓库内 Python 配置规则自动探测本机可用的 CPython 开发头，不支持 Python callback / UDF / 自定义 source/sink。
 - 当前反压是 query-local，一版不做多 query 全局公平调度。
 - 当前多进程链路仍是本地多进程验证，不包含真正分布式调度、容错恢复、状态迁移、资源治理。
 
@@ -199,6 +201,103 @@ LIMIT 10;
 - 不支持 `INSERT INTO ... VALUES` 的流式路径
 - `LIMIT` 沿用现有 streaming API 语义，不应解读为完整无限流全局 SQL limit
 
+## Python wrapper（v1）
+
+当前仓库已补上最小 Python 对象绑定，目标是让 Python 直接调用现有 `DataflowSession`、stream API 和 stream SQL。
+
+### 绑定方式
+
+- 不引入额外第三方绑定框架
+- 采用手写 CPython extension
+- 对外暴露四类 Python 对象：
+  - `Session`
+  - `DataFrame`
+  - `StreamingDataFrame`
+  - `StreamingQuery`
+
+### GIL 策略
+
+为了避免 Python 线程被长时间 native 调用阻塞，以下操作会在 native 执行期间显式释放 GIL：
+
+- `Session.read_csv(...)`
+- `Session.sql(...)`
+- `Session.stream_sql(...)`
+- `Session.start_stream_sql(...)`
+- `DataFrame.count()`
+- `DataFrame.to_rows()`
+- `DataFrame.show()`
+- `StreamingQuery.start()`
+- `StreamingQuery.await_termination(...)`
+- `StreamingQuery.stop()`
+
+第一版明确不支持：
+
+- Python callback
+- Python UDF
+- Python 自定义 source / sink
+
+这样可以避免 native 线程反向进入 Python 时的额外 GIL 管理复杂度。
+
+### 当前 Python API
+
+- `Session.read_csv(path, delimiter=',')`
+- `Session.sql(sql_text)`
+- `Session.create_dataframe_from_arrow(pyarrow_table)`
+- `Session.create_temp_view(name, df_or_stream_df)`
+- `Session.read_stream_csv_dir(path, delimiter=',')`
+- `Session.stream_sql(sql_text)`
+- `Session.start_stream_sql(sql_text, trigger_interval_ms=1000, checkpoint_path='')`
+- `DataFrame.to_rows() / to_arrow() / count() / show()`
+- `StreamingDataFrame.select(...) / filter(...) / with_column(...) / drop(...) / limit(...)`
+- `StreamingDataFrame.window(...) / group_sum(...) / group_count(...)`
+- `StreamingDataFrame.write_stream_csv(...) / write_stream_console(...)`
+- `StreamingQuery.start() / await_termination(...) / stop() / progress()`
+
+### 构建与运行
+
+当前 Python wrapper 会在 Bazel workspace 初始化时自动探测本机可用的 CPython 解释器与开发头。
+如需显式指定，可设置 `VELARIA_PYTHON_BIN=/path/to/pythonX.Y`。
+
+仓库中同时提供了 `python_api/` 目录：
+
+- `python_api/pyproject.toml`
+- `python_api/requirements.lock`
+- `python_api/BUILD.bazel`
+
+用于统一 Python API 元数据、`uv` 依赖管理和 Bazel wheel 构建入口。
+
+需要注意：
+
+- `rules_python` 的 `py_wheel` 当前只支持 pure-Python wheel
+- `//python_api:velaria_whl` 负责打包 pure-Python API 层
+- `//python_api:velaria_native_whl` 会在 pure wheel 基础上注入 `_velaria.so`，产出本地平台 wheel
+
+构建扩展：
+
+```bash
+bazel build //:velaria_pyext
+bazel build //python_api:velaria_whl
+bazel build //python_api:velaria_native_whl
+```
+
+Python 运行时还需要安装 `pyarrow`，因为 `DataFrame.to_arrow()` 会返回 `pyarrow.Table`。
+当前 Python API 面向 `Python 3.12` 和 `Python 3.13`。
+
+运行 demo：
+
+```bash
+PYTHONPATH=python_api \
+VELARIA_PYTHON_EXT="$(bazel info bazel-bin)/_velaria.so" \
+python3 python_api/demo_stream_sql.py
+```
+
+demo 会展示：
+
+- Python 侧创建 `Session`
+- Python 侧调用 stream API 建 source view
+- Python 侧调用 stream SQL 启动 `INSERT INTO ... SELECT ...`
+- Python 侧读取 sink CSV 并打印结果与 query progress
+
 ## SQL 规划执行模型（v1）
 
 `session.sql()` 已按 `Parser -> Planner -> DataFrame` 的三层推进：
@@ -290,6 +389,7 @@ bazel run //:stream_runtime_test
 bazel run //:stream_benchmark
 bazel run //:stream_actor_benchmark
 bazel run //:stream_actor_credit_test
+bazel build //:velaria_pyext
 ```
 
 ### 本机多进程 actor-stream 实验

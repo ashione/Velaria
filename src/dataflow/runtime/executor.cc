@@ -1,10 +1,13 @@
 #include "src/dataflow/runtime/executor.h"
 
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#include "src/dataflow/runtime/rpc_runner.h"
 
 namespace dataflow {
 
@@ -46,6 +49,34 @@ struct AggregateAccumulator {
 };
 
 }  // namespace
+
+RunnerExecutor::RunnerExecutor(std::shared_ptr<RpcRunner> runner,
+                             std::shared_ptr<Executor> fallback,
+                             bool dual_path)
+    : runner_(std::move(runner)),
+      fallback_(std::move(fallback)),
+      dual_path_(dual_path) {
+  if (!fallback_) {
+    fallback_ = std::make_shared<LocalExecutor>();
+  }
+}
+
+Table RunnerExecutor::execute(const PlanNodePtr& plan) const {
+  Table local_result = fallback_->execute(plan);
+  if (!runner_ || !dual_path_) {
+    return local_result;
+  }
+  const uint64_t message_id = next_message_id_.fetch_add(1, std::memory_order_relaxed);
+  const uint64_t correlation_id = message_id;
+  if (!runner_->sendControl(message_id, correlation_id, "local", "remote", RpcMessageType::Control,
+                           "RunRequest", "local_execute")) {
+    return local_result;
+  }
+  if (!runner_->sendDataBatch(message_id + 1, correlation_id, "local", "remote", local_result)) {
+    return local_result;
+  }
+  return local_result;
+}
 
 Table LocalExecutor::execute(const PlanNodePtr& plan) const {
   if (!plan) return Table();
@@ -138,7 +169,6 @@ Table LocalExecutor::execute(const PlanNodePtr& plan) const {
     case PlanKind::GroupBySum: {
       std::vector<size_t> keyIdx;
       std::vector<AggregateSpec> aggs;
-      const Table* source = nullptr;
       Table aggregateInput;
 
       if (plan->kind == PlanKind::Aggregate) {
@@ -146,7 +176,6 @@ Table LocalExecutor::execute(const PlanNodePtr& plan) const {
         keyIdx = node->keys;
         aggs = node->aggregates;
         aggregateInput = execute(node->child);
-        source = &aggregateInput;
       } else {
         const auto* node = static_cast<GroupBySumPlan*>(plan.get());
         keyIdx = node->keys;
@@ -156,15 +185,13 @@ Table LocalExecutor::execute(const PlanNodePtr& plan) const {
         sumSpec.output_name = "sum";
         aggs.push_back(sumSpec);
         aggregateInput = execute(node->child);
-        source = &aggregateInput;
       }
 
-      if (!source) return Table();
       std::unordered_map<std::string, AggregateAccumulator> states;
       std::vector<std::string> orderedKeys;
 
-      for (const auto& row : source->rows) {
-        std::string key = makeKey(*source, row, keyIdx);
+      for (const auto& row : aggregateInput.rows) {
+        std::string key = makeKey(aggregateInput, row, keyIdx);
         auto it = states.find(key);
         if (it == states.end()) {
           AggregateAccumulator acc;
@@ -208,7 +235,7 @@ Table LocalExecutor::execute(const PlanNodePtr& plan) const {
 
       Table out;
       for (size_t idx : keyIdx) {
-        out.schema.fields.push_back(source->schema.fields[idx]);
+        out.schema.fields.push_back(aggregateInput.schema.fields[idx]);
       }
       for (const auto& agg : aggs) out.schema.fields.push_back(agg.output_name);
       for (size_t i = 0; i < out.schema.fields.size(); ++i) {

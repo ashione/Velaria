@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dataflow Runtime Dashboard</title>
+  <style>
+    :root {
+      font-family: 'Inter', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', Arial, sans-serif;
+      color: #0f172a;
+      background: linear-gradient(140deg, #06152e 0%, #102848 38%, #18406b 100%);
+      min-height: 100%;
+    }
+
+    body {
+      margin: 0;
+      color: #e7eefc;
+      min-height: 100vh;
+    }
+
+    .hero {
+      max-width: 1220px;
+      margin: 0 auto;
+      padding: 24px 16px 32px;
+    }
+
+    .title {
+      font-size: 34px;
+      margin: 0 0 6px;
+      letter-spacing: 0.01em;
+      color: #f8fbff;
+      font-weight: 700;
+    }
+
+    .subtitle {
+      margin: 0;
+      color: #a9bfdd;
+      font-size: 14px;
+    }
+
+    .panel-grid {
+      margin-top: 18px;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 14px;
+    }
+
+    .panel {
+      margin: 0;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02));
+      border: 1px solid rgba(148, 175, 207, 0.35);
+      border-radius: 14px;
+      padding: 14px 14px 16px;
+      box-shadow: 0 16px 28px rgba(3, 12, 20, 0.35);
+      backdrop-filter: blur(8px);
+    }
+
+    .panel h3 {
+      margin: 0 0 12px;
+      color: #f8fbff;
+    }
+
+    .row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    input, textarea, button {
+      border-radius: 8px;
+      border: 1px solid rgba(188, 205, 238, 0.45);
+      padding: 10px;
+      font-size: 14px;
+      box-sizing: border-box;
+    }
+
+    input, textarea {
+      width: 100%;
+      background: rgba(10, 20, 35, 0.6);
+      color: #ebf2ff;
+    }
+
+    textarea {
+      min-height: 110px;
+      resize: vertical;
+      line-height: 1.4;
+    }
+
+    .small {
+      flex: 1;
+      min-width: 250px;
+    }
+
+    button {
+      border: none;
+      cursor: pointer;
+      color: #f8fbff;
+      background: linear-gradient(135deg, #5d8dff, #3dd4ff);
+      min-width: 160px;
+      font-weight: 700;
+      box-shadow: 0 8px 18px rgba(12, 58, 128, 0.35);
+    }
+
+    button:hover {
+      filter: brightness(1.05);
+    }
+
+    .muted {
+      color: #9fb4d5;
+      font-size: 13px;
+    }
+
+    .grid {
+      overflow: auto;
+      border-top: 1px solid rgba(173, 198, 230, 0.25);
+      margin-top: 6px;
+    }
+
+    table {
+      width: 100%;
+      min-width: 760px;
+      border-collapse: collapse;
+      margin-top: 12px;
+    }
+
+    th, td {
+      border-bottom: 1px solid rgba(173, 198, 230, 0.22);
+      text-align: left;
+      font-size: 13px;
+      padding: 9px 10px;
+      vertical-align: top;
+      color: #f2f6ff;
+    }
+
+    th {
+      color: #bcd3ff;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .ok {
+      color: #31d18d;
+      font-weight: 700;
+    }
+
+    .warn {
+      color: #ffc94d;
+    }
+
+    .code {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-all;
+      background: #081423;
+      border: 1px solid rgba(146, 176, 217, 0.35);
+      border-radius: 10px;
+      padding: 10px;
+      line-height: 1.45;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: #dbe9ff;
+    }
+
+    .tiny {
+      font-size: 11px;
+      color: #90a8ca;
+    }
+
+    a {
+      color: #8bdaff;
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+  </style>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+</head>
+<body>
+  <div class="hero">
+    <div id="dashboard-root"></div>
+    <script src="/app.js"></script>
+  </div>
+</body>
+</html>

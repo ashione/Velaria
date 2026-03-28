@@ -116,6 +116,17 @@ GROUP BY name;
 - 包含 `dashboard` 在内的提交入口都走 worker 路径（`JobMaster + worker`）。
 - 当未禁用自启动 worker（`--no-auto-worker`）且 worker 不可用时，调度返回 `no worker available`，不会在 scheduler 内本地“伪执行”。
 
+### 调度策略（当前版本）
+
+- 提交入口：`dashboard/client` 先构建计划并通过 `submitRemote` 创建 `job -> chain -> task`。
+- 排队语义：远端可执行任务进入 `JobMaster` 的 `pending_remote_tasks_` 队列；只有 `chain` 变为可运行且调度器发现空闲 worker 时才会派发。
+- 派发规则：`dispatcher` 按 `idle_workers` 空闲 worker 数从队列头取任务，按到达顺序依次下发（先到先服务）。
+- worker 绑定：每个任务与 worker 连接绑定；发送成功后任务状态变更为 `TASK_SUBMITTED/CHAIN_SUBMITTED`，失败则回灌 `TASK_FAILED/JOB_FAILED`。
+- 并发与并行：`chain` 并发受 `chain_parallelism` 和可用 worker 约束；每条 task 支持重试与 heartbeat 观测。
+- 结果确认：worker 完成后返回 `Result`，scheduler 由 worker 响应更新 `job/chain/task` 快照并回推给提交端。
+- 管理建议：用日志事件与 `/api/jobs` 快照观察 `JOB_* / CHAIN_* / TASK_*` 的状态变化判断是否在排队与是否正在运行。
+- 当前默认 worker 策略：scheduler 默认自启动本地 worker（`--local-workers`，默认 1）。如需人工模式可使用 `--no-auto-worker`，此时才会出现 `no-worker-available` 回退路径。
+
 ## 构建与启动命令
 
 ### 单机示例

@@ -47,6 +47,17 @@
 - scheduler 负责接入、快照记录、分发与状态收集，不在本地执行 SQL。
 - dashboard/客户端提交均应走 worker 执行链路。
 
+### 当前调度策略（v1）
+
+- 任务建模：提交后生成 `job`，再拆成 `chain` 与 `task`；远端执行走 `RemoteTaskSpec` 队列。
+- 队列与触发：`chain` 达到可运行状态后进入待调度队列；`scheduler` 周期性扫描 `idle_workers` 并调用 `dispatch` 下发任务。
+- 典型流：
+  - `SUBMITTED -> CHAIN_READY -> CHAIN_SCHEDULED -> CHAIN_RUNNING -> CHAIN_SUCCEEDED/FAILED`（task 相应变化）。
+- 排队：当无空闲 worker 时，任务保留在 `JobMaster` 的 remote pending queue，不会丢弃。
+- 分发方式：`first-come-first-served` 的空闲 worker 分配；由 `task_to_worker` 跟踪绑定。
+- 失败与恢复：task 发送失败触发本地失败落盘并通知客户端；链内失败进入 jobmaster 重试逻辑（当前重试策略按配置）。
+- worker 供给：scheduler 默认自动启动本地 worker（`--local-workers`，默认 1）；如指定 `--no-auto-worker` 则走手工挂载模式。
+
 ## 常用命令
 
 ### 构建

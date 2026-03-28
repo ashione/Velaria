@@ -191,7 +191,7 @@ Value parseValueToken(const Token& token) {
   if (token.is_number) {
     try {
       if (token.text.find('.') != std::string::npos) return Value(std::stod(token.text));
-      return Value(std::stoll(token.text));
+      return Value(static_cast<int64_t>(std::stoll(token.text)));
     } catch (...) {
       throw SQLSyntaxError("invalid numeric literal: " + token.text);
     }

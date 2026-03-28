@@ -20,6 +20,13 @@ py_binary(
     deps = [":velaria_py"],
 )
 
+py_binary(
+    name = "demo_batch_sql_arrow",
+    srcs = ["demo_batch_sql_arrow.py"],
+    main = "demo_batch_sql_arrow.py",
+    deps = [":velaria_py"],
+)
+
 py_package(
     name = "velaria_pkg",
     packages = ["velaria"],

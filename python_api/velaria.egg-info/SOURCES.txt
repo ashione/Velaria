@@ -1,8 +1,0 @@
-README.md
-pyproject.toml
-velaria/__init__.py
-velaria.egg-info/PKG-INFO
-velaria.egg-info/SOURCES.txt
-velaria.egg-info/dependency_links.txt
-velaria.egg-info/requires.txt
-velaria.egg-info/top_level.txt

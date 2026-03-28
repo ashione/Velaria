@@ -198,13 +198,35 @@ df::Table tableFromArrowObject(PyObject* obj) {
   if (pyarrow == nullptr) {
     throw std::runtime_error("pyarrow is required for create_dataframe_from_arrow()");
   }
+  PyObject* record_batch_type = PyObject_GetAttrString(pyarrow, "RecordBatch");
+  PyObject* table_type = PyObject_GetAttrString(pyarrow, "Table");
   PyObject* table_fn = PyObject_GetAttrString(pyarrow, "table");
-  Py_DECREF(pyarrow);
-  if (table_fn == nullptr) {
-    throw std::runtime_error("failed to resolve pyarrow.table");
+  if (record_batch_type == nullptr || table_type == nullptr || table_fn == nullptr) {
+    Py_XDECREF(record_batch_type);
+    Py_XDECREF(table_type);
+    Py_XDECREF(table_fn);
+    Py_DECREF(pyarrow);
+    throw std::runtime_error("failed to resolve pyarrow table helpers");
   }
-  PyObject* table_obj = PyObject_CallFunctionObjArgs(table_fn, obj, nullptr);
+
+  PyObject* table_obj = nullptr;
+  if (PyObject_IsInstance(obj, record_batch_type) == 1) {
+    PyObject* from_batches = PyObject_GetAttrString(table_type, "from_batches");
+    if (from_batches != nullptr) {
+      PyObject* batches = PyList_New(1);
+      Py_INCREF(obj);
+      PyList_SET_ITEM(batches, 0, obj);
+      table_obj = PyObject_CallFunctionObjArgs(from_batches, batches, nullptr);
+      Py_DECREF(batches);
+      Py_DECREF(from_batches);
+    }
+  } else {
+    table_obj = PyObject_CallFunctionObjArgs(table_fn, obj, nullptr);
+  }
+  Py_DECREF(record_batch_type);
+  Py_DECREF(table_type);
   Py_DECREF(table_fn);
+  Py_DECREF(pyarrow);
   if (table_obj == nullptr) {
     throw std::runtime_error("failed to normalize input as pyarrow.Table");
   }
@@ -252,6 +274,28 @@ df::Table tableFromArrowObject(PyObject* obj) {
 
   Py_DECREF(table_obj);
   return df::Table(df::Schema(std::move(names)), std::move(rows));
+}
+
+std::vector<df::Table> tablesFromArrowObject(PyObject* obj) {
+  if (PyUnicode_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj)) {
+    return {tableFromArrowObject(obj)};
+  }
+  if (PyList_Check(obj) || PyTuple_Check(obj)) {
+    PyObject* seq = PySequence_Fast(obj, "arrow batches");
+    if (seq == nullptr) {
+      throw std::runtime_error("failed to read arrow batch sequence");
+    }
+    std::vector<df::Table> tables;
+    const Py_ssize_t count = PySequence_Fast_GET_SIZE(seq);
+    tables.reserve(static_cast<size_t>(count));
+    PyObject** items = PySequence_Fast_ITEMS(seq);
+    for (Py_ssize_t i = 0; i < count; ++i) {
+      tables.push_back(tableFromArrowObject(items[i]));
+    }
+    Py_DECREF(seq);
+    return tables;
+  }
+  return {tableFromArrowObject(obj)};
 }
 
 PyObject* pyFromValue(const df::Value& value) {
@@ -691,6 +735,18 @@ PyObject* sessionCreateDataFrameFromArrow(PyVelariaSession* self, PyObject* args
   });
 }
 
+PyObject* sessionCreateStreamFromArrow(PyVelariaSession* self, PyObject* args) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    PyObject* arrow_obj = nullptr;
+    if (!PyArg_ParseTuple(args, "O", &arrow_obj)) {
+      return nullptr;
+    }
+    std::vector<df::Table> batches = tablesFromArrowObject(arrow_obj);
+    return wrapStreamingDataFrame(
+        self->session->readStream(std::make_shared<df::MemoryStreamSource>(std::move(batches))));
+  });
+}
+
 PyObject* sessionStreamSql(PyVelariaSession* self, PyObject* args) {
   return withExceptionTranslation([&]() -> PyObject* {
     const char* sql = nullptr;
@@ -1007,6 +1063,8 @@ PyMethodDef sessionMethods[] = {
     {"sql", reinterpret_cast<PyCFunction>(sessionSql), METH_VARARGS, "Run batch SQL or SQL DDL."},
     {"create_dataframe_from_arrow", reinterpret_cast<PyCFunction>(sessionCreateDataFrameFromArrow),
      METH_VARARGS, "Create a DataFrame from a pyarrow.Table-compatible object."},
+    {"create_stream_from_arrow", reinterpret_cast<PyCFunction>(sessionCreateStreamFromArrow),
+     METH_VARARGS, "Create a StreamingDataFrame from a pyarrow.Table-compatible object."},
     {"create_temp_view", reinterpret_cast<PyCFunction>(sessionCreateTempView), METH_VARARGS,
      "Register a DataFrame or StreamingDataFrame temp view."},
     {"read_stream_csv_dir", reinterpret_cast<PyCFunction>(sessionReadStreamCsvDir),

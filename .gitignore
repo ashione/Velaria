@@ -12,3 +12,10 @@ src/dataflow/runner/dashboard/*.js.map
 *.log
 *.tmp
 *.temp
+
+# Python local artifacts
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/

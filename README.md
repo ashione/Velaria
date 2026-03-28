@@ -243,6 +243,7 @@ LIMIT 10;
 - `Session.read_csv(path, delimiter=',')`
 - `Session.sql(sql_text)`
 - `Session.create_dataframe_from_arrow(pyarrow_table)`
+- `Session.create_stream_from_arrow(pyarrow_table_or_batches)`
 - `Session.create_temp_view(name, df_or_stream_df)`
 - `Session.read_stream_csv_dir(path, delimiter=',')`
 - `Session.stream_sql(sql_text)`
@@ -252,6 +253,11 @@ LIMIT 10;
 - `StreamingDataFrame.window(...) / group_sum(...) / group_count(...)`
 - `StreamingDataFrame.write_stream_csv(...) / write_stream_console(...)`
 - `StreamingQuery.start() / await_termination(...) / stop() / progress()`
+
+其中：
+
+- `create_dataframe_from_arrow(...)` 支持 `pyarrow.Table` 和可被 `pyarrow.table(...)` 归一化的对象
+- `create_stream_from_arrow(...)` 支持单个 `pyarrow.Table` / `RecordBatch`，也支持由多批 `Table` / `RecordBatch` 组成的 Python 序列
 
 ### 构建与运行
 
@@ -268,9 +274,9 @@ LIMIT 10;
 
 需要注意：
 
-- `rules_python` 的 `py_wheel` 当前只支持 pure-Python wheel
 - `//python_api:velaria_whl` 负责打包 pure-Python API 层
 - `//python_api:velaria_native_whl` 会在 pure wheel 基础上注入 `_velaria.so`，产出本地平台 wheel
+- 在源码树开发态，如果仓库里已经构建过 `//:velaria_pyext`，`velaria` 会自动从 `bazel-bin/_velaria.so` 发现 native 扩展
 
 构建扩展：
 
@@ -286,17 +292,20 @@ Python 运行时还需要安装 `pyarrow`，因为 `DataFrame.to_arrow()` 会返
 运行 demo：
 
 ```bash
-PYTHONPATH=python_api \
-VELARIA_PYTHON_EXT="$(bazel info bazel-bin)/_velaria.so" \
-python3 python_api/demo_stream_sql.py
+bazel build //:velaria_pyext
+cd python_api && uv sync --python /opt/homebrew/bin/python3.13
+cd python_api && .venv/bin/python demo_stream_sql.py
+cd python_api && .venv/bin/python demo_batch_sql_arrow.py
 ```
 
 demo 会展示：
 
 - Python 侧创建 `Session`
-- Python 侧调用 stream API 建 source view
+- Python 侧直接用 `pyarrow.Table` 建 batch / stream 输入
 - Python 侧调用 stream SQL 启动 `INSERT INTO ... SELECT ...`
 - Python 侧读取 sink CSV 并打印结果与 query progress
+- Python 侧 `pyarrow.Table -> DataFrame` roundtrip
+- Python 侧 batch SQL 可直接基于 Arrow 输入视图执行并返回 Arrow 结果
 
 ## SQL 规划执行模型（v1）
 

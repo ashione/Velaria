@@ -23,7 +23,7 @@ int main() {
          "sales,7\n";
   }
 
-  auto& session = dataflow::SparkSession::builder();
+  auto& session = dataflow::DataflowSession::builder();
   session.createTempView("people", session.read_csv(peoplePath));
   session.createTempView("bonus", session.read_csv(bonusPath));
 

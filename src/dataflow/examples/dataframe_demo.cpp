@@ -14,7 +14,7 @@ int main() {
          "eve,40\n";
   }
 
-  auto& session = dataflow::SparkSession::builder();
+  auto& session = dataflow::DataflowSession::builder();
   auto df = session.read_csv(path);
 
   session.createTempView("people", df);

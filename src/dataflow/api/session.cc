@@ -4,24 +4,24 @@
 
 namespace dataflow {
 
-SparkSession& SparkSession::builder() {
-  static SparkSession session;
+DataflowSession& DataflowSession::builder() {
+  static DataflowSession session;
   return session;
 }
 
-DataFrame SparkSession::read_csv(const std::string& path, char delimiter) {
+DataFrame DataflowSession::read_csv(const std::string& path, char delimiter) {
   return DataFrame(load_csv(path, delimiter));
 }
 
-DataFrame SparkSession::createDataFrame(const Table& table) {
+DataFrame DataflowSession::createDataFrame(const Table& table) {
   return DataFrame(table);
 }
 
-void SparkSession::createTempView(const std::string& name, const DataFrame& df) {
+void DataflowSession::createTempView(const std::string& name, const DataFrame& df) {
   catalog_.createView(name, df);
 }
 
-DataFrame SparkSession::sql(const std::string& sql) {
+DataFrame DataflowSession::sql(const std::string& sql) {
   auto query = sql::SqlParser::parse(sql);
   sql::SqlPlanner planner;
   return planner.plan(query, catalog_);

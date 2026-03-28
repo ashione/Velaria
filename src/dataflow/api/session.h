@@ -7,9 +7,9 @@
 
 namespace dataflow {
 
-class SparkSession {
+class DataflowSession {
  public:
-  static SparkSession& builder();
+  static DataflowSession& builder();
 
   DataFrame read_csv(const std::string& path, char delimiter = ',');
   DataFrame createDataFrame(const Table& table);

@@ -183,14 +183,21 @@ void runComplexDmlRegression() {
 
 void runPlannerPlanRegression() {
   dataflow::ViewCatalog catalog;
-  Table t_users = Table(
-      Schema({"user_id", "region", "score"}),
-      {Row({1, std::string("apac"), 25}), Row({2, std::string("emea"), 18}),
-       Row({3, std::string("na"), 34})});
-  Table t_actions = Table(
-      Schema({"user_id", "event", "score"}),
-      {Row({1, std::string("view"), 8}), Row({2, std::string("buy"), 16}),
-       Row({3, std::string("view"), 4})});
+  Table t_users =
+      Table(Schema({"user_id", "region", "score"}),
+            {Row({Value(static_cast<int64_t>(1)), Value(std::string("apac")),
+                  Value(static_cast<int64_t>(25))}),
+             Row({Value(static_cast<int64_t>(2)), Value(std::string("emea")),
+                  Value(static_cast<int64_t>(18))}),
+             Row({Value(static_cast<int64_t>(3)), Value(std::string("na")),
+                  Value(static_cast<int64_t>(34))})});
+  Table t_actions = Table(Schema({"user_id", "event", "score"}),
+                         {Row({Value(static_cast<int64_t>(1)), Value(std::string("view")),
+                               Value(static_cast<int64_t>(8))}),
+                          Row({Value(static_cast<int64_t>(2)), Value(std::string("buy")),
+                               Value(static_cast<int64_t>(16))}),
+                          Row({Value(static_cast<int64_t>(3)), Value(std::string("view")),
+                               Value(static_cast<int64_t>(4))})});
   catalog.createView("users", DataFrame(t_users));
   catalog.createView("actions", DataFrame(t_actions));
 
@@ -208,7 +215,7 @@ void runPlannerPlanRegression() {
 
   expect(logical.steps.size() >= 5, "planner_logical_has_operators");
   expect(physical.steps.size() == logical.steps.size(), "planner_physical_step_count_match");
-  expect(df.rowCount() > 0, "planner_execution_has_output");
+  expect(df.toTable().rowCount() > 0, "planner_execution_has_output");
   expect(df.schema().fields.size() == 2, "planner_output_schema_two_columns");
   expect(df.schema().fields[0] == "region", "planner_output_col_region");
   expect(df.schema().fields[1] == "total_score", "planner_output_col_total_score");

@@ -80,10 +80,13 @@ cc_binary(
 cc_binary(
     name = "_velaria_native",
     srcs = ["src/dataflow/python/python_module.cc"],
-    linkopts = [
-        "-undefined",
-        "dynamic_lookup",
-    ],
+    linkopts = select({
+        "@bazel_tools//src/conditions:darwin": [
+            "-undefined",
+            "dynamic_lookup",
+        ],
+        "//conditions:default": [],
+    }),
     deps = [
         ":dataflow_core",
         "@velaria_local_python//:headers",

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <csignal>
+#include <cerrno>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
@@ -12,6 +14,7 @@
 #include <string>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <filesystem>
 #include <thread>
 #include <unordered_map>
@@ -32,6 +35,14 @@
 namespace dataflow {
 
 namespace {
+
+std::atomic<bool>* g_schedulerStopRequested = nullptr;
+
+void onSchedulerStopSignal(int) {
+  if (g_schedulerStopRequested) {
+    g_schedulerStopRequested->store(true);
+  }
+}
 
 bool parseConfigEndpoint(const std::string& endpoint,
                          std::string* host,
@@ -378,6 +389,12 @@ std::string dashboardReadFile(const std::string& relative_path, bool* ok) {
   return out.str();
 }
 
+struct LocalWorkerProcess {
+  pid_t pid;
+  std::string node_id;
+  bool registered;
+};
+
 void serveDashboardAsset(int fd, const std::string& raw_path) {
   std::string path = raw_path;
   const std::size_t qmark = path.find('?');
@@ -578,9 +595,123 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
   std::vector<int> dashboard_conns;
   uint64_t next_message_id = 1;
   std::unordered_set<std::string> local_worker_nodes;
-  std::atomic<int> launching_local_workers{0};
+  int launching_local_workers = 0;
+  std::unordered_map<pid_t, LocalWorkerProcess> local_worker_processes;
+  std::unordered_map<std::string, pid_t> local_worker_node_to_pid;
   int local_worker_seq = 1;
   const int target_local_workers = config.auto_worker ? std::max(1, config.local_worker_count) : 0;
+  std::atomic<bool> stop_requested{false};
+  g_schedulerStopRequested = &stop_requested;
+  const auto old_sigint = std::signal(SIGINT, &onSchedulerStopSignal);
+  const auto old_sigterm = std::signal(SIGTERM, &onSchedulerStopSignal);
+
+  const auto exitStatusFromWaitStatus = [&](int status) {
+    if (WIFEXITED(status)) {
+      return WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+      return 128 + WTERMSIG(status);
+    }
+    return -1;
+  };
+
+  const auto stopAllLocalWorkers = [&]() {
+    std::vector<std::pair<pid_t, std::string>> targets;
+    targets.reserve(local_worker_processes.size());
+    for (const auto& kv : local_worker_processes) {
+      targets.push_back({kv.first, kv.second.node_id});
+      if (kv.first > 0) {
+        kill(kv.first, SIGTERM);
+      }
+    }
+    for (const auto& kv : targets) {
+      const pid_t pid = kv.first;
+      if (pid <= 0) continue;
+      int status = 0;
+      bool terminated = false;
+      auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+      while (std::chrono::steady_clock::now() < deadline) {
+        const pid_t waited = waitpid(pid, &status, WNOHANG);
+        if (waited == pid) {
+          terminated = true;
+          break;
+        }
+        if (waited < 0) {
+          if (errno == ECHILD) {
+            terminated = true;
+          }
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      if (!terminated) {
+        kill(pid, SIGKILL);
+        deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+        while (std::chrono::steady_clock::now() < deadline) {
+          const pid_t waited = waitpid(pid, &status, WNOHANG);
+          if (waited == pid) {
+            terminated = true;
+            break;
+          }
+          if (waited < 0) {
+            if (errno == ECHILD) {
+              terminated = true;
+            }
+            break;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+      }
+      if (!terminated) {
+        continue;
+      }
+      if (waitpid(pid, &status, 0) < 0 && errno != ECHILD) {
+        continue;
+      }
+      emitRpcEvent("actor_scheduler", "local_worker_exit", config.node_id, "WORKER_EXIT", "",
+                   {observability::field("worker_node", kv.second),
+                    observability::field("pid", kv.first),
+                    observability::field("return_code", exitStatusFromWaitStatus(status))});
+    }
+    local_worker_processes.clear();
+    local_worker_node_to_pid.clear();
+    local_worker_nodes.clear();
+    launching_local_workers = 0;
+  };
+
+  const auto reapLocalWorkers = [&]() {
+    std::vector<pid_t> exited;
+    for (const auto& kv : local_worker_processes) {
+      int status = 0;
+      const pid_t pid = kv.first;
+      const pid_t waited = waitpid(pid, &status, WNOHANG);
+      if (waited != pid) {
+        continue;
+      }
+      exited.push_back(pid);
+      emitRpcEvent("actor_scheduler", "local_worker_exit", config.node_id, "WORKER_EXIT", "",
+                   {observability::field("worker_node", kv.second.node_id),
+                    observability::field("pid", kv.first),
+                    observability::field("return_code", exitStatusFromWaitStatus(status))});
+    }
+    for (const pid_t pid : exited) {
+      const auto it = local_worker_processes.find(pid);
+      if (it != local_worker_processes.end()) {
+        if (!it->second.registered && launching_local_workers > 0) {
+          --launching_local_workers;
+        }
+        local_worker_node_to_pid.erase(it->second.node_id);
+        local_worker_nodes.erase(it->second.node_id);
+        local_worker_processes.erase(pid);
+      }
+    }
+  };
+
+  const auto ensureSignalRestored = [&]() {
+    std::signal(SIGINT, old_sigint);
+    std::signal(SIGTERM, old_sigterm);
+    g_schedulerStopRequested = nullptr;
+  };
 
   auto startLocalWorker = [&]() -> bool {
     if (target_local_workers <= 0) return false;
@@ -591,27 +722,33 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
     worker_config.single_node = false;
     worker_config.dashboard_enabled = false;
 
-    launching_local_workers.fetch_add(1);
-    std::thread([worker_config, worker_index, scheduler_node = config.node_id,
-                 &launching_local_workers]() {
+    const pid_t pid = fork();
+    if (pid < 0) {
+      emitRpcEvent("actor_scheduler", "local_worker_spawn_failed", config.node_id,
+                   "WORKER_SPAWN_FAILED", "",
+                   {observability::field("worker_index", worker_index), observability::field("errno", errno)});
+      return false;
+    }
+    if (pid == 0) {
       const int rc = runActorWorker(worker_config);
-      launching_local_workers.fetch_sub(1);
-      emitRpcEvent("actor_scheduler", "local_worker_exit", scheduler_node, "WORKER_EXIT", "",
-                   {observability::field("worker_index", worker_index),
-                    observability::field("worker_node", worker_config.node_id),
-                    observability::field("return_code", rc)});
-    }).detach();
+      _exit(rc);
+    }
+
+    ++launching_local_workers;
+    local_worker_processes.emplace(pid, LocalWorkerProcess{pid, worker_config.node_id, false});
+    local_worker_node_to_pid.emplace(worker_config.node_id, pid);
 
     emitRpcEvent("actor_scheduler", "local_worker_spawn", config.node_id, "WORKER_SPAWNED", "",
                  {observability::field("worker_index", worker_index),
                   observability::field("worker_node", worker_config.node_id),
-                  observability::field("target", target_local_workers)});
+                  observability::field("target", target_local_workers),
+                  observability::field("pid", pid)});
     return true;
   };
 
   auto ensureLocalWorkers = [&]() {
     if (!config.auto_worker) return;
-    while (static_cast<int>(local_worker_nodes.size()) + launching_local_workers.load() < target_local_workers) {
+    while (static_cast<int>(local_worker_nodes.size()) + launching_local_workers < target_local_workers) {
       if (!startLocalWorker()) {
         break;
       }
@@ -643,7 +780,7 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
                      {observability::field("reason", "no worker available")});
         return false;
       }
-      if (workers.empty() && launching_local_workers.load() > 0 && summary_out) {
+      if (workers.empty() && launching_local_workers > 0 && summary_out) {
         summary_out->assign("scheduler started local worker, job submitted to remote execution queue");
       }
     }
@@ -792,9 +929,9 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
       }
       job_to_client.erase(job);
     }
-    emitRpcEvent("actor_scheduler", "connection_closed", config.node_id, "RPC_CONNECTION_CLOSED", "",
-                 {observability::field("fd", fd), observability::field("role", role),
-                  observability::field("peer_node", node)});
+      emitRpcEvent("actor_scheduler", "connection_closed", config.node_id, "RPC_CONNECTION_CLOSED", "",
+                   {observability::field("fd", fd), observability::field("role", role),
+                    observability::field("peer_node", node)});
     conns.erase(std::remove(conns.begin(), conns.end(), fd), conns.end());
     ::close(fd);
   };
@@ -893,7 +1030,8 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
     }
   };
 
-  while (true) {
+  while (!stop_requested.load()) {
+    reapLocalWorkers();
     fd_set reads;
     FD_ZERO(&reads);
     FD_SET(server_fd, &reads);
@@ -918,6 +1056,7 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
     const int ready = select(max_fd + 1, &reads, nullptr, nullptr, &tick);
     dispatchPending();
     if (ready <= 0) {
+      if (stop_requested.load()) break;
       continue;
     }
 
@@ -965,6 +1104,16 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
           workers.push_back(fd);
         }
         if (isLocalWorkerNodeId(worker_node_by_fd[fd], config.node_id)) {
+          const auto proc_it = local_worker_node_to_pid.find(worker_node_by_fd[fd]);
+          if (proc_it != local_worker_node_to_pid.end()) {
+            const auto status_it = local_worker_processes.find(proc_it->second);
+            if (status_it != local_worker_processes.end() && !status_it->second.registered) {
+              status_it->second.registered = true;
+              if (launching_local_workers > 0) {
+                --launching_local_workers;
+              }
+            }
+          }
           local_worker_nodes.insert(worker_node_by_fd[fd]);
         }
         idle_workers.insert(fd);
@@ -1129,6 +1278,20 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
       ::close(fd);
     }
   }
+
+  for (const int fd : conns) {
+    close(fd);
+  }
+  for (const int fd : dashboard_conns) {
+    ::close(fd);
+  }
+  if (dashboard_server_fd >= 0) {
+    ::close(dashboard_server_fd);
+  }
+  ::close(server_fd);
+  stopAllLocalWorkers();
+  ensureSignalRestored();
+  return 0;
 }
 
 int runActorWorker(const ActorRuntimeConfig& config) {

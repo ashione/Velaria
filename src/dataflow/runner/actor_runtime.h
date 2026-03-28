@@ -19,7 +19,7 @@ struct ActorRuntimeConfig {
   std::string listen_address = "127.0.0.1:61000";
   std::string dashboard_listen_address = "127.0.0.1:8080";
   bool auto_worker = true;
-  int local_worker_count = 1;
+  int local_worker_count = 2;
   bool dashboard_enabled = false;
   bool single_node = false;
   bool print_help = false;

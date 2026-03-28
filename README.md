@@ -36,12 +36,12 @@ client
 
 为避免外部生态专有命名侵入仓库，统一使用以下术语：
 
-- `SparkSession` -> `DataflowSession`
-- `spark.sql(...)` -> `session.sql(...)`
-- `spark.read...` -> `session.read...`
-- `Spark-like compatibility` -> `语义对齐` 或 `外部接口语义参考`
+- `Session` 风格命名 -> `DataflowSession`
+- SQL 入口 -> `session.sql(...)`
+- 读取入口 -> `session.read(...)`
+- `compatibility` 表达 -> `语义对齐` 或 `接口语义参考`
 
-新增文档、注释、接口说明不要再引入 `spark`/`Spark` 命名。
+新增文档、注释、接口说明请避免引入外部框架专名，使用仓库内统一术语。
 
 ## 当前能力边界
 
@@ -78,7 +78,7 @@ client
 
 ## SQL DDL（v1）语义
 
-参考 Spark/Flink 的 `Catalog` 语义，当前支持以下建表类型：
+参考主流数据处理引擎的 `Catalog` 语义，当前支持以下建表类型：
 
 - `CREATE TABLE`：普通表，既可被 `SELECT`，也可被 `INSERT`。
 - `CREATE SOURCE TABLE`：源表，偏向上游输入，当前版本限制为只读，禁止 `INSERT`。

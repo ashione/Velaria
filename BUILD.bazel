@@ -177,3 +177,9 @@ cc_binary(
     srcs = ["src/dataflow/examples/actor_rpc_smoke.cc"],
     deps = [":dataflow_actor_runner"],
 )
+
+cc_binary(
+    name = "sql_regression_test",
+    srcs = ["src/dataflow/tests/sql_regression_test.cc"],
+    deps = [":dataflow_core"],
+)

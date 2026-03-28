@@ -114,7 +114,7 @@ GROUP BY name;
 
 - scheduler 只负责编排与分发，不直接执行 SQL。
 - 包含 `dashboard` 在内的提交入口都走 worker 路径（`JobMaster + worker`）。
-- 当 worker 不可用时，调度返回 `no worker available`，不会在 scheduler 内本地“伪执行”。
+- 当未禁用自启动 worker（`--no-auto-worker`）且 worker 不可用时，调度返回 `no worker available`，不会在 scheduler 内本地“伪执行”。
 
 ## 构建与启动命令
 
@@ -151,6 +151,8 @@ bazel run //:actor_rpc_smoke
 ```bash
 bazel run //:actor_rpc_scheduler -- --listen 127.0.0.1:61000 --node-id scheduler --dashboard-enabled --dashboard-listen 127.0.0.1:8080
 ```
+
+默认 scheduler 会自启动一个本地 worker（`--no-auto-worker` 可关闭），如果你希望强制手工 worker，可再按需启动：
 
 终端 B：
 

@@ -103,6 +103,8 @@ bazel run //:actor_rpc_worker -- --connect 127.0.0.1:61000 --node-id worker-1
 bazel run //:actor_rpc_client -- --connect 127.0.0.1:61000 --payload "demo payload"
 ```
 
+默认 scheduler 会自启动一个本地 worker；如需验证手工挂载链路，可按上面保留 worker 步骤单独运行，或使用 `--no-auto-worker`。
+
 或一键执行：
 
 ```bash
@@ -119,7 +121,7 @@ bazel run //:actor_rpc_client -- --connect 127.0.0.1:61000 --payload "demo paylo
 - scheduler 输出 `[scheduler] listen 127.0.0.1:61000`
 - worker 输出 `[worker] connected 127.0.0.1:61000`
 - client 先输出 `job accepted`，再输出 `job result`
-- 日志中不出现 `no-worker-available`
+- 日志中通常不出现 `no-worker-available`（除非配置 `--no-auto-worker`）
 - 日志中不出现 `cannot connect`
 - 日志中不出现 `scheduler closed connection`
 
@@ -139,7 +141,7 @@ bazel run //:stream_demo
 - 示例文件统一保持 `.cc`；不要新建 `.cpp` / `.cxx` 示例。
 - `--listen` / `--connect` 参数必须是 `host:port`。
 - 多进程验收顺序必须是 `scheduler -> worker -> client`。
-- 若出现 `no-worker-available`，先查 worker 是否已连上 scheduler。
+- 若出现 `no-worker-available`，优先确认是否启动了 `--no-auto-worker`，然后再检查 worker 是否已连上 scheduler。
 - 若出现 `cannot connect`，先查 scheduler 是否已监听、端口是否一致。
 - `Value` 当前允许 `Int64/Double` 跨类型比较；若改成严格类型模式，需同步更新 Planner 与示例。
 - `Schema` / `Join` 场景要注意对象生命周期，避免临时对象引用外泄。

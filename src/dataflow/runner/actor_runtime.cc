@@ -208,6 +208,11 @@ void sendHttpResponse(int fd, int code, const std::string& reason, const std::st
   sendAllBytes(fd, reinterpret_cast<const uint8_t*>(text.data()), text.size());
 }
 
+bool isLocalWorkerNodeId(const std::string& node_id, const std::string& scheduler_node_id) {
+  const std::string prefix = scheduler_node_id + "-worker-";
+  return node_id.compare(0, prefix.size(), prefix) == 0;
+}
+
 bool readHttpRequest(int fd, std::string* method, std::string* path, std::string* body) {
   if (!method || !path || !body) return false;
   method->clear();
@@ -572,6 +577,48 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
   std::unordered_map<std::string, RpcJobSnapshot> job_snapshots;
   std::vector<int> dashboard_conns;
   uint64_t next_message_id = 1;
+  std::unordered_set<std::string> local_worker_nodes;
+  std::atomic<int> launching_local_workers{0};
+  int local_worker_seq = 1;
+  const int target_local_workers = config.auto_worker ? std::max(1, config.local_worker_count) : 0;
+
+  auto startLocalWorker = [&]() -> bool {
+    if (target_local_workers <= 0) return false;
+    ActorRuntimeConfig worker_config = config;
+    const int worker_index = local_worker_seq++;
+    worker_config.node_id = config.node_id + "-worker-" + std::to_string(worker_index);
+    worker_config.connect_address = config.listen_address;
+    worker_config.single_node = false;
+    worker_config.dashboard_enabled = false;
+
+    launching_local_workers.fetch_add(1);
+    std::thread([worker_config, worker_index, scheduler_node = config.node_id,
+                 &launching_local_workers]() {
+      const int rc = runActorWorker(worker_config);
+      launching_local_workers.fetch_sub(1);
+      emitRpcEvent("actor_scheduler", "local_worker_exit", scheduler_node, "WORKER_EXIT", "",
+                   {observability::field("worker_index", worker_index),
+                    observability::field("worker_node", worker_config.node_id),
+                    observability::field("return_code", rc)});
+    }).detach();
+
+    emitRpcEvent("actor_scheduler", "local_worker_spawn", config.node_id, "WORKER_SPAWNED", "",
+                 {observability::field("worker_index", worker_index),
+                  observability::field("worker_node", worker_config.node_id),
+                  observability::field("target", target_local_workers)});
+    return true;
+  };
+
+  auto ensureLocalWorkers = [&]() {
+    if (!config.auto_worker) return;
+    while (static_cast<int>(local_worker_nodes.size()) + launching_local_workers.load() < target_local_workers) {
+      if (!startLocalWorker()) {
+        break;
+      }
+    }
+  };
+
+  ensureLocalWorkers();
 
   auto emitSnapshotEvent = [&](const RpcJobSnapshot& snapshot) {
     emitRpcEvent("actor_scheduler", "job_snapshot", config.node_id, snapshot.status_code, snapshot.job_id,
@@ -583,16 +630,22 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
                                std::string* job_id_out,
                                std::string* summary_out) -> bool {
     if (workers.empty()) {
-      if (job_id_out) {
-        job_id_out->clear();
+      ensureLocalWorkers();
+      if (!config.auto_worker && workers.empty()) {
+        if (job_id_out) {
+          job_id_out->clear();
+        }
+        if (summary_out) {
+          summary_out->assign("scheduler reject: no worker available");
+        }
+        emitRpcEvent("actor_scheduler", "dashboard_submit", config.node_id,
+                     "JOB_SUBMIT_REJECTED", "",
+                     {observability::field("reason", "no worker available")});
+        return false;
       }
-      if (summary_out) {
-        summary_out->assign("scheduler reject: no worker available");
+      if (workers.empty() && launching_local_workers.load() > 0 && summary_out) {
+        summary_out->assign("scheduler started local worker, job submitted to remote execution queue");
       }
-      emitRpcEvent("actor_scheduler", "dashboard_submit", config.node_id,
-                   "JOB_SUBMIT_REJECTED", "",
-                   {observability::field("reason", "no worker available")});
-      return false;
     }
 
     DataFrame plan_df;
@@ -714,9 +767,13 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
   auto cleanup = [&](int fd) {
     const std::string role = conn_role.count(fd) ? conn_role[fd] : "unknown";
     const std::string node = conn_node.count(fd) ? conn_node[fd] : "";
+    const std::string worker_node = worker_node_by_fd.count(fd) ? worker_node_by_fd[fd] : "";
     conn_role.erase(fd);
     conn_node.erase(fd);
     worker_node_by_fd.erase(fd);
+    if (role == "worker" && isLocalWorkerNodeId(worker_node, config.node_id)) {
+      local_worker_nodes.erase(worker_node);
+    }
     idle_workers.erase(fd);
     removeWorker(&workers, fd);
     std::vector<std::string> stale_jobs;
@@ -743,6 +800,7 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
   };
 
   auto dispatchPending = [&]() {
+    ensureLocalWorkers();
     while (!idle_workers.empty()) {
       RemoteTaskSpec task;
       if (!JobMaster::instance().pollRemoteTask(&task, std::chrono::milliseconds(0))) {
@@ -906,6 +964,9 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
         if (std::find(workers.begin(), workers.end(), fd) == workers.end()) {
           workers.push_back(fd);
         }
+        if (isLocalWorkerNodeId(worker_node_by_fd[fd], config.node_id)) {
+          local_worker_nodes.insert(worker_node_by_fd[fd]);
+        }
         idle_workers.insert(fd);
         ActorRpcMessage ack;
         ack.action = ActorRpcAction::Ack;
@@ -921,6 +982,9 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
         conn_role[fd] = "client";
         conn_node[fd] = msg.node_id;
         if (workers.empty()) {
+          ensureLocalWorkers();
+        }
+        if (workers.empty() && !config.auto_worker) {
           ActorRpcMessage nack;
           nack.action = ActorRpcAction::Ack;
           nack.node_id = config.node_id;

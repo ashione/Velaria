@@ -1,5 +1,7 @@
 #include <string>
 
+#include <cstdlib>
+
 #include "src/dataflow/runner/actor_runtime.h"
 
 int main(int argc, char* argv[]) {
@@ -23,6 +25,21 @@ int main(int argc, char* argv[]) {
     }
     if (std::string(argv[i]) == "--dashboard-enabled") {
       config.dashboard_enabled = true;
+      continue;
+    }
+    if (std::string(argv[i]) == "--auto-worker") {
+      config.auto_worker = true;
+      continue;
+    }
+    if (std::string(argv[i]) == "--no-auto-worker") {
+      config.auto_worker = false;
+      continue;
+    }
+    if (std::string(argv[i]) == "--local-workers" && i + 1 < argc) {
+      const int worker_count = std::atoi(argv[++i]);
+      if (worker_count > 0) {
+        config.local_worker_count = worker_count;
+      }
       continue;
     }
     if (std::string(argv[i]) == "--single-node") {

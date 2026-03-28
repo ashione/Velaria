@@ -380,6 +380,10 @@ class StreamingQuery {
  public:
   StreamingQuery(StreamingDataFrame root, std::shared_ptr<StreamSink> sink,
                  StreamingQueryOptions options);
+  StreamingQuery(StreamingQuery&& other) noexcept;
+  StreamingQuery& operator=(StreamingQuery&& other) noexcept;
+  StreamingQuery(const StreamingQuery&) = delete;
+  StreamingQuery& operator=(const StreamingQuery&) = delete;
 
   StreamingQuery& trigger(uint64_t triggerIntervalMs);
   StreamingQuery& start();

@@ -72,6 +72,35 @@ cc_binary(
 )
 
 cc_binary(
+    name = "stream_sql_demo",
+    srcs = ["src/dataflow/examples/stream_sql_demo.cc"],
+    deps = [":dataflow_core"],
+)
+
+cc_binary(
+    name = "_velaria_native",
+    srcs = ["src/dataflow/python/python_module.cc"],
+    linkopts = [
+        "-undefined",
+        "dynamic_lookup",
+    ],
+    deps = [
+        ":dataflow_core",
+        "@velaria_local_python//:headers",
+    ],
+    linkshared = True,
+    visibility = ["//visibility:public"],
+)
+
+genrule(
+    name = "velaria_pyext",
+    srcs = [":_velaria_native"],
+    outs = ["_velaria.so"],
+    cmd = "cp $< $@",
+    visibility = ["//visibility:public"],
+)
+
+cc_binary(
     name = "stream_stateful_demo",
     srcs = ["src/dataflow/examples/stream_stateful_demo.cc"],
     deps = [":dataflow_core"],
@@ -165,11 +194,11 @@ genrule(
     name = "dashboard_app_js",
     srcs = [
         "src/dataflow/runner/dashboard/app.ts",
-        "scripts/build_dashboard_frontend.sh",
+        "//scripts:build_dashboard_frontend.sh",
     ],
     outs = ["src/dataflow/runner/dashboard/app.js"],
-    cmd = "$(location scripts/build_dashboard_frontend.sh) $(location src/dataflow/runner/dashboard/app.ts) $@",
-    tools = ["scripts/build_dashboard_frontend.sh"],
+    cmd = "$(location //scripts:build_dashboard_frontend.sh) $(location src/dataflow/runner/dashboard/app.ts) $@",
+    tools = ["//scripts:build_dashboard_frontend.sh"],
 )
 
 cc_binary(

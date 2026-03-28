@@ -1,2 +1,3 @@
 build --cxxopt=-std=c++17
 build --host_cxxopt=-std=c++17
+build --macos_minimum_os=10.15

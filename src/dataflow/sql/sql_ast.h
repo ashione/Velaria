@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "src/dataflow/core/table.h"
@@ -80,6 +81,8 @@ struct CreateTableStmt {
   std::string table;
   std::vector<SqlColumnDef> columns;
   TableKind kind = TableKind::Regular;
+  std::string provider;
+  std::unordered_map<std::string, std::string> options;
 };
 
 struct InsertStmt {

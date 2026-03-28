@@ -5,6 +5,7 @@
 #include "src/dataflow/stream/stream.h"
 #include "src/dataflow/sql/sql_parser.h"
 #include "src/dataflow/sql/sql_planner.h"
+#include <unordered_map>
 
 namespace dataflow {
 
@@ -22,10 +23,17 @@ class DataflowSession {
   Table submit(const std::string& sql, const ExecutionOptions& options = {});
 
   void createTempView(const std::string& name, const DataFrame& df);
+  void createTempView(const std::string& name, const StreamingDataFrame& df);
+  void registerStreamSink(const std::string& name, std::shared_ptr<StreamSink> sink);
   DataFrame sql(const std::string& sql);
+  StreamingDataFrame streamSql(const std::string& sql);
+  StreamingQuery startStreamSql(const std::string& sql,
+                                const StreamingQueryOptions& options = {});
 
  private:
   ViewCatalog catalog_;
+  std::unordered_map<std::string, StreamingDataFrame> stream_views_;
+  std::unordered_map<std::string, std::shared_ptr<StreamSink>> stream_sinks_;
 };
 
 }  // namespace dataflow

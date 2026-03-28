@@ -505,20 +505,23 @@ SqlColumnDef parseCreateColumn(ParseState& state) {
   return out;
 }
 
-void consumeCreateOptions(ParseState& state) {
+void parseCreateOptions(ParseState& state, SqlStatement& out) {
   if (state.consumeWord("USING")) {
-    state.expectToken();
+    out.create.provider = state.expectToken().text;
   }
   if (state.consumeWord("OPTIONS")) {
     state.expectSymbol("(");
-    int depth = 1;
-    while (!state.isEnd() && depth > 0) {
-      Token token = state.take();
-      if (token.text == "(") ++depth;
-      if (token.text == ")") --depth;
-    }
-    if (depth != 0) {
-      throw SQLSyntaxError("unterminated OPTIONS()");
+    if (!state.consumeSymbol(")")) {
+      while (true) {
+        const auto key = state.expectToken().text;
+        state.consumeSymbol("=");
+        const auto value = state.expectToken().text;
+        out.create.options[key] = value;
+        if (state.consumeSymbol(")")) {
+          break;
+        }
+        state.expectSymbol(",");
+      }
     }
   }
 }
@@ -542,7 +545,7 @@ SqlStatement parseCreateTable(ParseState& state) {
     if (state.consumeSymbol(")")) break;
     state.expectSymbol(",");
   }
-  consumeCreateOptions(state);
+  parseCreateOptions(state, out);
   return out;
 }
 

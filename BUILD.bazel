@@ -1,0 +1,58 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+
+cc_library(
+    name = "dataflow_core",
+    srcs = [
+        "src/dataflow/core/value.cc",
+        "src/dataflow/core/table.cc",
+        "src/dataflow/core/csv.cc",
+        "src/dataflow/api/dataframe.cc",
+        "src/dataflow/api/session.cc",
+        "src/dataflow/serial/serializer.cc",
+        "src/dataflow/planner/plan.cc",
+        "src/dataflow/runtime/executor.cc",
+        "src/dataflow/stream/stream.cc",
+    ],
+    hdrs = [
+        "src/dataflow/core/value.h",
+        "src/dataflow/core/table.h",
+        "src/dataflow/core/csv.h",
+        "src/dataflow/api/dataframe.h",
+        "src/dataflow/api/session.h",
+        "src/dataflow/serial/serializer.h",
+        "src/dataflow/planner/plan.h",
+        "src/dataflow/runtime/executor.h",
+        "src/dataflow/stream/stream.h",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_binary(
+    name = "wordcount_demo",
+    srcs = ["src/dataflow/examples/wordcount.cpp"],
+    deps = [":dataflow_core"],
+)
+
+cc_binary(
+    name = "df_demo",
+    srcs = ["src/dataflow/examples/dataframe_demo.cpp"],
+    deps = [":dataflow_core"],
+)
+
+cc_binary(
+    name = "stream_demo",
+    srcs = ["src/dataflow/examples/stream_demo.cpp"],
+    deps = [":dataflow_core"],
+)
+
+cc_binary(
+    name = "stream_stateful_demo",
+    srcs = ["src/dataflow/examples/stream_stateful_demo.cpp"],
+    deps = [":dataflow_core"],
+)
+
+cc_binary(
+    name = "stream_state_container_demo",
+    srcs = ["src/dataflow/examples/stream_state_container_demo.cpp"],
+    deps = [":dataflow_core"],
+)

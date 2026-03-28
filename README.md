@@ -72,6 +72,44 @@ client
 
 当前版本仍是本地内存 catalog，`SOURCE`/`SINK` 只记录表语义并做执行约束校验，不直接引入外部连接器。
 
+## SQL DDL / DML 支持（v1）
+
+### DDL
+
+- `CREATE TABLE`: 创建普通内存表，支持读写。
+- `CREATE SOURCE TABLE`: 创建源表，仅可读。
+- `CREATE SINK TABLE`: 创建汇聚/结果表，仅可用于写入。
+
+示例：
+
+```sql
+CREATE TABLE users (id INT, name STRING, score INT);
+CREATE SOURCE TABLE source_users (name STRING, score INT);
+CREATE SINK TABLE summary_by_region (region STRING, score_sum INT);
+```
+
+### DML
+
+- `INSERT INTO ... VALUES`：支持按列顺序插入或显式列名。
+- `INSERT INTO ... SELECT`：支持把子查询结果写入目标表（当前解析器仅允许 `SELECT` 子查询语法）。
+
+示例：
+
+```sql
+INSERT INTO users (id, name, score) VALUES (1, 'alice', 10), (2, 'bob', 20);
+
+INSERT INTO summary_by_region
+SELECT name AS region, SUM(score) AS score_sum
+FROM users
+GROUP BY name;
+```
+
+### 语义限制
+
+- 任何 `INSERT` 到 `SOURCE` 表都会返回语义错误。
+- 对 `SINK` 表执行 `SELECT`（或 `JOIN` 中作为右表）会返回语义错误。
+- `SELECT` 中必须满足本版本约束（例如 `HAVING` 依赖聚合语义、`GROUP BY` 与投影一致性等）。
+
 ## 构建与启动命令
 
 ### 单机示例

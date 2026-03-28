@@ -36,6 +36,12 @@
 - `CREATE SOURCE TABLE`：源表，当前约束为只读，不允许 `INSERT` 写入。
 - `CREATE SINK TABLE`：汇聚/结果表，当前约束为禁止 `SELECT` 查询使用该表（包括 join 输入）。
 
+### SQL DML 运行约束
+
+- `INSERT INTO ... VALUES`：支持全列/显式列插入。
+- `INSERT INTO ... SELECT`：支持查询结果写入目标表（目标表不应为 `SOURCE TABLE`）。
+- `SINK TABLE` 可用于写入，不应用于查询输入。
+
 ## 常用命令
 
 ### 构建

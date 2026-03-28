@@ -4,12 +4,17 @@
 #include <string>
 #include <utility>
 
+#include "src/dataflow/catalog/catalog.h"
 #include "src/dataflow/api/session.h"
+#include "src/dataflow/sql/sql_planner.h"
 #include "src/dataflow/sql/sql_parser.h"
 
 namespace {
 
 using dataflow::DataflowSession;
+using dataflow::DataFrame;
+using dataflow::Row;
+using dataflow::Schema;
 using dataflow::Table;
 using dataflow::Value;
 
@@ -99,6 +104,24 @@ void runParserRegression() {
         expect(st.query.join.has_value(), "parser_alias_join_present");
         expect(st.query.limit.value_or(0) == 2, "parser_alias_limit_present");
       });
+
+  expectNoThrow(
+      "parser_join_with_parenthesized_on",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT u.user_id FROM users u INNER JOIN actions a ON (u.user_id = a.user_id) "
+            "WHERE u.user_id > (1)");
+        expect(st.query.join.has_value(), "parser_parenthesized_join_present");
+      });
+
+  expectNoThrow(
+      "parser_predicate_with_parenthesized_rhs",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT u.user_id FROM users u WHERE u.user_id > (1) LIMIT 1");
+        expect(st.query.where.has_value(), "parser_predicate_where_present");
+        expect(st.query.limit.value_or(0) == 1, "parser_predicate_limit_present");
+      });
 }
 
 void runSemanticRegression() {
@@ -158,12 +181,46 @@ void runComplexDmlRegression() {
   expect(!hasSummaryRow(out, "emea", 12, 1), "e2e_complex_dml_emea_filtered");
 }
 
+void runPlannerPlanRegression() {
+  dataflow::ViewCatalog catalog;
+  Table t_users = Table(
+      Schema({"user_id", "region", "score"}),
+      {Row({1, std::string("apac"), 25}), Row({2, std::string("emea"), 18}),
+       Row({3, std::string("na"), 34})});
+  Table t_actions = Table(
+      Schema({"user_id", "event", "score"}),
+      {Row({1, std::string("view"), 8}), Row({2, std::string("buy"), 16}),
+       Row({3, std::string("view"), 4})});
+  catalog.createView("users", DataFrame(t_users));
+  catalog.createView("actions", DataFrame(t_actions));
+
+  const auto st = dataflow::sql::SqlParser::parse(
+      "SELECT u.region, SUM(a.score) AS total_score "
+      "FROM users u INNER JOIN actions a ON (u.user_id = a.user_id) "
+      "WHERE a.score > 5 "
+      "GROUP BY u.region "
+      "HAVING total_score > 10 "
+      "LIMIT 5");
+  dataflow::sql::SqlPlanner planner;
+  const auto logical = planner.buildLogicalPlan(st.query, catalog);
+  const auto physical = planner.buildPhysicalPlan(logical);
+  const auto df = planner.materializeFromPhysical(physical);
+
+  expect(logical.steps.size() >= 5, "planner_logical_has_operators");
+  expect(physical.steps.size() == logical.steps.size(), "planner_physical_step_count_match");
+  expect(df.rowCount() > 0, "planner_execution_has_output");
+  expect(df.schema().fields.size() == 2, "planner_output_schema_two_columns");
+  expect(df.schema().fields[0] == "region", "planner_output_col_region");
+  expect(df.schema().fields[1] == "total_score", "planner_output_col_total_score");
+}
+
 }  // namespace
 
 int main() {
   runParserRegression();
   runSemanticRegression();
   runComplexDmlRegression();
+  runPlannerPlanRegression();
 
   if (g_failed == 0) {
     std::cout << "All regression checks passed.\n";

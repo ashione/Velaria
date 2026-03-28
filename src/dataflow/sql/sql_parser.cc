@@ -314,13 +314,22 @@ Predicate parsePredicate(ParseState& state) {
     }
     out.lhs_is_aggregate = true;
     out.lhs_aggregate = parseAggregateExpr(state, lhs.text);
+    if (left_paren) {
+      state.consumeSymbol(")");
+      left_paren = false;
+    }
   } else {
     out.lhs = parseColumnWithFirst(state, lhs);
   }
 
   out.op = parseOperator(state);
   Token rhs = state.expectToken();
-  if (rhs.text == "(" || rhs.text == ")" || rhs.text == ",") throw SQLSyntaxError("invalid predicate");
+  bool rhs_parenthesized = false;
+  if (rhs.text == "(") {
+    rhs_parenthesized = true;
+    rhs = state.expectToken();
+  }
+  if (rhs.text == ")" || rhs.text == ",") throw SQLSyntaxError("invalid predicate");
   if (rhs.is_string) {
     out.rhs = Value(rhs.text);
   } else if (rhs.is_number) {
@@ -329,6 +338,9 @@ Predicate parsePredicate(ParseState& state) {
     throw SQLSyntaxError("unsupported predicate literal");
   } else {
     out.rhs = parseValueToken(rhs);
+  }
+  if (rhs_parenthesized) {
+    state.expectSymbol(")");
   }
   if (left_paren) {
     state.expectSymbol(")");
@@ -414,11 +426,15 @@ JoinItem parseJoin(ParseState& state) {
   state.expectWord("JOIN");
   out.right = parseFrom(state);
   state.expectWord("ON");
+  const bool parenthesized = state.consumeSymbol("(");
   out.left_key = parseColumn(state);
   if (!state.consumeSymbol("=") && !state.consumeSymbol("==")) {
     throw SQLSyntaxError("only equality join is supported");
   }
   out.right_key = parseColumn(state);
+  if (parenthesized) {
+    state.expectSymbol(")");
+  }
   return out;
 }
 

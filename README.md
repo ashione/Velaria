@@ -62,6 +62,18 @@ client
 - 当前多进程链路仍是本地多进程验证，不包含真正分布式调度、容错恢复、状态迁移、资源治理。
 - 错误恢复能力仍需继续加强，当前主要依赖明确日志与失败文案排查。
 
+## SQL 规划执行模型（v1）
+
+`session.sql()` 已按 `Parser -> Planner -> DataFrame` 的三层推进：
+
+- `SqlParser` 将 SQL 解析成 `SqlQuery` AST。当前已支持 `ON (...)`、`HAVING`、`LIMIT`，并可解析简单的括号谓词写法（如 `WHERE a.score > (5)`）。
+- `SqlPlanner::buildLogicalPlan(...)` 生成逻辑步骤：`Scan -> (Join?) -> (Filter?) -> (Aggregate?) -> (Having?) -> Project -> (Limit?)`。
+- `SqlPlanner::buildPhysicalPlan(...)` 将逻辑步骤映射到物理步骤，当前策略：
+  - `Join` 与 `Aggregate` 作为 barrier 阶段；
+  - 连续 `Filter/Project/Limit/Having` 可尝试融合为 `FusedUnary`；
+  - 连续 `Project` 去重、连续 `Limit` 取小值（优化边界保留可验证）。
+- `materializeFromPhysical(...)` 按物理步骤回放为现有 `DataFrame` 算子链，复用本地执行器。
+
 ## SQL DDL（v1）语义
 
 参考 Spark/Flink 的 `Catalog` 语义，当前支持以下建表类型：
@@ -125,7 +137,7 @@ GROUP BY name;
 - 并发与并行：`chain` 并发受 `chain_parallelism` 和可用 worker 约束；每条 task 支持重试与 heartbeat 观测。
 - 结果确认：worker 完成后返回 `Result`，scheduler 由 worker 响应更新 `job/chain/task` 快照并回推给提交端。
 - 管理建议：用日志事件与 `/api/jobs` 快照观察 `JOB_* / CHAIN_* / TASK_*` 的状态变化判断是否在排队与是否正在运行。
-- 当前默认 worker 策略：scheduler 默认自启动本地 worker（`--local-workers`，默认 1）。如需人工模式可使用 `--no-auto-worker`，此时才会出现 `no-worker-available` 回退路径。
+- 当前默认 worker 策略：scheduler 默认自启动本地 worker（`--local-workers`，默认 2）。如需人工模式可使用 `--no-auto-worker`，此时才会出现 `no-worker-available` 回退路径。
 
 ## 构建与启动命令
 

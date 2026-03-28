@@ -62,6 +62,16 @@ client
 - 当前多进程链路仍是本地多进程验证，不包含真正分布式调度、容错恢复、状态迁移、资源治理。
 - 错误恢复能力仍需继续加强，当前主要依赖明确日志与失败文案排查。
 
+## SQL DDL（v1）语义
+
+参考 Spark/Flink 的 `Catalog` 语义，当前支持以下建表类型：
+
+- `CREATE TABLE`：普通表，既可被 `SELECT`，也可被 `INSERT`。
+- `CREATE SOURCE TABLE`：源表，偏向上游输入，当前版本限制为只读，禁止 `INSERT`。
+- `CREATE SINK TABLE`：结果表，偏向下游输出，当前版本限制为只写，禁止 `SELECT`（含 `JOIN` 输入）。
+
+当前版本仍是本地内存 catalog，`SOURCE`/`SINK` 只记录表语义并做执行约束校验，不直接引入外部连接器。
+
 ## 构建与启动命令
 
 ### 单机示例

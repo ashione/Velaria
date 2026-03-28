@@ -77,7 +77,7 @@ DataFrame executeCreateTable(ViewCatalog& catalog, const sql::CreateTableStmt& s
     }
     fields.push_back(col.name);
   }
-  catalog.createTable(stmt.table, fields);
+  catalog.createTable(stmt.table, fields, stmt.kind);
   return dmlResult("create table done", 0);
 }
 
@@ -165,6 +165,9 @@ Table normalizeInsertSelect(const Table& target, const std::vector<std::string>&
 }
 
 DataFrame executeInsert(ViewCatalog& catalog, const sql::InsertStmt& stmt) {
+  if (catalog.isSourceTable(stmt.table)) {
+    throw SQLSemanticError("INSERT INTO is not allowed on SOURCE TABLE: " + stmt.table);
+  }
   DataFrame& view = catalog.getViewMutable(stmt.table);
   Table target = view.toTable();
   Table toInsert;

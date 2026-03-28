@@ -173,6 +173,9 @@ DataFrame SqlPlanner::plan(const SqlQuery& query, const ViewCatalog& catalog) co
     return current;
   }
 
+  if (catalog.isSinkTable(query.from.name)) {
+    throw SQLSemanticError("SELECT from SINK table is not allowed: " + query.from.name);
+  }
   DataFrame current = catalog.getView(query.from.name);
   RelationContext ctx;
   auto leftSchema = current.schema();
@@ -184,6 +187,9 @@ DataFrame SqlPlanner::plan(const SqlQuery& query, const ViewCatalog& catalog) co
   if (query.join.has_value()) {
     const auto& join = query.join.value();
     const auto& rightView = join.right;
+    if (catalog.isSinkTable(rightView.name)) {
+      throw SQLSemanticError("JOIN with SINK table is not allowed: " + rightView.name);
+    }
     DataFrame right = catalog.getView(rightView.name);
     const auto rightSchema = right.schema();
 

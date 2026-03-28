@@ -30,6 +30,12 @@
 
 如果需要描述兼容关系，使用“语义对齐”“接口映射”“外部行为参考”，不要把外部框架名直接放进仓库主接口或注释里。
 
+### SQL DDL 建表语义
+
+- `CREATE TABLE`：普通表，支持 `SELECT` 与 `INSERT`。
+- `CREATE SOURCE TABLE`：源表，当前约束为只读，不允许 `INSERT` 写入。
+- `CREATE SINK TABLE`：汇聚/结果表，当前约束为禁止 `SELECT` 查询使用该表（包括 join 输入）。
+
 ## 常用命令
 
 ### 构建

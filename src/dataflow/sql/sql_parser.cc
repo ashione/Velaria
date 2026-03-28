@@ -36,7 +36,7 @@ bool isClauseKeyword(const std::string& value) {
   return u == "FROM" || u == "WHERE" || u == "GROUP" || u == "BY" || u == "HAVING" ||
          u == "LIMIT" || u == "JOIN" || u == "INNER" || u == "LEFT" || u == "ON" || u == "AS" ||
          u == "SELECT" || u == "CREATE" || u == "TABLE" || u == "INSERT" || u == "INTO" ||
-         u == "VALUES" || u == "USING" || u == "OPTIONS";
+         u == "VALUES" || u == "USING" || u == "OPTIONS" || u == "SOURCE" || u == "SINK";
 }
 
 bool isJoinKeyword(const std::string& value) {
@@ -457,6 +457,11 @@ void consumeCreateOptions(ParseState& state) {
 SqlStatement parseCreateTable(ParseState& state) {
   SqlStatement out;
   out.kind = SqlStatementKind::CreateTable;
+  if (state.consumeWord("SOURCE")) {
+    out.create.kind = sql::TableKind::Source;
+  } else if (state.consumeWord("SINK")) {
+    out.create.kind = sql::TableKind::Sink;
+  }
   state.expectWord("TABLE");
   out.create.table = state.expectToken().text;
   state.expectSymbol("(");

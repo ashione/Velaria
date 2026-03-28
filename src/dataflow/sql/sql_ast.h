@@ -72,10 +72,12 @@ struct SqlQuery {
 };
 
 enum class SqlStatementKind { Select, CreateTable, InsertValues, InsertSelect };
+enum class TableKind { Regular, Source, Sink };
 
 struct CreateTableStmt {
   std::string table;
   std::vector<SqlColumnDef> columns;
+  TableKind kind = TableKind::Regular;
 };
 
 struct InsertStmt {

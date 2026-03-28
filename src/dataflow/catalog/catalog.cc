@@ -4,13 +4,16 @@ namespace dataflow {
 
 void ViewCatalog::createView(const std::string& name, const DataFrame& df) {
   views_[name] = df;
+  table_kinds_[name] = sql::TableKind::Regular;
 }
 
-void ViewCatalog::createTable(const std::string& name, const std::vector<std::string>& columns) {
+void ViewCatalog::createTable(const std::string& name, const std::vector<std::string>& columns,
+                             sql::TableKind kind) {
   if (hasView(name)) {
     throw SQLSemanticError("table already exists: " + name);
   }
   views_[name] = DataFrame(Table(Schema(columns), {}));
+  table_kinds_[name] = kind;
 }
 
 bool ViewCatalog::hasView(const std::string& name) const {
@@ -19,6 +22,25 @@ bool ViewCatalog::hasView(const std::string& name) const {
 
 bool ViewCatalog::hasTable(const std::string& name) const {
   return hasView(name);
+}
+
+sql::TableKind ViewCatalog::tableKind(const std::string& name) const {
+  auto it = table_kinds_.find(name);
+  if (it == table_kinds_.end()) {
+    if (hasView(name)) {
+      return sql::TableKind::Regular;
+    }
+    throw CatalogNotFoundError("view not found: " + name);
+  }
+  return it->second;
+}
+
+bool ViewCatalog::isSourceTable(const std::string& name) const {
+  return tableKind(name) == sql::TableKind::Source;
+}
+
+bool ViewCatalog::isSinkTable(const std::string& name) const {
+  return tableKind(name) == sql::TableKind::Sink;
 }
 
 const DataFrame& ViewCatalog::getView(const std::string& name) const {

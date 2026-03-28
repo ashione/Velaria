@@ -21,6 +21,10 @@ bool recvAllBytes(int fd, uint8_t* data, size_t size);
 bool sendFrameOverSocket(int fd,
                          const LengthPrefixedFrameCodec& codec,
                          const RpcFrame& frame);
+bool sendFrameOverSocket(int fd,
+                         const LengthPrefixedFrameCodec& codec,
+                         const RpcFrame& frame,
+                         std::vector<uint8_t>* scratch);
 bool recvFrameOverSocket(int fd,
                          const LengthPrefixedFrameCodec& codec,
                          RpcFrame* frame);

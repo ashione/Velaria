@@ -115,8 +115,19 @@ bool recvAllBytes(int fd, uint8_t* data, size_t size) {
 bool sendFrameOverSocket(int fd,
                         const LengthPrefixedFrameCodec& codec,
                         const RpcFrame& frame) {
-  const std::vector<uint8_t> bytes = codec.encode(frame);
+  std::vector<uint8_t> bytes = codec.encode(frame);
   return sendAllBytes(fd, bytes);
+}
+
+bool sendFrameOverSocket(int fd,
+                        const LengthPrefixedFrameCodec& codec,
+                        const RpcFrame& frame,
+                        std::vector<uint8_t>* scratch) {
+  if (scratch == nullptr) {
+    return sendFrameOverSocket(fd, codec, frame);
+  }
+  codec.encodeInto(frame, scratch);
+  return sendAllBytes(fd, *scratch);
 }
 
 bool recvFrameOverSocket(int fd,

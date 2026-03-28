@@ -1,17 +1,17 @@
-# Velaria：纯 C++17 Dataflow 引擎调研项目
+# Velaria：纯 C++17 单机 Streaming-First Dataflow 内核
 
-Velaria 是一个面向可演进运行时的轻量数据流引擎研究项目，目标是先打通 SQL/DF 执行闭环，再持续推进多进程运行与调度能力。
+Velaria 是一个面向可演进运行时的轻量数据流引擎研究项目，当前目标收敛为：**单机本地优先、Streaming-first、稳定性与状态流吞吐优先**。
 
-本仓库聚焦纯 C++17 数据流引擎演进：先稳定 `DataFrame / SQL / Streaming` 最小闭环，再逐步扩展到可分布式运行时。当前路线不是外部大数据框架的同名移植，而是围绕本地执行、可诊断边界、可扩展调度接口做内核化实现。
+本仓库当前不以真正分布式系统为目标，而是围绕 `DataflowSession`、`StreamingDataFrame`、本地状态、流控/反压、本机多进程并行执行做内核化实现。batch 语义继续保留，但当前按照“bounded stream”视角纳入同一执行模型。
 
 ## 本轮里程碑（2026-03-28）
 
-当前已对齐的执行路线是：`operator chain in-proc + cross-process RPC + simple jobmaster`。
+当前已对齐的执行路线是：`micro-batch in-proc + query-local backpressure + local worker scale-up`，并保留 `actor + rpc + jobmaster` 作为本机多进程实验路径。
 
-- 单进程路径：`sql_demo`、`df_demo`、`stream_demo` 继续保留，用于验证算子链、SQL 解析/规划、本地执行语义。
-- 多进程路径：新增 `actor + rpc + jobmaster` 最小闭环，由 scheduler 统一接入 worker / client 并完成任务受理、分发、回传。
-- 可观测性：多进程链路已具备基础日志与失败文案，便于按步骤排查 `listen / connect / accept / result`。
-- 兼容性底线：现有单节点示例命令保持不变，仍优先保证 `bazel build //:sql_demo` 与 `bazel run //:sql_demo` 可用。
+- 单机流式路径：`readStream -> StreamingDataFrame -> writeStream` 已具备 query 级配置、checkpoint/progress、本地文件 source/sink、窗口列、基础状态聚合。
+- 稳定性路径：`StreamingQuery` 负责 query-local 流控与端到端反压，默认采用“有界排队后阻塞”，避免 source 在 sink/state 过慢时无限积压。
+- 单进程路径：`sql_demo`、`df_demo`、`stream_demo` 继续保留，用于验证本地执行语义。
+- 本机多进程路径：保留 `actor + rpc + jobmaster` 最小闭环，用于验证同机任务分发与运行时边界，不作为真正分布式完成态。
 
 ## 当前本地多进程架构
 
@@ -48,21 +48,65 @@ client
 已具备：
 
 - `DataflowSession` / `DataFrame` / `StreamingDataFrame`
-- `read_csv`
-- 基础算子：`select / filter / withColumn / drop / repartition`
-- 聚合：`groupBy + sum`，以及 `SUM / COUNT / AVG / MIN / MAX`
+- `read_csv` / `readStream(...)` / `readStreamCsvDir(...)`
+- Streaming query 配置：`trigger interval`、`max in-flight batches`、`max queued partitions`、`checkpoint path`、`single-process/local-workers`
+- 流控与反压：query-local backlog 水位、阻塞计数、bounded backlog、progress snapshot
+- Streaming source/sink：`memory source`、`目录 CSV 增量 source`、`console sink`、`append 文件 sink`
+- 基础算子：`select / filter / withColumn / drop / limit / window`
+- 聚合：`groupBy + sum/count`，以及批处理 `SUM / COUNT / AVG / MIN / MAX`
+- 基础状态聚合：stateful `sum/count`
 - 本地 SQL 主链路：`SqlParser -> SqlPlanner -> DataFrame`
 - 临时视图：`createTempView / resolve`
 - actor/rpc 最小闭环：`scheduler / worker / client / smoke`
 
 当前限制：
 
-- 当前版本不扩展窗口函数（window）。
+- 运行模型当前固定为 `micro-batch only`，不做 continuous。
+- window 当前仅提供固定窗口列（tumble）与基础状态聚合，不扩展更复杂窗口语义。
 - 当前版本不扩展 CTE / 子查询。
 - 当前版本不扩展 `UNION` 相关能力。
 - `JOIN` 仅保留现有最小能力，不在本轮继续做更复杂 join 语义扩展。
+- 当前反压是 query-local，一版不做多 query 全局公平调度。
 - 当前多进程链路仍是本地多进程验证，不包含真正分布式调度、容错恢复、状态迁移、资源治理。
-- 错误恢复能力仍需继续加强，当前主要依赖明确日志与失败文案排查。
+
+## Streaming 运行时（当前版本）
+
+当前 streaming 主接口为：
+
+- `session.readStream(source)`
+- `session.readStreamCsvDir(path)`
+- `StreamingDataFrame.writeStream(sink, options)`
+- `StreamingQuery.start() / awaitTermination() / stop()`
+
+`StreamingQueryOptions` 当前承载：
+
+- `trigger_interval_ms`
+- `max_inflight_batches`
+- `max_queued_partitions`
+- `backpressure_high_watermark / backpressure_low_watermark`
+- `checkpoint_path`
+- `execution_mode = single-process / local-workers`
+- `local_workers`
+- `max_retained_windows`
+
+### 反压语义
+
+- 反压按 `batch / partition` 水位控制。
+- 当 backlog 超过阈值时，source 拉取会被阻塞，而不是继续无限积压。
+- sink 写出慢、状态更新慢、或局部并行分区过多，都会回灌到 query-local backlog 指标。
+- 当前最少可观察指标：`blocked_count / max_backlog_batches / inflight_batches / inflight_partitions / last_batch_latency_ms / last_sink_latency_ms / last_state_latency_ms`。
+
+### checkpoint / progress
+
+- 每批完成后会把 `batches_pulled / batches_processed / blocked_count / max_backlog_batches / last_source_offset` 落到本地 checkpoint 文件。
+- `MemoryStreamSource` 会按 batch offset 恢复。
+- `DirectoryCsvStreamSource` 会按最后完成文件名恢复。
+
+### 状态索引与窗口淘汰
+
+- 当前 stateful 聚合会把 `group key -> aggregate state` 作为状态主索引。
+- 若分组键包含窗口列（如 `window_start`），运行时会额外维护窗口成员索引，用于按窗口淘汰旧状态。
+- `max_retained_windows > 0` 时，仅保留最近 N 个窗口对应的状态键，避免状态无限增长。
 
 ## SQL 规划执行模型（v1）
 
@@ -149,7 +193,39 @@ GROUP BY name;
 bazel run //:sql_demo
 bazel run //:df_demo
 bazel run //:stream_demo
+bazel run //:stream_stateful_demo
+bazel run //:stream_runtime_test
+bazel run //:stream_benchmark
+bazel run //:stream_actor_benchmark
+bazel run //:stream_actor_credit_test
 ```
+
+### 本机多进程 actor-stream 实验
+
+- `stream_actor_benchmark`：使用本地 worker 进程、分区级 credit 和 actor rpc 消息执行窗口 + key 的 partial aggregate。
+- `stream_actor_credit_test`：验证本机多进程路径下：
+  - credit 上限不被突破
+  - 阻塞计数会触发
+  - 多进程结果与单进程基线一致
+
+这条路径当前是独立实验运行时：
+
+- 目标是验证 `partition credit + local worker process + result merge` 的最小闭环。
+- 重点在语义与流控，不代表当前实现已经优于单进程。
+- 当前 worker 做的是 partition 级 partial aggregate，最终状态回并仍在 coordinator 本地完成。
+- 对轻量 aggregation，actor-stream 仍可能慢于单进程；在 CPU-heavy 聚合负载下可用 `stream_actor_benchmark` 验证本机多进程 scale-up，例如：
+
+```bash
+bazel run //:stream_actor_benchmark -- 16 65536 4 4 0 400
+```
+
+参数含义依次为：
+- `batch_count`
+- `rows_per_batch`
+- `worker_count`
+- `max_inflight_partitions`
+- `worker_delay_ms`
+- `cpu_spin_per_row`
 
 ### 构建 actor/rpc/jobmaster 路线
 

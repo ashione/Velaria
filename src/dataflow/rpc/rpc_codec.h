@@ -78,6 +78,7 @@ class IRpcFrameCodec {
 class LengthPrefixedFrameCodec : public IRpcFrameCodec {
  public:
   std::vector<uint8_t> encode(const RpcFrame& frame) const override;
+  void encodeInto(const RpcFrame& frame, std::vector<uint8_t>* out) const;
   bool decode(const std::vector<uint8_t>& bytes,
               RpcFrame* frame,
               size_t* consumed_bytes) const override;

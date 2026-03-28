@@ -78,6 +78,12 @@ cc_binary(
 )
 
 cc_binary(
+    name = "stream_benchmark",
+    srcs = ["src/dataflow/examples/stream_benchmark.cc"],
+    deps = [":dataflow_core"],
+)
+
+cc_binary(
     name = "sql_demo",
     srcs = ["src/dataflow/examples/sql_demo.cc"],
     deps = [":dataflow_core"],
@@ -106,6 +112,24 @@ cc_library(
         "src/dataflow/transport/ipc_transport.h",
     ],
     deps = [":dataflow_core"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "dataflow_stream_actor_runtime",
+    srcs = [
+        "src/dataflow/stream/binary_row_batch.cc",
+        "src/dataflow/stream/actor_stream_runtime.cc",
+    ],
+    hdrs = [
+        "src/dataflow/stream/binary_row_batch.h",
+        "src/dataflow/stream/actor_stream_runtime.h",
+    ],
+    deps = [
+        ":dataflow_actor_rpc_codec",
+        ":dataflow_transport",
+        ":dataflow_core",
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -179,7 +203,31 @@ cc_binary(
 )
 
 cc_binary(
+    name = "stream_actor_benchmark",
+    srcs = ["src/dataflow/examples/stream_actor_benchmark.cc"],
+    deps = [":dataflow_stream_actor_runtime"],
+)
+
+cc_binary(
+    name = "tpch_q1_style_benchmark",
+    srcs = ["src/dataflow/examples/tpch_q1_style_benchmark.cc"],
+    deps = [":dataflow_stream_actor_runtime"],
+)
+
+cc_binary(
     name = "sql_regression_test",
     srcs = ["src/dataflow/tests/sql_regression_test.cc"],
     deps = [":dataflow_core"],
+)
+
+cc_binary(
+    name = "stream_runtime_test",
+    srcs = ["src/dataflow/tests/stream_runtime_test.cc"],
+    deps = [":dataflow_core"],
+)
+
+cc_binary(
+    name = "stream_actor_credit_test",
+    srcs = ["src/dataflow/tests/stream_actor_credit_test.cc"],
+    deps = [":dataflow_stream_actor_runtime"],
 )

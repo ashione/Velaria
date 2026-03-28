@@ -228,9 +228,16 @@ std::vector<std::string> RpcSerializerRegistry::codecIds() const {
   return ids;
 }
 
-std::vector<uint8_t> LengthPrefixedFrameCodec::encode(
-    const RpcFrame& frame) const {
+std::vector<uint8_t> LengthPrefixedFrameCodec::encode(const RpcFrame& frame) const {
+  std::vector<uint8_t> bytes;
+  encodeInto(frame, &bytes);
+  return bytes;
+}
+
+void LengthPrefixedFrameCodec::encodeInto(const RpcFrame& frame, std::vector<uint8_t>* bytes) const {
+  if (bytes == nullptr) return;
   std::vector<uint8_t> body;
+  body.reserve(64 + frame.payload.size());
   appendByte(&body, frame.header.protocol_version);
   appendByte(&body, static_cast<uint8_t>(frame.header.type));
   writeU64(&body, frame.header.message_id);
@@ -241,10 +248,10 @@ std::vector<uint8_t> LengthPrefixedFrameCodec::encode(
   writeU32(&body, static_cast<uint32_t>(frame.payload.size()));
   body.insert(body.end(), frame.payload.begin(), frame.payload.end());
 
-  std::vector<uint8_t> bytes;
-  writeU32(&bytes, static_cast<uint32_t>(body.size()));
-  bytes.insert(bytes.end(), body.begin(), body.end());
-  return bytes;
+  bytes->clear();
+  bytes->reserve(4 + body.size());
+  writeU32(bytes, static_cast<uint32_t>(body.size()));
+  bytes->insert(bytes->end(), body.begin(), body.end());
 }
 
 bool LengthPrefixedFrameCodec::decode(const std::vector<uint8_t>& bytes,

@@ -32,6 +32,14 @@ DataFrame DataflowSession::read_csv(const std::string& path, char delimiter) {
   return DataFrame(load_csv(path, delimiter));
 }
 
+StreamingDataFrame DataflowSession::readStream(std::shared_ptr<StreamSource> source) {
+  return StreamingDataFrame(std::move(source));
+}
+
+StreamingDataFrame DataflowSession::readStreamCsvDir(const std::string& directory, char delimiter) {
+  return readStream(std::make_shared<DirectoryCsvStreamSource>(directory, delimiter));
+}
+
 DataFrame DataflowSession::createDataFrame(const Table& table) {
   return DataFrame(table);
 }

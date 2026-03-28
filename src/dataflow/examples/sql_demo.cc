@@ -35,5 +35,15 @@ int main() {
       "SELECT a.name, a.dept, b.bonus FROM people a INNER JOIN bonus b ON a.dept = b.dept");
   joined.show();
 
+  auto complex_query = session.sql(
+      "SELECT a.dept, a.name, SUM(a.score) AS total_score, COUNT(*) AS cnt, "
+      "MAX(a.score) AS max_score "
+      "FROM people a INNER JOIN bonus b ON a.dept = b.dept "
+      "WHERE a.score > 10 "
+      "GROUP BY a.dept, a.name "
+      "HAVING total_score > 20 "
+      "LIMIT 20");
+  complex_query.show();
+
   return 0;
 }

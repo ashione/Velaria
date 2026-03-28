@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <stdexcept>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -176,6 +177,16 @@ bool isJoinStart(const ParseState& state) {
   return !state.isEnd() && isJoinKeyword(state.peek().text);
 }
 
+std::optional<AggregateFunctionKind> tryParseAggregateFunction(const std::string& value) {
+  auto u = toUpper(value);
+  if (u == "SUM") return AggregateFunctionKind::Sum;
+  if (u == "COUNT") return AggregateFunctionKind::Count;
+  if (u == "AVG") return AggregateFunctionKind::Avg;
+  if (u == "MIN") return AggregateFunctionKind::Min;
+  if (u == "MAX") return AggregateFunctionKind::Max;
+  return std::nullopt;
+}
+
 Value parseValueToken(const Token& token) {
   if (token.is_number) {
     try {
@@ -239,6 +250,35 @@ ColumnRef parseColumn(ParseState& state) {
   return out;
 }
 
+ColumnRef parseColumnWithFirst(ParseState& state, const Token& first) {
+  if (first.text == "*" && !first.is_string && !first.is_number) {
+    throw SQLSyntaxError("expected column reference, got *");
+  }
+  if (state.consumeSymbol(".")) {
+    Token second = state.expectToken();
+    if (second.text == "*") {
+      throw SQLSyntaxError("expected column reference, got table.*");
+    }
+    return ColumnRef{first.text, second.text};
+  }
+  return ColumnRef{"", first.text};
+}
+
+AggregateFunctionKind parseAggregateFunction(const std::string& name);
+
+AggregateExpr parseAggregateExpr(ParseState& state, const std::string& function_name) {
+  AggregateExpr agg;
+  agg.function = parseAggregateFunction(function_name);
+  if (state.consumeSymbol("*")) {
+    agg.count_all = true;
+    state.expectSymbol(")");
+    return agg;
+  }
+  agg.argument = parseColumn(state);
+  state.expectSymbol(")");
+  return agg;
+}
+
 FromItem parseFrom(ParseState& state) {
   FromItem out;
   out.name = state.expectToken().text;
@@ -259,7 +299,25 @@ FromItem parseFrom(ParseState& state) {
 
 Predicate parsePredicate(ParseState& state) {
   Predicate out;
-  out.lhs = parseColumn(state);
+  bool left_paren = false;
+  if (state.consumeSymbol("(")) {
+    left_paren = true;
+  }
+  Token lhs = state.expectToken();
+  if (lhs.text == ")" || lhs.text == "," || lhs.text == "*") {
+    throw SQLSyntaxError("invalid predicate");
+  }
+
+  if (state.consumeSymbol("(")) {
+    if (!tryParseAggregateFunction(lhs.text).has_value()) {
+      throw SQLSyntaxError("unsupported aggregate function: " + lhs.text);
+    }
+    out.lhs_is_aggregate = true;
+    out.lhs_aggregate = parseAggregateExpr(state, lhs.text);
+  } else {
+    out.lhs = parseColumnWithFirst(state, lhs);
+  }
+
   out.op = parseOperator(state);
   Token rhs = state.expectToken();
   if (rhs.text == "(" || rhs.text == ")" || rhs.text == ",") throw SQLSyntaxError("invalid predicate");
@@ -271,6 +329,9 @@ Predicate parsePredicate(ParseState& state) {
     throw SQLSyntaxError("unsupported predicate literal");
   } else {
     out.rhs = parseValueToken(rhs);
+  }
+  if (left_paren) {
+    state.expectSymbol(")");
   }
   return out;
 }
@@ -315,15 +376,7 @@ SelectItem parseSelectItem(ParseState& state) {
     return item;
   }
   if (state.consumeSymbol("(")) {
-    AggregateExpr agg;
-    agg.function = parseAggregateFunction(first.text);
-    if (state.consumeSymbol("*")) {
-      agg.count_all = true;
-      state.expectSymbol(")");
-    } else {
-      agg.argument = parseColumn(state);
-      state.expectSymbol(")");
-    }
+    AggregateExpr agg = parseAggregateExpr(state, first.text);
     item.is_aggregate = true;
     item.aggregate = agg;
     parseOptionalAlias(state, &item.alias);

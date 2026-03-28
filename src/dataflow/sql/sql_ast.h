@@ -50,7 +50,9 @@ struct JoinItem {
 };
 
 struct Predicate {
+  bool lhs_is_aggregate = false;
   ColumnRef lhs;
+  AggregateExpr lhs_aggregate;
   Value rhs;
   BinaryOperatorKind op = BinaryOperatorKind::Eq;
 };

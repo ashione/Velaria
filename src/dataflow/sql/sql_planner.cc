@@ -210,6 +210,9 @@ DataFrame SqlPlanner::plan(const SqlQuery& query, const ViewCatalog& catalog) co
   }
 
   if (query.where.has_value()) {
+    if (query.where->lhs_is_aggregate) {
+      throw SQLSemanticError("WHERE does not support aggregate expressions");
+    }
     std::size_t idx = ctx.resolveColumn(query.where->lhs, nullptr);
     current = current.filterByIndex(idx, opToString(query.where->op), query.where->rhs);
   }
@@ -277,7 +280,42 @@ DataFrame SqlPlanner::plan(const SqlQuery& query, const ViewCatalog& catalog) co
 
     if (query.having.has_value()) {
       const auto& pred = query.having.value();
-      auto havingIndex = aggSchema.indexOf(pred.lhs.name);
+      std::string havingColumn;
+      if (pred.lhs_is_aggregate) {
+        std::string default_name =
+            defaultAggregateAlias(pred.lhs_aggregate.function, pred.lhs_aggregate.argument.name, "");
+        if (aggSchema.has(default_name)) {
+          havingColumn = default_name;
+        } else {
+          bool matched = false;
+          for (const auto& item : query.select_items) {
+            if (!item.is_aggregate) {
+              continue;
+            }
+            const auto& agg = item.aggregate;
+            if (agg.function != pred.lhs_aggregate.function) {
+              continue;
+            }
+            if (agg.count_all != pred.lhs_aggregate.count_all) {
+              continue;
+            }
+            if (!agg.count_all &&
+                (agg.argument.name != pred.lhs_aggregate.argument.name ||
+                 agg.argument.qualifier != pred.lhs_aggregate.argument.qualifier)) {
+              continue;
+            }
+            havingColumn = defaultAggregateAlias(item.aggregate.function, item.aggregate.argument.name, item.alias);
+            matched = true;
+            break;
+          }
+          if (!matched) {
+            throw SQLSemanticError("HAVING aggregate not found in SELECT: " + default_name);
+          }
+        }
+      } else {
+        havingColumn = pred.lhs.name;
+      }
+      auto havingIndex = aggSchema.indexOf(havingColumn);
       current = current.filterByIndex(havingIndex, opToString(pred.op), pred.rhs);
     }
 

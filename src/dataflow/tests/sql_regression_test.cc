@@ -1,8 +1,12 @@
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "src/dataflow/catalog/catalog.h"
 #include "src/dataflow/api/session.h"
@@ -122,6 +126,19 @@ void runParserRegression() {
         expect(st.query.where.has_value(), "parser_predicate_where_present");
         expect(st.query.limit.value_or(0) == 1, "parser_predicate_limit_present");
       });
+
+  expectNoThrow(
+      "parser_create_source_table_csv_options",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "CREATE SOURCE TABLE stream_events (key STRING, value INT) "
+            "USING csv OPTIONS(path '/tmp/stream-input', delimiter ',')");
+        expect(st.kind == dataflow::sql::SqlStatementKind::CreateTable, "parser_create_csv_kind");
+        expect(st.create.kind == dataflow::sql::TableKind::Source, "parser_create_csv_source_kind");
+        expect(st.create.provider == "csv", "parser_create_csv_provider");
+        expect(st.create.options.at("path") == "/tmp/stream-input", "parser_create_csv_path");
+        expect(st.create.options.at("delimiter") == ",", "parser_create_csv_delimiter");
+      });
 }
 
 void runSemanticRegression() {
@@ -221,6 +238,111 @@ void runPlannerPlanRegression() {
   expect(df.schema().fields[1] == "total_score", "planner_output_col_total_score");
 }
 
+void runStreamSqlRegression() {
+  namespace fs = std::filesystem;
+
+  DataflowSession& s = DataflowSession::builder();
+  const std::string input_dir = "/tmp/velaria-stream-sql-regression-input";
+  const std::string sink_path = "/tmp/velaria-stream-sql-regression-output.csv";
+  const std::string checkpoint_path = "/tmp/velaria-stream-sql-regression.checkpoint";
+
+  fs::remove_all(input_dir);
+  fs::create_directories(input_dir);
+  fs::remove(sink_path);
+  fs::remove(checkpoint_path);
+
+  {
+    std::ofstream out(input_dir + "/batch-0001.csv");
+    out << "key,value\n";
+    out << "userA,10\n";
+    out << "userA,5\n";
+  }
+  {
+    std::ofstream out(input_dir + "/batch-0002.csv");
+    out << "key,value\n";
+    out << "userB,20\n";
+    out << "userA,7\n";
+  }
+
+  expectNoThrow(
+      "stream_sql_create_source_csv",
+      [&]() {
+        s.sql(
+            "CREATE SOURCE TABLE stream_events_csv_v1 (key STRING, value INT) "
+            "USING csv OPTIONS(path '" + input_dir + "', delimiter ',')");
+      });
+
+  expectNoThrow(
+      "stream_sql_create_sink_csv",
+      [&]() {
+        s.sql(
+            "CREATE SINK TABLE stream_summary_csv_v1 (key STRING, value_sum INT) "
+            "USING csv OPTIONS(path '" + sink_path + "', delimiter ',')");
+      });
+
+  dataflow::StreamingQueryOptions options;
+  options.trigger_interval_ms = 0;
+  options.checkpoint_path = checkpoint_path;
+
+  auto query = s.startStreamSql(
+      "INSERT INTO stream_summary_csv_v1 "
+      "SELECT key, SUM(value) AS value_sum "
+      "FROM stream_events_csv_v1 "
+      "WHERE value > 6 "
+      "GROUP BY key "
+      "HAVING value_sum > 15 "
+      "LIMIT 10",
+      options);
+  const auto processed = query.awaitTermination(2);
+  expect(processed == 2, "stream_sql_csv_insert_processed_batches");
+
+  const auto sink_table = s.read_csv(sink_path).toTable();
+  expect(sink_table.rows.size() == 2, "stream_sql_csv_sink_rows");
+
+  bool has_user_a = false;
+  bool has_user_b = false;
+  const auto key_idx = sink_table.schema.indexOf("key");
+  const auto sum_idx = sink_table.schema.indexOf("value_sum");
+  for (const auto& row : sink_table.rows) {
+    if (row[key_idx].toString() == "userA" && row[sum_idx].asInt64() == 17) {
+      has_user_a = true;
+    }
+    if (row[key_idx].toString() == "userB" && row[sum_idx].asInt64() == 20) {
+      has_user_b = true;
+    }
+  }
+  expect(has_user_a, "stream_sql_csv_sink_has_user_a");
+  expect(has_user_b, "stream_sql_csv_sink_has_user_b");
+
+  expectThrows(
+      "stream_sql_join_rejected",
+      [&]() {
+        s.streamSql(
+            "SELECT a.key, SUM(a.value) AS value_sum "
+            "FROM stream_events_csv_v1 a INNER JOIN stream_events_csv_v1 b "
+            "ON a.key = b.key GROUP BY a.key");
+      },
+      "does not support JOIN");
+
+  expectThrows(
+      "stream_sql_avg_rejected",
+      [&]() {
+        s.streamSql(
+            "SELECT key, AVG(value) AS avg_value "
+            "FROM stream_events_csv_v1 GROUP BY key");
+      },
+      "only supports SUM and COUNT(*)");
+
+  expectThrows(
+      "stream_sql_regular_csv_rejected",
+      [&]() {
+        s.sql(
+            "CREATE TABLE regular_csv_v1 (key STRING, value INT) "
+            "USING csv OPTIONS(path '" + input_dir + "')");
+      },
+      "requires CREATE SOURCE TABLE or CREATE SINK TABLE");
+}
+
 }  // namespace
 
 int main() {
@@ -228,6 +350,7 @@ int main() {
   runSemanticRegression();
   runComplexDmlRegression();
   runPlannerPlanRegression();
+  runStreamSqlRegression();
 
   if (g_failed == 0) {
     std::cout << "All regression checks passed.\n";

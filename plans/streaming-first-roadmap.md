@@ -41,7 +41,45 @@
   - `DataFrame.readStream`（返回 `StreamingDataFrame`）
   - `StreamingDataFrame.writeStream`（输出接入）
 - 复用已有算子：`select/filter/withColumn/drop/groupBy/sum`
-- SQL v1 仍然以 `SELECT` 子集为主，流式 SQL 后续接入（`from_json`、`watermark`、`window`）
+- SQL v1 当前已接入最小流式子集：
+  - `streamSql("SELECT ...")`
+  - `startStreamSql("INSERT INTO sink_table SELECT ...")`
+  - `CREATE SOURCE TABLE ... USING csv`
+  - `CREATE SINK TABLE ... USING csv`
+- 当前流式 SQL 仍只覆盖 `SELECT/WHERE/GROUP BY/HAVING/LIMIT + SUM/COUNT(*)` 的单表路径；`from_json / watermark / window SQL / JOIN` 仍在后续范围
+
+## 当前已落地的最小流式 SQL 设计
+
+### 设计目标
+
+- 不重写现有 parser/planner 主链路
+- 直接把可支持的 SQL 子集映射到 `StreamingDataFrame`
+- 先打通 `csv source -> stream sql select -> csv sink`
+
+### 当前入口
+
+- `DataflowSession::streamSql(const std::string&)`
+- `DataflowSession::startStreamSql(const std::string&, StreamingQueryOptions)`
+
+### 当前映射关系
+
+- `CREATE SOURCE TABLE ... USING csv OPTIONS(path ...)`
+  - 注册 `DirectoryCsvStreamSource`
+- `CREATE SINK TABLE ... USING csv OPTIONS(path ...)`
+  - 注册 `FileAppendStreamSink`
+- `SELECT ... FROM stream_source`
+  - 读取已注册流式 view
+- `INSERT INTO sink_table SELECT ...`
+  - 把查询结果挂到已注册 sink，并返回 `StreamingQuery`
+
+### 当前约束
+
+- 只支持 `USING csv`
+- 只支持单表查询
+- 只支持 `SUM` 与 `COUNT(*)`
+- `HAVING` 只作用于当前已支持的聚合输出
+- `LIMIT` 沿用现有 streaming API 的 batch 级实现
+- 不支持 `JOIN / AVG / MIN / MAX / INSERT ... VALUES / window SQL`
 
 ---
 

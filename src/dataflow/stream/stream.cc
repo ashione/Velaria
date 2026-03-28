@@ -1282,6 +1282,46 @@ StreamingQuery::StreamingQuery(StreamingDataFrame root, std::shared_ptr<StreamSi
   progress_.query_id = nextStreamingQueryId();
 }
 
+StreamingQuery::StreamingQuery(StreamingQuery&& other) noexcept
+    : root_(std::move(other.root_)),
+      sink_(std::move(other.sink_)),
+      options_(std::move(other.options_)),
+      progress_(std::move(other.progress_)),
+      running_(other.running_.load()),
+      started_(other.started_),
+      execution_decided_(other.execution_decided_),
+      resolved_execution_mode_(other.resolved_execution_mode_),
+      execution_reason_(std::move(other.execution_reason_)) {
+  other.running_ = false;
+  other.started_ = false;
+  other.execution_decided_ = false;
+  other.resolved_execution_mode_ = StreamingExecutionMode::SingleProcess;
+}
+
+StreamingQuery& StreamingQuery::operator=(StreamingQuery&& other) noexcept {
+  if (this == &other) {
+    return *this;
+  }
+  root_ = std::move(other.root_);
+  sink_ = std::move(other.sink_);
+  options_ = std::move(other.options_);
+  {
+    std::lock_guard<std::mutex> lock(progress_mu_);
+    progress_ = std::move(other.progress_);
+  }
+  running_ = other.running_.load();
+  started_ = other.started_;
+  execution_decided_ = other.execution_decided_;
+  resolved_execution_mode_ = other.resolved_execution_mode_;
+  execution_reason_ = std::move(other.execution_reason_);
+
+  other.running_ = false;
+  other.started_ = false;
+  other.execution_decided_ = false;
+  other.resolved_execution_mode_ = StreamingExecutionMode::SingleProcess;
+  return *this;
+}
+
 StreamingQuery& StreamingQuery::trigger(uint64_t triggerIntervalMs) {
   options_.trigger_interval_ms = triggerIntervalMs;
   return *this;

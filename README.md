@@ -57,6 +57,8 @@ client
 - 聚合：`groupBy + sum/count`，以及批处理 `SUM / COUNT / AVG / MIN / MAX`
 - 基础状态聚合：stateful `sum/count`
 - 本地 SQL 主链路：`SqlParser -> SqlPlanner -> DataFrame`
+- 流式 SQL 最小闭环：`streamSql(SELECT ...)`、`startStreamSql(INSERT INTO ... SELECT ...)`
+- 流式 SQL CSV 表：`CREATE SOURCE TABLE ... USING csv`、`CREATE SINK TABLE ... USING csv`
 - 临时视图：`createTempView / resolve`
 - actor/rpc 最小闭环：`scheduler / worker / client / smoke`
 
@@ -67,6 +69,7 @@ client
 - 当前版本不扩展 CTE / 子查询。
 - 当前版本不扩展 `UNION` 相关能力。
 - `JOIN` 仅保留现有最小能力，不在本轮继续做更复杂 join 语义扩展。
+- 流式 SQL 当前不支持 `JOIN / AVG / MIN / MAX / window SQL / INSERT ... VALUES`。
 - 当前反压是 query-local，一版不做多 query 全局公平调度。
 - 当前多进程链路仍是本地多进程验证，不包含真正分布式调度、容错恢复、状态迁移、资源治理。
 
@@ -76,6 +79,8 @@ client
 
 - `session.readStream(source)`
 - `session.readStreamCsvDir(path)`
+- `session.streamSql(sql)`
+- `session.startStreamSql(sql, options)`
 - `StreamingDataFrame.writeStream(sink, options)`
 - `StreamingQuery.start() / awaitTermination() / stop()`
 
@@ -126,6 +131,73 @@ client
 - 当前 stateful 聚合会把 `group key -> aggregate state` 作为状态主索引。
 - 若分组键包含窗口列（如 `window_start`），运行时会额外维护窗口成员索引，用于按窗口淘汰旧状态。
 - `max_retained_windows > 0` 时，仅保留最近 N 个窗口对应的状态键，避免状态无限增长。
+
+## 流式 SQL（当前版本）
+
+当前已补上基于现有 `StreamingDataFrame` API 的最小流式 SQL 子集。
+
+### API 入口
+
+- `session.streamSql("SELECT ...") -> StreamingDataFrame`
+- `session.startStreamSql("INSERT INTO sink_table SELECT ...", options) -> StreamingQuery`
+
+### 当前支持的查询子集
+
+- 单表 `SELECT`
+- `WHERE`
+- `GROUP BY`
+- `HAVING`
+- `LIMIT`
+- `SUM(col)`
+- `COUNT(*)`
+
+当前实现仍然是把 SQL 映射回已有流式算子：
+
+- `FROM source` -> 已注册的流式 view
+- `WHERE` -> `filter`
+- `GROUP BY + SUM/COUNT(*)` -> `groupBy + sum/count`
+- `HAVING` -> 聚合结果上的 `filter`
+- `LIMIT` -> 现有 `StreamingDataFrame::limit`
+
+### 当前支持的流式 SQL DDL / DML
+
+- `CREATE SOURCE TABLE ... USING csv OPTIONS(path 'dir', delimiter ',')`
+- `CREATE SINK TABLE ... USING csv OPTIONS(path '/tmp/out.csv', delimiter ',')`
+- `INSERT INTO sink_table SELECT ...`
+
+其中：
+
+- `SOURCE TABLE USING csv` 绑定到 `DirectoryCsvStreamSource`
+- `SINK TABLE USING csv` 绑定到 `FileAppendStreamSink`
+- `INSERT INTO ... SELECT ...` 需要通过 `session.startStreamSql(...)` 启动
+
+示例：
+
+```sql
+CREATE SOURCE TABLE stream_events (key STRING, value INT)
+USING csv OPTIONS(path '/tmp/stream-input', delimiter ',');
+
+CREATE SINK TABLE stream_summary (key STRING, value_sum INT)
+USING csv OPTIONS(path '/tmp/stream-output.csv', delimiter ',');
+
+INSERT INTO stream_summary
+SELECT key, SUM(value) AS value_sum
+FROM stream_events
+WHERE value > 6
+GROUP BY key
+HAVING value_sum > 15
+LIMIT 10;
+```
+
+### 当前限制
+
+- 只支持 `USING csv`
+- 只支持单表查询
+- 不支持 `JOIN`
+- 不支持 `AVG / MIN / MAX`
+- 不支持窗口 SQL 语法
+- 不支持 `INSERT INTO ... VALUES` 的流式路径
+- `LIMIT` 沿用现有 streaming API 语义，不应解读为完整无限流全局 SQL limit
 
 ## SQL 规划执行模型（v1）
 
@@ -212,6 +284,7 @@ GROUP BY name;
 bazel run //:sql_demo
 bazel run //:df_demo
 bazel run //:stream_demo
+bazel run //:stream_sql_demo
 bazel run //:stream_stateful_demo
 bazel run //:stream_runtime_test
 bazel run //:stream_benchmark

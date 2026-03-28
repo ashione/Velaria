@@ -72,6 +72,12 @@ cc_binary(
 )
 
 cc_binary(
+    name = "stream_sql_demo",
+    srcs = ["src/dataflow/examples/stream_sql_demo.cc"],
+    deps = [":dataflow_core"],
+)
+
+cc_binary(
     name = "stream_stateful_demo",
     srcs = ["src/dataflow/examples/stream_stateful_demo.cc"],
     deps = [":dataflow_core"],

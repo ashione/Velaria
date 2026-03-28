@@ -146,6 +146,33 @@ class RelationContext {
 }  // namespace
 
 DataFrame SqlPlanner::plan(const SqlQuery& query, const ViewCatalog& catalog) const {
+  if (!query.has_from) {
+    if (query.join.has_value() || query.where.has_value() || !query.group_by.empty() ||
+        query.having.has_value()) {
+      throw SQLSemanticError("SELECT without FROM only supports literal projection");
+    }
+
+    std::vector<std::string> fields;
+    Row row;
+    fields.reserve(query.select_items.size());
+    row.reserve(query.select_items.size());
+    for (std::size_t i = 0; i < query.select_items.size(); ++i) {
+      const auto& item = query.select_items[i];
+      if (!item.is_literal || item.is_all || item.is_table_all || item.is_aggregate ||
+          !item.column.name.empty()) {
+        throw SQLSemanticError("SELECT without FROM only supports literal projection");
+      }
+      fields.push_back(item.alias.empty() ? "expr" + std::to_string(i + 1) : item.alias);
+      row.push_back(item.literal);
+    }
+
+    DataFrame current(Table(Schema(std::move(fields)), std::vector<Row>{std::move(row)}));
+    if (query.limit.has_value()) {
+      current = current.limit(*query.limit);
+    }
+    return current;
+  }
+
   DataFrame current = catalog.getView(query.from.name);
   RelationContext ctx;
   auto leftSchema = current.schema();
@@ -186,6 +213,12 @@ DataFrame SqlPlanner::plan(const SqlQuery& query, const ViewCatalog& catalog) co
                                                               [](const SelectItem& item) {
                                                                 return item.is_aggregate;
                                                               });
+
+  if (std::any_of(query.select_items.begin(), query.select_items.end(), [](const SelectItem& item) {
+        return item.is_literal;
+      })) {
+    throw SQLSemanticError("literal projection with FROM is not supported in SQL v1");
+  }
 
   if (isAggregateQuery) {
     if (query.having.has_value() && query.group_by.empty()) {

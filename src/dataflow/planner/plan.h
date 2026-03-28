@@ -40,12 +40,15 @@ struct FilterPlan : PlanNode {
   PlanNodePtr child;
   size_t column_index;
   Value value;
+  std::string op;
   bool (*pred)(const Value& lhs, const Value& rhs);
-  FilterPlan(PlanNodePtr p, size_t cidx, Value v, bool (*pfn)(const Value&, const Value&))
+  FilterPlan(PlanNodePtr p, size_t cidx, Value v, std::string op_name,
+             bool (*pfn)(const Value&, const Value&))
       : PlanNode(PlanKind::Filter),
         child(std::move(p)),
         column_index(cidx),
         value(std::move(v)),
+        op(std::move(op_name)),
         pred(pfn) {}
 };
 
@@ -109,5 +112,8 @@ struct JoinPlan : PlanNode {
   JoinPlan(PlanNodePtr l, PlanNodePtr r, size_t lk, size_t rk, JoinKind k)
       : PlanNode(PlanKind::Join), left(std::move(l)), right(std::move(r)), left_key(lk), right_key(rk), kind(k) {}
 };
+
+std::string serializePlan(const PlanNodePtr& plan);
+PlanNodePtr deserializePlan(const std::string& payload);
 
 }  // namespace dataflow

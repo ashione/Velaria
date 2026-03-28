@@ -37,7 +37,7 @@
 
 ## 与 DataFrame 批处理的关系
 - 不推翻原有 DataFrame v0.1 代码；只在其上加流接口层：
-  - `StreamingSession`（可复用同名 `SparkSession`）
+- `StreamingSession`（可复用同名 `DataflowSession`）
   - `DataFrame.readStream`（返回 `StreamingDataFrame`）
   - `StreamingDataFrame.writeStream`（输出接入）
 - 复用已有算子：`select/filter/withColumn/drop/groupBy/sum`

@@ -4,7 +4,7 @@
 #include "src/dataflow/stream/stream.h"
 
 int main() {
-  auto state = dataflow::makeMemoryStateStore();
+  auto state = dataflow::makeStateStore("memory");
 
   // key-value
   state->put("offset", "42");

@@ -9,7 +9,15 @@
 #include <thread>
 #include <unordered_set>
 
+#if __has_include(<rocksdb/db.h>)
+#include <rocksdb/db.h>
+#define DATAFLOW_HAS_ROCKSDB_BACKEND 1
+#else
+#define DATAFLOW_HAS_ROCKSDB_BACKEND 0
+#endif
+
 #include "src/dataflow/api/dataframe.h"
+#include "src/dataflow/ai/plugin_runtime.h"
 
 namespace dataflow {
 
@@ -46,6 +54,7 @@ std::string makeStateKey(const Row& row, const std::vector<size_t>& keyIdx,
 }
 
 // tiny length-prefix codec to avoid delimiter conflict for map/list keys and values
+#if DATAFLOW_HAS_ROCKSDB_BACKEND
 std::string encodeToken(const std::string& token) {
   return std::to_string(token.size()) + ":" + token;
 }
@@ -89,6 +98,7 @@ bool decodeStringList(const std::string& raw, std::vector<std::string>* values) 
   }
   return true;
 }
+#endif
 
 }  // namespace
 
@@ -236,12 +246,18 @@ bool MemoryStateStore::listKeys(std::vector<std::string>* keys) const {
   return !keys->empty();
 }
 
-#ifdef DATAFLOW_USE_ROCKSDB
-#include <rocksdb/db.h>
-
+#if DATAFLOW_HAS_ROCKSDB_BACKEND
 std::shared_ptr<StateStore> makeRocksDbStateStore(const std::string& dbPath) {
   return RocksDbStateStore::create(dbPath);
 }
+#else
+std::shared_ptr<StateStore> makeRocksDbStateStore(const std::string& dbPath) {
+  (void)dbPath;
+  throw std::runtime_error("RocksDB backend is not linked in this build");
+}
+#endif
+
+#if DATAFLOW_HAS_ROCKSDB_BACKEND
 
 namespace {
 constexpr char kKvPrefix[] = "kv:";
@@ -489,6 +505,33 @@ std::shared_ptr<StateStore> makeMemoryStateStore() {
   return std::make_shared<MemoryStateStore>();
 }
 
+std::shared_ptr<StateStore> makeStateStore(const StateStoreConfig& config) {
+  auto backend = config.backend.empty() ? std::string("memory") : config.backend;
+  if (backend == "memory") {
+    return makeMemoryStateStore();
+  }
+
+  if (backend == "rocksdb") {
+    std::string path = config.defaultPath;
+    auto it = config.options.find("path");
+    if (it != config.options.end()) {
+      path = it->second;
+    }
+    return makeRocksDbStateStore(path);
+  }
+
+  throw std::invalid_argument("unsupported state store backend: " + backend);
+}
+
+std::shared_ptr<StateStore> makeStateStore(
+    const std::string& backend,
+    const std::unordered_map<std::string, std::string>& options) {
+  StateStoreConfig config;
+  config.backend = backend;
+  config.options = options;
+  return makeStateStore(config);
+}
+
 // ---------- Source / Sink ----------
 
 MemoryStreamSource::MemoryStreamSource(std::vector<Table> batches) : batches_(std::move(batches)) {}
@@ -659,19 +702,48 @@ StreamingQuery::StreamingQuery(StreamingDataFrame root, std::shared_ptr<StreamSi
     : root_(std::move(root)), sink_(std::move(sink)), intervalMs_(triggerIntervalMs) {}
 
 size_t StreamingQuery::awaitTermination(size_t maxBatches) {
+  const std::string query_id = "stream-query-" + std::to_string(reinterpret_cast<uintptr_t>(this));
   running_ = true;
   size_t processed = 0;
 
   while (running_) {
     Table in;
+
+    ai::PluginContext ctx;
+    ctx.trace_id = query_id;
+    ctx.labels["api"] = "StreamingQuery::awaitTermination";
+    ai::PluginPayload payload;
+    payload.summary = "batch start";
+
+    auto batch_start =
+        ai::PluginManager::instance().runHook(ai::HookPoint::kStreamingBatchStart, ctx, &payload);
+    if (!batch_start.continue_execution()) {
+      running_ = false;
+      break;
+    }
+
     if (!root_.source_->nextBatch(in)) {
       break;
     }
 
     Table out = root_.applyTransforms(in);
+    payload.summary = "batch transformed";
+    payload.row_count = in.rows.size();
+    payload.attributes["batch_out_rows"] = std::to_string(out.rows.size());
+
     if (sink_) {
       sink_->write(out);
     }
+
+    payload.summary = "batch end";
+    payload.row_count = out.rows.size();
+    auto batch_end =
+        ai::PluginManager::instance().runHook(ai::HookPoint::kStreamingBatchEnd, ctx, &payload);
+    if (!batch_end.continue_execution()) {
+      running_ = false;
+      break;
+    }
+
     ++processed;
 
     if (maxBatches != 0 && processed >= maxBatches) {

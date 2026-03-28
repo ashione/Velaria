@@ -1,4 +1,4 @@
-# DataFrame 优先：Spark-like C++ 引擎 v1 兼容计划
+# DataFrame 优先：语义对齐 C++ 引擎 v1 兼容计划
 
 ## 结论（直接执行）
 你明确了方向：**DataFrame 优先 + 流式优先**。
@@ -14,7 +14,7 @@
 
 ### A. 核心能力（必须）
 1. **Session/Context 与作业入口**
-   - `createSession()/SparkSession` 兼容入口
+- `createSession()/DataflowSession` 兼容入口
    - `session.read()`、`session.createDataFrame()`
    - `read.csv/parquet/json/orc`（v1）
    - `write`：`overwrite/append` + `parquet/csv`
@@ -42,9 +42,9 @@
    - 基础监控（job/stage/task 状态、耗时、失败重试次数）
 
 5. **兼容层语义与边界**
-   - 在 Spark 相同调用下，返回行为一致的“默认语义”
+- 在语义对齐调用下，返回行为一致的“默认语义”
    - 标注“兼容差异”（如 catalog/cache 一些默认值）
-   - 统一异常模型，给出 `Spark API 映射文档`
+- 统一异常模型，给出 `外部接口映射文档`
 
 ### B. 明确先不支持（v1）
 - Structured Streaming（可后续）
@@ -54,18 +54,18 @@
 
 ---
 
-## 2) 版本化兼容映射（Spark->当前引擎）
+## 2) 版本化兼容映射（Reference->当前引擎）
 
 ### DataFrame -> C++ DSL
-| Spark API | v1 对应 | 备注 |
+| 参考 API | v1 对应 | 备注 |
 |---|---|---|
-| `spark.read.parquet` | `read.parquet` | 一致 |
+| `session.read.parquet` | `read.parquet` | 一致 |
 | `df.select` | `DataFrame.select` | 一致 |
 | `df.filter` / `df.where` | `DataFrame.filter` | 一致 |
 | `df.groupBy(...).agg(...)` | `DataFrame.groupBy().agg()` | 算子树统一
 | `df.join(other, on, how)` | `DataFrame.join` | 先支持 inner/left/right/full 外连接后续加 |
 | `df.persist(StorageLevel)` | `DataFrame.persist` | 支持 MEMORY/DISK 简版 |
-| `spark.sql("...")` | `session.sql` | SQL 解析器先支持基础 SELECT/CTE |
+| `session.sql("...")` | `session.sql` | SQL 解析器先支持基础 SELECT/CTE |
 | `show/collect/count` | Action | 保留惰性计划语义 |
 
 ### 术语映射（内部实现）
@@ -96,7 +96,7 @@
 
 ## 4) 立即可执行清单（本周）
 
-1. 建立 API 程序接口定义：`IDataFrame`, `IDataSet`, `SparkLikeSession`
+1. 建立 API 程序接口定义：`IDataFrame`, `IDataSet`, `DataflowSessionCompatible`
 2. 落地 30 个最小 DataFrame 单测（含 select/filter/groupBy/join/action）
 3. 先跑一个端到端 demo：
    - 本地 CSV -> filter + groupBy + join -> write parquet
@@ -106,5 +106,5 @@
 
 ## 5) 你要确认的两点（快速决策）
 
-- 是否把 **SQL 方言**先限定到 **Spark 3.x ANSI 子集**（推荐）？
+- 是否把 **SQL 方言**先限定到 **ANSI 子集**（推荐）？
 - 是否要求第一版支持 **Hive Metastore/Glue catalog 对接**（否则先用内置 catalog）？

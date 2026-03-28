@@ -291,18 +291,34 @@ AggregateFunctionKind parseAggregateFunction(const std::string& name) {
   throw SQLSyntaxError("unsupported aggregate function: " + name);
 }
 
+void parseOptionalAlias(ParseState& state, std::string* alias) {
+  if (state.consumeWord("AS")) {
+    *alias = state.expectToken().text;
+  } else if (!state.isEnd() && isAliasCandidate(state.peek())) {
+    if (!isKeyword(state.peek().text, "FROM") && !isKeyword(state.peek().text, "WHERE") &&
+        !isKeyword(state.peek().text, "GROUP") && !isKeyword(state.peek().text, "HAVING") &&
+        !isKeyword(state.peek().text, "LIMIT") && state.peek().text != ",") {
+      *alias = state.expectToken().text;
+    }
+  }
+}
+
 SelectItem parseSelectItem(ParseState& state) {
   SelectItem item;
 
   if (state.consumeSymbol("*")) {
     item.is_all = true;
-    if (state.consumeWord("AS")) {
-      item.alias = state.expectToken().text;
-    }
+    parseOptionalAlias(state, &item.alias);
     return item;
   }
 
   Token first = state.expectToken();
+  if (first.is_number || first.is_string || isKeyword(first.text, "NULL")) {
+    item.is_literal = true;
+    item.literal = parseValueLiteral(first);
+    parseOptionalAlias(state, &item.alias);
+    return item;
+  }
   if (state.consumeSymbol("(")) {
     AggregateExpr agg;
     agg.function = parseAggregateFunction(first.text);
@@ -315,11 +331,7 @@ SelectItem parseSelectItem(ParseState& state) {
     }
     item.is_aggregate = true;
     item.aggregate = agg;
-    if (state.consumeWord("AS")) {
-      item.alias = state.expectToken().text;
-    } else if (state.isIdentifier() && !isClauseKeyword(state.peek().text) && state.peek().text != ",") {
-      item.alias = state.expectToken().text;
-    }
+    parseOptionalAlias(state, &item.alias);
     return item;
   }
 
@@ -340,16 +352,7 @@ SelectItem parseSelectItem(ParseState& state) {
     item.is_table_all = true;
     item.table_name_or_alias = tableName;
   }
-  if (state.consumeWord("AS")) {
-    item.alias = state.expectToken().text;
-  } else if (!state.isEnd() && isAliasCandidate(state.peek())) {
-    // keep inline aliases when not followed by clauses
-    if (!isKeyword(state.peek().text, "FROM") && !isKeyword(state.peek().text, "WHERE") &&
-        !isKeyword(state.peek().text, "GROUP") && !isKeyword(state.peek().text, "HAVING") &&
-        !isKeyword(state.peek().text, "LIMIT") && state.peek().text != ",") {
-      item.alias = state.expectToken().text;
-    }
-  }
+  parseOptionalAlias(state, &item.alias);
   return item;
 }
 
@@ -378,28 +381,30 @@ SqlQuery SqlParser::parse(const std::string& sql) {
   SqlQuery out;
 
   state.expectWord("SELECT");
-  while (!state.isEnd()) {
-    if (state.consumeWord("FROM")) {
-      break;
-    }
+  while (true) {
     out.select_items.push_back(parseSelectItem(state));
-    if (!state.consumeSymbol(",")) {
-      if (state.consumeWord("FROM")) {
-        break;
-      }
+    if (state.consumeSymbol(",")) {
       if (state.isEnd()) {
         throw SQLSyntaxError("unexpected end while parsing select list");
       }
-      throw SQLSyntaxError("expect comma or FROM");
+      continue;
     }
+    if (state.consumeWord("FROM")) {
+      out.has_from = true;
+      break;
+    }
+    if (state.isEnd()) break;
+    throw SQLSyntaxError("expect comma or FROM");
   }
 
   if (out.select_items.empty()) {
     throw SQLSyntaxError("SELECT list cannot be empty");
   }
-  out.from = parseFrom(state);
+  if (out.has_from) {
+    out.from = parseFrom(state);
+  }
 
-  if (isJoinStart(state)) {
+  if (out.has_from && isJoinStart(state)) {
     out.join = parseJoin(state);
   }
 

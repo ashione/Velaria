@@ -6,7 +6,6 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "src/dataflow/core/table.h"
@@ -71,7 +70,10 @@ class MemoryStateStore : public StateStore {
   std::unordered_map<std::string, std::vector<std::string>> lists_;
 };
 
-#ifdef DATAFLOW_USE_ROCKSDB
+// RocksDB implementation is optional and auto-detected by build environment.
+// If the build does not contain rocksdb headers, requesting backend="rocksdb"
+// will fail at runtime with a clear error.
+#if __has_include(<rocksdb/db.h>)
 class RocksDbStateStore : public StateStore {
  public:
   static std::shared_ptr<RocksDbStateStore> create(const std::string& dbPath);
@@ -109,11 +111,17 @@ class RocksDbStateStore : public StateStore {
 };
 #endif
 
-std::shared_ptr<StateStore> makeMemoryStateStore();
+struct StateStoreConfig {
+  std::string backend = "memory";
+  std::string defaultPath = "/tmp/dataflow-state";
+  std::unordered_map<std::string, std::string> options;
+};
 
-#ifdef DATAFLOW_USE_ROCKSDB
+std::shared_ptr<StateStore> makeMemoryStateStore();
 std::shared_ptr<StateStore> makeRocksDbStateStore(const std::string& dbPath);
-#endif
+std::shared_ptr<StateStore> makeStateStore(const StateStoreConfig& config);
+std::shared_ptr<StateStore> makeStateStore(const std::string& backend,
+                                          const std::unordered_map<std::string, std::string>& options = {});
 
 class StreamSource {
  public:

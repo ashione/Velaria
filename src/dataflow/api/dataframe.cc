@@ -3,6 +3,10 @@
 #include <algorithm>
 #include <iostream>
 #include <stdexcept>
+#include <cstdint>
+#include <sstream>
+
+#include "src/dataflow/ai/plugin_runtime.h"
 
 namespace dataflow {
 
@@ -17,6 +21,97 @@ bool gtePred(const Value& lhs, const Value& rhs) { return lhs > rhs || lhs == rh
 
 std::shared_ptr<Executor> defaultExecutor() { return std::make_shared<LocalExecutor>(); }
 
+std::string planKindName(PlanKind kind) {
+  switch (kind) {
+    case PlanKind::Source:
+      return "Source";
+    case PlanKind::Select:
+      return "Select";
+    case PlanKind::Filter:
+      return "Filter";
+    case PlanKind::WithColumn:
+      return "WithColumn";
+    case PlanKind::Drop:
+      return "Drop";
+    case PlanKind::Limit:
+      return "Limit";
+    case PlanKind::GroupBySum:
+      return "GroupBySum";
+    case PlanKind::Aggregate:
+      return "Aggregate";
+    case PlanKind::Join:
+      return "Join";
+    default:
+      return "Unknown";
+  }
+}
+
+void explainPlan(const PlanNodePtr& node, std::ostringstream& out, int depth = 0) {
+  if (!node) {
+    out << std::string(depth * 2, ' ') << "null";
+    return;
+  }
+  out << std::string(depth * 2, ' ') << planKindName(node->kind) << "\n";
+  if (node->kind == PlanKind::Select) {
+    const auto* n = static_cast<SelectPlan*>(node.get());
+    for (const auto& child : {n->child}) {
+      explainPlan(child, out, depth + 1);
+    }
+    return;
+  }
+  if (node->kind == PlanKind::Filter) {
+    const auto* n = static_cast<FilterPlan*>(node.get());
+    out << std::string((depth + 1) * 2, ' ') << "idx=" << n->column_index << "\n";
+    explainPlan(n->child, out, depth + 1);
+    return;
+  }
+  if (node->kind == PlanKind::WithColumn) {
+    const auto* n = static_cast<WithColumnPlan*>(node.get());
+    out << std::string((depth + 1) * 2, ' ') << "added=" << n->added_column << "\n";
+    explainPlan(n->child, out, depth + 1);
+    return;
+  }
+  if (node->kind == PlanKind::Drop) {
+    const auto* n = static_cast<DropPlan*>(node.get());
+    out << std::string((depth + 1) * 2, ' ') << "keep=" << n->keep_indices.size() << "\n";
+    explainPlan(n->child, out, depth + 1);
+    return;
+  }
+  if (node->kind == PlanKind::Limit) {
+    const auto* n = static_cast<LimitPlan*>(node.get());
+    out << std::string((depth + 1) * 2, ' ') << "n=" << n->n << "\n";
+    explainPlan(n->child, out, depth + 1);
+    return;
+  }
+  if (node->kind == PlanKind::Aggregate || node->kind == PlanKind::GroupBySum) {
+    if (node->kind == PlanKind::Aggregate) {
+      const auto* n = static_cast<AggregatePlan*>(node.get());
+      out << std::string((depth + 1) * 2, ' ') << "keys=" << n->keys.size() << ", aggs="
+          << n->aggregates.size() << "\n";
+      explainPlan(n->child, out, depth + 1);
+      return;
+    }
+    const auto* n = static_cast<GroupBySumPlan*>(node.get());
+    out << std::string((depth + 1) * 2, ' ') << "keys=" << n->keys.size() << ", value="
+        << n->value_index << "\n";
+    explainPlan(n->child, out, depth + 1);
+    return;
+  }
+  if (node->kind == PlanKind::Join) {
+    const auto* n = static_cast<JoinPlan*>(node.get());
+    out << std::string((depth + 1) * 2, ' ') << "left_key=" << n->left_key
+        << ", right_key=" << n->right_key << "\n";
+    explainPlan(n->left, out, depth + 1);
+    explainPlan(n->right, out, depth + 1);
+    return;
+  }
+  if (node->kind == PlanKind::Source) {
+    const auto* n = static_cast<SourcePlan*>(node.get());
+    out << std::string((depth + 1) * 2, ' ') << "source=" << n->source_name << "\n";
+    return;
+  }
+}
+
 }  // namespace
 
 DataFrame::DataFrame(Table table)
@@ -28,12 +123,48 @@ DataFrame::DataFrame(PlanNodePtr plan, std::shared_ptr<Executor> exec)
   if (!executor_) executor_ = defaultExecutor();
 }
 
+DataflowJobHandle DataFrame::submitAsync(const ExecutionOptions& options) const {
+  return JobMaster::instance().submit(plan_, executor_, options);
+}
+
 const Table& DataFrame::materialize() const {
   if (!cached_) {
+    ai::PluginContext ctx;
+    ctx.trace_id = "df-" + std::to_string(reinterpret_cast<uintptr_t>(this));
+    ctx.session_id = "default";
+    ctx.labels["api"] = "DataFrame::materialize";
+
+    ai::PluginPayload payload;
+    payload.plan = explain();
+    payload.summary = "DataFrame execute begin";
+
+    auto before_exec =
+        ai::PluginManager::instance().runHook(ai::HookPoint::kPlanBeforeExecute, ctx, &payload);
+    if (!before_exec.continue_execution()) {
+      throw std::runtime_error(before_exec.reason.empty() ? "plan execution was blocked by ai plugin"
+                                                         : before_exec.reason);
+    }
+
     cached_table_ = executor_->execute(plan_);
+
+    payload.row_count = cached_table_.rowCount();
+    payload.summary = "DataFrame execute end";
+    auto after_exec =
+        ai::PluginManager::instance().runHook(ai::HookPoint::kPlanAfterExecute, ctx, &payload);
+    if (!after_exec.continue_execution()) {
+      throw std::runtime_error(after_exec.reason.empty() ? "plan execution was blocked after execution"
+                                                        : after_exec.reason);
+    }
+
     cached_ = true;
   }
   return cached_table_;
+}
+
+std::string DataFrame::explain() const {
+  std::ostringstream out;
+  explainPlan(plan_, out, 0);
+  return out.str();
 }
 
 DataFrame DataFrame::select(const std::vector<std::string>& columns) const {
@@ -75,7 +206,7 @@ DataFrame DataFrame::filterByIndex(size_t columnIndex, const std::string& op, co
   } else {
     throw std::invalid_argument("unsupported filter op: " + op);
   }
-  auto node = std::make_shared<FilterPlan>(plan_, columnIndex, value, pred);
+  auto node = std::make_shared<FilterPlan>(plan_, columnIndex, value, op, pred);
   return DataFrame(node, executor_);
 }
 
@@ -145,6 +276,10 @@ size_t DataFrame::count() const {
 
 std::vector<Row> DataFrame::collect() const {
   return materialize().rows;
+}
+
+std::string DataFrame::serializePlan() const {
+  return dataflow::serializePlan(plan_);
 }
 
 void DataFrame::show(size_t max_rows) const {

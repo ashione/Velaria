@@ -8,6 +8,7 @@
 #include "src/dataflow/core/table.h"
 #include "src/dataflow/planner/plan.h"
 #include "src/dataflow/runtime/executor.h"
+#include "src/dataflow/runtime/job_master.h"
 
 namespace dataflow {
 
@@ -52,6 +53,10 @@ class DataFrame {
   size_t count() const;
   void show(size_t max_rows = 20) const;
   std::vector<Row> collect() const;
+  std::string serializePlan() const;
+
+  DataflowJobHandle submitAsync(const ExecutionOptions& options = {}) const;
+  std::string explain() const;
 
   Table toTable() const;
   const Schema& schema() const;

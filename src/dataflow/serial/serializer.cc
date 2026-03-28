@@ -1,5 +1,7 @@
 #include "src/dataflow/serial/serializer.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <sstream>
 
 namespace dataflow {
@@ -26,8 +28,60 @@ std::string ProtoLikeSerializer::serialize(const Table& table) const {
 }
 
 Table ProtoLikeSerializer::deserialize(const std::string& payload) const {
-  (void)payload;
-  return Table();
+  std::istringstream in(payload);
+  std::string token;
+  Table table;
+
+  if (!std::getline(in, token)) return table;
+  size_t fieldCount = static_cast<size_t>(std::stoull(token));
+  table.schema.fields.reserve(fieldCount);
+  for (size_t i = 0; i < fieldCount; ++i) {
+    std::string field;
+    if (!std::getline(in, field)) return Table();
+    table.schema.fields.push_back(field);
+  }
+
+  if (!std::getline(in, token)) return Table();
+  size_t rowCount = static_cast<size_t>(std::stoull(token));
+  table.rows.reserve(rowCount);
+
+  for (size_t r = 0; r < rowCount; ++r) {
+    if (!std::getline(in, token)) return Table();
+    const auto colon = token.find(':');
+    if (colon == std::string::npos) return Table();
+    const size_t itemCount = static_cast<size_t>(std::stoull(token.substr(0, colon)));
+    std::string payloadRest = token.substr(colon + 1);
+
+    Row row;
+    row.reserve(itemCount);
+    size_t offset = 0;
+    for (size_t i = 0; i < itemCount; ++i) {
+      size_t sep = payloadRest.find(',', offset);
+      std::string item = (sep == std::string::npos) ? payloadRest.substr(offset)
+                                                   : payloadRest.substr(offset, sep - offset);
+      offset = (sep == std::string::npos) ? payloadRest.size() : (sep + 1);
+
+      const size_t bar = item.find('|');
+      if (bar == std::string::npos) return Table();
+      const auto typeCode = static_cast<DataType>(std::stoi(item.substr(0, bar)));
+      const std::string value = item.substr(bar + 1);
+
+      if (typeCode == DataType::Nil) {
+        row.emplace_back();
+      } else if (typeCode == DataType::Int64) {
+        row.emplace_back(static_cast<int64_t>(std::stoll(value)));
+      } else if (typeCode == DataType::Double) {
+        row.emplace_back(std::stod(value));
+      } else {
+        row.emplace_back(Value(value));
+      }
+    }
+    table.rows.push_back(std::move(row));
+  }
+  for (size_t i = 0; i < table.schema.fields.size(); ++i) {
+    table.schema.index[table.schema.fields[i]] = i;
+  }
+  return table;
 }
 
 std::string ArrowLikeSerializer::name() const { return "arrow-like"; }
@@ -52,8 +106,7 @@ std::string ArrowLikeSerializer::serialize(const Table& table) const {
 }
 
 Table ArrowLikeSerializer::deserialize(const std::string& payload) const {
-  (void)payload;
-  return Table();
+  return ProtoLikeSerializer().deserialize(payload);
 }
 
 std::unique_ptr<ISerializer> makeSerializer(SerializationKind kind) {

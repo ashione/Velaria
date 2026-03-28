@@ -29,8 +29,10 @@ struct SelectItem {
   bool is_table_all = false;
   std::string table_name_or_alias;
   bool is_aggregate = false;
+  bool is_literal = false;
   ColumnRef column;
   AggregateExpr aggregate;
+  Value literal;
   std::string alias;
 };
 
@@ -54,6 +56,7 @@ struct Predicate {
 
 struct SqlQuery {
   std::vector<SelectItem> select_items;
+  bool has_from = false;
   FromItem from;
   std::optional<JoinItem> join;
   std::optional<Predicate> where;

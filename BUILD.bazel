@@ -12,6 +12,11 @@ cc_library(
         "src/dataflow/serial/serializer.cc",
         "src/dataflow/planner/plan.cc",
         "src/dataflow/runtime/executor.cc",
+        "src/dataflow/runtime/job_master.cc",
+        "src/dataflow/runtime/byte_transport.cc",
+        "src/dataflow/runtime/rpc_runner.cc",
+        "src/dataflow/rpc/rpc_codec.cc",
+        "src/dataflow/ai/plugin_runtime.cc",
         "src/dataflow/sql/sql_parser.cc",
         "src/dataflow/sql/sql_planner.cc",
         "src/dataflow/stream/stream.cc",
@@ -30,6 +35,13 @@ cc_library(
         "src/dataflow/sql/sql_planner.h",
         "src/dataflow/planner/plan.h",
         "src/dataflow/runtime/executor.h",
+        "src/dataflow/runtime/byte_transport.h",
+        "src/dataflow/runtime/rpc_contract.h",
+        "src/dataflow/runtime/job_master.h",
+        "src/dataflow/runtime/observability.h",
+        "src/dataflow/runtime/rpc_runner.h",
+        "src/dataflow/ai/plugin_runtime.h",
+        "src/dataflow/rpc/rpc_codec.h",
         "src/dataflow/stream/stream.h",
     ],
     visibility = ["//visibility:public"],
@@ -37,36 +49,116 @@ cc_library(
 
 cc_binary(
     name = "wordcount_demo",
-    srcs = ["src/dataflow/examples/wordcount.cpp"],
+    srcs = ["src/dataflow/examples/wordcount.cc"],
     deps = [":dataflow_core"],
 )
 
 cc_binary(
     name = "df_demo",
-    srcs = ["src/dataflow/examples/dataframe_demo.cpp"],
+    srcs = ["src/dataflow/examples/dataframe_demo.cc"],
     deps = [":dataflow_core"],
 )
 
 cc_binary(
     name = "stream_demo",
-    srcs = ["src/dataflow/examples/stream_demo.cpp"],
+    srcs = ["src/dataflow/examples/stream_demo.cc"],
     deps = [":dataflow_core"],
 )
 
 cc_binary(
     name = "stream_stateful_demo",
-    srcs = ["src/dataflow/examples/stream_stateful_demo.cpp"],
+    srcs = ["src/dataflow/examples/stream_stateful_demo.cc"],
     deps = [":dataflow_core"],
 )
 
 cc_binary(
     name = "stream_state_container_demo",
-    srcs = ["src/dataflow/examples/stream_state_container_demo.cpp"],
+    srcs = ["src/dataflow/examples/stream_state_container_demo.cc"],
     deps = [":dataflow_core"],
 )
 
 cc_binary(
     name = "sql_demo",
-    srcs = ["src/dataflow/examples/sql_demo.cpp"],
+    srcs = ["src/dataflow/examples/sql_demo.cc"],
     deps = [":dataflow_core"],
+)
+
+cc_library(
+    name = "dataflow_actor_rpc_codec",
+    srcs = [
+        "src/dataflow/rpc/actor_rpc_codec.cc",
+        "src/dataflow/rpc/serialization.cc",
+    ],
+    hdrs = [
+        "src/dataflow/rpc/actor_rpc_codec.h",
+        "src/dataflow/rpc/serialization.h",
+    ],
+    deps = [":dataflow_core"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "dataflow_transport",
+    srcs = [
+        "src/dataflow/transport/ipc_transport.cc",
+    ],
+    hdrs = [
+        "src/dataflow/transport/ipc_transport.h",
+    ],
+    deps = [":dataflow_core"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "dataflow_actor_runtime",
+    srcs = [
+        "src/dataflow/runtime/actor_runtime.cc",
+    ],
+    hdrs = [
+        "src/dataflow/runtime/actor_runtime.h",
+    ],
+    deps = [
+        ":dataflow_core",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "dataflow_actor_runner",
+    srcs = [
+        "src/dataflow/runner/actor_runtime.cc",
+    ],
+    hdrs = [
+        "src/dataflow/runner/actor_runtime.h",
+    ],
+    deps = [
+        ":dataflow_actor_rpc_codec",
+        ":dataflow_transport",
+        ":dataflow_core",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_binary(
+    name = "actor_rpc_scheduler",
+    srcs = ["src/dataflow/examples/actor_rpc_scheduler.cc"],
+    deps = [":dataflow_actor_runner"],
+)
+
+cc_binary(
+    name = "actor_rpc_worker",
+    srcs = ["src/dataflow/examples/actor_rpc_worker.cc"],
+    deps = [":dataflow_actor_runner"],
+)
+
+cc_binary(
+    name = "actor_rpc_client",
+    srcs = ["src/dataflow/examples/actor_rpc_client.cc"],
+    deps = [":dataflow_actor_runner"],
+)
+
+cc_binary(
+    name = "actor_rpc_smoke",
+    srcs = ["src/dataflow/examples/actor_rpc_smoke.cc"],
+    deps = [":dataflow_actor_runner"],
 )

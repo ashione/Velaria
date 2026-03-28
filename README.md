@@ -110,6 +110,12 @@ GROUP BY name;
 - 对 `SINK` 表执行 `SELECT`（或 `JOIN` 中作为右表）会返回语义错误。
 - `SELECT` 中必须满足本版本约束（例如 `HAVING` 依赖聚合语义、`GROUP BY` 与投影一致性等）。
 
+### 执行模型
+
+- scheduler 只负责编排与分发，不直接执行 SQL。
+- 包含 `dashboard` 在内的提交入口都走 worker 路径（`JobMaster + worker`）。
+- 当 worker 不可用时，调度返回 `no worker available`，不会在 scheduler 内本地“伪执行”。
+
 ## 构建与启动命令
 
 ### 单机示例

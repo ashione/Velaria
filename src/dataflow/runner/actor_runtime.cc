@@ -100,11 +100,6 @@ std::string nextDashboardJobId() {
   return "dashboard_job_" + std::to_string(seq.fetch_add(1));
 }
 
-bool isSelectSql(const std::string& sql) {
-  const auto statement = sql::SqlParser::parse(sql);
-  return statement.kind == sql::SqlStatementKind::Select;
-}
-
 Table makeDemoInputTable(const std::string& payload) {
   Table table(Schema({"token", "bucket", "score"}), {});
   const int64_t base = static_cast<int64_t>(payload.size());
@@ -587,51 +582,6 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
                                const std::string& sql,
                                std::string* job_id_out,
                                std::string* summary_out) -> bool {
-    const auto set_immediate_snapshot = [&](RpcJobSnapshot& snapshot,
-                                           const std::string& plan_result) {
-      snapshot.job_id = nextDashboardJobId();
-      snapshot.client_node = "dashboard";
-      snapshot.worker_node = "scheduler";
-      snapshot.payload = flattenText(sql);
-      snapshot.sql = sql;
-      snapshot.result_payload = plan_result;
-      snapshot.state = "FINISHED";
-      snapshot.status_code = "JOB_FINISHED";
-      snapshot.chain.chain_id = snapshot.job_id + ":chain_1";
-      snapshot.chain.state = "SUCCEEDED";
-      snapshot.chain.status_code = "CHAIN_SUCCEEDED";
-      snapshot.chain.task_ids = {snapshot.job_id + ":task_1"};
-      snapshot.task.task_id = snapshot.job_id + ":task_1";
-      snapshot.task.state = "SUCCEEDED";
-      snapshot.task.status_code = "TASK_SUCCEEDED";
-      snapshot.task.worker_id = "scheduler";
-    };
-
-    if (!sql.empty()) {
-      try {
-        if (!isSelectSql(sql)) {
-          const auto dml_df = buildSqlPlan(sql, payload_input);
-          const Table dml_result = dml_df.toTable();
-          RpcJobSnapshot snapshot;
-          set_immediate_snapshot(snapshot, summarizeTable(dml_result));
-          const std::string job_id = snapshot.job_id;
-          if (job_id_out) {
-            *job_id_out = job_id;
-          }
-          if (summary_out) {
-            summary_out->assign(snapshot.result_payload);
-          }
-          job_snapshots[job_id] = snapshot;
-          emitSnapshotEvent(snapshot);
-          return true;
-        }
-      } catch (const std::exception& e) {
-        if (job_id_out) job_id_out->clear();
-        if (summary_out) summary_out->assign(e.what());
-        return false;
-      }
-    }
-
     if (workers.empty()) {
       if (job_id_out) {
         job_id_out->clear();

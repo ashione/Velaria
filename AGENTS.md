@@ -42,6 +42,11 @@
 - `INSERT INTO ... SELECT`：支持查询结果写入目标表（目标表不应为 `SOURCE TABLE`）。
 - `SINK TABLE` 可用于写入，不应用于查询输入。
 
+### 调度执行模型
+
+- scheduler 负责接入、快照记录、分发与状态收集，不在本地执行 SQL。
+- dashboard/客户端提交均应走 worker 执行链路。
+
 ## 常用命令
 
 ### 构建

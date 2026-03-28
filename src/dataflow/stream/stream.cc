@@ -340,6 +340,46 @@ const char* streamingExecutionModeName(StreamingExecutionMode mode) {
   return "single-process";
 }
 
+const char* streamingTransportModeName(StreamingTransportMode mode) {
+  switch (mode) {
+    case StreamingTransportMode::InProcess:
+      return "inproc";
+    case StreamingTransportMode::RpcCopy:
+      return "rpc-copy";
+    case StreamingTransportMode::SharedMemory:
+      return "shared-memory";
+    case StreamingTransportMode::Auto:
+      return "auto";
+  }
+  return "inproc";
+}
+
+size_t estimateTablePayloadBytes(const Table& table) {
+  size_t bytes = 0;
+  for (const auto& field : table.schema.fields) {
+    bytes += field.size();
+  }
+  for (const auto& row : table.rows) {
+    for (const auto& value : row) {
+      bytes += value.toString().size();
+      bytes += sizeof(Value);
+    }
+  }
+  return bytes;
+}
+
+bool queryHasStatefulOps(const std::vector<StreamTransform>& transforms) {
+  return std::any_of(transforms.begin(), transforms.end(),
+                     [](const StreamTransform& transform) { return transform.touchesState(); });
+}
+
+bool queryHasWindowOps(const std::vector<StreamTransform>& transforms) {
+  return std::any_of(transforms.begin(), transforms.end(), [](const StreamTransform& transform) {
+    return transform.label().find("window") != std::string::npos ||
+           transform.accelerator().kind == StreamAcceleratorKind::WindowKeySum;
+  });
+}
+
 LocalActorStreamOptions makeActorOptions(const StreamingQueryOptions& options) {
   LocalActorStreamOptions actor;
   actor.worker_count = std::max<size_t>(2, options.effectiveActorWorkers());
@@ -880,6 +920,8 @@ std::shared_ptr<StateStore> makeStateStore(
 
 MemoryStreamSource::MemoryStreamSource(std::vector<Table> batches) : batches_(std::move(batches)) {}
 
+void MemoryStreamSource::open(const StreamSourceContext&) {}
+
 bool MemoryStreamSource::nextBatch(const StreamPullContext&, Table& batch) {
   if (index_ >= batches_.size()) return false;
   batch = batches_[index_++];
@@ -899,6 +941,8 @@ bool MemoryStreamSource::restoreOffsetToken(const std::string& token) {
 
 DirectoryCsvStreamSource::DirectoryCsvStreamSource(std::string directory, char delimiter)
     : directory_(std::move(directory)), delimiter_(delimiter) {}
+
+void DirectoryCsvStreamSource::open(const StreamSourceContext&) {}
 
 bool DirectoryCsvStreamSource::nextBatch(const StreamPullContext&, Table& batch) {
   namespace fs = std::filesystem;
@@ -957,6 +1001,11 @@ void ConsoleStreamSink::write(const Table& table) {
 
 FileAppendStreamSink::FileAppendStreamSink(std::string path, char delimiter)
     : path_(std::move(path)), delimiter_(delimiter) {}
+
+void FileAppendStreamSink::open(const StreamSinkContext&) {
+  namespace fs = std::filesystem;
+  wrote_schema_ = fs::exists(path_) && fs::is_regular_file(path_) && fs::file_size(path_) > 0;
+}
 
 void FileAppendStreamSink::write(const Table& table) {
   namespace fs = std::filesystem;
@@ -1280,6 +1329,16 @@ StreamingQuery::StreamingQuery(StreamingDataFrame root, std::shared_ptr<StreamSi
                                StreamingQueryOptions options)
     : root_(std::move(root)), sink_(std::move(sink)), options_(std::move(options)) {
   progress_.query_id = nextStreamingQueryId();
+  strategy_decision_.requested_execution_mode =
+      streamingExecutionModeName(options_.execution_mode);
+  strategy_decision_.resolved_execution_mode = strategy_decision_.requested_execution_mode;
+  strategy_decision_.transport_mode = streamingTransportModeName(StreamingTransportMode::InProcess);
+  strategy_decision_.has_stateful_ops = queryHasStatefulOps(root_.transforms_);
+  strategy_decision_.has_window = queryHasWindowOps(root_.transforms_);
+  strategy_decision_.source_is_bounded = root_.source_ ? root_.source_->bounded() : true;
+  strategy_decision_.sink_is_blocking =
+      sink_ && sink_->name() != "memory" && sink_->name() != "console";
+  applyStrategyDecision(strategy_decision_);
 }
 
 StreamingQuery::StreamingQuery(StreamingQuery&& other) noexcept
@@ -1291,7 +1350,8 @@ StreamingQuery::StreamingQuery(StreamingQuery&& other) noexcept
       started_(other.started_),
       execution_decided_(other.execution_decided_),
       resolved_execution_mode_(other.resolved_execution_mode_),
-      execution_reason_(std::move(other.execution_reason_)) {
+      execution_reason_(std::move(other.execution_reason_)),
+      strategy_decision_(std::move(other.strategy_decision_)) {
   other.running_ = false;
   other.started_ = false;
   other.execution_decided_ = false;
@@ -1314,6 +1374,7 @@ StreamingQuery& StreamingQuery::operator=(StreamingQuery&& other) noexcept {
   execution_decided_ = other.execution_decided_;
   resolved_execution_mode_ = other.resolved_execution_mode_;
   execution_reason_ = std::move(other.execution_reason_);
+  strategy_decision_ = std::move(other.strategy_decision_);
 
   other.running_ = false;
   other.started_ = false;
@@ -1330,11 +1391,27 @@ StreamingQuery& StreamingQuery::trigger(uint64_t triggerIntervalMs) {
 StreamingQuery& StreamingQuery::start() {
   started_ = true;
   running_ = true;
-  updateProgress([&](StreamingQueryProgress& progress) {
-    progress.status = "running";
-    progress.execution_mode = streamingExecutionModeName(options_.execution_mode);
-    progress.execution_reason.clear();
-  });
+  StreamSourceContext source_context;
+  source_context.query_id = progress_.query_id;
+  source_context.trigger_interval_ms = options_.trigger_interval_ms;
+  source_context.max_inflight_batches = options_.max_inflight_batches;
+  source_context.max_queued_partitions = options_.max_queued_partitions;
+  source_context.checkpoint_path = options_.checkpoint_path;
+  source_context.source_is_bounded = root_.source_ ? root_.source_->bounded() : true;
+  if (root_.source_) {
+    root_.source_->open(source_context);
+  }
+
+  StreamSinkContext sink_context;
+  sink_context.query_id = progress_.query_id;
+  sink_context.checkpoint_path = options_.checkpoint_path;
+  sink_context.requested_execution_mode =
+      streamingExecutionModeName(options_.execution_mode);
+  if (sink_) {
+    sink_->open(sink_context);
+  }
+
+  updateProgress([&](StreamingQueryProgress& progress) { progress.status = "running"; });
   return *this;
 }
 
@@ -1352,6 +1429,11 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
   StreamAcceleratorSpec actor_accelerator;
   const bool actor_pipeline_supported =
       findActorAcceleratorTransform(root_.transforms_, &actor_transform_index, &actor_accelerator);
+  strategy_decision_.actor_eligible = actor_pipeline_supported;
+  strategy_decision_.reason =
+      actor_pipeline_supported ? "query plan is eligible for actor acceleration"
+                               : "query plan is not eligible for actor acceleration";
+  applyStrategyDecision(strategy_decision_);
   std::vector<StreamTransform> actor_prefix_transforms;
   if (actor_pipeline_supported) {
     actor_prefix_transforms.assign(root_.transforms_.begin(),
@@ -1417,6 +1499,11 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
       envelope.table = std::move(batch);
       envelope.offset = root_.source_->currentOffsetToken();
       envelope.partition_count = partitionCountForBatch(envelope.table, options_);
+      strategy_decision_.estimated_partitions =
+          std::max(strategy_decision_.estimated_partitions, envelope.partition_count);
+      strategy_decision_.projected_payload_bytes =
+          std::max(strategy_decision_.projected_payload_bytes, estimateTablePayloadBytes(envelope.table));
+      applyStrategyDecision(strategy_decision_);
 
       {
         std::lock_guard<std::mutex> lock(queue_mu);
@@ -1507,6 +1594,17 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
           execution_decided_ = true;
           resolved_execution_mode_ = StreamingExecutionMode::ActorCredit;
           execution_reason_ = "configured actor-credit execution";
+          strategy_decision_.resolved_execution_mode =
+              streamingExecutionModeName(resolved_execution_mode_);
+          strategy_decision_.reason = execution_reason_;
+          strategy_decision_.transport_mode = actor_result.used_shared_memory
+                                                  ? streamingTransportModeName(
+                                                        StreamingTransportMode::SharedMemory)
+                                                  : streamingTransportModeName(
+                                                        StreamingTransportMode::RpcCopy);
+          strategy_decision_.used_actor_runtime = true;
+          strategy_decision_.used_shared_memory = actor_result.used_shared_memory;
+          applyStrategyDecision(strategy_decision_);
         } else if (!execution_decided_) {
           LocalExecutionDecision decision;
           auto actor_result = runAutoLocalActorStreamWindowKeySum(std::vector<Table>{actor_input},
@@ -1519,17 +1617,36 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
                   : StreamingExecutionMode::SingleProcess;
           execution_reason_ = decision.reason;
           execution_decided_ = true;
-          updateProgress([&](StreamingQueryProgress& progress) {
-            progress.execution_mode = streamingExecutionModeName(resolved_execution_mode_);
-            progress.execution_reason = execution_reason_;
-          });
+          strategy_decision_.resolved_execution_mode =
+              streamingExecutionModeName(resolved_execution_mode_);
+          strategy_decision_.reason = execution_reason_;
+          strategy_decision_.sampled_batches = decision.sampled_batches;
+          strategy_decision_.sampled_rows_per_batch = decision.rows_per_batch;
+          strategy_decision_.average_projected_payload_bytes =
+              decision.average_projected_payload_bytes;
+          strategy_decision_.actor_speedup = decision.actor_speedup;
+          strategy_decision_.compute_to_overhead_ratio =
+              decision.compute_to_overhead_ratio;
           if (resolved_execution_mode_ == StreamingExecutionMode::ActorCredit) {
             out = finalizeActorWindowKeySumOutput(std::move(actor_result.final_table),
                                                   actor_accelerator, root_.state_, options_,
                                                   &state_ms);
             partitions_used = std::max<size_t>(1, actor_result.processed_partitions);
             used_actor_runtime = true;
+            strategy_decision_.transport_mode = actor_result.used_shared_memory
+                                                    ? streamingTransportModeName(
+                                                          StreamingTransportMode::SharedMemory)
+                                                    : streamingTransportModeName(
+                                                          StreamingTransportMode::RpcCopy);
+            strategy_decision_.used_actor_runtime = true;
+            strategy_decision_.used_shared_memory = actor_result.used_shared_memory;
+          } else {
+            strategy_decision_.transport_mode =
+                streamingTransportModeName(StreamingTransportMode::InProcess);
+            strategy_decision_.used_actor_runtime = false;
+            strategy_decision_.used_shared_memory = false;
           }
+          applyStrategyDecision(strategy_decision_);
         } else if (resolved_execution_mode_ == StreamingExecutionMode::ActorCredit) {
           auto actor_result =
               runLocalActorStreamWindowKeySum(std::vector<Table>{actor_input}, actor_options);
@@ -1537,28 +1654,49 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
                                                root_.state_, options_, &state_ms);
           partitions_used = std::max<size_t>(1, actor_result.processed_partitions);
           used_actor_runtime = true;
+          strategy_decision_.used_actor_runtime = true;
+          strategy_decision_.used_shared_memory = actor_result.used_shared_memory;
+          strategy_decision_.transport_mode = actor_result.used_shared_memory
+                                                  ? streamingTransportModeName(
+                                                        StreamingTransportMode::SharedMemory)
+                                                  : streamingTransportModeName(
+                                                        StreamingTransportMode::RpcCopy);
+          applyStrategyDecision(strategy_decision_);
         }
       } else if (options_.execution_mode == StreamingExecutionMode::Auto && !execution_decided_) {
         execution_decided_ = true;
         resolved_execution_mode_ = StreamingExecutionMode::SingleProcess;
         execution_reason_ = "actor path requires window_start/key/value schema after partition-local transforms";
-        updateProgress([&](StreamingQueryProgress& progress) {
-          progress.execution_mode = streamingExecutionModeName(resolved_execution_mode_);
-          progress.execution_reason = execution_reason_;
-        });
+        strategy_decision_.resolved_execution_mode =
+            streamingExecutionModeName(resolved_execution_mode_);
+        strategy_decision_.reason = execution_reason_;
+        strategy_decision_.transport_mode =
+            streamingTransportModeName(StreamingTransportMode::InProcess);
+        applyStrategyDecision(strategy_decision_);
       }
     } else if (wants_actor_mode && !actor_pipeline_supported && !execution_decided_) {
       execution_decided_ = true;
       resolved_execution_mode_ = StreamingExecutionMode::SingleProcess;
       execution_reason_ = "query plan is not eligible for actor acceleration";
-      updateProgress([&](StreamingQueryProgress& progress) {
-        progress.execution_mode = streamingExecutionModeName(resolved_execution_mode_);
-        progress.execution_reason = execution_reason_;
-      });
+      strategy_decision_.resolved_execution_mode =
+          streamingExecutionModeName(resolved_execution_mode_);
+      strategy_decision_.reason = execution_reason_;
+      strategy_decision_.transport_mode =
+          streamingTransportModeName(StreamingTransportMode::InProcess);
+      applyStrategyDecision(strategy_decision_);
     }
 
     if (!used_actor_runtime) {
       out = root_.applyTransforms(envelope.table, options_, &state_ms, &partitions_used);
+      strategy_decision_.used_actor_runtime = false;
+      strategy_decision_.used_shared_memory = false;
+      strategy_decision_.transport_mode =
+          streamingTransportModeName(StreamingTransportMode::InProcess);
+      strategy_decision_.resolved_execution_mode =
+          streamingExecutionModeName(options_.execution_mode == StreamingExecutionMode::Auto
+                                         ? resolved_execution_mode_
+                                         : options_.execution_mode);
+      applyStrategyDecision(strategy_decision_);
     }
     const auto before_sink = std::chrono::steady_clock::now();
     if (sink_) {
@@ -1579,6 +1717,16 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
       progress.inflight_partitions = partitions_used;
       progress.status = "running";
     });
+    StreamCheckpointMarker checkpoint_marker;
+    checkpoint_marker.query_id = progress().query_id;
+    checkpoint_marker.source_offset = envelope.offset;
+    checkpoint_marker.batches_processed = progress().batches_processed;
+    if (root_.source_) {
+      root_.source_->checkpoint(checkpoint_marker);
+    }
+    if (sink_) {
+      sink_->checkpoint(checkpoint_marker);
+    }
     persistCheckpoint(progress());
 
     payload.summary = "batch end";
@@ -1610,6 +1758,12 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
   if (root_.state_) {
     root_.state_->close();
   }
+  if (root_.source_) {
+    root_.source_->close();
+  }
+  if (sink_) {
+    sink_->close();
+  }
   updateProgress([](StreamingQueryProgress& progress) { progress.status = "stopped"; });
   return processed_this_run;
 }
@@ -1620,11 +1774,40 @@ void StreamingQuery::stop() {
   if (root_.state_) {
     root_.state_->close();
   }
+  if (root_.source_) {
+    root_.source_->close();
+  }
+  if (sink_) {
+    sink_->close();
+  }
 }
 
 StreamingQueryProgress StreamingQuery::progress() const {
   std::lock_guard<std::mutex> lock(progress_mu_);
   return progress_;
+}
+
+void StreamingQuery::applyStrategyDecision(const StreamingStrategyDecision& decision) {
+  updateProgress([&](StreamingQueryProgress& progress) {
+    progress.requested_execution_mode = decision.requested_execution_mode;
+    progress.execution_mode = decision.resolved_execution_mode;
+    progress.execution_reason = decision.reason;
+    progress.transport_mode = decision.transport_mode;
+    progress.actor_eligible = decision.actor_eligible;
+    progress.used_actor_runtime = decision.used_actor_runtime;
+    progress.used_shared_memory = decision.used_shared_memory;
+    progress.has_stateful_ops = decision.has_stateful_ops;
+    progress.has_window = decision.has_window;
+    progress.sink_is_blocking = decision.sink_is_blocking;
+    progress.source_is_bounded = decision.source_is_bounded;
+    progress.estimated_partitions = decision.estimated_partitions;
+    progress.projected_payload_bytes = decision.projected_payload_bytes;
+    progress.sampled_batches = decision.sampled_batches;
+    progress.sampled_rows_per_batch = decision.sampled_rows_per_batch;
+    progress.average_projected_payload_bytes = decision.average_projected_payload_bytes;
+    progress.actor_speedup = decision.actor_speedup;
+    progress.compute_to_overhead_ratio = decision.compute_to_overhead_ratio;
+  });
 }
 
 std::string StreamingQuery::snapshotJson() const {
@@ -1633,8 +1816,10 @@ std::string StreamingQuery::snapshotJson() const {
   out << "{"
       << "\"query_id\":\"" << jsonEscape(current.query_id) << "\","
       << "\"status\":\"" << jsonEscape(current.status) << "\","
+      << "\"requested_execution_mode\":\"" << jsonEscape(current.requested_execution_mode) << "\","
       << "\"execution_mode\":\"" << jsonEscape(current.execution_mode) << "\","
       << "\"execution_reason\":\"" << jsonEscape(current.execution_reason) << "\","
+      << "\"transport_mode\":\"" << jsonEscape(current.transport_mode) << "\","
       << "\"batches_pulled\":" << current.batches_pulled << ","
       << "\"batches_processed\":" << current.batches_processed << ","
       << "\"blocked_count\":" << current.blocked_count << ","
@@ -1645,7 +1830,21 @@ std::string StreamingQuery::snapshotJson() const {
       << "\"last_sink_latency_ms\":" << current.last_sink_latency_ms << ","
       << "\"last_state_latency_ms\":" << current.last_state_latency_ms << ","
       << "\"last_source_offset\":\"" << jsonEscape(current.last_source_offset) << "\","
-      << "\"backpressure_active\":" << (current.backpressure_active ? "true" : "false")
+      << "\"backpressure_active\":" << (current.backpressure_active ? "true" : "false") << ","
+      << "\"actor_eligible\":" << (current.actor_eligible ? "true" : "false") << ","
+      << "\"used_actor_runtime\":" << (current.used_actor_runtime ? "true" : "false") << ","
+      << "\"used_shared_memory\":" << (current.used_shared_memory ? "true" : "false") << ","
+      << "\"has_stateful_ops\":" << (current.has_stateful_ops ? "true" : "false") << ","
+      << "\"has_window\":" << (current.has_window ? "true" : "false") << ","
+      << "\"sink_is_blocking\":" << (current.sink_is_blocking ? "true" : "false") << ","
+      << "\"source_is_bounded\":" << (current.source_is_bounded ? "true" : "false") << ","
+      << "\"estimated_partitions\":" << current.estimated_partitions << ","
+      << "\"projected_payload_bytes\":" << current.projected_payload_bytes << ","
+      << "\"sampled_batches\":" << current.sampled_batches << ","
+      << "\"sampled_rows_per_batch\":" << current.sampled_rows_per_batch << ","
+      << "\"average_projected_payload_bytes\":" << current.average_projected_payload_bytes << ","
+      << "\"actor_speedup\":" << current.actor_speedup << ","
+      << "\"compute_to_overhead_ratio\":" << current.compute_to_overhead_ratio
       << "}";
   return out.str();
 }
@@ -1677,6 +1876,10 @@ bool StreamingQuery::loadCheckpoint() {
     if (key == "blocked_count") restored.blocked_count = std::stoull(value);
     if (key == "max_backlog_batches") restored.max_backlog_batches = std::stoull(value);
     if (key == "last_source_offset") restored.last_source_offset = value;
+    if (key == "requested_execution_mode") restored.requested_execution_mode = value;
+    if (key == "execution_mode") restored.execution_mode = value;
+    if (key == "execution_reason") restored.execution_reason = value;
+    if (key == "transport_mode") restored.transport_mode = value;
   }
 
   if (!restored.last_source_offset.empty()) {
@@ -1705,6 +1908,10 @@ void StreamingQuery::persistCheckpoint(const StreamingQueryProgress& progress) c
   out << "blocked_count=" << progress.blocked_count << "\n";
   out << "max_backlog_batches=" << progress.max_backlog_batches << "\n";
   out << "last_source_offset=" << progress.last_source_offset << "\n";
+  out << "requested_execution_mode=" << progress.requested_execution_mode << "\n";
+  out << "execution_mode=" << progress.execution_mode << "\n";
+  out << "execution_reason=" << progress.execution_reason << "\n";
+  out << "transport_mode=" << progress.transport_mode << "\n";
 }
 
 }  // namespace dataflow

@@ -265,6 +265,7 @@ LIMIT 10;
 
 当前 Python wrapper 会在 Bazel workspace 初始化时自动探测本机可用的 CPython 解释器与开发头。
 如需显式指定，可设置 `VELARIA_PYTHON_BIN=/path/to/pythonX.Y`。
+Python 侧依赖管理与 demo 运行默认使用 `uv`。
 
 仓库中同时提供了 `python_api/` 目录：
 
@@ -290,16 +291,16 @@ bazel build //python_api:velaria_whl
 bazel build //python_api:velaria_native_whl
 ```
 
-Python 运行时还需要安装 `pyarrow`，因为 `DataFrame.to_arrow()` 会返回 `pyarrow.Table`。
+Python 运行时依赖由 `uv sync --project python_api ...` 统一安装，其中包含 `pyarrow`，因为 `DataFrame.to_arrow()` 会返回 `pyarrow.Table`。
 当前 Python API 面向 `Python 3.12` 和 `Python 3.13`。
 
 运行 demo：
 
 ```bash
 bazel build //:velaria_pyext
-cd python_api && uv sync --python /opt/homebrew/bin/python3.13
-cd python_api && .venv/bin/python demo_stream_sql.py
-cd python_api && .venv/bin/python demo_batch_sql_arrow.py
+uv sync --project python_api --python /opt/homebrew/bin/python3.13
+uv run --project python_api python python_api/demo_stream_sql.py
+uv run --project python_api python python_api/demo_batch_sql_arrow.py
 ```
 
 demo 会展示：
@@ -398,11 +399,14 @@ bazel run //:df_demo
 bazel run //:stream_demo
 bazel run //:stream_sql_demo
 bazel run //:stream_stateful_demo
-bazel run //:stream_runtime_test
+bazel test //:stream_runtime_test
 bazel run //:stream_benchmark
 bazel run //:stream_actor_benchmark
-bazel run //:stream_actor_credit_test
+bazel test //:stream_actor_credit_test
 bazel build //:velaria_pyext
+uv sync --project python_api --python python3.12
+uv run --project python_api python python_api/demo_batch_sql_arrow.py
+uv run --project python_api python python_api/demo_stream_sql.py
 ```
 
 ### 本机多进程 actor-stream 实验

@@ -37,9 +37,12 @@ print(json.dumps({
 
     chosen = None
     for candidate in candidates:
-        python_bin = repository_ctx.which(candidate)
-        if python_bin == None:
-            continue
+        if "/" in candidate or "\\" in candidate:
+            python_bin = candidate
+        else:
+            python_bin = repository_ctx.which(candidate)
+            if python_bin == None:
+                continue
         result = repository_ctx.execute([python_bin, "-c", probe], quiet = True)
         if result.return_code != 0:
             continue

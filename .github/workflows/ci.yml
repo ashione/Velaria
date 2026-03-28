@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+
+jobs:
+  native-and-python:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ github.workspace }}/python_api
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bazelisk
+        uses: bazelbuild/setup-bazelisk@v3
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Configure Python for Bazel
+        run: |
+          echo "VELARIA_PYTHON_BIN=$(which python)" >> "$GITHUB_ENV"
+
+      - name: Native Build
+        run: |
+          bazel build //:sql_demo //:stream_demo //:velaria_pyext
+
+      - name: Native Regression
+        run: |
+          bazel test //:stream_runtime_test //:sql_regression_test //:stream_actor_credit_test
+
+      - name: Python Smoke
+        run: |
+          ./scripts/run_python_ci_checks.sh

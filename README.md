@@ -53,6 +53,7 @@ client
 - Streaming query 配置：`trigger interval`、`max in-flight batches`、`max queued partitions`、`checkpoint path`、`single-process/local-workers/actor-credit/auto`
 - 流控与反压：query-local backlog 水位、阻塞计数、bounded backlog、progress snapshot
 - Streaming source/sink：`memory source`、`目录 CSV 增量 source`、`console sink`、`append 文件 sink`
+- Python 数据交换：`CSV` 文件输入 + `Arrow` 进程内 batch/stream 输入 + `Arrow` 输出
 - 基础算子：`select / filter / withColumn / drop / limit / window`
 - 聚合：`groupBy + sum/count`，以及批处理 `SUM / COUNT / AVG / MIN / MAX`
 - 基础状态聚合：stateful `sum/count`
@@ -258,6 +259,7 @@ LIMIT 10;
 
 - `create_dataframe_from_arrow(...)` 支持 `pyarrow.Table` 和可被 `pyarrow.table(...)` 归一化的对象
 - `create_stream_from_arrow(...)` 支持单个 `pyarrow.Table` / `RecordBatch`，也支持由多批 `Table` / `RecordBatch` 组成的 Python 序列
+- 因此 Python 侧既可以继续走 `CSV`，也可以完全跳过文件落盘，直接把内存中的 Arrow 数据交给 batch / stream 执行链
 
 ### 构建与运行
 
@@ -276,7 +278,9 @@ LIMIT 10;
 
 - `//python_api:velaria_whl` 负责打包 pure-Python API 层
 - `//python_api:velaria_native_whl` 会在 pure wheel 基础上注入 `_velaria.so`，产出本地平台 wheel
+- 已安装 native wheel 时，`import velaria` 会直接从包内加载 `_velaria.so`
 - 在源码树开发态，如果仓库里已经构建过 `//:velaria_pyext`，`velaria` 会自动从 `bazel-bin/_velaria.so` 发现 native 扩展
+- `VELARIA_PYTHON_EXT` 仍保留为显式覆盖入口，但不是主路径
 
 构建扩展：
 

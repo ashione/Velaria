@@ -139,12 +139,14 @@ Table LocalExecutor::execute(const PlanNodePtr& plan) const {
       std::vector<size_t> keyIdx;
       std::vector<AggregateSpec> aggs;
       const Table* source = nullptr;
+      Table aggregateInput;
 
       if (plan->kind == PlanKind::Aggregate) {
         const auto* node = static_cast<AggregatePlan*>(plan.get());
         keyIdx = node->keys;
         aggs = node->aggregates;
-        source = &execute(node->child);
+        aggregateInput = execute(node->child);
+        source = &aggregateInput;
       } else {
         const auto* node = static_cast<GroupBySumPlan*>(plan.get());
         keyIdx = node->keys;
@@ -153,7 +155,8 @@ Table LocalExecutor::execute(const PlanNodePtr& plan) const {
         sumSpec.value_index = node->value_index;
         sumSpec.output_name = "sum";
         aggs.push_back(sumSpec);
-        source = &execute(node->child);
+        aggregateInput = execute(node->child);
+        source = &aggregateInput;
       }
 
       if (!source) return Table();

@@ -41,13 +41,24 @@ DataFrame DataFrame::select(const std::vector<std::string>& columns) const {
   std::vector<size_t> idxs;
   idxs.reserve(columns.size());
   for (const auto& c : columns) idxs.push_back(source.schema.indexOf(c));
+  return selectByIndices(idxs);
+}
 
-  auto node = std::make_shared<SelectPlan>(plan_, idxs);
+DataFrame DataFrame::selectByIndices(const std::vector<size_t>& columns,
+                                    const std::vector<std::string>& aliases) const {
+  if (!columns.empty()) {
+    const auto source = materialize();
+    for (size_t idx : columns) {
+      if (idx >= source.schema.fields.size()) {
+        throw std::out_of_range("select index out of range: " + std::to_string(idx));
+      }
+    }
+  }
+  auto node = std::make_shared<SelectPlan>(plan_, columns, aliases);
   return DataFrame(node, executor_);
 }
 
-DataFrame DataFrame::filter(const std::string& column, const std::string& op, const Value& value) const {
-  const auto source = materialize();
+DataFrame DataFrame::filterByIndex(size_t columnIndex, const std::string& op, const Value& value) const {
   bool (*pred)(const Value&, const Value&) = &eqPred;
   if (op == "==" || op == "=") {
     pred = &eqPred;
@@ -64,9 +75,13 @@ DataFrame DataFrame::filter(const std::string& column, const std::string& op, co
   } else {
     throw std::invalid_argument("unsupported filter op: " + op);
   }
-
-  auto node = std::make_shared<FilterPlan>(plan_, source.schema.indexOf(column), value, pred);
+  auto node = std::make_shared<FilterPlan>(plan_, columnIndex, value, pred);
   return DataFrame(node, executor_);
+}
+
+DataFrame DataFrame::filter(const std::string& column, const std::string& op, const Value& value) const {
+  const auto source = materialize();
+  return filterByIndex(source.schema.indexOf(column), op, value);
 }
 
 DataFrame DataFrame::withColumn(const std::string& name, const std::string& sourceColumn) const {
@@ -99,6 +114,12 @@ DataFrame DataFrame::cache() const {
   // materialize eagerly now to simulate cache for v0.1
   materialize();
   return *this;
+}
+
+DataFrame DataFrame::aggregate(const std::vector<size_t>& keys,
+                              const std::vector<AggregateSpec>& aggs) const {
+  auto node = std::make_shared<AggregatePlan>(plan_, keys, aggs);
+  return DataFrame(node, executor_);
 }
 
 GroupedDataFrame DataFrame::groupBy(const std::vector<std::string>& keys) const {
@@ -150,9 +171,10 @@ const Schema& DataFrame::schema() const {
   return materialize().schema;
 }
 
-DataFrame GroupedDataFrame::sum(const std::string& valueColumn, const std::string&) const {
+DataFrame GroupedDataFrame::sum(const std::string& valueColumn, const std::string& outColumn) const {
   const auto source = executor_->execute(plan_);
-  auto node = std::make_shared<GroupBySumPlan>(plan_, keys_, source.schema.indexOf(valueColumn));
+  AggregateSpec spec{AggregateFunction::Sum, source.schema.indexOf(valueColumn), outColumn};
+  auto node = std::make_shared<AggregatePlan>(plan_, keys_, std::vector<AggregateSpec>{spec});
   return DataFrame(node, executor_);
 }
 

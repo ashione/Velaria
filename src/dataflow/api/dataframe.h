@@ -33,12 +33,17 @@ class DataFrame {
   explicit DataFrame(PlanNodePtr plan, std::shared_ptr<Executor> exec = nullptr);
 
   DataFrame select(const std::vector<std::string>& columns) const;
+  DataFrame selectByIndices(const std::vector<size_t>& columns,
+                           const std::vector<std::string>& aliases = {}) const;
   DataFrame filter(const std::string& column, const std::string& op, const Value& value) const;
+  DataFrame filterByIndex(size_t columnIndex, const std::string& op, const Value& value) const;
   DataFrame withColumn(const std::string& name, const std::string& sourceColumn) const;
   DataFrame drop(const std::string& column) const;
   DataFrame limit(size_t n) const;
   DataFrame repartition(size_t parts) const;
   DataFrame cache() const;
+  DataFrame aggregate(const std::vector<size_t>& keys,
+                     const std::vector<AggregateSpec>& aggs) const;
 
   GroupedDataFrame groupBy(const std::vector<std::string>& keys) const;
   DataFrame join(const DataFrame& right, const std::string& leftOn, const std::string& rightOn,

@@ -14,19 +14,16 @@ int main() {
          "eve,40\n";
   }
 
-  auto& spark = dataflow::SparkSession::builder();
-  auto df = spark.read_csv(path);
+  auto& session = dataflow::SparkSession::builder();
+  auto df = session.read_csv(path);
 
-  spark.createTempView("people", df);
+  session.createTempView("people", df);
 
-  auto top2 = df.select({"name", "score"}).filter("score", ">", dataflow::Value(int64_t(15))).limit(10);
-  top2.show();
+  auto top2 = session.sql("SELECT * FROM people LIMIT 2");
+  top2.show(10);
 
-  auto g = df.groupBy({"name"}).sum("score");
-  g.show();
-
-  auto limited = spark.sql("SELECT * FROM people LIMIT 2");
-  limited.show(10);
+  auto g = session.sql("SELECT name, SUM(score) AS total FROM people GROUP BY name HAVING total > 20 LIMIT 10");
+  g.show(10);
 
   return 0;
 }

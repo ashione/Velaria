@@ -11,7 +11,7 @@ namespace dataflow {
 struct PlanNode;
 using PlanNodePtr = std::shared_ptr<PlanNode>;
 
-enum class PlanKind { Source, Select, Filter, WithColumn, Drop, Limit, GroupBySum, Join };
+enum class PlanKind { Source, Select, Filter, WithColumn, Drop, Limit, GroupBySum, Aggregate, Join };
 enum class JoinKind { Inner, Left, Right, Full };
 
 struct PlanNode {
@@ -30,8 +30,10 @@ struct SourcePlan : PlanNode {
 struct SelectPlan : PlanNode {
   PlanNodePtr child;
   std::vector<size_t> indices;
-  explicit SelectPlan(PlanNodePtr p, std::vector<size_t> idx)
-      : PlanNode(PlanKind::Select), child(std::move(p)), indices(std::move(idx)) {}
+  std::vector<std::string> aliases;
+  explicit SelectPlan(PlanNodePtr p, std::vector<size_t> idx, std::vector<std::string> aliases = {})
+      : PlanNode(PlanKind::Select), child(std::move(p)), indices(std::move(idx)),
+        aliases(std::move(aliases)) {}
 };
 
 struct FilterPlan : PlanNode {
@@ -77,6 +79,25 @@ struct GroupBySumPlan : PlanNode {
   size_t value_index;
   GroupBySumPlan(PlanNodePtr p, std::vector<size_t> ks, size_t vid)
       : PlanNode(PlanKind::GroupBySum), child(std::move(p)), keys(std::move(ks)), value_index(vid) {}
+};
+
+enum class AggregateFunction { Sum, Count, Avg, Min, Max };
+
+struct AggregateSpec {
+  AggregateFunction function;
+  size_t value_index;
+  std::string output_name;
+};
+
+struct AggregatePlan : PlanNode {
+  PlanNodePtr child;
+  std::vector<size_t> keys;
+  std::vector<AggregateSpec> aggregates;
+  AggregatePlan(PlanNodePtr p, std::vector<size_t> ks, std::vector<AggregateSpec> aggs)
+      : PlanNode(PlanKind::Aggregate),
+        child(std::move(p)),
+        keys(std::move(ks)),
+        aggregates(std::move(aggs)) {}
 };
 
 struct JoinPlan : PlanNode {

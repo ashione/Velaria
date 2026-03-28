@@ -1,10 +1,9 @@
 #pragma once
 
-#include <memory>
-#include <string>
-#include <unordered_map>
-
 #include "src/dataflow/api/dataframe.h"
+#include "src/dataflow/catalog/catalog.h"
+#include "src/dataflow/sql/sql_parser.h"
+#include "src/dataflow/sql/sql_planner.h"
 
 namespace dataflow {
 
@@ -19,7 +18,7 @@ class SparkSession {
   DataFrame sql(const std::string& sql);
 
  private:
-  std::unordered_map<std::string, DataFrame> tempViews_;
+  ViewCatalog catalog_;
 };
 
 }  // namespace dataflow

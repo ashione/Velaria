@@ -3,6 +3,7 @@
 #include <cctype>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace dataflow {
@@ -14,6 +15,9 @@ struct Token {
   std::string text;
   bool is_string = false;
   bool is_number = false;
+
+  Token() = default;
+  Token(std::string t, bool s, bool n) : text(std::move(t)), is_string(s), is_number(n) {}
 };
 
 std::string toUpper(std::string value) {
@@ -58,7 +62,7 @@ std::vector<Token> tokenize(const std::string& sql) {
           break;
         }
       }
-      out.push_back(Token{sql.substr(start, i - start), false, false});
+      out.push_back(Token(sql.substr(start, i - start), false, false));
       continue;
     }
     if (std::isdigit(static_cast<unsigned char>(c)) || ((c == '+' || c == '-') &&
@@ -78,7 +82,7 @@ std::vector<Token> tokenize(const std::string& sql) {
         }
         break;
       }
-      out.push_back(Token{sql.substr(start, i - start), false, true});
+      out.push_back(Token(sql.substr(start, i - start), false, true));
       continue;
     }
     if (c == '\'' || c == '"') {
@@ -97,25 +101,25 @@ std::vector<Token> tokenize(const std::string& sql) {
       }
       std::string content = sql.substr(start, i - start);
       ++i;
-      out.push_back(Token{content, true, false});
+      out.push_back(Token(content, true, false));
       continue;
     }
     if (i + 1 < sql.size()) {
       std::string two = sql.substr(i, 2);
       if (two == ">=" || two == "<=" || two == "!=" || two == "<>") {
-        out.push_back(Token{two, false, false});
+        out.push_back(Token(two, false, false));
         i += 2;
         continue;
       }
     }
     if (c == ',' || c == '(' || c == ')' || c == '.' || c == '*' || c == '=' || c == '>' || c == '<') {
-      out.push_back(Token{std::string(1, c), false, false});
+      out.push_back(Token(std::string(1, c), false, false));
       ++i;
       continue;
     }
     throw SQLSyntaxError(std::string("invalid token: ") + c);
   }
-  out.push_back(Token{"", false, false});
+  out.push_back(Token("", false, false));
   return out;
 }
 

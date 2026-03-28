@@ -30,7 +30,7 @@ std::vector<dataflow::Table> makeBatches(size_t batch_count, size_t rows_per_bat
   return batches;
 }
 
-void runCase(const std::string& name, dataflow::LocalExecutionMode mode, size_t workers,
+void runCase(const std::string& name, dataflow::StreamingExecutionMode mode, size_t workers,
              bool stateful, size_t batch_count, size_t rows_per_batch) {
   dataflow::DataflowSession& session = dataflow::DataflowSession::builder();
   auto source =
@@ -40,6 +40,8 @@ void runCase(const std::string& name, dataflow::LocalExecutionMode mode, size_t 
   options.trigger_interval_ms = 0;
   options.execution_mode = mode;
   options.local_workers = workers;
+  options.actor_workers = workers;
+  options.actor_max_inflight_partitions = workers;
   options.max_inflight_batches = 4;
   options.max_queued_partitions = 16;
   options.max_retained_windows = 4;
@@ -68,6 +70,8 @@ void runCase(const std::string& name, dataflow::LocalExecutionMode mode, size_t 
 
   std::cout << "[bench] " << name << " processed=" << processed << " elapsed_s=" << seconds
             << " batches_per_s=" << batches_per_sec << " rows_per_s=" << rows_per_sec
+            << " mode=" << progress.execution_mode
+            << " reason=" << progress.execution_reason
             << " blocked=" << progress.blocked_count
             << " last_batch_ms=" << progress.last_batch_latency_ms
             << " last_state_ms=" << progress.last_state_latency_ms << std::endl;
@@ -84,13 +88,17 @@ int main(int argc, char** argv) {
   if (argc > 2) rows_per_batch = static_cast<size_t>(std::strtoull(argv[2], nullptr, 10));
   if (argc > 3) worker_count = static_cast<size_t>(std::strtoull(argv[3], nullptr, 10));
 
-  runCase("stateless-single", dataflow::LocalExecutionMode::SingleProcess, 1, false, batch_count,
+  runCase("stateless-single", dataflow::StreamingExecutionMode::SingleProcess, 1, false, batch_count,
           rows_per_batch);
-  runCase("stateless-local-workers", dataflow::LocalExecutionMode::LocalWorkers, worker_count,
+  runCase("stateless-local-workers", dataflow::StreamingExecutionMode::LocalWorkers, worker_count,
           false, batch_count, rows_per_batch);
-  runCase("stateful-single", dataflow::LocalExecutionMode::SingleProcess, 1, true, batch_count,
+  runCase("stateful-single", dataflow::StreamingExecutionMode::SingleProcess, 1, true, batch_count,
           rows_per_batch);
-  runCase("stateful-local-workers", dataflow::LocalExecutionMode::LocalWorkers, worker_count, true,
+  runCase("stateful-local-workers", dataflow::StreamingExecutionMode::LocalWorkers, worker_count, true,
           batch_count, rows_per_batch);
+  runCase("stateful-actor-credit", dataflow::StreamingExecutionMode::ActorCredit, worker_count, true,
+          batch_count, rows_per_batch);
+  runCase("stateful-auto", dataflow::StreamingExecutionMode::Auto, worker_count, true, batch_count,
+          rows_per_batch);
   return 0;
 }

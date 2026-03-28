@@ -10,6 +10,7 @@ Velaria 是一个面向可演进运行时的轻量数据流引擎研究项目，
 
 - 单机流式路径：`readStream -> StreamingDataFrame -> writeStream` 已具备 query 级配置、checkpoint/progress、本地文件 source/sink、窗口列、基础状态聚合。
 - 稳定性路径：`StreamingQuery` 负责 query-local 流控与端到端反压，默认采用“有界排队后阻塞”，避免 source 在 sink/state 过慢时无限积压。
+- query 级执行模式：`StreamingQuery` 当前支持 `single-process / local-workers / actor-credit / auto`，并会在 progress/snapshot 中记录最终选择与原因。
 - 单进程路径：`sql_demo`、`df_demo`、`stream_demo` 继续保留，用于验证本地执行语义。
 - 本机多进程路径：保留 `actor + rpc + jobmaster` 最小闭环，用于验证同机任务分发与运行时边界，不作为真正分布式完成态。
 
@@ -49,7 +50,7 @@ client
 
 - `DataflowSession` / `DataFrame` / `StreamingDataFrame`
 - `read_csv` / `readStream(...)` / `readStreamCsvDir(...)`
-- Streaming query 配置：`trigger interval`、`max in-flight batches`、`max queued partitions`、`checkpoint path`、`single-process/local-workers`
+- Streaming query 配置：`trigger interval`、`max in-flight batches`、`max queued partitions`、`checkpoint path`、`single-process/local-workers/actor-credit/auto`
 - 流控与反压：query-local backlog 水位、阻塞计数、bounded backlog、progress snapshot
 - Streaming source/sink：`memory source`、`目录 CSV 增量 source`、`console sink`、`append 文件 sink`
 - 基础算子：`select / filter / withColumn / drop / limit / window`
@@ -85,9 +86,26 @@ client
 - `max_queued_partitions`
 - `backpressure_high_watermark / backpressure_low_watermark`
 - `checkpoint_path`
-- `execution_mode = single-process / local-workers`
+- `execution_mode = single-process / local-workers / actor-credit / auto`
 - `local_workers`
+- `actor_workers / actor_max_inflight_partitions`
+- `actor_shared_memory_transport / actor_shared_memory_min_payload_bytes`
+- `actor_auto_options`
 - `max_retained_windows`
+
+`StreamingQueryProgress` / `snapshotJson()` 当前额外暴露：
+
+- `execution_mode`
+- `execution_reason`
+
+用于说明当前 query 最终走的是哪条本地执行路径，以及为何选择或回退。
+
+### query 级 actor / auto 选择
+
+- `actor-credit` 和 `auto` 当前只会对**明确支持的热路径**生效：前置变换全部是 partition-local，且最终 barrier 为 `window_start + key` 上的 `sum(value)`。
+- 当前这条热路径会下推到本地 actor-stream runtime，执行 `window_start/key/value` 的 partition partial aggregate，再把结果回并回 `StreamingQuery`。
+- 不满足这条条件时，query 会自动回退到现有 `single-process` 路径，并在 `execution_reason` 中说明原因。
+- 这意味着当前的 actor/auto 不是“任意 streaming plan 自动并行化”，而是**对明确可识别的窗口分组求和热路径做定向加速**。
 
 ### 反压语义
 
@@ -101,6 +119,7 @@ client
 - 每批完成后会把 `batches_pulled / batches_processed / blocked_count / max_backlog_batches / last_source_offset` 落到本地 checkpoint 文件。
 - `MemoryStreamSource` 会按 batch offset 恢复。
 - `DirectoryCsvStreamSource` 会按最后完成文件名恢复。
+- `snapshotJson()` 当前还会携带 `execution_mode / execution_reason`，用于排查 query 是否进入 actor-credit 或 auto 回退。
 
 ### 状态索引与窗口淘汰
 
@@ -203,6 +222,7 @@ bazel run //:stream_actor_credit_test
 ### 本机多进程 actor-stream 实验
 
 - `stream_actor_benchmark`：使用本地 worker 进程、分区级 credit 和 actor rpc 消息执行窗口 + key 的 partial aggregate。
+- `stream_benchmark`：从 `StreamingQuery` 入口直接验证 `single-process / local-workers / actor-credit / auto` 四种 query 级执行模式。
 - `stream_actor_credit_test`：验证本机多进程路径下：
   - credit 上限不被突破
   - 阻塞计数会触发
@@ -213,6 +233,7 @@ bazel run //:stream_actor_credit_test
 - 目标是验证 `partition credit + local worker process + result merge` 的最小闭环。
 - 重点在语义与流控，不代表当前实现已经优于单进程。
 - 当前 worker 做的是 partition 级 partial aggregate，最终状态回并仍在 coordinator 本地完成。
+- 当前输入大 payload 会在同 host 本地 worker 路径上走 `shared memory + mmap`；worker 和 coordinator 都已经支持基于 buffer 视图的解码，不再先把整块 payload 拷进 `std::vector<uint8_t>` 再反序列化。
 - 对轻量 aggregation，actor-stream 仍可能慢于单进程；在 CPU-heavy 聚合负载下可用 `stream_actor_benchmark` 验证本机多进程 scale-up，例如：
 
 ```bash
@@ -226,6 +247,16 @@ bazel run //:stream_actor_benchmark -- 16 65536 4 4 0 400
 - `max_inflight_partitions`
 - `worker_delay_ms`
 - `cpu_spin_per_row`
+- 可选第 7 个参数：`mode = single / actor / auto / all`
+
+当前 query 级 `stream_benchmark` 的一个参考结果：
+
+- `stateful-single`: `89k rows/s`
+- `stateful-local-workers`: `88k rows/s`
+- `stateful-actor-credit`: `108k rows/s`
+- `stateful-auto`: 默认阈值下仍可能保守回退到 `single-process`
+
+这说明 query 级 actor 下推已经接入 `StreamingQuery`，但 `auto` 阈值仍需要针对真实 query workload 继续调优。
 
 ### 构建 actor/rpc/jobmaster 路线
 

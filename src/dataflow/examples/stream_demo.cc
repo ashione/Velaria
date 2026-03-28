@@ -44,7 +44,7 @@ int main() {
   options.backpressure_high_watermark = 2;
   options.backpressure_low_watermark = 1;
   options.checkpoint_path = "/tmp/velaria-stream-demo.checkpoint";
-  options.execution_mode = dataflow::LocalExecutionMode::LocalWorkers;
+  options.execution_mode = dataflow::StreamingExecutionMode::LocalWorkers;
   options.local_workers = 2;
   std::filesystem::remove(options.checkpoint_path);
 

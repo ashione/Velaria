@@ -26,6 +26,7 @@
 #include "src/dataflow/ai/plugin_runtime.h"
 #include "src/dataflow/api/dataframe.h"
 #include "src/dataflow/core/csv.h"
+#include "src/dataflow/stream/actor_stream_runtime.h"
 
 namespace dataflow {
 
@@ -207,6 +208,38 @@ std::vector<Table> splitTable(const Table& table, size_t parts) {
   return out;
 }
 
+Table mergeTables(const std::vector<Table>& tables);
+
+Table executePartitionStage(const Table& input, const std::vector<StreamTransform>& stage,
+                            const StreamingQueryOptions& options, size_t worker_count) {
+  if (stage.empty()) return input;
+  if (worker_count <= 1 || input.rows.size() <= 1) {
+    Table table = input;
+    for (const auto& transform : stage) {
+      table = transform(table, options);
+    }
+    return table;
+  }
+
+  auto splits = splitTable(input, worker_count);
+  std::vector<Table> outputs(splits.size());
+  std::vector<std::thread> threads;
+  threads.reserve(splits.size());
+  for (size_t i = 0; i < splits.size(); ++i) {
+    threads.emplace_back([&, i] {
+      Table part = splits[i];
+      for (const auto& transform : stage) {
+        part = transform(part, options);
+      }
+      outputs[i] = std::move(part);
+    });
+  }
+  for (auto& thread : threads) {
+    thread.join();
+  }
+  return mergeTables(outputs);
+}
+
 Table mergeTables(const std::vector<Table>& tables) {
   if (tables.empty()) return Table();
   Table out(tables.front().schema, {});
@@ -292,6 +325,105 @@ struct BatchEnvelope {
   std::string offset;
   size_t partition_count = 1;
 };
+
+const char* streamingExecutionModeName(StreamingExecutionMode mode) {
+  switch (mode) {
+    case StreamingExecutionMode::SingleProcess:
+      return "single-process";
+    case StreamingExecutionMode::LocalWorkers:
+      return "local-workers";
+    case StreamingExecutionMode::ActorCredit:
+      return "actor-credit";
+    case StreamingExecutionMode::Auto:
+      return "auto";
+  }
+  return "single-process";
+}
+
+LocalActorStreamOptions makeActorOptions(const StreamingQueryOptions& options) {
+  LocalActorStreamOptions actor;
+  actor.worker_count = std::max<size_t>(2, options.effectiveActorWorkers());
+  actor.max_inflight_partitions =
+      std::max<size_t>(1, options.actor_max_inflight_partitions > 0
+                              ? options.actor_max_inflight_partitions
+                              : actor.worker_count);
+  actor.shared_memory_transport = options.actor_shared_memory_transport;
+  actor.shared_memory_min_payload_bytes = options.actor_shared_memory_min_payload_bytes;
+  return actor;
+}
+
+LocalExecutionAutoOptions makeActorAutoOptions(const StreamingAutoExecutionOptions& options) {
+  LocalExecutionAutoOptions out;
+  out.sample_batches = options.sample_batches;
+  out.min_rows_per_batch = options.min_rows_per_batch;
+  out.min_projected_payload_bytes = options.min_projected_payload_bytes;
+  out.min_compute_to_overhead_ratio = options.min_compute_to_overhead_ratio;
+  out.min_actor_speedup = options.min_actor_speedup;
+  out.strong_actor_speedup = options.strong_actor_speedup;
+  return out;
+}
+
+bool findActorAcceleratorTransform(const std::vector<StreamTransform>& transforms, size_t* index,
+                                   StreamAcceleratorSpec* accelerator) {
+  if (index == nullptr || accelerator == nullptr) return false;
+  bool found = false;
+  for (size_t i = 0; i < transforms.size(); ++i) {
+    if (transforms[i].accelerator().kind == StreamAcceleratorKind::None) continue;
+    if (found) return false;
+    *index = i;
+    *accelerator = transforms[i].accelerator();
+    found = true;
+  }
+  if (!found) return false;
+  for (size_t i = 0; i < *index; ++i) {
+    if (transforms[i].mode() != StreamTransformMode::PartitionLocal) {
+      return false;
+    }
+  }
+  return *index + 1 == transforms.size();
+}
+
+bool canRunActorWindowKeySum(const Table& table, const StreamAcceleratorSpec& accelerator) {
+  return accelerator.kind == StreamAcceleratorKind::WindowKeySum && table.schema.has("window_start") &&
+         table.schema.has("key") && table.schema.has("value");
+}
+
+void renameColumn(Table* table, const std::string& from, const std::string& to) {
+  if (table == nullptr || from == to || !table->schema.has(from)) return;
+  const auto idx = table->schema.indexOf(from);
+  table->schema.fields[idx] = to;
+  table->schema.index.erase(from);
+  table->schema.index[to] = idx;
+}
+
+Table finalizeActorWindowKeySumOutput(Table aggregated, const StreamAcceleratorSpec& accelerator,
+                                      std::shared_ptr<StateStore> state,
+                                      const StreamingQueryOptions& options, uint64_t* state_ms) {
+  auto started = std::chrono::steady_clock::now();
+  renameColumn(&aggregated, "value_sum", accelerator.output_column.empty() ? "value_sum"
+                                                                            : accelerator.output_column);
+  if (!accelerator.stateful) {
+    if (state_ms != nullptr) *state_ms = 0;
+    return aggregated;
+  }
+
+  auto state_store = state ? state : makeMemoryStateStore();
+  const size_t window_idx = aggregated.schema.indexOf("window_start");
+  const size_t key_idx = aggregated.schema.indexOf("key");
+  const size_t sum_idx =
+      aggregated.schema.indexOf(accelerator.output_column.empty() ? "value_sum" : accelerator.output_column);
+  for (auto& row : aggregated.rows) {
+    const auto state_key = makeStateKey(row, {window_idx, key_idx}, "group_sum:");
+    const double delta = row[sum_idx].asDouble();
+    row[sum_idx] = Value(state_store->addDouble(state_key, delta));
+    registerWindowState(state_store.get(), "group_sum", row[window_idx].toString(), state_key);
+  }
+  evictExpiredWindows(state_store.get(), "group_sum", options);
+  if (state_ms != nullptr) {
+    *state_ms = toMillis(std::chrono::steady_clock::now() - started);
+  }
+  return aggregated;
+}
 
 }  // namespace
 
@@ -865,11 +997,12 @@ void MemoryStreamSink::write(const Table& table) {
 // ---------- Transform ----------
 
 StreamTransform::StreamTransform(Fn f, StreamTransformMode mode, bool touches_state,
-                                 std::string label)
+                                 std::string label, StreamAcceleratorSpec accelerator)
     : fn_(std::move(f)),
       mode_(mode),
       touches_state_(touches_state),
-      label_(std::move(label)) {}
+      label_(std::move(label)),
+      accelerator_(std::move(accelerator)) {}
 
 // ---------- StreamingDataFrame ----------
 
@@ -992,36 +1125,6 @@ StreamingQuery StreamingDataFrame::writeStreamToConsole(uint64_t triggerInterval
 
 Table StreamingDataFrame::applyTransforms(const Table& batch, const StreamingQueryOptions& options,
                                           uint64_t* state_ms, size_t* partitions) const {
-  auto execute_stage = [&](const Table& input, const std::vector<StreamTransform>& stage,
-                           size_t worker_count) -> Table {
-    if (stage.empty()) return input;
-    if (worker_count <= 1 || input.rows.size() <= 1) {
-      Table table = input;
-      for (const auto& transform : stage) {
-        table = transform(table, options);
-      }
-      return table;
-    }
-
-    auto splits = splitTable(input, worker_count);
-    std::vector<Table> outputs(splits.size());
-    std::vector<std::thread> threads;
-    threads.reserve(splits.size());
-    for (size_t i = 0; i < splits.size(); ++i) {
-      threads.emplace_back([&, i] {
-        Table part = splits[i];
-        for (const auto& transform : stage) {
-          part = transform(part, options);
-        }
-        outputs[i] = std::move(part);
-      });
-    }
-    for (auto& thread : threads) {
-      thread.join();
-    }
-    return mergeTables(outputs);
-  };
-
   Table current = batch;
   std::vector<StreamTransform> pending_partition_local;
   uint64_t state_time = 0;
@@ -1033,7 +1136,7 @@ Table StreamingDataFrame::applyTransforms(const Table& batch, const StreamingQue
       continue;
     }
 
-    current = execute_stage(current, pending_partition_local, safeWorkerCount(options));
+    current = executePartitionStage(current, pending_partition_local, options, safeWorkerCount(options));
     pending_partition_local.clear();
 
     auto started = std::chrono::steady_clock::now();
@@ -1045,7 +1148,7 @@ Table StreamingDataFrame::applyTransforms(const Table& batch, const StreamingQue
     max_partitions = std::max<size_t>(1, max_partitions);
   }
 
-  current = execute_stage(current, pending_partition_local, safeWorkerCount(options));
+  current = executePartitionStage(current, pending_partition_local, options, safeWorkerCount(options));
 
   if (state_ms != nullptr) {
     *state_ms = state_time;
@@ -1070,6 +1173,12 @@ GroupedStreamingDataFrame::GroupedStreamingDataFrame(std::shared_ptr<StreamSourc
 StreamingDataFrame GroupedStreamingDataFrame::sum(const std::string& valueColumn, bool stateful,
                                                   const std::string& outputColumn) const {
   auto t = transforms_;
+  StreamAcceleratorSpec accelerator;
+  if (keys_ == std::vector<std::string>{"window_start", "key"} && valueColumn == "value") {
+    accelerator.kind = StreamAcceleratorKind::WindowKeySum;
+    accelerator.stateful = stateful;
+    accelerator.output_column = outputColumn;
+  }
   if (!stateful) {
     t.emplace_back(
         [keys = keys_, valueColumn, outputColumn](const Table& input,
@@ -1077,7 +1186,7 @@ StreamingDataFrame GroupedStreamingDataFrame::sum(const std::string& valueColumn
           auto grouped = DataFrame(input).groupBy(keys).sum(valueColumn, outputColumn);
           return grouped.toTable();
         },
-        StreamTransformMode::GlobalBarrier, false, "group_sum");
+        StreamTransformMode::GlobalBarrier, false, "group_sum", accelerator);
     return StreamingDataFrame(source_, std::move(t), nullptr);
   }
 
@@ -1107,7 +1216,7 @@ StreamingDataFrame GroupedStreamingDataFrame::sum(const std::string& valueColumn
         evictExpiredWindows(stateStore.get(), "group_sum", options);
         return out;
       },
-      StreamTransformMode::GlobalBarrier, true, "stateful_group_sum");
+      StreamTransformMode::GlobalBarrier, true, "stateful_group_sum", accelerator);
 
   return StreamingDataFrame(source_, std::move(t), state);
 }
@@ -1181,7 +1290,11 @@ StreamingQuery& StreamingQuery::trigger(uint64_t triggerIntervalMs) {
 StreamingQuery& StreamingQuery::start() {
   started_ = true;
   running_ = true;
-  updateProgress([](StreamingQueryProgress& progress) { progress.status = "running"; });
+  updateProgress([&](StreamingQueryProgress& progress) {
+    progress.status = "running";
+    progress.execution_mode = streamingExecutionModeName(options_.execution_mode);
+    progress.execution_reason.clear();
+  });
   return *this;
 }
 
@@ -1195,6 +1308,16 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
   std::mutex queue_mu;
   std::condition_variable queue_cv;
   bool source_done = false;
+  size_t actor_transform_index = 0;
+  StreamAcceleratorSpec actor_accelerator;
+  const bool actor_pipeline_supported =
+      findActorAcceleratorTransform(root_.transforms_, &actor_transform_index, &actor_accelerator);
+  std::vector<StreamTransform> actor_prefix_transforms;
+  if (actor_pipeline_supported) {
+    actor_prefix_transforms.assign(root_.transforms_.begin(),
+                                   root_.transforms_.begin() +
+                                       static_cast<std::ptrdiff_t>(actor_transform_index));
+  }
 
   auto queuedPartitions = [&]() -> size_t {
     size_t total = 0;
@@ -1324,7 +1447,79 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
     const auto batch_started = std::chrono::steady_clock::now();
     uint64_t state_ms = 0;
     size_t partitions_used = 1;
-    Table out = root_.applyTransforms(envelope.table, options_, &state_ms, &partitions_used);
+    Table out;
+    bool used_actor_runtime = false;
+    const bool wants_actor_mode =
+        options_.execution_mode == StreamingExecutionMode::ActorCredit ||
+        options_.execution_mode == StreamingExecutionMode::Auto;
+    if (wants_actor_mode && actor_pipeline_supported) {
+      Table actor_input =
+          executePartitionStage(envelope.table, actor_prefix_transforms, options_, 1);
+      if (canRunActorWindowKeySum(actor_input, actor_accelerator)) {
+        const auto actor_options = makeActorOptions(options_);
+        if (options_.execution_mode == StreamingExecutionMode::ActorCredit) {
+          auto actor_result =
+              runLocalActorStreamWindowKeySum(std::vector<Table>{actor_input}, actor_options);
+          out = finalizeActorWindowKeySumOutput(std::move(actor_result.final_table), actor_accelerator,
+                                               root_.state_, options_, &state_ms);
+          partitions_used = std::max<size_t>(1, actor_result.processed_partitions);
+          used_actor_runtime = true;
+          execution_decided_ = true;
+          resolved_execution_mode_ = StreamingExecutionMode::ActorCredit;
+          execution_reason_ = "configured actor-credit execution";
+        } else if (!execution_decided_) {
+          LocalExecutionDecision decision;
+          auto actor_result = runAutoLocalActorStreamWindowKeySum(std::vector<Table>{actor_input},
+                                                                  actor_options,
+                                                                  makeActorAutoOptions(options_.actor_auto_options),
+                                                                  &decision);
+          resolved_execution_mode_ =
+              decision.chosen_mode == LocalExecutionMode::ActorCredit
+                  ? StreamingExecutionMode::ActorCredit
+                  : StreamingExecutionMode::SingleProcess;
+          execution_reason_ = decision.reason;
+          execution_decided_ = true;
+          updateProgress([&](StreamingQueryProgress& progress) {
+            progress.execution_mode = streamingExecutionModeName(resolved_execution_mode_);
+            progress.execution_reason = execution_reason_;
+          });
+          if (resolved_execution_mode_ == StreamingExecutionMode::ActorCredit) {
+            out = finalizeActorWindowKeySumOutput(std::move(actor_result.final_table),
+                                                  actor_accelerator, root_.state_, options_,
+                                                  &state_ms);
+            partitions_used = std::max<size_t>(1, actor_result.processed_partitions);
+            used_actor_runtime = true;
+          }
+        } else if (resolved_execution_mode_ == StreamingExecutionMode::ActorCredit) {
+          auto actor_result =
+              runLocalActorStreamWindowKeySum(std::vector<Table>{actor_input}, actor_options);
+          out = finalizeActorWindowKeySumOutput(std::move(actor_result.final_table), actor_accelerator,
+                                               root_.state_, options_, &state_ms);
+          partitions_used = std::max<size_t>(1, actor_result.processed_partitions);
+          used_actor_runtime = true;
+        }
+      } else if (options_.execution_mode == StreamingExecutionMode::Auto && !execution_decided_) {
+        execution_decided_ = true;
+        resolved_execution_mode_ = StreamingExecutionMode::SingleProcess;
+        execution_reason_ = "actor path requires window_start/key/value schema after partition-local transforms";
+        updateProgress([&](StreamingQueryProgress& progress) {
+          progress.execution_mode = streamingExecutionModeName(resolved_execution_mode_);
+          progress.execution_reason = execution_reason_;
+        });
+      }
+    } else if (wants_actor_mode && !actor_pipeline_supported && !execution_decided_) {
+      execution_decided_ = true;
+      resolved_execution_mode_ = StreamingExecutionMode::SingleProcess;
+      execution_reason_ = "query plan is not eligible for actor acceleration";
+      updateProgress([&](StreamingQueryProgress& progress) {
+        progress.execution_mode = streamingExecutionModeName(resolved_execution_mode_);
+        progress.execution_reason = execution_reason_;
+      });
+    }
+
+    if (!used_actor_runtime) {
+      out = root_.applyTransforms(envelope.table, options_, &state_ms, &partitions_used);
+    }
     const auto before_sink = std::chrono::steady_clock::now();
     if (sink_) {
       sink_->write(out);
@@ -1398,6 +1593,8 @@ std::string StreamingQuery::snapshotJson() const {
   out << "{"
       << "\"query_id\":\"" << jsonEscape(current.query_id) << "\","
       << "\"status\":\"" << jsonEscape(current.status) << "\","
+      << "\"execution_mode\":\"" << jsonEscape(current.execution_mode) << "\","
+      << "\"execution_reason\":\"" << jsonEscape(current.execution_reason) << "\","
       << "\"batches_pulled\":" << current.batches_pulled << ","
       << "\"batches_processed\":" << current.batches_processed << ","
       << "\"blocked_count\":" << current.blocked_count << ","

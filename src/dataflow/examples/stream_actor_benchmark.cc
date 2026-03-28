@@ -50,7 +50,23 @@ void printMetrics(const std::string& label, const dataflow::LocalActorStreamResu
             << " worker_serialize_ms=" << result.worker_serialize_ms
             << " input_payload_bytes=" << result.input_payload_bytes
             << " output_payload_bytes=" << result.output_payload_bytes
+            << " input_shm_bytes=" << result.input_shared_memory_bytes
+            << " output_shm_bytes=" << result.output_shared_memory_bytes
+            << " used_shm=" << (result.used_shared_memory ? "true" : "false")
             << std::endl;
+}
+
+void printDecision(const dataflow::LocalExecutionDecision& decision) {
+  std::cout << "[actor-stream] auto-decision chosen=" << dataflow::localExecutionModeName(decision.chosen_mode)
+            << " sampled_batches=" << decision.sampled_batches
+            << " rows_per_batch=" << decision.rows_per_batch
+            << " avg_projected_payload_bytes=" << decision.average_projected_payload_bytes
+            << " single_rows_per_s=" << decision.single_rows_per_s
+            << " actor_rows_per_s=" << decision.actor_rows_per_s
+            << " actor_speedup=" << decision.actor_speedup
+            << " compute_to_overhead=" << decision.compute_to_overhead_ratio
+            << " thresholds_met=" << (decision.thresholds_met ? "true" : "false")
+            << " reason=" << decision.reason << std::endl;
 }
 
 }  // namespace
@@ -62,6 +78,7 @@ int main(int argc, char** argv) {
   size_t max_inflight = 4;
   uint64_t worker_delay_ms = 5;
   size_t cpu_spin_per_row = 0;
+  std::string mode = "all";
 
   if (argc > 1) batch_count = static_cast<size_t>(std::strtoull(argv[1], nullptr, 10));
   if (argc > 2) rows_per_batch = static_cast<size_t>(std::strtoull(argv[2], nullptr, 10));
@@ -69,27 +86,41 @@ int main(int argc, char** argv) {
   if (argc > 4) max_inflight = static_cast<size_t>(std::strtoull(argv[4], nullptr, 10));
   if (argc > 5) worker_delay_ms = static_cast<uint64_t>(std::strtoull(argv[5], nullptr, 10));
   if (argc > 6) cpu_spin_per_row = static_cast<size_t>(std::strtoull(argv[6], nullptr, 10));
+  if (argc > 7) mode = argv[7];
 
   const auto batches = makeBatches(batch_count, rows_per_batch);
-
-  const auto single_started = std::chrono::steady_clock::now();
-  dataflow::LocalActorStreamResult single_result;
-  single_result.final_table = dataflow::runSingleProcessWindowKeySum(batches, cpu_spin_per_row);
-  single_result.processed_batches = batch_count;
-  single_result.processed_partitions = batch_count;
-  single_result.elapsed_ms = static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::steady_clock::now() - single_started)
-          .count());
-  printMetrics("single-process", single_result, rows_per_batch);
 
   dataflow::LocalActorStreamOptions actor_options;
   actor_options.worker_count = worker_count;
   actor_options.max_inflight_partitions = max_inflight;
   actor_options.worker_delay_ms = worker_delay_ms;
   actor_options.cpu_spin_per_row = cpu_spin_per_row;
-  const auto actor_result = dataflow::runLocalActorStreamWindowKeySum(batches, actor_options);
-  printMetrics("actor-credit", actor_result, rows_per_batch);
+
+  if (mode == "single" || mode == "all") {
+    const auto single_started = std::chrono::steady_clock::now();
+    dataflow::LocalActorStreamResult single_result;
+    single_result.final_table = dataflow::runSingleProcessWindowKeySum(batches, cpu_spin_per_row);
+    single_result.processed_batches = batch_count;
+    single_result.processed_partitions = batch_count;
+    single_result.elapsed_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - single_started)
+            .count());
+    printMetrics("single-process", single_result, rows_per_batch);
+  }
+
+  if (mode == "actor" || mode == "all") {
+    const auto actor_result = dataflow::runLocalActorStreamWindowKeySum(batches, actor_options);
+    printMetrics("actor-credit", actor_result, rows_per_batch);
+  }
+
+  if (mode == "auto" || mode == "all") {
+    dataflow::LocalExecutionDecision decision;
+    const auto auto_result =
+        dataflow::runAutoLocalActorStreamWindowKeySum(batches, actor_options, {}, &decision);
+    printDecision(decision);
+    printMetrics("auto-selected", auto_result, rows_per_batch);
+  }
 
   return 0;
 }

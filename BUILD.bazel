@@ -16,9 +16,12 @@ cc_library(
         "src/dataflow/runtime/byte_transport.cc",
         "src/dataflow/runtime/rpc_runner.cc",
         "src/dataflow/rpc/rpc_codec.cc",
+        "src/dataflow/transport/ipc_transport.cc",
         "src/dataflow/ai/plugin_runtime.cc",
         "src/dataflow/sql/sql_parser.cc",
         "src/dataflow/sql/sql_planner.cc",
+        "src/dataflow/stream/binary_row_batch.cc",
+        "src/dataflow/stream/actor_stream_runtime.cc",
         "src/dataflow/stream/stream.cc",
     ],
     hdrs = [
@@ -42,6 +45,9 @@ cc_library(
         "src/dataflow/runtime/rpc_runner.h",
         "src/dataflow/ai/plugin_runtime.h",
         "src/dataflow/rpc/rpc_codec.h",
+        "src/dataflow/transport/ipc_transport.h",
+        "src/dataflow/stream/binary_row_batch.h",
+        "src/dataflow/stream/actor_stream_runtime.h",
         "src/dataflow/stream/stream.h",
     ],
     visibility = ["//visibility:public"],
@@ -105,31 +111,13 @@ cc_library(
 
 cc_library(
     name = "dataflow_transport",
-    srcs = [
-        "src/dataflow/transport/ipc_transport.cc",
-    ],
-    hdrs = [
-        "src/dataflow/transport/ipc_transport.h",
-    ],
     deps = [":dataflow_core"],
     visibility = ["//visibility:public"],
 )
 
 cc_library(
     name = "dataflow_stream_actor_runtime",
-    srcs = [
-        "src/dataflow/stream/binary_row_batch.cc",
-        "src/dataflow/stream/actor_stream_runtime.cc",
-    ],
-    hdrs = [
-        "src/dataflow/stream/binary_row_batch.h",
-        "src/dataflow/stream/actor_stream_runtime.h",
-    ],
-    deps = [
-        ":dataflow_actor_rpc_codec",
-        ":dataflow_transport",
-        ":dataflow_core",
-    ],
+    deps = [":dataflow_core"],
     visibility = ["//visibility:public"],
 )
 

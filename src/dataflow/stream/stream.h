@@ -131,7 +131,16 @@ std::shared_ptr<StateStore> makeStateStore(
     const std::string& backend,
     const std::unordered_map<std::string, std::string>& options = {});
 
-enum class LocalExecutionMode { SingleProcess, LocalWorkers };
+enum class StreamingExecutionMode { SingleProcess, LocalWorkers, ActorCredit, Auto };
+
+struct StreamingAutoExecutionOptions {
+  size_t sample_batches = 2;
+  size_t min_rows_per_batch = 64 * 1024;
+  size_t min_projected_payload_bytes = 256 * 1024;
+  double min_compute_to_overhead_ratio = 1.5;
+  double min_actor_speedup = 1.05;
+  double strong_actor_speedup = 1.25;
+};
 
 struct StreamingQueryOptions {
   uint64_t trigger_interval_ms = 1000;
@@ -140,16 +149,23 @@ struct StreamingQueryOptions {
   size_t backpressure_high_watermark = 2;
   size_t backpressure_low_watermark = 1;
   std::string checkpoint_path;
-  LocalExecutionMode execution_mode = LocalExecutionMode::SingleProcess;
+  StreamingExecutionMode execution_mode = StreamingExecutionMode::SingleProcess;
   size_t local_workers = 1;
+  size_t actor_workers = 0;
+  size_t actor_max_inflight_partitions = 0;
+  bool actor_shared_memory_transport = true;
+  size_t actor_shared_memory_min_payload_bytes = 64 * 1024;
+  StreamingAutoExecutionOptions actor_auto_options;
   uint64_t idle_wait_ms = 100;
   size_t max_retained_windows = 0;
 
   size_t effectiveLocalWorkers() const {
-    return execution_mode == LocalExecutionMode::LocalWorkers && local_workers > 1
+    return execution_mode == StreamingExecutionMode::LocalWorkers && local_workers > 1
                ? local_workers
                : 1;
   }
+
+  size_t effectiveActorWorkers() const { return actor_workers > 0 ? actor_workers : local_workers; }
 };
 
 struct StreamPullContext {
@@ -164,6 +180,8 @@ struct StreamPullContext {
 struct StreamingQueryProgress {
   std::string query_id;
   std::string status = "created";
+  std::string execution_mode = "single-process";
+  std::string execution_reason;
   size_t batches_pulled = 0;
   size_t batches_processed = 0;
   size_t blocked_count = 0;
@@ -270,12 +288,21 @@ class MemoryStreamSink : public StreamSink {
 
 enum class StreamTransformMode { PartitionLocal, GlobalBarrier };
 
+enum class StreamAcceleratorKind { None, WindowKeySum };
+
+struct StreamAcceleratorSpec {
+  StreamAcceleratorKind kind = StreamAcceleratorKind::None;
+  bool stateful = false;
+  std::string output_column;
+};
+
 class StreamTransform {
  public:
   using Fn = std::function<Table(const Table&, const StreamingQueryOptions&)>;
 
   StreamTransform(Fn f, StreamTransformMode mode = StreamTransformMode::PartitionLocal,
-                  bool touches_state = false, std::string label = {});
+                  bool touches_state = false, std::string label = {},
+                  StreamAcceleratorSpec accelerator = {});
 
   Table operator()(const Table& in, const StreamingQueryOptions& options) const {
     return fn_(in, options);
@@ -283,12 +310,14 @@ class StreamTransform {
   StreamTransformMode mode() const { return mode_; }
   bool touchesState() const { return touches_state_; }
   const std::string& label() const { return label_; }
+  const StreamAcceleratorSpec& accelerator() const { return accelerator_; }
 
  private:
   Fn fn_;
   StreamTransformMode mode_;
   bool touches_state_ = false;
   std::string label_;
+  StreamAcceleratorSpec accelerator_;
 };
 
 class GroupedStreamingDataFrame;
@@ -372,6 +401,9 @@ class StreamingQuery {
   StreamingQueryProgress progress_;
   std::atomic<bool> running_{false};
   bool started_ = false;
+  bool execution_decided_ = false;
+  StreamingExecutionMode resolved_execution_mode_ = StreamingExecutionMode::SingleProcess;
+  std::string execution_reason_;
 };
 
 }  // namespace dataflow

@@ -64,6 +64,55 @@ const sqlPresets = [
   },
 ];
 
+interface ComplexSqlStep {
+  label: string;
+  payload: string;
+  sql: string;
+}
+
+const complexSqlDemos: Array<{ name: string; steps: ComplexSqlStep[] }> = [
+  {
+    name: '复杂分析 Demo（本地 DDL/DML + 最终查询）',
+    steps: [
+      {
+        label: 'Step 1: 创建用户明细表',
+        payload: '',
+        sql: "CREATE TABLE app_users (user_id INT, token STRING, score INT, region STRING)",
+      },
+      {
+        label: 'Step 2: 写入用户明细',
+        payload: '',
+        sql: "INSERT INTO app_users VALUES (1, 'alice', 25, 'apac'), (2, 'bob', 18, 'emea'), (3, 'claire', 34, 'na'), (4, 'david', 11, 'apac'), (5, 'ella', 7, 'na')",
+      },
+      {
+        label: 'Step 3: 创建交易事实表',
+        payload: '',
+        sql: "CREATE TABLE app_actions (user_id INT, action STRING, score INT)",
+      },
+      {
+        label: 'Step 4: 写入交易事实',
+        payload: '',
+        sql: "INSERT INTO app_actions VALUES (1, 'view', 5), (1, 'purchase', 20), (2, 'view', 12), (2, 'click', 6), (3, 'purchase', 30), (4, 'view', 4), (5, 'click', 11)",
+      },
+      {
+        label: 'Step 5: 基于 join 的分组计算',
+        payload: '',
+        sql: "CREATE TABLE app_region_summary (region STRING, total_score INT, user_count INT)",
+      },
+      {
+        label: 'Step 6: 写入分组结果',
+        payload: '',
+        sql: "INSERT INTO app_region_summary SELECT u.region AS region, SUM(a.score) AS total_score, COUNT(*) AS user_count FROM app_users AS u INNER JOIN app_actions AS a ON u.user_id = a.user_id WHERE a.score > 6 GROUP BY u.region HAVING SUM(a.score) > 15",
+      },
+      {
+        label: 'Step 7: 查看汇总结果',
+        payload: '',
+        sql: "SELECT region, total_score, user_count FROM app_region_summary WHERE total_score > 10 LIMIT 5",
+      },
+    ],
+  },
+];
+
 const api = {
   async listJobs(): Promise<JobListPayload> {
     const response = await fetch('/api/jobs');
@@ -246,6 +295,47 @@ function App() {
     setStatusText(`已加载 SQL 模板`);
   };
 
+  const applyComplexDemo = async (demoName: string, steps: ComplexSqlStep[]) => {
+    setSubmitting(true);
+    setStatusText(`开始执行 ${demoName}`);
+    setDetailText('');
+    const logs: string[] = [];
+    let lastJobId = '';
+    let finalDetail = '';
+    try {
+      for (let i = 0; i < steps.length; i += 1) {
+        const step = steps[i];
+        setStatusText(`执行 ${demoName}：${step.label}`);
+        const result = await api.submit(step.payload, step.sql);
+        lastJobId = result.job_id;
+        const stateText = result.state || 'SUBMITTED';
+        const statusCode = result.status_code || 'JOB_SUBMITTED';
+        logs.push(`${step.label}: ${result.job_id} -> ${stateText}/${statusCode}`);
+        await refresh();
+        if (i === steps.length - 1) {
+          const detail = await api.getJob(result.job_id);
+          setSelectedJobId(result.job_id);
+          finalDetail = JSON.stringify(detail, null, 2);
+        }
+      }
+      setStatusText(`复杂 Demo 已提交：${lastJobId}`);
+      if (finalDetail) {
+        setDetailText(finalDetail);
+      } else {
+        setDetailText(logs.join('\n'));
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      logs.push(`失败: ${message}`);
+      setStatusText(message);
+    } finally {
+      if (!finalDetail && logs.length > 0) {
+        setDetailText(logs.join('\n'));
+      }
+      setSubmitting(false);
+    }
+  };
+
   return h(
     'div',
     { className: 'panel-grid' },
@@ -290,6 +380,22 @@ function App() {
               style: { minWidth: 'auto', paddingLeft: '12px', paddingRight: '12px' },
             },
             item.name
+          )
+        )
+      ),
+      h(
+        'div',
+        { className: 'row', style: { marginBottom: '10px' } },
+        ...complexSqlDemos.map((demo) =>
+          h(
+            'button',
+            {
+              type: 'button',
+              disabled: submitting,
+              onClick: () => applyComplexDemo(demo.name, demo.steps),
+              style: { minWidth: 'auto', paddingLeft: '12px', paddingRight: '12px' },
+            },
+            `复杂Demo：${demo.name}`
           )
         )
       ),

@@ -573,6 +573,8 @@ PyObject* pyProgressFromNative(const df::StreamingQueryProgress& progress) {
   setDictItem(out, "execution_mode", PyUnicode_FromString(progress.execution_mode.c_str()));
   setDictItem(out, "execution_reason", PyUnicode_FromString(progress.execution_reason.c_str()));
   setDictItem(out, "transport_mode", PyUnicode_FromString(progress.transport_mode.c_str()));
+  setDictItem(out, "checkpoint_delivery_mode",
+              PyUnicode_FromString(progress.checkpoint_delivery_mode.c_str()));
   setDictItem(out, "batches_pulled", PyLong_FromUnsignedLongLong(progress.batches_pulled));
   setDictItem(out, "batches_processed", PyLong_FromUnsignedLongLong(progress.batches_processed));
   setDictItem(out, "blocked_count", PyLong_FromUnsignedLongLong(progress.blocked_count));
@@ -672,11 +674,22 @@ PyObject* sessionNew(PyTypeObject* type, PyObject*, PyObject*) {
 }
 
 df::StreamingQueryOptions parseQueryOptions(uint64_t trigger_interval_ms,
-                                            const char* checkpoint_path) {
+                                            const char* checkpoint_path,
+                                            const char* checkpoint_delivery_mode) {
   df::StreamingQueryOptions options;
   options.trigger_interval_ms = trigger_interval_ms;
   if (checkpoint_path != nullptr) {
     options.checkpoint_path = checkpoint_path;
+  }
+  const std::string mode = checkpoint_delivery_mode == nullptr ? "at-least-once"
+                                                               : checkpoint_delivery_mode;
+  if (mode == "at-least-once") {
+    options.checkpoint_delivery_mode = df::CheckpointDeliveryMode::AtLeastOnce;
+  } else if (mode == "best-effort") {
+    options.checkpoint_delivery_mode = df::CheckpointDeliveryMode::BestEffort;
+  } else {
+    throw std::runtime_error(
+        "checkpoint_delivery_mode must be 'at-least-once' or 'best-effort'");
   }
   return options;
 }
@@ -794,16 +807,20 @@ PyObject* sessionStartStreamSql(PyVelariaSession* self, PyObject* args, PyObject
     const char* sql = nullptr;
     unsigned long long trigger_interval_ms = 1000;
     const char* checkpoint_path = "";
-    static const char* kwlist[] = {"sql", "trigger_interval_ms", "checkpoint_path", nullptr};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|Ks", const_cast<char**>(kwlist), &sql,
-                                     &trigger_interval_ms, &checkpoint_path)) {
+    const char* checkpoint_delivery_mode = "at-least-once";
+    static const char* kwlist[] = {"sql", "trigger_interval_ms", "checkpoint_path",
+                                   "checkpoint_delivery_mode", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|Kss", const_cast<char**>(kwlist), &sql,
+                                     &trigger_interval_ms, &checkpoint_path,
+                                     &checkpoint_delivery_mode)) {
       return nullptr;
     }
     std::unique_ptr<df::StreamingQuery> out;
     {
       AllowThreads allow;
       out = std::make_unique<df::StreamingQuery>(self->session->startStreamSql(
-          sql, parseQueryOptions(static_cast<uint64_t>(trigger_interval_ms), checkpoint_path)));
+          sql, parseQueryOptions(static_cast<uint64_t>(trigger_interval_ms), checkpoint_path,
+                                 checkpoint_delivery_mode)));
     }
     return wrapStreamingQuery(std::move(*out));
   });
@@ -1021,7 +1038,8 @@ PyObject* streamWriteStreamCsv(PyVelariaStreamingDataFrame* self, PyObject* args
     auto sink =
         std::make_shared<df::FileAppendStreamSink>(path, parseDelimiter(delimiter_text));
     return wrapStreamingQuery(self->sdf_ptr->writeStream(
-        sink, parseQueryOptions(static_cast<uint64_t>(trigger_interval_ms), checkpoint_path)));
+        sink, parseQueryOptions(static_cast<uint64_t>(trigger_interval_ms), checkpoint_path,
+                                "at-least-once")));
   });
 }
 
@@ -1036,7 +1054,8 @@ PyObject* streamWriteStreamConsole(PyVelariaStreamingDataFrame* self, PyObject* 
       return nullptr;
     }
     return wrapStreamingQuery(self->sdf_ptr->writeStreamToConsole(
-        parseQueryOptions(static_cast<uint64_t>(trigger_interval_ms), checkpoint_path)));
+        parseQueryOptions(static_cast<uint64_t>(trigger_interval_ms), checkpoint_path,
+                          "at-least-once")));
   });
 }
 

@@ -4,7 +4,7 @@ Velaria 是一个面向可演进运行时的轻量数据流引擎研究项目，
 
 本仓库当前不以真正分布式系统为目标，而是围绕 `DataflowSession`、`StreamingDataFrame`、本地状态、流控/反压、本机多进程并行执行做内核化实现。batch 语义继续保留，但当前按照“bounded stream”视角纳入同一执行模型。
 
-## 本轮里程碑（v0.3，2026-03-28）
+## 本轮里程碑（v0.5，2026-03-29）
 
 当前已对齐的执行路线是：`micro-batch in-proc + query-local backpressure + local worker scale-up`，并保留 `actor + rpc + jobmaster` 作为本机多进程实验路径。
 
@@ -13,8 +13,22 @@ Velaria 是一个面向可演进运行时的轻量数据流引擎研究项目，
 - query 级执行模式：`StreamingQuery` 当前支持 `single-process / local-workers / actor-credit / auto`，并会在 progress/snapshot 中记录最终选择与原因。
 - logical/physical 规划：logical plan 新增统一节点 `WindowAssign / Sink`；physical strategy 在 progress 中结构化记录执行模式、transport、水位与批成本估算。
 - source/sink ABI：新增 C++ 运行时 ABI（`RuntimeSource / RuntimeSink`），接口显式带 `query_id / checkpoint / backpressure` 上下文，作为后续跨进程 source/sink 扩展的稳定边界。
+- source/sink 接入：新增 `RuntimeSourceAdapter / RuntimeSinkAdapter`，把 `RuntimeSource/RuntimeSink` 映射到 `readStream(...)/writeStream(...)`，并把 checkpoint/ack 传递到 ABI，保证 query-local 反压与状态语义不变。
 - 单进程路径：`sql_demo`、`df_demo`、`stream_demo` 继续保留，用于验证本地执行语义。
 - 本机多进程路径：保留 `actor + rpc + jobmaster` 最小闭环，用于验证同机任务分发与运行时边界，不作为真正分布式完成态。
+
+
+## v0.4 / v0.5 补充（本次）
+
+本次按“先语义边界，再扩展入口”的顺序补充：
+
+- `v0.4`：在现有 unified logical/physical + strategy decision 基础上，补齐 source/sink ABI 到 streaming 主链路的适配层（`makeRuntimeSourceAdapter`、`makeRuntimeSinkAdapter`）。
+- `v0.5`：补齐覆盖 query progress 合同、checkpoint/ack 透传、Python Arrow + stream SQL 端到端用例的测试资产。
+
+当前仍保持仓库边界：
+
+- 不把本地多进程实验描述为完整分布式完成态。
+- Python 继续坚持 Arrow 数据交换；当前已支持 Python custom stream source -> Arrow micro-batch 适配，仍不引入 Python callback/UDF（custom sink 采用 Arrow batch 回调适配，不直接下沉到 native sink ABI）。
 
 ## 当前本地多进程架构
 
@@ -74,7 +88,7 @@ client
 - 当前版本不扩展 `UNION` 相关能力。
 - `JOIN` 仅保留现有最小能力，不在本轮继续做更复杂 join 语义扩展。
 - 流式 SQL 当前不支持 `JOIN / AVG / MIN / MAX / window SQL / INSERT ... VALUES`。
-- Python wrapper 当前通过仓库内 Python 配置规则自动探测本机可用的 CPython 开发头，不支持 Python callback / UDF / 自定义 source/sink。
+- Python wrapper 当前通过仓库内 Python 配置规则自动探测本机可用的 CPython 开发头；支持 custom stream source 先转 Arrow 再接入 stream，仍不支持 Python callback / UDF / Python sink 直接下沉到 native sink ABI（可通过 Arrow batch custom sink 适配）。
 - 当前反压是 query-local，一版不做多 query 全局公平调度。
 - 当前多进程链路仍是本地多进程验证，不包含真正分布式调度、容错恢复、状态迁移、资源治理。
 
@@ -239,7 +253,7 @@ LIMIT 10;
 
 - Python callback
 - Python UDF
-- Python 自定义 source / sink
+- Python sink 直接下沉到 native sink ABI（可通过 custom Arrow sink 适配回调）
 
 这样可以避免 native 线程反向进入 Python 时的额外 GIL 管理复杂度。
 

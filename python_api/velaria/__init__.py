@@ -4,6 +4,14 @@ import pathlib
 import subprocess
 import sys
 
+from .custom_stream import (
+    CustomArrowStreamSink,
+    CustomArrowStreamSource,
+    CustomStreamEmitOptions,
+    consume_arrow_batches_with_custom_sink,
+    create_stream_from_custom_source,
+)
+
 
 def _load_from_path(ext_path: pathlib.Path):
     spec = importlib.util.spec_from_file_location("velaria._velaria", ext_path)
@@ -65,16 +73,32 @@ def _load_native():
         ) from exc
 
 
-_native = _load_native()
+class _NativeUnavailable:
+    def __init__(self, *args, **kwargs):
+        raise ImportError(
+            "Velaria native extension is required for Session/DataFrame/Streaming APIs. "
+            "Build //:velaria_pyext or set VELARIA_PYTHON_EXT."
+        )
 
-Session = _native.Session
-DataFrame = _native.DataFrame
-StreamingDataFrame = _native.StreamingDataFrame
-StreamingQuery = _native.StreamingQuery
+
+try:
+    _native = _load_native()
+except ImportError:
+    _native = None
+
+Session = _native.Session if _native is not None else _NativeUnavailable
+DataFrame = _native.DataFrame if _native is not None else _NativeUnavailable
+StreamingDataFrame = _native.StreamingDataFrame if _native is not None else _NativeUnavailable
+StreamingQuery = _native.StreamingQuery if _native is not None else _NativeUnavailable
 
 __all__ = [
     "Session",
     "DataFrame",
     "StreamingDataFrame",
     "StreamingQuery",
+    "CustomArrowStreamSource",
+    "CustomArrowStreamSink",
+    "CustomStreamEmitOptions",
+    "create_stream_from_custom_source",
+    "consume_arrow_batches_with_custom_sink",
 ]

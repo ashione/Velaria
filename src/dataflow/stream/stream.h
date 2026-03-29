@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "src/dataflow/core/table.h"
+#include "src/dataflow/stream/source_sink_abi.h"
 
 namespace dataflow {
 
@@ -134,6 +135,8 @@ std::shared_ptr<StateStore> makeStateStore(
 enum class StreamingExecutionMode { SingleProcess, LocalWorkers, ActorCredit, Auto };
 enum class StreamingTransportMode { InProcess, RpcCopy, SharedMemory, Auto };
 
+enum class CheckpointDeliveryMode { AtLeastOnce, BestEffort };
+
 struct StreamingAutoExecutionOptions {
   size_t sample_batches = 2;
   size_t min_rows_per_batch = 64 * 1024;
@@ -159,6 +162,7 @@ struct StreamingQueryOptions {
   StreamingAutoExecutionOptions actor_auto_options;
   uint64_t idle_wait_ms = 100;
   size_t max_retained_windows = 0;
+  CheckpointDeliveryMode checkpoint_delivery_mode = CheckpointDeliveryMode::AtLeastOnce;
 
   size_t effectiveLocalWorkers() const {
     return execution_mode == StreamingExecutionMode::LocalWorkers && local_workers > 1
@@ -223,6 +227,7 @@ struct StreamingStrategyDecision {
   size_t backpressure_max_queue_batches = 0;
   size_t backpressure_high_watermark = 0;
   size_t backpressure_low_watermark = 0;
+  std::string checkpoint_delivery_mode = "at-least-once";
 };
 
 struct StreamingQueryProgress {
@@ -262,6 +267,7 @@ struct StreamingQueryProgress {
   size_t backpressure_max_queue_batches = 0;
   size_t backpressure_high_watermark = 0;
   size_t backpressure_low_watermark = 0;
+  std::string checkpoint_delivery_mode = "at-least-once";
 };
 
 class StreamSource {
@@ -373,6 +379,41 @@ struct StreamAcceleratorSpec {
   bool stateful = false;
   std::string output_column;
 };
+
+class RuntimeSourceAdapter : public StreamSource {
+ public:
+  explicit RuntimeSourceAdapter(std::shared_ptr<RuntimeSource> source);
+
+  void open(const StreamSourceContext& context) override;
+  bool nextBatch(const StreamPullContext& context, Table& batch) override;
+  std::string currentOffsetToken() const override;
+  bool restoreOffsetToken(const std::string& token) override;
+  void checkpoint(const StreamCheckpointMarker& marker) override;
+  void close() override;
+  std::string describe() const override;
+
+ private:
+  std::shared_ptr<RuntimeSource> source_;
+  std::string last_token_;
+};
+
+class RuntimeSinkAdapter : public StreamSink {
+ public:
+  explicit RuntimeSinkAdapter(std::shared_ptr<RuntimeSink> sink);
+
+  void open(const StreamSinkContext& context) override;
+  void write(const Table& table) override;
+  void flush() override;
+  void checkpoint(const StreamCheckpointMarker& marker) override;
+  void close() override;
+  std::string name() const override;
+
+ private:
+  std::shared_ptr<RuntimeSink> sink_;
+};
+
+std::shared_ptr<StreamSource> makeRuntimeSourceAdapter(std::shared_ptr<RuntimeSource> source);
+std::shared_ptr<StreamSink> makeRuntimeSinkAdapter(std::shared_ptr<RuntimeSink> sink);
 
 class StreamTransform {
  public:

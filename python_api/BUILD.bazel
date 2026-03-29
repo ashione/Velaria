@@ -1,11 +1,15 @@
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
 load("@pypi//:requirements.bzl", "requirement")
 
 py_library(
     name = "velaria_py",
-    srcs = ["velaria/__init__.py"],
+    srcs = [
+        "velaria/__init__.py",
+        "velaria/custom_stream.py",
+    ],
     imports = ["."],
     deps = [
         requirement("pyarrow"),
@@ -63,4 +67,25 @@ genrule(
         + "$(location @velaria_local_python//:platform_tag.txt) "
         + "velaria $@",
     tools = ["//scripts:build_native_wheel.py"],
+)
+
+py_test(
+    name = "streaming_v05_test",
+    srcs = ["tests/test_streaming_v05.py"],
+    data = ["//:velaria_pyext"],
+    imports = ["."],
+    deps = [
+        ":velaria_py",
+        requirement("pyarrow"),
+    ],
+)
+
+py_test(
+    name = "custom_stream_source_test",
+    srcs = ["tests/test_custom_stream_source.py"],
+    imports = ["."],
+    deps = [
+        ":velaria_py",
+        requirement("pyarrow"),
+    ],
 )

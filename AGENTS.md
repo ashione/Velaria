@@ -18,6 +18,8 @@
 - `session` 对外入口统一使用 `DataflowSession`。
 - 现阶段不做 JVM/Python 宿主栈移植，核心计算逻辑保持纯 C++ 实现。
 - 单节点示例命令保持可用，不要为了多进程实验破坏 `sql_demo / df_demo / stream_demo`。
+- 所有 Python 相关命令统一显式使用 `uv` 执行，包括测试、脚本、依赖安装；不要直接调用 `python` / `pip`。
+- `README.md` 保持英文，`README-zh.md` 保持中文；后续修改 README 内容时必须同步更新这两份文档。
 
 ## 命名与术语约束
 
@@ -91,6 +93,16 @@ bazel build //:sql_demo //:df_demo //:stream_demo \
   && echo '[summary] build+smoke ok'
 ```
 
+### Python 测试
+
+```bash
+bazel build //:velaria_pyext
+PYTHONPATH=python_api \
+  uv run --with pyarrow python -m unittest \
+  python_api.tests.test_custom_stream_source \
+  python_api.tests.test_streaming_v05
+```
+
 ## 最小验收清单
 
 ### actor/rpc smoke
@@ -152,6 +164,7 @@ bazel run //:stream_demo
 - 示例文件统一保持 `.cc`；不要新建 `.cpp` / `.cxx` 示例。
 - `--listen` / `--connect` 参数必须是 `host:port`。
 - 多进程验收顺序必须是 `scheduler -> worker -> client`。
+- Python 测试、脚本、依赖安装统一使用 `uv run ...` / `uv pip ...`，不要直接使用 `python3` / `pip3`。
 - 若出现 `no-worker-available`，优先确认是否启动了 `--no-auto-worker`，然后再检查 worker 是否已连上 scheduler。
 - 若出现 `cannot connect`，先查 scheduler 是否已监听、端口是否一致。
 - `Value` 当前允许 `Int64/Double` 跨类型比较；若改成严格类型模式，需同步更新 Planner 与示例。

@@ -90,3 +90,21 @@
    - `stream_scan_demo`：模拟追加文件目录 -> 2s micro-batch
    - `stream_count_demo`：滚动计数并输出到 console
 4. 在 `README` 的里程碑里标注：**Streaming 为新 M1A**
+
+
+## v0.4 / v0.5（2026-03-29 更新）
+
+### v0.4 已完成（当前仓库）
+- logical/physical 保持统一主链路，执行模式决策以 query 级 strategy decision 形式暴露。
+- source/sink ABI 已接入 streaming 主执行链：`RuntimeSourceAdapter / RuntimeSinkAdapter`。
+- checkpoint/progress/backpressure 合同继续保持 query-local 语义。
+
+### v0.5 已完成（当前仓库）
+- 新增 ABI 适配层回归测试，覆盖 open/next/checkpoint/ack/close。
+- 新增 Python 自动化用例，覆盖 Arrow batch、stream SQL 与 progress 字段语义。
+- README 与 runtime 设计文档补齐版本边界说明与测试矩阵。
+
+### 仍在后续版本范围
+- Parquet/S3 source 的生产级实现。
+- checkpoint 与外部 sink 的更强语义保证（例如重放幂等与恢复策略细化）。
+- Python UDF 与自定义 sink（暂不纳入当前版本）；custom stream source 通过 Arrow 适配已纳入 v0.5。

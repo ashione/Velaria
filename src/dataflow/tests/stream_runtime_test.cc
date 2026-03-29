@@ -138,7 +138,7 @@ void testStatefulWindowCount() {
   expect(user_b == 2, "userB count should accumulate to 2");
 }
 
-void testCheckpointRestore() {
+void testCheckpointRestoreAtLeastOnceDefault() {
   namespace fs = std::filesystem;
   const std::string checkpoint = "/tmp/velaria-stream-runtime-test.checkpoint";
   fs::remove(checkpoint);
@@ -166,8 +166,43 @@ void testCheckpointRestore() {
   const size_t second_processed = second.awaitTermination();
   const auto progress = second.progress();
 
-  expect(second_processed == 2, "restored run should skip the first completed batch");
-  expect(progress.batches_processed == 3, "restored progress should preserve total batches");
+  expect(second_processed == 3, "at-least-once restore should replay from source");
+  expect(progress.batches_processed >= 4, "at-least-once progress should include replayed batches");
+}
+
+
+void testCheckpointRestoreBestEffort() {
+  namespace fs = std::filesystem;
+  const std::string checkpoint = "/tmp/velaria-stream-runtime-test-best-effort.checkpoint";
+  fs::remove(checkpoint);
+
+  dataflow::DataflowSession& session = dataflow::DataflowSession::builder();
+  std::vector<dataflow::Table> batches = {
+      makeWindowBatch({{"2026-03-28T10:00:00", "userA", 1}}),
+      makeWindowBatch({{"2026-03-28T10:00:10", "userA", 1}}),
+      makeWindowBatch({{"2026-03-28T10:00:20", "userA", 1}}),
+  };
+
+  dataflow::StreamingQueryOptions options;
+  options.trigger_interval_ms = 0;
+  options.checkpoint_path = checkpoint;
+  options.checkpoint_delivery_mode = dataflow::CheckpointDeliveryMode::BestEffort;
+
+  auto first = session.readStream(std::make_shared<dataflow::MemoryStreamSource>(batches))
+                   .writeStream(std::make_shared<CollectSink>(), options);
+  first.start();
+  const size_t first_processed = first.awaitTermination(1);
+  expect(first_processed == 1, "best-effort first run should stop after one batch");
+
+  auto second = session.readStream(std::make_shared<dataflow::MemoryStreamSource>(batches))
+                    .writeStream(std::make_shared<CollectSink>(), options);
+  second.start();
+  const size_t second_processed = second.awaitTermination();
+  const auto progress = second.progress();
+
+  expect(second_processed == 2, "best-effort restore should skip first completed batch");
+  expect(progress.checkpoint_delivery_mode == "best-effort",
+         "best-effort progress should expose checkpoint mode");
 }
 
 void testWindowEviction() {
@@ -207,7 +242,8 @@ int main() {
   try {
     testBackpressure();
     testStatefulWindowCount();
-    testCheckpointRestore();
+    testCheckpointRestoreAtLeastOnceDefault();
+    testCheckpointRestoreBestEffort();
     testWindowEviction();
     std::cout << "[test] stream runtime ok" << std::endl;
     return 0;

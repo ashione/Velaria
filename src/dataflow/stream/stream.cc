@@ -340,6 +340,16 @@ const char* streamingExecutionModeName(StreamingExecutionMode mode) {
   return "single-process";
 }
 
+const char* checkpointDeliveryModeName(CheckpointDeliveryMode mode) {
+  switch (mode) {
+    case CheckpointDeliveryMode::AtLeastOnce:
+      return "at-least-once";
+    case CheckpointDeliveryMode::BestEffort:
+      return "best-effort";
+  }
+  return "at-least-once";
+}
+
 const char* streamingTransportModeName(StreamingTransportMode mode) {
   switch (mode) {
     case StreamingTransportMode::InProcess:
@@ -1045,6 +1055,107 @@ void MemoryStreamSink::write(const Table& table) {
 
 // ---------- Transform ----------
 
+
+RuntimeSourceAdapter::RuntimeSourceAdapter(std::shared_ptr<RuntimeSource> source)
+    : source_(std::move(source)) {
+  if (source_ == nullptr) {
+    throw std::invalid_argument("runtime source adapter requires non-null source");
+  }
+}
+
+void RuntimeSourceAdapter::open(const StreamSourceContext& context) {
+  RuntimeSourceContext runtime;
+  runtime.query_id = context.query_id;
+  runtime.trigger_interval_ms = context.trigger_interval_ms;
+  runtime.max_inflight_batches = context.max_inflight_batches;
+  runtime.checkpoint_path = context.checkpoint_path;
+  source_->open(runtime);
+}
+
+bool RuntimeSourceAdapter::nextBatch(const StreamPullContext& context, Table& batch) {
+  RuntimeSourceContext runtime;
+  runtime.query_id = context.query_id;
+  runtime.backlog_batches = context.backlog_batches;
+  runtime.inflight_batches = context.inflight_batches;
+  runtime.max_inflight_batches = context.max_inflight_batches;
+
+  SourceBatchToken token;
+  const auto status = source_->nextBatch(&batch, &token);
+  if (status == SourceStatus::Ok) {
+    last_token_ = token.value;
+    return true;
+  }
+  return false;
+}
+
+std::string RuntimeSourceAdapter::currentOffsetToken() const { return last_token_; }
+
+bool RuntimeSourceAdapter::restoreOffsetToken(const std::string& token) {
+  last_token_ = token;
+  return !token.empty();
+}
+
+void RuntimeSourceAdapter::checkpoint(const StreamCheckpointMarker& marker) {
+  RuntimeCheckpointMarker runtime;
+  runtime.query_id = marker.query_id;
+  runtime.source_offset = marker.source_offset;
+  runtime.batches_processed = marker.batches_processed;
+  source_->checkpoint(runtime);
+  if (!marker.source_offset.empty()) {
+    SourceBatchToken token;
+    token.value = marker.source_offset;
+    source_->ack(token);
+  }
+}
+
+void RuntimeSourceAdapter::close() { source_->close(); }
+
+std::string RuntimeSourceAdapter::describe() const { return "runtime-source-adapter"; }
+
+RuntimeSinkAdapter::RuntimeSinkAdapter(std::shared_ptr<RuntimeSink> sink) : sink_(std::move(sink)) {
+  if (sink_ == nullptr) {
+    throw std::invalid_argument("runtime sink adapter requires non-null sink");
+  }
+}
+
+void RuntimeSinkAdapter::open(const StreamSinkContext& context) {
+  RuntimeSinkContext runtime;
+  runtime.query_id = context.query_id;
+  runtime.checkpoint_path = context.checkpoint_path;
+  runtime.execution_mode = context.requested_execution_mode;
+  runtime.transport_mode = "inproc";
+  sink_->open(runtime);
+}
+
+void RuntimeSinkAdapter::write(const Table& table) {
+  const auto status = sink_->write(table);
+  if (status == SinkStatus::Failed) {
+    throw std::runtime_error("runtime sink write failed");
+  }
+}
+
+void RuntimeSinkAdapter::flush() { sink_->flush(); }
+
+void RuntimeSinkAdapter::checkpoint(const StreamCheckpointMarker& marker) {
+  RuntimeCheckpointMarker runtime;
+  runtime.query_id = marker.query_id;
+  runtime.source_offset = marker.source_offset;
+  runtime.batches_processed = marker.batches_processed;
+  sink_->checkpoint(runtime);
+}
+
+void RuntimeSinkAdapter::close() { sink_->close(); }
+
+std::string RuntimeSinkAdapter::name() const { return "runtime-sink-adapter"; }
+
+std::shared_ptr<StreamSource> makeRuntimeSourceAdapter(std::shared_ptr<RuntimeSource> source) {
+  return std::make_shared<RuntimeSourceAdapter>(std::move(source));
+}
+
+std::shared_ptr<StreamSink> makeRuntimeSinkAdapter(std::shared_ptr<RuntimeSink> sink) {
+  return std::make_shared<RuntimeSinkAdapter>(std::move(sink));
+}
+
 StreamTransform::StreamTransform(Fn f, StreamTransformMode mode, bool touches_state,
                                  std::string label, StreamAcceleratorSpec accelerator)
     : fn_(std::move(f)),
@@ -1342,6 +1453,8 @@ StreamingQuery::StreamingQuery(StreamingDataFrame root, std::shared_ptr<StreamSi
       std::max<size_t>(1, options_.max_inflight_batches);
   strategy_decision_.backpressure_high_watermark = options_.backpressure_high_watermark;
   strategy_decision_.backpressure_low_watermark = options_.backpressure_low_watermark;
+  strategy_decision_.checkpoint_delivery_mode =
+      checkpointDeliveryModeName(options_.checkpoint_delivery_mode);
   strategy_decision_.estimated_state_size_bytes = strategy_decision_.has_stateful_ops ? 1024 : 0;
   applyStrategyDecision(strategy_decision_);
 }
@@ -1820,6 +1933,7 @@ void StreamingQuery::applyStrategyDecision(const StreamingStrategyDecision& deci
     progress.backpressure_max_queue_batches = decision.backpressure_max_queue_batches;
     progress.backpressure_high_watermark = decision.backpressure_high_watermark;
     progress.backpressure_low_watermark = decision.backpressure_low_watermark;
+    progress.checkpoint_delivery_mode = decision.checkpoint_delivery_mode;
   });
 }
 
@@ -1862,7 +1976,8 @@ std::string StreamingQuery::snapshotJson() const {
       << "\"estimated_batch_cost\":" << current.estimated_batch_cost << ","
       << "\"backpressure_max_queue_batches\":" << current.backpressure_max_queue_batches << ","
       << "\"backpressure_high_watermark\":" << current.backpressure_high_watermark << ","
-      << "\"backpressure_low_watermark\":" << current.backpressure_low_watermark
+      << "\"backpressure_low_watermark\":" << current.backpressure_low_watermark << ","
+      << "\"checkpoint_delivery_mode\":\"" << jsonEscape(current.checkpoint_delivery_mode) << "\""
       << "}";
   return out.str();
 }
@@ -1906,11 +2021,15 @@ bool StreamingQuery::loadCheckpoint() {
       restored.backpressure_high_watermark = std::stoull(value);
     if (key == "backpressure_low_watermark")
       restored.backpressure_low_watermark = std::stoull(value);
+    if (key == "checkpoint_delivery_mode") restored.checkpoint_delivery_mode = value;
   }
 
-  if (!restored.last_source_offset.empty()) {
+  const bool best_effort_restore =
+      options_.checkpoint_delivery_mode == CheckpointDeliveryMode::BestEffort;
+  if (best_effort_restore && !restored.last_source_offset.empty()) {
     root_.source_->restoreOffsetToken(restored.last_source_offset);
   }
+  restored.checkpoint_delivery_mode = checkpointDeliveryModeName(options_.checkpoint_delivery_mode);
   restored.status = "restored";
   updateProgress([&](StreamingQueryProgress& progress) { progress = restored; });
   return true;
@@ -1943,6 +2062,7 @@ void StreamingQuery::persistCheckpoint(const StreamingQueryProgress& progress) c
   out << "backpressure_max_queue_batches=" << progress.backpressure_max_queue_batches << "\n";
   out << "backpressure_high_watermark=" << progress.backpressure_high_watermark << "\n";
   out << "backpressure_low_watermark=" << progress.backpressure_low_watermark << "\n";
+  out << "checkpoint_delivery_mode=" << progress.checkpoint_delivery_mode << "\n";
 }
 
 }  // namespace dataflow

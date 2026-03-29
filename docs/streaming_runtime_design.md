@@ -128,3 +128,36 @@ actor-stream payload 当前使用 typed binary batch：
 2. 调整 query 级 `Auto` 阈值，使其更贴近真实 `StreamingQuery` workload。
 3. 给 query 级 progress 增加更细粒度的 actor 指标拆分。
 4. 继续把 source 到执行内核的中间 `Table/Row/Value` 转换收紧到更早的列式表示。
+
+
+## Source/Sink ABI Bridge (v0.4)
+
+为了把 ABI 变成可运行路径而不仅是头文件契约，stream runtime 现在提供：
+
+- `RuntimeSourceAdapter`：把 `RuntimeSource` 映射到 `StreamSource`。
+- `RuntimeSinkAdapter`：把 `RuntimeSink` 映射到 `StreamSink`。
+- `makeRuntimeSourceAdapter(...) / makeRuntimeSinkAdapter(...)`：统一构造入口。
+
+桥接规则：
+
+- query 启动时，`query_id / trigger / checkpoint` 从 `Stream*Context` 下传到 `Runtime*Context`。
+- 每批完成后，`source_offset / batches_processed` 通过 `RuntimeCheckpointMarker` 传递给 source/sink。
+- source 侧在 checkpoint 后收到 `ack(token)`，用于 credit/checkpoint 相关外部实现。
+- 反压仍由 `StreamingQuery` 的 query-local backlog 控制，ABI 不改变核心反压语义。
+
+## Test Matrix Additions (v0.5)
+
+新增测试覆盖：
+
+- `source_sink_abi_test`：验证 runtime ABI 适配层上下文、checkpoint、ack、close 调用链。
+- `python_api/tests/test_streaming_v05.py`：验证 Python Arrow batch SQL 与 stream SQL progress 合同。
+
+这两组测试与现有 `stream_runtime_test / stream_actor_credit_test / planner_v03_test` 共同构成 v0.5 的最小回归面。
+
+
+## Checkpoint Delivery Mode
+
+`StreamingQueryOptions.checkpoint_delivery_mode` 当前支持：
+
+- `at-least-once`（默认）：恢复时重放 source，避免漏处理，允许重复。
+- `best-effort`：按 checkpoint offset 尝试从已完成位置继续，减少重复但不保证严格语义。

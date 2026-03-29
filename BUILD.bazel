@@ -258,3 +258,9 @@ cc_test(
     srcs = ["src/dataflow/tests/planner_v03_test.cc"],
     deps = [":dataflow_core"],
 )
+
+cc_test(
+    name = "source_sink_abi_test",
+    srcs = ["src/dataflow/tests/source_sink_abi_test.cc"],
+    deps = [":dataflow_core"],
+)

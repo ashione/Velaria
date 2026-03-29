@@ -193,7 +193,149 @@ df::Value valueFromPy(PyObject* obj) {
   throw std::runtime_error("value must be None, int, float, bool, or string");
 }
 
-df::Table tableFromArrowObject(PyObject* obj) {
+enum class FastArrowColumnKind {
+  Unsupported,
+  Bool,
+  Int32,
+  UInt32,
+  Int64,
+  UInt64,
+  Float32,
+  Float64,
+  Utf8,
+  LargeUtf8,
+};
+
+bool bitmapHasValue(const uint8_t* bitmap, int64_t index) {
+  if (bitmap == nullptr) {
+    return true;
+  }
+  return ((bitmap[index >> 3] >> (index & 7)) & 0x01u) != 0;
+}
+
+FastArrowColumnKind fastArrowColumnKind(const ArrowSchema* schema) {
+  if (schema == nullptr || schema->format == nullptr) {
+    return FastArrowColumnKind::Unsupported;
+  }
+  const std::string format(schema->format);
+  if (format == "b") return FastArrowColumnKind::Bool;
+  if (format == "i") return FastArrowColumnKind::Int32;
+  if (format == "I") return FastArrowColumnKind::UInt32;
+  if (format == "l") return FastArrowColumnKind::Int64;
+  if (format == "L") return FastArrowColumnKind::UInt64;
+  if (format == "f") return FastArrowColumnKind::Float32;
+  if (format == "g") return FastArrowColumnKind::Float64;
+  if (format == "u") return FastArrowColumnKind::Utf8;
+  if (format == "U") return FastArrowColumnKind::LargeUtf8;
+  return FastArrowColumnKind::Unsupported;
+}
+
+df::Value valueFromFastArrowColumn(FastArrowColumnKind kind, const ArrowArray* array, int64_t row_index) {
+  const int64_t offset_row = row_index + array->offset;
+  const auto* validity = reinterpret_cast<const uint8_t*>(array->n_buffers > 0 ? array->buffers[0] : nullptr);
+  if (array->null_count != 0 && !bitmapHasValue(validity, offset_row)) {
+    return df::Value();
+  }
+
+  switch (kind) {
+    case FastArrowColumnKind::Bool: {
+      const auto* bits = reinterpret_cast<const uint8_t*>(array->buffers[1]);
+      return df::Value(static_cast<int64_t>(((bits[offset_row >> 3] >> (offset_row & 7)) & 0x01u) != 0));
+    }
+    case FastArrowColumnKind::Int32:
+      return df::Value(static_cast<int64_t>(reinterpret_cast<const int32_t*>(array->buffers[1])[offset_row]));
+    case FastArrowColumnKind::UInt32:
+      return df::Value(static_cast<int64_t>(reinterpret_cast<const uint32_t*>(array->buffers[1])[offset_row]));
+    case FastArrowColumnKind::Int64:
+      return df::Value(static_cast<int64_t>(reinterpret_cast<const int64_t*>(array->buffers[1])[offset_row]));
+    case FastArrowColumnKind::UInt64:
+      return df::Value(static_cast<int64_t>(reinterpret_cast<const uint64_t*>(array->buffers[1])[offset_row]));
+    case FastArrowColumnKind::Float32:
+      return df::Value(static_cast<double>(reinterpret_cast<const float*>(array->buffers[1])[offset_row]));
+    case FastArrowColumnKind::Float64:
+      return df::Value(reinterpret_cast<const double*>(array->buffers[1])[offset_row]);
+    case FastArrowColumnKind::Utf8: {
+      const auto* offsets = reinterpret_cast<const int32_t*>(array->buffers[1]);
+      const auto* data = reinterpret_cast<const char*>(array->buffers[2]);
+      const auto begin = offsets[offset_row];
+      const auto end = offsets[offset_row + 1];
+      return df::Value(std::string(data + begin, data + end));
+    }
+    case FastArrowColumnKind::LargeUtf8: {
+      const auto* offsets = reinterpret_cast<const int64_t*>(array->buffers[1]);
+      const auto* data = reinterpret_cast<const char*>(array->buffers[2]);
+      const auto begin = offsets[offset_row];
+      const auto end = offsets[offset_row + 1];
+      return df::Value(std::string(data + begin, data + end));
+    }
+    case FastArrowColumnKind::Unsupported:
+      break;
+  }
+  throw std::runtime_error("unsupported Arrow fast-path column");
+}
+
+bool tryTableFromArrowCapsules(PyObject* obj, df::Table* table) {
+  if (table == nullptr || !PyObject_HasAttrString(obj, "__arrow_c_array__")) {
+    return false;
+  }
+
+  PyObject* pair = PyObject_CallMethod(obj, "__arrow_c_array__", nullptr);
+  if (pair == nullptr) {
+    PyErr_Clear();
+    return false;
+  }
+  if (!PyTuple_Check(pair) || PyTuple_GET_SIZE(pair) != 2) {
+    Py_DECREF(pair);
+    return false;
+  }
+
+  auto* schema =
+      reinterpret_cast<ArrowSchema*>(PyCapsule_GetPointer(PyTuple_GET_ITEM(pair, 0), "arrow_schema"));
+  auto* array =
+      reinterpret_cast<ArrowArray*>(PyCapsule_GetPointer(PyTuple_GET_ITEM(pair, 1), "arrow_array"));
+  if (schema == nullptr || array == nullptr || schema->n_children != array->n_children) {
+    PyErr_Clear();
+    Py_DECREF(pair);
+    return false;
+  }
+
+  std::vector<std::string> names;
+  names.reserve(static_cast<size_t>(schema->n_children));
+  std::vector<FastArrowColumnKind> kinds;
+  kinds.reserve(static_cast<size_t>(schema->n_children));
+  for (int64_t i = 0; i < schema->n_children; ++i) {
+    const auto* child_schema = schema->children[i];
+    const auto kind = fastArrowColumnKind(child_schema);
+    if (kind == FastArrowColumnKind::Unsupported) {
+      Py_DECREF(pair);
+      return false;
+    }
+    names.emplace_back(child_schema != nullptr && child_schema->name != nullptr
+                           ? child_schema->name
+                           : ("col_" + std::to_string(static_cast<long long>(i))));
+    kinds.push_back(kind);
+  }
+
+  std::vector<df::Row> rows(static_cast<size_t>(array->length),
+                            df::Row(names.size(), df::Value()));
+  for (int64_t column = 0; column < array->n_children; ++column) {
+    const auto* child_array = array->children[column];
+    if (child_array == nullptr) {
+      Py_DECREF(pair);
+      return false;
+    }
+    for (int64_t row = 0; row < array->length; ++row) {
+      rows[static_cast<size_t>(row)][static_cast<size_t>(column)] =
+          valueFromFastArrowColumn(kinds[static_cast<size_t>(column)], child_array, row);
+    }
+  }
+
+  Py_DECREF(pair);
+  *table = df::Table(df::Schema(std::move(names)), std::move(rows));
+  return true;
+}
+
+df::Table tableFromArrowSlow(PyObject* obj) {
   PyObject* pyarrow = PyImport_ImportModule("pyarrow");
   if (pyarrow == nullptr) {
     throw std::runtime_error("pyarrow is required for create_dataframe_from_arrow()");
@@ -276,9 +418,57 @@ df::Table tableFromArrowObject(PyObject* obj) {
   return df::Table(df::Schema(std::move(names)), std::move(rows));
 }
 
+df::Table mergeArrowTables(const std::vector<df::Table>& tables) {
+  if (tables.empty()) {
+    return df::Table();
+  }
+  df::Table merged = tables.front();
+  for (size_t i = 1; i < tables.size(); ++i) {
+    if (tables[i].schema.fields != merged.schema.fields) {
+      throw std::runtime_error("Arrow stream batches must share the same schema");
+    }
+    merged.rows.insert(merged.rows.end(), tables[i].rows.begin(), tables[i].rows.end());
+  }
+  return merged;
+}
+
+PyObject* importRecordBatchReaderFromArrowObject(PyObject* pyarrow, PyObject* obj) {
+  PyObject* reader_type = PyObject_GetAttrString(pyarrow, "RecordBatchReader");
+  if (reader_type == nullptr) {
+    throw std::runtime_error("failed to resolve pyarrow.RecordBatchReader");
+  }
+
+  PyObject* reader = nullptr;
+  if (PyObject_IsInstance(obj, reader_type) == 1) {
+    Py_INCREF(obj);
+    reader = obj;
+  } else if (PyObject_HasAttrString(obj, "__arrow_c_stream__")) {
+    PyObject* capsule = PyObject_CallMethod(obj, "__arrow_c_stream__", nullptr);
+    if (capsule == nullptr) {
+      Py_DECREF(reader_type);
+      throw std::runtime_error("failed to export Arrow C stream");
+    }
+    PyObject* importer = PyObject_GetAttrString(reader_type, "_import_from_c_capsule");
+    if (importer == nullptr) {
+      Py_DECREF(capsule);
+      Py_DECREF(reader_type);
+      throw std::runtime_error("pyarrow.RecordBatchReader._import_from_c_capsule() is unavailable");
+    }
+    reader = PyObject_CallFunctionObjArgs(importer, capsule, nullptr);
+    Py_DECREF(importer);
+    Py_DECREF(capsule);
+    if (reader == nullptr) {
+      Py_DECREF(reader_type);
+      throw std::runtime_error("failed to import Arrow C stream as RecordBatchReader");
+    }
+  }
+  Py_DECREF(reader_type);
+  return reader;
+}
+
 std::vector<df::Table> tablesFromArrowObject(PyObject* obj) {
   if (PyUnicode_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj)) {
-    return {tableFromArrowObject(obj)};
+    return {tableFromArrowSlow(obj)};
   }
   if (PyList_Check(obj) || PyTuple_Check(obj)) {
     PyObject* seq = PySequence_Fast(obj, "arrow batches");
@@ -290,12 +480,54 @@ std::vector<df::Table> tablesFromArrowObject(PyObject* obj) {
     tables.reserve(static_cast<size_t>(count));
     PyObject** items = PySequence_Fast_ITEMS(seq);
     for (Py_ssize_t i = 0; i < count; ++i) {
-      tables.push_back(tableFromArrowObject(items[i]));
+      const auto nested = tablesFromArrowObject(items[i]);
+      tables.insert(tables.end(), nested.begin(), nested.end());
     }
     Py_DECREF(seq);
     return tables;
   }
-  return {tableFromArrowObject(obj)};
+
+  PyObject* pyarrow = PyImport_ImportModule("pyarrow");
+  if (pyarrow == nullptr) {
+    throw std::runtime_error("pyarrow is required for create_stream_from_arrow()");
+  }
+
+  PyObject* reader = importRecordBatchReaderFromArrowObject(pyarrow, obj);
+  if (reader != nullptr) {
+    std::vector<df::Table> tables;
+    while (true) {
+      PyObject* batch = PyObject_CallMethod(reader, "read_next_batch", nullptr);
+      if (batch == nullptr) {
+        if (PyErr_ExceptionMatches(PyExc_StopIteration)) {
+          PyErr_Clear();
+          break;
+        }
+        Py_DECREF(reader);
+        Py_DECREF(pyarrow);
+        throw std::runtime_error("failed to read next RecordBatch from Arrow stream");
+      }
+      df::Table table;
+      if (!tryTableFromArrowCapsules(batch, &table)) {
+        table = tableFromArrowSlow(batch);
+      }
+      tables.push_back(std::move(table));
+      Py_DECREF(batch);
+    }
+    Py_DECREF(reader);
+    Py_DECREF(pyarrow);
+    return tables;
+  }
+
+  Py_DECREF(pyarrow);
+  df::Table table;
+  if (!tryTableFromArrowCapsules(obj, &table)) {
+    table = tableFromArrowSlow(obj);
+  }
+  return {std::move(table)};
+}
+
+df::Table tableFromArrowObject(PyObject* obj) {
+  return mergeArrowTables(tablesFromArrowObject(obj));
 }
 
 PyObject* pyFromValue(const df::Value& value) {
@@ -826,6 +1058,31 @@ PyObject* sessionStartStreamSql(PyVelariaSession* self, PyObject* args, PyObject
   });
 }
 
+PyObject* sessionExplainStreamSql(PyVelariaSession* self, PyObject* args, PyObject* kwargs) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    const char* sql = nullptr;
+    unsigned long long trigger_interval_ms = 1000;
+    const char* checkpoint_path = "";
+    const char* checkpoint_delivery_mode = "at-least-once";
+    static const char* kwlist[] = {"sql", "trigger_interval_ms", "checkpoint_path",
+                                   "checkpoint_delivery_mode", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|Kss", const_cast<char**>(kwlist), &sql,
+                                     &trigger_interval_ms, &checkpoint_path,
+                                     &checkpoint_delivery_mode)) {
+      return nullptr;
+    }
+    std::string explain;
+    {
+      AllowThreads allow;
+      explain = self->session->explainStreamSql(
+          sql, parseQueryOptions(static_cast<uint64_t>(trigger_interval_ms), checkpoint_path,
+                                 checkpoint_delivery_mode));
+    }
+    return PyUnicode_FromStringAndSize(explain.c_str(),
+                                       static_cast<Py_ssize_t>(explain.size()));
+  });
+}
+
 PyObject* dataFrameToRows(PyVelariaDataFrame* self, PyObject*) {
   return withExceptionTranslation([&]() -> PyObject* {
     std::unique_ptr<df::Table> table;
@@ -1119,6 +1376,9 @@ PyMethodDef sessionMethods[] = {
      "Build a StreamingDataFrame from stream SQL."},
     {"start_stream_sql", reinterpret_cast<PyCFunction>(sessionStartStreamSql),
      METH_VARARGS | METH_KEYWORDS, "Start an INSERT INTO ... SELECT ... streaming SQL query."},
+    {"explain_stream_sql", reinterpret_cast<PyCFunction>(sessionExplainStreamSql),
+     METH_VARARGS | METH_KEYWORDS,
+     "Explain a SELECT or INSERT INTO ... SELECT ... streaming SQL query."},
     {nullptr, nullptr, 0, nullptr},
 };
 

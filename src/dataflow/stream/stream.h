@@ -175,8 +175,12 @@ struct StreamingQueryOptions {
 
 struct StreamPullContext {
   std::string query_id;
+  // `backlog_batches` and `inflight_batches` both represent the number of
+  // queued batches that have been pulled but not yet consumed by the query.
   size_t backlog_batches = 0;
   size_t inflight_batches = 0;
+  // `queued_partitions` tracks the queued partitions implied by the current
+  // backlog, not the partitions already being processed by the consumer.
   size_t queued_partitions = 0;
   size_t max_inflight_batches = 0;
   bool backpressure_active = false;
@@ -230,6 +234,11 @@ struct StreamingStrategyDecision {
   std::string checkpoint_delivery_mode = "at-least-once";
 };
 
+class StreamSink;
+StreamingStrategyDecision describeStreamingStrategy(const StreamingDataFrame& root,
+                                                    const std::shared_ptr<StreamSink>& sink,
+                                                    const StreamingQueryOptions& options);
+
 struct StreamingQueryProgress {
   std::string query_id;
   std::string status = "created";
@@ -239,10 +248,19 @@ struct StreamingQueryProgress {
   std::string transport_mode = "inproc";
   size_t batches_pulled = 0;
   size_t batches_processed = 0;
+  // `blocked_count` counts distinct producer-side waits caused by bounded
+  // backlog or partition pressure. It does not count spin loops.
   size_t blocked_count = 0;
+  // `max_backlog_batches` is the largest observed queued backlog immediately
+  // after enqueueing a pulled batch.
   size_t max_backlog_batches = 0;
+  // `inflight_*` represent the queued backlog still waiting to be consumed.
   size_t inflight_batches = 0;
   size_t inflight_partitions = 0;
+  // `last_batch_latency_ms` covers one batch from execution start through sink
+  // flush completion. `last_sink_latency_ms` is the sink write/flush portion.
+  // `last_state_latency_ms` is state/window finalize time and is zero for
+  // stateless batches.
   uint64_t last_batch_latency_ms = 0;
   uint64_t last_sink_latency_ms = 0;
   uint64_t last_state_latency_ms = 0;
@@ -471,6 +489,9 @@ class StreamingDataFrame {
 
  private:
   friend class StreamingQuery;
+  friend StreamingStrategyDecision describeStreamingStrategy(
+      const StreamingDataFrame& root, const std::shared_ptr<StreamSink>& sink,
+      const StreamingQueryOptions& options);
   std::shared_ptr<StreamSource> source_;
   std::vector<StreamTransform> transforms_;
   std::shared_ptr<StateStore> state_;
@@ -511,6 +532,7 @@ class StreamingQuery {
 
   StreamingQueryProgress progress() const;
   std::string snapshotJson() const;
+  const StreamingStrategyDecision& strategyDecision() const { return strategy_decision_; }
 
  private:
   void applyStrategyDecision(const StreamingStrategyDecision& decision);

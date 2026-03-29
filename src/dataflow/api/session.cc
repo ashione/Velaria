@@ -25,6 +25,46 @@ std::string nextQueryId() {
   return oss.str();
 }
 
+std::string formatStreamStrategyExplain(const StreamingStrategyDecision& strategy,
+                                        const StreamingQueryOptions& options) {
+  std::ostringstream out;
+  out << "requested_mode=" << strategy.requested_execution_mode << "\n";
+  out << "selected_mode=" << strategy.resolved_execution_mode << "\n";
+  out << "reason=" << strategy.reason << "\n";
+  out << "actor_eligible=" << (strategy.actor_eligible ? "true" : "false") << "\n";
+  out << "used_actor_runtime=" << (strategy.used_actor_runtime ? "true" : "false") << "\n";
+  out << "transport_mode=" << strategy.transport_mode << "\n";
+  out << "has_window=" << (strategy.has_window ? "true" : "false") << "\n";
+  out << "has_stateful_ops=" << (strategy.has_stateful_ops ? "true" : "false") << "\n";
+  out << "sink_is_blocking=" << (strategy.sink_is_blocking ? "true" : "false") << "\n";
+  out << "source_is_bounded=" << (strategy.source_is_bounded ? "true" : "false") << "\n";
+  out << "estimated_state_size_bytes=" << strategy.estimated_state_size_bytes << "\n";
+  out << "estimated_batch_cost=" << strategy.estimated_batch_cost << "\n";
+  out << "backpressure_max_queue_batches=" << strategy.backpressure_max_queue_batches << "\n";
+  out << "backpressure_high_watermark=" << strategy.backpressure_high_watermark << "\n";
+  out << "backpressure_low_watermark=" << strategy.backpressure_low_watermark << "\n";
+  out << "checkpoint_delivery_mode=" << strategy.checkpoint_delivery_mode << "\n";
+  out << "actor_workers=" << std::max<size_t>(2, options.effectiveActorWorkers()) << "\n";
+  out << "actor_max_inflight_partitions="
+      << std::max<size_t>(1, options.actor_max_inflight_partitions > 0
+                                 ? options.actor_max_inflight_partitions
+                                 : options.effectiveActorWorkers())
+      << "\n";
+  out << "actor_shared_memory_transport="
+      << (options.actor_shared_memory_transport ? "true" : "false") << "\n";
+  out << "actor_shared_memory_min_payload_bytes="
+      << options.actor_shared_memory_min_payload_bytes << "\n";
+  out << "auto_sample_batches=" << options.actor_auto_options.sample_batches << "\n";
+  out << "auto_min_rows_per_batch=" << options.actor_auto_options.min_rows_per_batch << "\n";
+  out << "auto_min_projected_payload_bytes="
+      << options.actor_auto_options.min_projected_payload_bytes << "\n";
+  out << "auto_min_compute_to_overhead_ratio="
+      << options.actor_auto_options.min_compute_to_overhead_ratio << "\n";
+  out << "auto_min_actor_speedup=" << options.actor_auto_options.min_actor_speedup << "\n";
+  out << "auto_strong_actor_speedup=" << options.actor_auto_options.strong_actor_speedup << "\n";
+  return out.str();
+}
+
 }  // namespace
 
 DataflowSession& DataflowSession::builder() {
@@ -422,8 +462,9 @@ StreamingDataFrame buildAggregateStream(const StreamingDataFrame& seed, const sq
   return aggregated.select(final_columns);
 }
 
-StreamingDataFrame buildStreamingSelect(const sql::SqlQuery& query,
-                                        const std::unordered_map<std::string, StreamingDataFrame>& stream_views) {
+[[maybe_unused]] StreamingDataFrame buildStreamingSelect(
+    const sql::SqlQuery& query,
+    const std::unordered_map<std::string, StreamingDataFrame>& stream_views) {
   ensureSingleTableQuery(query);
   auto it = stream_views.find(query.from.name);
   if (it == stream_views.end()) {
@@ -636,6 +677,40 @@ StreamingDataFrame DataflowSession::streamSql(const std::string& sql) {
   }
   sql::SqlPlanner planner;
   return planner.planStream(statement.query, stream_views_);
+}
+
+std::string DataflowSession::explainStreamSql(const std::string& sql,
+                                              const StreamingQueryOptions& options) {
+  const auto statement = sql::SqlParser::parse(sql);
+  const sql::SqlQuery* query = nullptr;
+  std::shared_ptr<StreamSink> sink;
+  if (statement.kind == sql::SqlStatementKind::Select) {
+    query = &statement.query;
+  } else if (statement.kind == sql::SqlStatementKind::InsertSelect) {
+    query = &statement.insert.query;
+    auto sink_it = stream_sinks_.find(statement.insert.table);
+    if (sink_it == stream_sinks_.end()) {
+      throw CatalogNotFoundError("stream sink not found: " + statement.insert.table);
+    }
+    sink = sink_it->second;
+  } else {
+    throw SQLSyntaxError("explainStreamSql only supports SELECT or INSERT INTO ... SELECT");
+  }
+
+  sql::SqlPlanner planner;
+  const auto logical = planner.buildStreamLogicalPlan(*query);
+  const auto physical = planner.buildStreamPhysicalPlan(logical);
+  const auto stream = planner.materializeStreamFromPhysical(physical, stream_views_);
+  const auto strategy = describeStreamingStrategy(stream, sink, options);
+
+  std::ostringstream out;
+  out << "logical\n";
+  out << planner.explainStreamLogicalPlan(logical);
+  out << "physical\n";
+  out << planner.explainStreamPhysicalPlan(physical);
+  out << "strategy\n";
+  out << formatStreamStrategyExplain(strategy, options);
+  return out.str();
 }
 
 StreamingQuery DataflowSession::startStreamSql(const std::string& sql,

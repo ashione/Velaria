@@ -100,3 +100,14 @@ py_test(
         requirement("pyarrow"),
     ],
 )
+
+py_test(
+    name = "arrow_stream_ingestion_test",
+    srcs = ["tests/test_arrow_stream_ingestion.py"],
+    main = "tests/test_arrow_stream_ingestion.py",
+    imports = ["."],
+    deps = [
+        ":velaria_py_pkg",
+        requirement("pyarrow"),
+    ],
+)

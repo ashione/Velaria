@@ -26,6 +26,10 @@ class FakeRuntimeSource : public dataflow::RuntimeSource {
   void open(const dataflow::RuntimeSourceContext& context) override {
     open_context = context;
     opened = true;
+    if (opened_from_next_batch) {
+      open_backlog_batches.push_back(context.backlog_batches);
+      open_inflight_batches.push_back(context.inflight_batches);
+    }
   }
 
   dataflow::SourceStatus nextBatch(dataflow::Table* out, dataflow::SourceBatchToken* token) override {
@@ -49,8 +53,11 @@ class FakeRuntimeSource : public dataflow::RuntimeSource {
   dataflow::RuntimeSourceContext open_context;
   bool opened = false;
   bool closed = false;
+  bool opened_from_next_batch = false;
   std::vector<std::string> acked_tokens;
   std::vector<std::string> checkpoints;
+  std::vector<std::size_t> open_backlog_batches;
+  std::vector<std::size_t> open_inflight_batches;
 
  private:
   std::vector<dataflow::Table> batches_;
@@ -116,11 +123,19 @@ int main() {
            "runtime source should receive query_id");
     expect(runtime_source->open_context.checkpoint_path == options.checkpoint_path,
            "runtime source should receive checkpoint path");
+    expect(runtime_source->open_context.max_inflight_batches == options.max_inflight_batches,
+           "runtime source should receive max inflight batches");
     expect(runtime_sink->open_context.execution_mode == "single-process",
            "runtime sink should receive requested execution mode");
+    expect(runtime_sink->open_context.transport_mode == "inproc",
+           "runtime sink should receive transport mode");
 
     expect(runtime_source->acked_tokens.size() == 2,
            "runtime source should ack per checkpointed batch");
+    expect(runtime_source->acked_tokens[0] == "batch-0",
+           "runtime source should ack the first source token");
+    expect(runtime_source->acked_tokens[1] == "batch-1",
+           "runtime source should ack the second source token");
     expect(runtime_sink->writes.size() == 2, "runtime sink should receive two writes");
     expect(runtime_sink->checkpoints.size() == 2, "runtime sink should receive checkpoints");
 

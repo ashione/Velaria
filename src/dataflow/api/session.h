@@ -27,6 +27,8 @@ class DataflowSession {
   void registerStreamSink(const std::string& name, std::shared_ptr<StreamSink> sink);
   DataFrame sql(const std::string& sql);
   StreamingDataFrame streamSql(const std::string& sql);
+  std::string explainStreamSql(const std::string& sql,
+                               const StreamingQueryOptions& options = {});
   StreamingQuery startStreamSql(const std::string& sql,
                                 const StreamingQueryOptions& options = {});
 

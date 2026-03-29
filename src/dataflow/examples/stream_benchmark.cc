@@ -7,6 +7,7 @@
 #include <cstdlib>
 
 #include "src/dataflow/api/session.h"
+#include "src/dataflow/runtime/observability.h"
 #include "src/dataflow/stream/stream.h"
 
 namespace {
@@ -32,6 +33,7 @@ std::vector<dataflow::Table> makeBatches(size_t batch_count, size_t rows_per_bat
 
 void runCase(const std::string& name, dataflow::StreamingExecutionMode mode, size_t workers,
              bool stateful, size_t batch_count, size_t rows_per_batch) {
+  using namespace dataflow::observability;
   dataflow::DataflowSession& session = dataflow::DataflowSession::builder();
   auto source =
       std::make_shared<dataflow::MemoryStreamSource>(makeBatches(batch_count, rows_per_batch));
@@ -75,6 +77,24 @@ void runCase(const std::string& name, dataflow::StreamingExecutionMode mode, siz
             << " blocked=" << progress.blocked_count
             << " last_batch_ms=" << progress.last_batch_latency_ms
             << " last_state_ms=" << progress.last_state_latency_ms << std::endl;
+  std::cout << "[bench-json] "
+            << object({
+                   field("name", name),
+                   field("processed", processed),
+                   field("elapsed_s", std::to_string(seconds), true),
+                   field("batches_per_s", std::to_string(batches_per_sec), true),
+                   field("rows_per_s", std::to_string(rows_per_sec), true),
+                   field("mode", progress.execution_mode),
+                   field("reason", progress.execution_reason),
+                   field("transport_mode", progress.transport_mode),
+                   field("blocked_count", progress.blocked_count),
+                   field("last_batch_latency_ms", progress.last_batch_latency_ms),
+                   field("last_state_latency_ms", progress.last_state_latency_ms),
+                   field("actor_eligible", progress.actor_eligible),
+                   field("used_actor_runtime", progress.used_actor_runtime),
+                   field("used_shared_memory", progress.used_shared_memory),
+               })
+            << std::endl;
 }
 
 }  // namespace

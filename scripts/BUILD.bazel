@@ -3,4 +3,5 @@ exports_files([
     "build_native_wheel.py",
     "run_actor_rpc_e2e.sh",
     "run_actor_rpc_scheduler.sh",
+    "run_stream_observability_regression.sh",
 ])

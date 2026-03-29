@@ -1,9 +1,11 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -50,6 +52,18 @@ class CollectSink : public dataflow::StreamSink {
   std::vector<dataflow::Table> batches_;
 };
 
+std::vector<std::string> readNonEmptyLines(const std::string& path) {
+  std::ifstream in(path);
+  std::vector<std::string> lines;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (!line.empty()) {
+      lines.push_back(line);
+    }
+  }
+  return lines;
+}
+
 dataflow::Table makeWindowBatch(const std::vector<std::tuple<const char*, const char*, int64_t>>& rows) {
   dataflow::Table table;
   table.schema = dataflow::Schema({"ts", "key", "value"});
@@ -94,6 +108,11 @@ void testBackpressure() {
   expect(processed == 4, "backpressure test should process all batches");
   expect(progress.blocked_count > 0, "backpressure test should record blocking");
   expect(progress.max_backlog_batches <= 1, "backpressure backlog should remain bounded");
+  expect(progress.backpressure_high_watermark == 1, "backpressure snapshot should expose high watermark");
+  expect(progress.backpressure_low_watermark == 0, "backpressure snapshot should expose low watermark");
+  expect(progress.inflight_batches == 0, "backpressure test should drain queued inflight batches");
+  expect(progress.inflight_partitions == 0, "backpressure test should drain queued inflight partitions");
+  expect(!progress.backpressure_active, "backpressure should clear after backlog drains");
   expect(sink->batches() == 4, "slow sink should receive all batches");
 }
 
@@ -168,6 +187,7 @@ void testCheckpointRestoreAtLeastOnceDefault() {
 
   expect(second_processed == 3, "at-least-once restore should replay from source");
   expect(progress.batches_processed >= 4, "at-least-once progress should include replayed batches");
+  expect(progress.last_source_offset == "3", "at-least-once restore should finish at the final source offset");
 }
 
 
@@ -203,6 +223,40 @@ void testCheckpointRestoreBestEffort() {
   expect(second_processed == 2, "best-effort restore should skip first completed batch");
   expect(progress.checkpoint_delivery_mode == "best-effort",
          "best-effort progress should expose checkpoint mode");
+  expect(progress.last_source_offset == "3", "best-effort restore should finish at the final source offset");
+}
+
+void testCheckpointRestoreDuplicatesSinkOutputAtLeastOnce() {
+  namespace fs = std::filesystem;
+  const std::string checkpoint = "/tmp/velaria-stream-runtime-test-duplicates.checkpoint";
+  const std::string sink_path = "/tmp/velaria-stream-runtime-test-duplicates.csv";
+  fs::remove(checkpoint);
+  fs::remove(sink_path);
+
+  dataflow::DataflowSession& session = dataflow::DataflowSession::builder();
+  std::vector<dataflow::Table> batches = {
+      makeWindowBatch({{"2026-03-28T11:00:00", "userA", 1}}),
+      makeWindowBatch({{"2026-03-28T11:00:10", "userB", 2}}),
+      makeWindowBatch({{"2026-03-28T11:00:20", "userC", 3}}),
+  };
+
+  dataflow::StreamingQueryOptions options;
+  options.trigger_interval_ms = 0;
+  options.checkpoint_path = checkpoint;
+
+  auto first = session.readStream(std::make_shared<dataflow::MemoryStreamSource>(batches))
+                   .writeStream(std::make_shared<dataflow::FileAppendStreamSink>(sink_path), options);
+  first.start();
+  expect(first.awaitTermination(1) == 1, "duplicate-output first run should stop after one batch");
+
+  auto second = session.readStream(std::make_shared<dataflow::MemoryStreamSource>(batches))
+                    .writeStream(std::make_shared<dataflow::FileAppendStreamSink>(sink_path), options);
+  second.start();
+  expect(second.awaitTermination() == 3, "duplicate-output second run should replay all batches");
+
+  const auto lines = readNonEmptyLines(sink_path);
+  expect(lines.size() == 5, "at-least-once replay should leave header plus four data rows");
+  expect(lines[1] == lines[2], "at-least-once replay should duplicate the first sink output");
 }
 
 void testWindowEviction() {
@@ -244,6 +298,7 @@ int main() {
     testStatefulWindowCount();
     testCheckpointRestoreAtLeastOnceDefault();
     testCheckpointRestoreBestEffort();
+    testCheckpointRestoreDuplicatesSinkOutputAtLeastOnce();
     testWindowEviction();
     std::cout << "[test] stream runtime ok" << std::endl;
     return 0;

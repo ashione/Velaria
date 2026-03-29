@@ -58,6 +58,12 @@ struct Predicate {
   BinaryOperatorKind op = BinaryOperatorKind::Eq;
 };
 
+struct WindowSpec {
+  ColumnRef time_column;
+  uint64_t every_ms = 0;
+  std::string output_column = "window_start";
+};
+
 struct SqlColumnDef {
   std::string name;
   std::string type;
@@ -69,6 +75,7 @@ struct SqlQuery {
   FromItem from;
   std::optional<JoinItem> join;
   std::optional<Predicate> where;
+  std::optional<WindowSpec> window;
   std::vector<ColumnRef> group_by;
   std::optional<Predicate> having;
   std::optional<std::size_t> limit;

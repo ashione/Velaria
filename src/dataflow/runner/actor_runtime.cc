@@ -106,7 +106,7 @@ std::string summarizeTable(const Table& table) {
   return out.str();
 }
 
-std::string nextDashboardJobId() {
+[[maybe_unused]] std::string nextDashboardJobId() {
   static std::atomic<std::uint64_t> seq{1};
   return "dashboard_job_" + std::to_string(seq.fetch_add(1));
 }
@@ -423,6 +423,12 @@ struct RpcTaskSnapshot {
   std::string state = "SUBMITTED";
   std::string status_code = "TASK_SUBMITTED";
   std::string worker_id;
+  std::string fail_reason;
+  std::chrono::steady_clock::time_point queued_at;
+  std::chrono::steady_clock::time_point dispatched_at;
+  std::chrono::steady_clock::time_point worker_started_at;
+  std::chrono::steady_clock::time_point worker_finished_at;
+  std::chrono::steady_clock::time_point result_returned_at;
 };
 
 struct RpcChainSnapshot {
@@ -447,11 +453,26 @@ struct RpcJobSnapshot {
 
 std::string snapshotToJson(const RpcJobSnapshot& snapshot) {
   using namespace observability;
+  const auto queue_wait_ms =
+      epochMillis(snapshot.task.dispatched_at) - epochMillis(snapshot.task.queued_at);
+  const auto worker_run_ms =
+      epochMillis(snapshot.task.worker_finished_at) - epochMillis(snapshot.task.worker_started_at);
+  const auto result_return_ms =
+      epochMillis(snapshot.task.result_returned_at) - epochMillis(snapshot.task.dispatched_at);
   const std::string task_json = object({
       field("task_id", snapshot.task.task_id),
       field("state", snapshot.task.state),
       field("status_code", snapshot.task.status_code),
       field("worker_id", snapshot.task.worker_id),
+      field("fail_reason", snapshot.task.fail_reason),
+      field("queued_at_ms", epochMillis(snapshot.task.queued_at)),
+      field("dispatched_at_ms", epochMillis(snapshot.task.dispatched_at)),
+      field("worker_started_at_ms", epochMillis(snapshot.task.worker_started_at)),
+      field("worker_finished_at_ms", epochMillis(snapshot.task.worker_finished_at)),
+      field("result_returned_at_ms", epochMillis(snapshot.task.result_returned_at)),
+      field("queue_wait_ms", queue_wait_ms > 0 ? queue_wait_ms : 0),
+      field("worker_run_ms", worker_run_ms > 0 ? worker_run_ms : 0),
+      field("result_return_ms", result_return_ms > 0 ? result_return_ms : 0),
   });
   const std::string chain_json = object({
       field("chain_id", snapshot.chain.chain_id),
@@ -958,7 +979,9 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
         snapshot_it->second.task.state = "SUBMITTED";
         snapshot_it->second.task.status_code = "TASK_SUBMITTED";
         snapshot_it->second.task.worker_id = worker_node;
+        snapshot_it->second.task.fail_reason.clear();
         snapshot_it->second.chain.task_ids = {task.task_id};
+        snapshot_it->second.task.dispatched_at = std::chrono::steady_clock::now();
         emitSnapshotEvent(snapshot_it->second);
       }
 
@@ -1004,6 +1027,9 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
         snapshot_it->second.task.state = "FAILED";
         snapshot_it->second.task.status_code = "TASK_FAILED";
         snapshot_it->second.task.worker_id = worker_node;
+        snapshot_it->second.task.fail_reason = completion.error_message;
+        snapshot_it->second.task.worker_finished_at = std::chrono::steady_clock::now();
+        snapshot_it->second.task.result_returned_at = snapshot_it->second.task.worker_finished_at;
         snapshot_it->second.result_payload = completion.error_message;
         emitSnapshotEvent(snapshot_it->second);
       }
@@ -1154,6 +1180,7 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
         snapshot.payload = msg.summary.empty() ? "plan submitted" : msg.summary;
         snapshot.state = "SUBMITTED";
         snapshot.status_code = "JOB_SUBMITTED";
+        snapshot.task.queued_at = std::chrono::steady_clock::now();
         emitRpcEvent("actor_scheduler", "job_snapshot", config.node_id, snapshot.status_code, msg.job_id,
                      {observability::field("snapshot", snapshotToJson(snapshot), true)});
 
@@ -1206,6 +1233,9 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
           snap_it->second.task.state = msg.ok ? "FINISHED" : "FAILED";
           snap_it->second.task.status_code = msg.ok ? "TASK_FINISHED" : "TASK_FAILED";
           snap_it->second.task.worker_id = msg.node_id;
+          snap_it->second.task.fail_reason = msg.ok ? "" : msg.reason;
+          snap_it->second.task.worker_finished_at = std::chrono::steady_clock::now();
+          snap_it->second.task.result_returned_at = snap_it->second.task.worker_finished_at;
           emitSnapshotEvent(snap_it->second);
         }
         task_to_worker.erase(worker_it);
@@ -1248,6 +1278,9 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
           snap_it->second.task.state = "RUNNING";
           snap_it->second.task.status_code = "TASK_RUNNING";
           snap_it->second.task.worker_id = msg.node_id;
+          if (snap_it->second.task.worker_started_at == std::chrono::steady_clock::time_point()) {
+            snap_it->second.task.worker_started_at = std::chrono::steady_clock::now();
+          }
           emitSnapshotEvent(snap_it->second);
         }
         }

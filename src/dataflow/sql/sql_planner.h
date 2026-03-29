@@ -109,6 +109,8 @@ class SqlPlanner {
   DataFrame materializeFromPhysical(const PhysicalPlan& physical) const;
   StreamLogicalPlan buildStreamLogicalPlan(const SqlQuery& query) const;
   StreamPhysicalPlan buildStreamPhysicalPlan(const StreamLogicalPlan& logical) const;
+  std::string explainStreamLogicalPlan(const StreamLogicalPlan& logical) const;
+  std::string explainStreamPhysicalPlan(const StreamPhysicalPlan& physical) const;
   StreamingDataFrame materializeStreamFromPhysical(
       const StreamPhysicalPlan& physical,
       const std::unordered_map<std::string, StreamingDataFrame>& stream_views) const;

@@ -27,6 +27,34 @@
 - `ActorCredit`：仅对明确支持的热路径下推到本地 actor-stream runtime。
 - `Auto`：先采样，再在 `SingleProcess` 和 `ActorCredit` 之间做一次 query-local 选择。
 
+## Strategy Decision and Explain
+
+当前 planner / runtime 共享同一份 strategy decision 语义，避免“planner 解释一套、runtime 实际执行另一套”。
+
+当前暴露出口：
+
+- `StreamingQueryProgress.execution_mode`
+- `StreamingQueryProgress.execution_reason`
+- `StreamingQueryProgress.transport_mode`
+- `DataflowSession::explainStreamSql(...)`
+
+`explainStreamSql(...)` 当前输出三段：
+
+- `logical`
+- `physical`
+- `strategy`
+
+其中 `strategy` 至少包含：
+
+- selected mode
+- fallback / downgrade reason
+- actor hot-path eligibility
+- estimated state size
+- estimated batch cost
+- transport/shared-memory 相关参数快照
+- checkpoint delivery mode
+- backpressure 相关阈值
+
 ## Current Actor Pushdown Boundary
 
 当前只有一类 query 会被 `ActorCredit` / `Auto` 接住：
@@ -46,6 +74,15 @@
 
 - `StreamingQueryProgress.execution_mode`
 - `StreamingQueryProgress.execution_reason`
+
+同一条 query 当前要求在以下模式下结果一致：
+
+- `SingleProcess`
+- `LocalWorkers`
+- `ActorCredit`
+- `Auto`
+
+其中 `Auto` 若未命中热路径，必须稳定回退到 `SingleProcess` 并给出明确 reason。
 
 ## Auto Selection Rule
 
@@ -87,6 +124,30 @@
 
 这意味着当前已经去掉了“shared memory -> vector copy -> decode”这层明显多余的内存移动。
 
+## Backpressure and Checkpoint Contract
+
+当前 contract 重点不是强事务语义，而是“边界明确且可诊断”。
+
+### Backpressure
+
+- `backlog`：pull 后、consumer drain 前的队列 batch 数
+- `blocked_count`：producer 因 backlog / partition 压力进入 wait 的事件数
+- `max_backlog_batches`：enqueue 后观测到的最大 backlog
+- `inflight_batches / inflight_partitions`：当前仍在队列里待消费的工作量
+
+延迟口径：
+
+- `last_batch_latency_ms`：单批从执行开始到 sink flush 完成
+- `last_sink_latency_ms`：sink write/flush
+- `last_state_latency_ms`：state/window finalize；stateless batch 为 `0`
+
+### Checkpoint
+
+- checkpoint 使用本地文件并采用原子替换写入
+- 默认 delivery mode 为 `at-least-once`
+- `best-effort` 仅在 source 实现 `restoreOffsetToken(...)` 时恢复 offset
+- 两种模式都不宣称 exactly-once sink delivery
+
 ## Binary Batch Layout
 
 actor-stream payload 当前使用 typed binary batch：
@@ -121,6 +182,7 @@ actor-stream payload 当前使用 typed binary batch：
 - query 级 `Auto` 当前阈值更接近“保守正确”，还不是最终调优状态。
 - `split_ms / merge_ms` 仍是毫秒级指标，对极短阶段不够敏感。
 - SQL 路径仍未自动下推到 actor runtime；当前优化主要落在 streaming 执行内核。
+- 同机 observability 仍是 experiment profile，不是完整 dashboard / distributed telemetry 体系。
 
 ## Recommended Next Steps
 
@@ -151,8 +213,14 @@ actor-stream payload 当前使用 typed binary batch：
 
 - `source_sink_abi_test`：验证 runtime ABI 适配层上下文、checkpoint、ack、close 调用链。
 - `python_api/tests/test_streaming_v05.py`：验证 Python Arrow batch SQL 与 stream SQL progress 合同。
+- `stream_strategy_explain_test`：验证 explain 输出、execution-mode consistency、auto fallback reason。
+- `python_api/tests/test_arrow_stream_ingestion.py`：验证 `RecordBatchReader`、`__arrow_c_stream__` 与 stream Arrow ingestion。
 
-这两组测试与现有 `stream_runtime_test / stream_actor_credit_test / planner_v03_test` 共同构成 v0.5 的最小回归面。
+配套 regression 脚本：
+
+- `scripts/run_stream_observability_regression.sh`
+
+这些测试与现有 `stream_runtime_test / stream_actor_credit_test / planner_v03_test / sql_regression_test` 共同构成 v0.5 的最小回归面。
 
 
 ## Checkpoint Delivery Mode

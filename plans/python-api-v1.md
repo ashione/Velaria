@@ -52,6 +52,7 @@
 
 - `Session.create_dataframe_from_arrow(pyarrow_obj)`
 - `Session.create_stream_from_arrow(pyarrow_obj_or_batches)`
+- `Session.explain_stream_sql(sql, ...)`
 - `DataFrame.to_arrow()`
 
 其中：
@@ -61,6 +62,8 @@
 - `create_stream_from_arrow(...)`
   - 输入可为单个 `pyarrow.Table`
   - 输入可为单个 `pyarrow.RecordBatch`
+  - 输入可为 `pyarrow.RecordBatchReader`
+  - 输入可为实现了 `__arrow_c_stream__` 的对象
   - 输入也可为多批 `Table / RecordBatch` 的 Python 序列
 
 这意味着 Python 侧既可继续走 CSV，也可完全跳过文件落盘，直接把内存中的 Arrow 数据交给 batch / stream 执行链。
@@ -101,16 +104,18 @@ Python 边界做的是：
 
 ### 输入
 
-Arrow 输入当前采取“先归一化，再转 `Table`”策略：
+Arrow 输入当前采取“优先走 Arrow stream / capsule fast path，再回退到安全归一化”的策略：
 
-- 对 `Table` / `RecordBatch` 做 Python 层对象归一化
-- 再按列读取成 Python 列表
-- 最后映射回 C++ `Value`
+- 优先接收 `RecordBatchReader` 与 `__arrow_c_stream__`
+- 固定宽度列优先走更轻的导入 fast path
+- 复杂类型和不支持的对象继续回退到原有安全归一化路径
+- 最终仍映射回 C++ `Value`
 
 优点：
 
-- 简单直接
 - 与现有 `Value` 类型体系一致
+- 不改写现有 planner / runtime
+- 能先把 Python API 做成可用边界，再逐步压缩导入成本
 
 边界：
 
@@ -126,6 +131,7 @@ Arrow 输入当前采取“先归一化，再转 `Table`”策略：
 - `Session.read_csv(...)`
 - `Session.sql(...)`
 - `Session.stream_sql(...)`
+- `Session.explain_stream_sql(...)`
 - `Session.start_stream_sql(...)`
 - `DataFrame.count()`
 - `DataFrame.to_rows()`
@@ -138,14 +144,14 @@ Arrow 输入当前采取“先归一化，再转 `Table`”策略：
 
 - Python callback
 - Python UDF
-- Python 自定义 source
-- Python 自定义 sink
+- Python callback source 直接进入 native 执行节点
+- Python callback sink 直接进入 native sink ABI
 
 ## Packaging 设计
 
 ### Bazel 产物
 
-当前有三类 Python 相关产物：
+当前有四类 Python 相关产物：
 
 - `//python_api:velaria_py_pkg`
   - Bazel 运行时 package，包含 Python 源码和包内 `_velaria.so`
@@ -191,9 +197,13 @@ Arrow 输入当前采取“先归一化，再转 `Table`”策略：
 - batch SQL
 - stream API
 - stream SQL
+- stream SQL explain
 - Arrow batch 输入
 - Arrow stream 输入
+- `RecordBatchReader`
+- `__arrow_c_stream__`
 - Arrow 输出
+- custom stream source 的 Arrow 适配入口
 - pure wheel
 - native wheel
 
@@ -202,10 +212,8 @@ Arrow 输入当前采取“先归一化，再转 `Table`”策略：
 - Arrow 输入仍是导入复制，不是零拷贝
 - stream Arrow 输入当前映射到 `MemoryStreamSource`
 - 还未支持：
-  - `__arrow_c_stream__`
-  - `RecordBatchReader`
   - Python callback sink
-  - Python callback source
+  - Python callback source 直接进入 native 执行节点
   - Python UDF
 
 ## 下一步建议
@@ -213,14 +221,14 @@ Arrow 输入当前采取“先归一化，再转 `Table`”策略：
 ### 短期
 
 - 增加 Python API 回归测试
-- 支持 `RecordBatchReader` / `__arrow_c_stream__`
+- 完善 `explain_stream_sql(...)` 的更多示例与错误文案
 - 更明确的类型/空值错误文案
 
 ### 中期
 
 - 评估 `Arrow -> Table` 零拷贝或半零拷贝导入
 - 让 stream Arrow 输入支持更明确的多批 offset / progress 语义
-- 评估是否在 Python API 暴露 `StreamingQueryOptions`
+- 评估是否在 Python API 暴露更结构化的 `StreamingQueryOptions`
 
 ### 长期
 

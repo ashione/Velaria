@@ -48,6 +48,7 @@ cc_library(
         "src/dataflow/transport/ipc_transport.h",
         "src/dataflow/stream/binary_row_batch.h",
         "src/dataflow/stream/actor_stream_runtime.h",
+        "src/dataflow/stream/source_sink_abi.h",
         "src/dataflow/stream/stream.h",
     ],
     visibility = ["//visibility:public"],
@@ -250,4 +251,10 @@ cc_test(
     name = "stream_actor_credit_test",
     srcs = ["src/dataflow/tests/stream_actor_credit_test.cc"],
     deps = [":dataflow_stream_actor_runtime"],
+)
+
+cc_test(
+    name = "planner_v03_test",
+    srcs = ["src/dataflow/tests/planner_v03_test.cc"],
+    deps = [":dataflow_core"],
 )

@@ -4,13 +4,15 @@ Velaria 是一个面向可演进运行时的轻量数据流引擎研究项目，
 
 本仓库当前不以真正分布式系统为目标，而是围绕 `DataflowSession`、`StreamingDataFrame`、本地状态、流控/反压、本机多进程并行执行做内核化实现。batch 语义继续保留，但当前按照“bounded stream”视角纳入同一执行模型。
 
-## 本轮里程碑（2026-03-28）
+## 本轮里程碑（v0.3，2026-03-28）
 
 当前已对齐的执行路线是：`micro-batch in-proc + query-local backpressure + local worker scale-up`，并保留 `actor + rpc + jobmaster` 作为本机多进程实验路径。
 
 - 单机流式路径：`readStream -> StreamingDataFrame -> writeStream` 已具备 query 级配置、checkpoint/progress、本地文件 source/sink、窗口列、基础状态聚合。
 - 稳定性路径：`StreamingQuery` 负责 query-local 流控与端到端反压，默认采用“有界排队后阻塞”，避免 source 在 sink/state 过慢时无限积压。
 - query 级执行模式：`StreamingQuery` 当前支持 `single-process / local-workers / actor-credit / auto`，并会在 progress/snapshot 中记录最终选择与原因。
+- logical/physical 规划：logical plan 新增统一节点 `WindowAssign / Sink`；physical strategy 在 progress 中结构化记录执行模式、transport、水位与批成本估算。
+- source/sink ABI：新增 C++ 运行时 ABI（`RuntimeSource / RuntimeSink`），接口显式带 `query_id / checkpoint / backpressure` 上下文，作为后续跨进程 source/sink 扩展的稳定边界。
 - 单进程路径：`sql_demo`、`df_demo`、`stream_demo` 继续保留，用于验证本地执行语义。
 - 本机多进程路径：保留 `actor + rpc + jobmaster` 最小闭环，用于验证同机任务分发与运行时边界，不作为真正分布式完成态。
 
@@ -105,6 +107,8 @@ client
 
 - `execution_mode`
 - `execution_reason`
+- `estimated_state_size_bytes / estimated_batch_cost`
+- `backpressure_max_queue_batches / backpressure_high_watermark / backpressure_low_watermark`
 
 用于说明当前 query 最终走的是哪条本地执行路径，以及为何选择或回退。
 

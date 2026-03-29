@@ -147,6 +147,14 @@ void serializeNode(const PlanNodePtr& plan, std::string* out) {
       appendSize(out, node->n);
       return;
     }
+    case PlanKind::WindowAssign: {
+      const auto* node = static_cast<const WindowAssignPlan*>(plan.get());
+      serializeNode(node->child, out);
+      appendSize(out, node->time_column_index);
+      appendSize(out, static_cast<std::size_t>(node->window_ms));
+      appendToken(out, node->output_column);
+      return;
+    }
     case PlanKind::GroupBySum: {
       const auto* node = static_cast<const GroupBySumPlan*>(plan.get());
       serializeNode(node->child, out);
@@ -175,6 +183,12 @@ void serializeNode(const PlanNodePtr& plan, std::string* out) {
       appendSize(out, node->left_key);
       appendSize(out, node->right_key);
       appendInt(out, static_cast<int>(node->kind));
+      return;
+    }
+    case PlanKind::Sink: {
+      const auto* node = static_cast<const SinkPlan*>(plan.get());
+      serializeNode(node->child, out);
+      appendToken(out, node->sink_name);
       return;
     }
   }
@@ -229,6 +243,14 @@ PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset) {
       auto child = deserializeNode(payload, offset);
       return std::make_shared<LimitPlan>(std::move(child), readSize(payload, offset));
     }
+    case PlanKind::WindowAssign: {
+      auto child = deserializeNode(payload, offset);
+      const auto time_column_index = readSize(payload, offset);
+      const auto window_ms = static_cast<uint64_t>(readSize(payload, offset));
+      const auto output_column = readToken(payload, offset);
+      return std::make_shared<WindowAssignPlan>(std::move(child), time_column_index, window_ms,
+                                                output_column);
+    }
     case PlanKind::GroupBySum: {
       auto child = deserializeNode(payload, offset);
       std::vector<std::size_t> keys;
@@ -263,6 +285,11 @@ PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset) {
       const auto right_key = readSize(payload, offset);
       const auto join_kind = static_cast<JoinKind>(readInt(payload, offset));
       return std::make_shared<JoinPlan>(std::move(left), std::move(right), left_key, right_key, join_kind);
+    }
+    case PlanKind::Sink: {
+      auto child = deserializeNode(payload, offset);
+      const auto sink_name = readToken(payload, offset);
+      return std::make_shared<SinkPlan>(std::move(child), sink_name);
     }
   }
   throw std::runtime_error("plan decode: unsupported plan kind");

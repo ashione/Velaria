@@ -35,12 +35,16 @@ std::string planKindName(PlanKind kind) {
       return "Drop";
     case PlanKind::Limit:
       return "Limit";
+    case PlanKind::WindowAssign:
+      return "WindowAssign";
     case PlanKind::GroupBySum:
       return "GroupBySum";
     case PlanKind::Aggregate:
       return "Aggregate";
     case PlanKind::Join:
       return "Join";
+    case PlanKind::Sink:
+      return "Sink";
     default:
       return "Unknown";
   }
@@ -97,6 +101,13 @@ void explainPlan(const PlanNodePtr& node, std::ostringstream& out, int depth = 0
     explainPlan(n->child, out, depth + 1);
     return;
   }
+  if (node->kind == PlanKind::WindowAssign) {
+    const auto* n = static_cast<WindowAssignPlan*>(node.get());
+    out << std::string((depth + 1) * 2, ' ') << "idx=" << n->time_column_index
+        << ", window_ms=" << n->window_ms << ", output=" << n->output_column << "\n";
+    explainPlan(n->child, out, depth + 1);
+    return;
+  }
   if (node->kind == PlanKind::Join) {
     const auto* n = static_cast<JoinPlan*>(node.get());
     out << std::string((depth + 1) * 2, ' ') << "left_key=" << n->left_key
@@ -108,6 +119,12 @@ void explainPlan(const PlanNodePtr& node, std::ostringstream& out, int depth = 0
   if (node->kind == PlanKind::Source) {
     const auto* n = static_cast<SourcePlan*>(node.get());
     out << std::string((depth + 1) * 2, ' ') << "source=" << n->source_name << "\n";
+    return;
+  }
+  if (node->kind == PlanKind::Sink) {
+    const auto* n = static_cast<SinkPlan*>(node.get());
+    out << std::string((depth + 1) * 2, ' ') << "sink=" << n->sink_name << "\n";
+    explainPlan(n->child, out, depth + 1);
     return;
   }
 }

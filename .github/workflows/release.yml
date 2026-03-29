@@ -68,14 +68,15 @@ jobs:
           bazel build //python_api:velaria_native_whl
           mkdir -p dist/linux
           cp bazel-bin/python_api/velaria-*-native.whl dist/linux/
+          python3 ./scripts/normalize_wheel_filename.py dist/linux/velaria-*-native.whl
 
       - name: Repair wheel to manylinux
         run: |
           python -m pip install auditwheel
           auditwheel repair \
             --wheel-dir dist/linux \
-            dist/linux/velaria-*-native.whl
-          rm -f dist/linux/velaria-*-native.whl
+            dist/linux/velaria-*.whl
+          rm -f dist/linux/velaria-*-linux_*.whl
 
       - name: Upload manylinux artifact
         uses: actions/upload-artifact@v4
@@ -107,6 +108,7 @@ jobs:
           bazel build //python_api:velaria_native_whl
           mkdir -p dist/macos
           cp bazel-bin/python_api/velaria-*-native.whl dist/macos/
+          python3 ./scripts/normalize_wheel_filename.py dist/macos/velaria-*-native.whl
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4

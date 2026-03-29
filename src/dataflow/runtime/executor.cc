@@ -4,6 +4,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <cstdint>
 #include <unordered_map>
 #include <vector>
 
@@ -37,6 +38,13 @@ std::vector<std::string> splitKey(const std::string& key) {
   }
   out.push_back(cur);
   return out;
+}
+
+int64_t parseEpochMillis(const Value& value) {
+  if (value.isNumber()) {
+    return value.asInt64();
+  }
+  return static_cast<int64_t>(std::stoll(value.toString()));
 }
 
 struct AggregateAccumulator {
@@ -162,6 +170,26 @@ Table LocalExecutor::execute(const PlanNodePtr& plan) const {
       Table out = in;
       if (out.rows.size() > node->n) {
         out.rows.resize(node->n);
+      }
+      return out;
+    }
+    case PlanKind::WindowAssign: {
+      const auto* node = static_cast<WindowAssignPlan*>(plan.get());
+      Table in = execute(node->child);
+      if (node->window_ms == 0) {
+        throw std::runtime_error("window size cannot be zero");
+      }
+      Table out = in;
+      out.schema.fields.push_back(node->output_column);
+      out.schema.index[node->output_column] = out.schema.fields.size() - 1;
+      const auto window = static_cast<int64_t>(node->window_ms);
+      for (auto& row : out.rows) {
+        if (node->time_column_index >= row.size()) {
+          throw std::runtime_error("window assign source column out of range");
+        }
+        const int64_t ts_ms = parseEpochMillis(row[node->time_column_index]);
+        const int64_t window_start = (ts_ms / window) * window;
+        row.push_back(Value(window_start));
       }
       return out;
     }
@@ -307,6 +335,10 @@ Table LocalExecutor::execute(const PlanNodePtr& plan) const {
         }
       }
       return out;
+    }
+    case PlanKind::Sink: {
+      const auto* node = static_cast<SinkPlan*>(plan.get());
+      return execute(node->child);
     }
     default:
       return Table();

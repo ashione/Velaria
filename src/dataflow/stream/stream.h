@@ -218,6 +218,11 @@ struct StreamingStrategyDecision {
   size_t average_projected_payload_bytes = 0;
   double actor_speedup = 0.0;
   double compute_to_overhead_ratio = 0.0;
+  size_t estimated_state_size_bytes = 0;
+  size_t estimated_batch_cost = 0;
+  size_t backpressure_max_queue_batches = 0;
+  size_t backpressure_high_watermark = 0;
+  size_t backpressure_low_watermark = 0;
 };
 
 struct StreamingQueryProgress {
@@ -252,6 +257,11 @@ struct StreamingQueryProgress {
   size_t average_projected_payload_bytes = 0;
   double actor_speedup = 0.0;
   double compute_to_overhead_ratio = 0.0;
+  size_t estimated_state_size_bytes = 0;
+  size_t estimated_batch_cost = 0;
+  size_t backpressure_max_queue_batches = 0;
+  size_t backpressure_high_watermark = 0;
+  size_t backpressure_low_watermark = 0;
 };
 
 class StreamSource {

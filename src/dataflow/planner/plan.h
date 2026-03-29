@@ -11,7 +11,19 @@ namespace dataflow {
 struct PlanNode;
 using PlanNodePtr = std::shared_ptr<PlanNode>;
 
-enum class PlanKind { Source, Select, Filter, WithColumn, Drop, Limit, GroupBySum, Aggregate, Join };
+enum class PlanKind {
+  Source,
+  Select,
+  Filter,
+  WithColumn,
+  Drop,
+  Limit,
+  WindowAssign,
+  GroupBySum,
+  Aggregate,
+  Join,
+  Sink
+};
 enum class JoinKind { Inner, Left, Right, Full };
 
 struct PlanNode {
@@ -76,6 +88,19 @@ struct LimitPlan : PlanNode {
   LimitPlan(PlanNodePtr p, size_t limit) : PlanNode(PlanKind::Limit), child(std::move(p)), n(limit) {}
 };
 
+struct WindowAssignPlan : PlanNode {
+  PlanNodePtr child;
+  size_t time_column_index;
+  uint64_t window_ms;
+  std::string output_column;
+  WindowAssignPlan(PlanNodePtr p, size_t cidx, uint64_t w, std::string output)
+      : PlanNode(PlanKind::WindowAssign),
+        child(std::move(p)),
+        time_column_index(cidx),
+        window_ms(w),
+        output_column(std::move(output)) {}
+};
+
 struct GroupBySumPlan : PlanNode {
   PlanNodePtr child;
   std::vector<size_t> keys;
@@ -111,6 +136,13 @@ struct JoinPlan : PlanNode {
   JoinKind kind;
   JoinPlan(PlanNodePtr l, PlanNodePtr r, size_t lk, size_t rk, JoinKind k)
       : PlanNode(PlanKind::Join), left(std::move(l)), right(std::move(r)), left_key(lk), right_key(rk), kind(k) {}
+};
+
+struct SinkPlan : PlanNode {
+  PlanNodePtr child;
+  std::string sink_name;
+  explicit SinkPlan(PlanNodePtr p, std::string sink)
+      : PlanNode(PlanKind::Sink), child(std::move(p)), sink_name(std::move(sink)) {}
 };
 
 std::string serializePlan(const PlanNodePtr& plan);

@@ -1338,6 +1338,11 @@ StreamingQuery::StreamingQuery(StreamingDataFrame root, std::shared_ptr<StreamSi
   strategy_decision_.source_is_bounded = root_.source_ ? root_.source_->bounded() : true;
   strategy_decision_.sink_is_blocking =
       sink_ && sink_->name() != "memory" && sink_->name() != "console";
+  strategy_decision_.backpressure_max_queue_batches =
+      std::max<size_t>(1, options_.max_inflight_batches);
+  strategy_decision_.backpressure_high_watermark = options_.backpressure_high_watermark;
+  strategy_decision_.backpressure_low_watermark = options_.backpressure_low_watermark;
+  strategy_decision_.estimated_state_size_bytes = strategy_decision_.has_stateful_ops ? 1024 : 0;
   applyStrategyDecision(strategy_decision_);
 }
 
@@ -1503,6 +1508,9 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
           std::max(strategy_decision_.estimated_partitions, envelope.partition_count);
       strategy_decision_.projected_payload_bytes =
           std::max(strategy_decision_.projected_payload_bytes, estimateTablePayloadBytes(envelope.table));
+      strategy_decision_.estimated_batch_cost =
+          std::max(strategy_decision_.estimated_batch_cost,
+                   envelope.table.rows.size() * envelope.table.schema.fields.size());
       applyStrategyDecision(strategy_decision_);
 
       {
@@ -1807,6 +1815,11 @@ void StreamingQuery::applyStrategyDecision(const StreamingStrategyDecision& deci
     progress.average_projected_payload_bytes = decision.average_projected_payload_bytes;
     progress.actor_speedup = decision.actor_speedup;
     progress.compute_to_overhead_ratio = decision.compute_to_overhead_ratio;
+    progress.estimated_state_size_bytes = decision.estimated_state_size_bytes;
+    progress.estimated_batch_cost = decision.estimated_batch_cost;
+    progress.backpressure_max_queue_batches = decision.backpressure_max_queue_batches;
+    progress.backpressure_high_watermark = decision.backpressure_high_watermark;
+    progress.backpressure_low_watermark = decision.backpressure_low_watermark;
   });
 }
 
@@ -1844,7 +1857,12 @@ std::string StreamingQuery::snapshotJson() const {
       << "\"sampled_rows_per_batch\":" << current.sampled_rows_per_batch << ","
       << "\"average_projected_payload_bytes\":" << current.average_projected_payload_bytes << ","
       << "\"actor_speedup\":" << current.actor_speedup << ","
-      << "\"compute_to_overhead_ratio\":" << current.compute_to_overhead_ratio
+      << "\"compute_to_overhead_ratio\":" << current.compute_to_overhead_ratio << ","
+      << "\"estimated_state_size_bytes\":" << current.estimated_state_size_bytes << ","
+      << "\"estimated_batch_cost\":" << current.estimated_batch_cost << ","
+      << "\"backpressure_max_queue_batches\":" << current.backpressure_max_queue_batches << ","
+      << "\"backpressure_high_watermark\":" << current.backpressure_high_watermark << ","
+      << "\"backpressure_low_watermark\":" << current.backpressure_low_watermark
       << "}";
   return out.str();
 }
@@ -1880,6 +1898,14 @@ bool StreamingQuery::loadCheckpoint() {
     if (key == "execution_mode") restored.execution_mode = value;
     if (key == "execution_reason") restored.execution_reason = value;
     if (key == "transport_mode") restored.transport_mode = value;
+    if (key == "estimated_state_size_bytes") restored.estimated_state_size_bytes = std::stoull(value);
+    if (key == "estimated_batch_cost") restored.estimated_batch_cost = std::stoull(value);
+    if (key == "backpressure_max_queue_batches")
+      restored.backpressure_max_queue_batches = std::stoull(value);
+    if (key == "backpressure_high_watermark")
+      restored.backpressure_high_watermark = std::stoull(value);
+    if (key == "backpressure_low_watermark")
+      restored.backpressure_low_watermark = std::stoull(value);
   }
 
   if (!restored.last_source_offset.empty()) {
@@ -1912,6 +1938,11 @@ void StreamingQuery::persistCheckpoint(const StreamingQueryProgress& progress) c
   out << "execution_mode=" << progress.execution_mode << "\n";
   out << "execution_reason=" << progress.execution_reason << "\n";
   out << "transport_mode=" << progress.transport_mode << "\n";
+  out << "estimated_state_size_bytes=" << progress.estimated_state_size_bytes << "\n";
+  out << "estimated_batch_cost=" << progress.estimated_batch_cost << "\n";
+  out << "backpressure_max_queue_batches=" << progress.backpressure_max_queue_batches << "\n";
+  out << "backpressure_high_watermark=" << progress.backpressure_high_watermark << "\n";
+  out << "backpressure_low_watermark=" << progress.backpressure_low_watermark << "\n";
 }
 
 }  // namespace dataflow

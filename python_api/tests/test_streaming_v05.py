@@ -1,27 +1,9 @@
 import json
-import os
 import pathlib
 import tempfile
 import unittest
 
 import pyarrow as pa
-
-
-def _find_native_ext() -> str:
-    if os.environ.get("VELARIA_PYTHON_EXT"):
-        return os.environ["VELARIA_PYTHON_EXT"]
-
-    here = pathlib.Path(__file__).resolve()
-    candidates = []
-    for root in [here.parent, *here.parents]:
-        for p in root.glob("**/_velaria.so"):
-            candidates.append(p)
-    if not candidates:
-        raise RuntimeError("cannot locate _velaria.so for python tests")
-    return str(candidates[0])
-
-
-os.environ.setdefault("VELARIA_PYTHON_EXT", _find_native_ext())
 
 import velaria  # noqa: E402
 

@@ -1,17 +1,11 @@
 name: CI
 
 on:
-  push:
-    branches:
-      - main
-      - "codex/**"
   pull_request:
 
 jobs:
   native-and-python:
     runs-on: ubuntu-latest
-    env:
-      PYTHONPATH: ${{ github.workspace }}/python_api
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,3 +36,71 @@ jobs:
       - name: Python Smoke
         run: |
           ./scripts/run_python_ci_checks.sh
+
+  wheel-manylinux:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bazelisk
+        uses: bazelbuild/setup-bazelisk@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Configure Python for Bazel
+        run: |
+          echo "VELARIA_PYTHON_BIN=$(which python)" >> "$GITHUB_ENV"
+
+      - name: Build native wheel
+        run: |
+          bazel build //python_api:velaria_native_whl
+          mkdir -p dist/linux
+          cp bazel-bin/python_api/velaria-*-native.whl dist/linux/
+
+      - name: Repair wheel to manylinux
+        run: |
+          python -m pip install auditwheel
+          auditwheel repair \
+            --wheel-dir dist/linux \
+            dist/linux/velaria-*-native.whl
+          rm -f dist/linux/velaria-*-native.whl
+
+      - name: Upload manylinux wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: velaria-manylinux-wheel
+          path: dist/linux/*.whl
+
+  wheel-macos:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bazelisk
+        uses: bazelbuild/setup-bazelisk@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Configure Python for Bazel
+        run: |
+          echo "VELARIA_PYTHON_BIN=$(which python)" >> "$GITHUB_ENV"
+
+      - name: Build macOS native wheel
+        run: |
+          bazel build //python_api:velaria_native_whl
+          mkdir -p dist/macos
+          cp bazel-bin/python_api/velaria-*-native.whl dist/macos/
+
+      - name: Upload macOS wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: velaria-macos-wheel
+          path: dist/macos/*.whl

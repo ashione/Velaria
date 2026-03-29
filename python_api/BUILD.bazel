@@ -3,13 +3,23 @@ load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
 load("@rules_python//python:py_test.bzl", "py_test")
 load("@pypi//:requirements.bzl", "requirement")
+load("//python_api:version.bzl", "VELARIA_PY_VERSION")
+
+genrule(
+    name = "velaria_native_py_pkg",
+    srcs = ["//:velaria_pyext"],
+    outs = ["velaria/_velaria.so"],
+    cmd = "cp $< $@",
+)
 
 py_library(
-    name = "velaria_py",
+    name = "velaria_py_pkg",
     srcs = [
         "velaria/__init__.py",
+        "velaria/_version.py",
         "velaria/custom_stream.py",
     ],
+    data = [":velaria_native_py_pkg"],
     imports = ["."],
     deps = [
         requirement("pyarrow"),
@@ -21,27 +31,27 @@ py_binary(
     name = "demo_stream_sql",
     srcs = ["demo_stream_sql.py"],
     main = "demo_stream_sql.py",
-    deps = [":velaria_py"],
+    deps = [":velaria_py_pkg"],
 )
 
 py_binary(
     name = "demo_batch_sql_arrow",
     srcs = ["demo_batch_sql_arrow.py"],
     main = "demo_batch_sql_arrow.py",
-    deps = [":velaria_py"],
+    deps = [":velaria_py_pkg"],
 )
 
 py_package(
     name = "velaria_pkg",
     packages = ["velaria"],
-    deps = [":velaria_py"],
+    deps = [":velaria_py_pkg"],
 )
 
 py_wheel(
     name = "velaria_whl",
     distribution = "velaria",
     python_tag = "py3",
-    version = "0.1.0",
+    version = VELARIA_PY_VERSION,
     deps = [":velaria_pkg"],
     requires = [
         "pyarrow",
@@ -58,7 +68,7 @@ genrule(
         "@velaria_local_python//:abi_tag.txt",
         "@velaria_local_python//:platform_tag.txt",
     ],
-    outs = ["velaria-0.1.0-native.whl"],
+    outs = ["velaria-%s-native.whl" % VELARIA_PY_VERSION],
     cmd = "python3 $(location //scripts:build_native_wheel.py) "
         + "$(location :velaria_whl) "
         + "$(location //:velaria_pyext) "
@@ -72,10 +82,10 @@ genrule(
 py_test(
     name = "streaming_v05_test",
     srcs = ["tests/test_streaming_v05.py"],
-    data = ["//:velaria_pyext"],
+    main = "tests/test_streaming_v05.py",
     imports = ["."],
     deps = [
-        ":velaria_py",
+        ":velaria_py_pkg",
         requirement("pyarrow"),
     ],
 )
@@ -83,9 +93,10 @@ py_test(
 py_test(
     name = "custom_stream_source_test",
     srcs = ["tests/test_custom_stream_source.py"],
+    main = "tests/test_custom_stream_source.py",
     imports = ["."],
     deps = [
-        ":velaria_py",
+        ":velaria_py_pkg",
         requirement("pyarrow"),
     ],
 )

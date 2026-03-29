@@ -147,6 +147,8 @@ Arrow 输入当前采取“先归一化，再转 `Table`”策略：
 
 当前有三类 Python 相关产物：
 
+- `//python_api:velaria_py_pkg`
+  - Bazel 运行时 package，包含 Python 源码和包内 `_velaria.so`
 - `//:velaria_pyext`
   - native `_velaria.so`
 - `//python_api:velaria_whl`
@@ -172,16 +174,14 @@ Arrow 输入当前采取“先归一化，再转 `Table`”策略：
 
 `velaria/__init__.py` 当前按以下顺序加载 native 扩展：
 
-1. 若设置了 `VELARIA_PYTHON_EXT`
-   - 显式按给定路径加载
-2. 若已安装 native wheel
+1. 若运行在 Bazel `velaria_py_pkg` 或已安装 native wheel
    - 直接从包内导入 `._velaria`
-3. 若处于源码树开发态
+2. 若处于源码树开发态
    - 自动定位仓库根
    - 自动查找 `bazel-bin/_velaria.so`
    - 必要时通过 `bazel info bazel-bin` 解析真实输出目录
 
-因此源码树开发时通常不再需要手工设置环境变量。
+因此源码树开发时不需要手工设置任何 native 扩展环境变量。
 
 ## 现状与边界
 

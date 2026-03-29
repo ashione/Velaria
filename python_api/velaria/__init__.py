@@ -10,6 +10,8 @@ from .custom_stream import (
     consume_arrow_batches_with_custom_sink,
     create_stream_from_custom_source,
 )
+from .excel import read_excel
+from .bitable import BitableClient, group_rows_by_field, group_rows_count_by_field
 from ._version import __version__
 
 
@@ -112,4 +114,8 @@ __all__ = [
     "CustomStreamEmitOptions",
     "create_stream_from_custom_source",
     "consume_arrow_batches_with_custom_sink",
+    "read_excel",
+    "BitableClient",
+    "group_rows_by_field",
+    "group_rows_count_by_field",
 ]

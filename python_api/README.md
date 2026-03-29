@@ -103,3 +103,29 @@ bazel test //python_api:custom_stream_source_test
 - `trigger_interval_ms`
 - `checkpoint_path`
 - `checkpoint_delivery_mode`
+
+### XLSX 数据读取
+
+仓库里已提供 `velaria.read_excel(...)` 直接读 `.xlsx`：
+
+- 先调用 `pandas.read_excel`
+- 再转成 `pyarrow.Table`
+- 再通过 `Session.create_dataframe_from_arrow(...)` 变成 Velaria DataFrame
+
+示例：
+
+```python
+from velaria import Session, read_excel
+
+session = Session()
+df = read_excel(session, "/path/to/file.xlsx", sheet_name="Sheet1")
+session.create_temp_view("staff", df)
+out = session.sql("SELECT * FROM staff LIMIT 5")
+print(out.to_rows())
+```
+
+该能力依赖运行时安装 `pandas` 与 `openpyxl`（已作为 Python 包依赖）：
+
+```bash
+uv run python -c "import pandas, openpyxl"
+```

@@ -31,7 +31,24 @@ jobs:
 
       - name: Native Regression
         run: |
-          bazel test //:stream_runtime_test //:sql_regression_test //:stream_actor_credit_test
+          bazel test \
+            //:planner_v03_test \
+            //:sql_regression_test \
+            //:stream_runtime_test \
+            //:stream_actor_credit_test \
+            //:source_sink_abi_test \
+            //:stream_strategy_explain_test
+
+      - name: Same-host Observability Regression
+        run: |
+          ./scripts/run_stream_observability_regression.sh
+
+      - name: Python Regression
+        run: |
+          bazel test \
+            //python_api:custom_stream_source_test \
+            //python_api:streaming_v05_test \
+            //python_api:arrow_stream_ingestion_test
 
       - name: Python Smoke
         run: |

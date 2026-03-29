@@ -199,6 +199,27 @@ Arrow ingestion 支持：
 - 实现了 `__arrow_c_stream__` 的对象
 - Arrow batch 的 Python 序列
 
+### XLSX 读取
+
+仓库也支持直接读取 `.xlsx` 文件为 Velaria DataFrame。
+
+使用方式为 `velaria.read_excel(session, path, ...)`：
+
+```python
+from velaria import Session, read_excel
+
+session = Session()
+df = read_excel(session, "/path/to/file.xlsx", sheet_name="Sheet1")
+session.create_temp_view("excel_source", df)
+print(session.sql("SELECT * FROM excel_source LIMIT 5").to_rows())
+```
+
+该能力依赖 `pandas` 与 `openpyxl`（已作为 Python 包依赖）：
+
+```bash
+uv run python -c "import pandas, openpyxl"
+```
+
 本仓库里的 Python 命令统一使用 `uv`：
 
 ```bash

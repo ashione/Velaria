@@ -17,11 +17,15 @@ py_library(
     srcs = [
         "velaria/__init__.py",
         "velaria/_version.py",
+        "velaria/excel.py",
         "velaria/custom_stream.py",
+        "velaria/bitable.py",
     ],
     data = [":velaria_native_py_pkg"],
     imports = ["."],
     deps = [
+        requirement("openpyxl"),
+        requirement("pandas"),
         requirement("pyarrow"),
     ],
     visibility = ["//visibility:public"],
@@ -55,6 +59,8 @@ py_wheel(
     deps = [":velaria_pkg"],
     requires = [
         "pyarrow",
+        "pandas",
+        "openpyxl",
     ],
 )
 
@@ -77,6 +83,18 @@ genrule(
         + "$(location @velaria_local_python//:platform_tag.txt) "
         + "velaria $@",
     tools = ["//scripts:build_native_wheel.py"],
+)
+
+py_test(
+    name = "read_excel_test",
+    srcs = ["tests/test_read_excel.py"],
+    main = "tests/test_read_excel.py",
+    data = ["tests/fixtures/employee_import_mock.xlsx"],
+    imports = ["."],
+    deps = [
+        ":velaria_py_pkg",
+        requirement("pyarrow"),
+    ],
 )
 
 py_test(
@@ -109,5 +127,25 @@ py_test(
     deps = [
         ":velaria_py_pkg",
         requirement("pyarrow"),
+    ],
+)
+
+py_test(
+    name = "bitable_stream_source_test",
+    srcs = ["tests/test_bitable_stream_source.py"],
+    main = "tests/test_bitable_stream_source.py",
+    imports = ["."],
+    deps = [
+        ":velaria_py_pkg",
+    ],
+)
+
+py_test(
+    name = "bitable_group_by_owner_integration_test",
+    srcs = ["tests/test_bitable_group_by_owner_integration.py"],
+    main = "tests/test_bitable_group_by_owner_integration.py",
+    imports = ["."],
+    deps = [
+        ":velaria_py_pkg",
     ],
 )

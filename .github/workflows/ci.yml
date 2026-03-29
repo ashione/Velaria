@@ -29,6 +29,7 @@ jobs:
       - name: Configure Python for Bazel
         run: |
           echo "VELARIA_PYTHON_BIN=$(which python)" >> "$GITHUB_ENV"
+          echo "VELARIA_PLATFORM_TAG=macosx_11_0_arm64" >> "$GITHUB_ENV"
 
       - name: Native Build
         run: |
@@ -139,5 +140,5 @@ jobs:
       - name: Upload macOS wheel
         uses: actions/upload-artifact@v4
         with:
-          name: velaria-macos-wheel
+          name: velaria-macos-arm64-wheel
           path: dist/macos/*.whl

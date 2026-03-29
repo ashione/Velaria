@@ -62,6 +62,7 @@ jobs:
       - name: Configure Python for Bazel
         run: |
           echo "VELARIA_PYTHON_BIN=$(which python)" >> "$GITHUB_ENV"
+          echo "VELARIA_PLATFORM_TAG=macosx_11_0_arm64" >> "$GITHUB_ENV"
 
       - name: Build native wheel
         run: |
@@ -77,6 +78,10 @@ jobs:
             --wheel-dir dist/linux \
             dist/linux/velaria-*.whl
           rm -f dist/linux/velaria-*-linux_*.whl
+
+      - name: Validate manylinux wheel contents
+        run: |
+          python3 ./scripts/validate_native_wheel.py dist/linux/velaria-*.whl python_api/velaria
 
       - name: Upload manylinux artifact
         uses: actions/upload-artifact@v4
@@ -110,10 +115,14 @@ jobs:
           cp bazel-bin/python_api/velaria-*-native.whl dist/macos/
           python3 ./scripts/normalize_wheel_filename.py dist/macos/velaria-*-native.whl
 
+      - name: Validate macOS wheel contents
+        run: |
+          python3 ./scripts/validate_native_wheel.py dist/macos/velaria-*.whl python_api/velaria
+
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: velaria-macos-wheel
+          name: velaria-macos-arm64-wheel
           path: dist/macos/*.whl
 
   publish-release:
@@ -132,7 +141,7 @@ jobs:
       - name: Download macOS artifact
         uses: actions/download-artifact@v4
         with:
-          name: velaria-macos-wheel
+          name: velaria-macos-arm64-wheel
           path: dist/macos
 
       - name: Publish GitHub release

@@ -1,5 +1,6 @@
 def _local_python_config_impl(repository_ctx):
     override = repository_ctx.os.environ.get("VELARIA_PYTHON_BIN", "")
+    platform_override = repository_ctx.os.environ.get("VELARIA_PLATFORM_TAG", "")
     candidates = []
     if override:
         candidates.append(override)
@@ -14,7 +15,7 @@ def _local_python_config_impl(repository_ctx):
     ])
 
     probe = """
-import json, os, sys, sysconfig
+import json, os, platform, sys, sysconfig
 inc = sysconfig.get_path("include") or ""
 plat = sysconfig.get_path("platinclude") or ""
 paths = [p for p in [inc, plat] if p]
@@ -29,6 +30,8 @@ print(json.dumps({
   "version": sys.version.split()[0],
   "include_dir": os.path.dirname(header) if header else "",
   "header": header,
+  "machine": platform.machine().lower(),
+  "sys_platform": sys.platform,
   "python_tag": f"cp{sys.version_info[0]}{sys.version_info[1]}",
   "abi_tag": f"cp{sys.version_info[0]}{sys.version_info[1]}",
   "platform_tag": sysconfig.get_platform().replace("-", "_").replace(".", "_"),
@@ -54,11 +57,21 @@ print(json.dumps({
     if chosen == None:
         fail("Could not find a local CPython interpreter with Python.h. Set VELARIA_PYTHON_BIN to a usable interpreter.")
 
+    platform_tag = chosen["platform_tag"]
+    if platform_override:
+        platform_tag = platform_override
+    elif chosen.get("sys_platform") == "darwin":
+        machine = chosen.get("machine", "")
+        if machine == "arm64":
+            platform_tag = "macosx_11_0_arm64"
+        elif machine == "x86_64" and platform_tag == "macosx_10_13_universal2":
+            platform_tag = "macosx_10_13_x86_64"
+
     repository_ctx.symlink(chosen["include_dir"], "include")
     repository_ctx.file("defs.bzl", 'VELARIA_PYTHON_INCLUDE = "include"\n')
     repository_ctx.file("python_tag.txt", chosen["python_tag"] + "\n")
     repository_ctx.file("abi_tag.txt", chosen["abi_tag"] + "\n")
-    repository_ctx.file("platform_tag.txt", chosen["platform_tag"] + "\n")
+    repository_ctx.file("platform_tag.txt", platform_tag + "\n")
     repository_ctx.file(
         "BUILD.bazel",
         """
@@ -79,5 +92,5 @@ exports_files(["include_marker", "python_tag.txt", "abi_tag.txt", "platform_tag.
 
 local_python_configure = repository_rule(
     implementation = _local_python_config_impl,
-    environ = ["VELARIA_PYTHON_BIN"],
+    environ = ["VELARIA_PLATFORM_TAG", "VELARIA_PYTHON_BIN"],
 )

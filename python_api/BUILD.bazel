@@ -51,6 +51,12 @@ py_package(
     deps = [":velaria_py_pkg"],
 )
 
+filegroup(
+    name = "velaria_python_sources",
+    srcs = glob(["velaria/**/*.py"]),
+    visibility = ["//visibility:public"],
+)
+
 py_wheel(
     name = "velaria_whl",
     distribution = "velaria",
@@ -68,6 +74,7 @@ genrule(
     name = "velaria_native_whl",
     srcs = [
         ":velaria_whl",
+        ":velaria_python_sources",
         "//:velaria_pyext",
         "//scripts:build_native_wheel.py",
         "@velaria_local_python//:python_tag.txt",
@@ -81,7 +88,8 @@ genrule(
         + "$(location @velaria_local_python//:python_tag.txt) "
         + "$(location @velaria_local_python//:abi_tag.txt) "
         + "$(location @velaria_local_python//:platform_tag.txt) "
-        + "velaria $@",
+        + "velaria $@"
+        + " $(locations :velaria_python_sources)",
     tools = ["//scripts:build_native_wheel.py"],
 )
 

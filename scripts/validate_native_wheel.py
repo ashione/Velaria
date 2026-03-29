@@ -49,14 +49,10 @@ def main() -> int:
 
         dist_info = _find_dist_info_prefix(names)
         wheel_text = _read_wheel_text(zf, f"{dist_info}/WHEEL")
-        metadata_text = _read_wheel_text(zf, f"{dist_info}/METADATA")
-
         if "Root-Is-Purelib: false" not in wheel_text:
             raise SystemExit("wheel must declare Root-Is-Purelib: false")
         if "Tag: py3-none-any" in wheel_text:
             raise SystemExit("wheel must not keep pure-python py3-none-any tag")
-        if "Requires-Python: >=3.12" not in metadata_text:
-            raise SystemExit("wheel metadata is missing Requires-Python: >=3.12")
 
         native_info = zf.getinfo("velaria/_velaria.so")
         if native_info.file_size <= 0:

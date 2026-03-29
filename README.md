@@ -76,7 +76,7 @@ Available today:
 - Streaming query options: trigger interval, max in-flight batches, max queued partitions, checkpoint path, and execution modes such as `single-process / local-workers / actor-credit / auto`
 - Flow control and backpressure: query-local backlog watermarks, blocked counters, bounded backlog, and progress snapshots
 - Streaming sources and sinks: memory source, directory CSV incremental source, console sink, and append file sink
-- Python exchange paths: CSV input, in-process Arrow batch/stream input, and Arrow output
+- Python exchange paths: CSV input, in-process Arrow batch/stream input, `RecordBatchReader`, `__arrow_c_stream__`, and Arrow output
 - Basic operators: `select / filter / withColumn / drop / limit / window`
 - Aggregation: `groupBy + sum/count`, plus batch `SUM / COUNT / AVG / MIN / MAX`
 - Basic stateful aggregation: stateful `sum/count`
@@ -95,7 +95,7 @@ Current limits:
 - No subquery expansion in this round.
 - No `UNION` support in this round.
 - `JOIN` remains intentionally minimal.
-- Streaming SQL does not support `JOIN / AVG / MIN / MAX / window SQL / INSERT ... VALUES`.
+- Streaming SQL does not support `JOIN / AVG / MIN / MAX / INSERT ... VALUES`.
 - Python bindings auto-detect local CPython headers through repository rules and support custom stream sources through Arrow conversion, but still do not support Python callback/UDF execution or direct Python sink callbacks into the native sink ABI.
 - Backpressure is query-local; global fairness across queries is out of scope.
 - The multi-process path remains a same-host experiment and does not include true distributed scheduling, fault recovery, state migration, or resource governance.
@@ -107,6 +107,7 @@ Current streaming entry points:
 - `session.readStream(source)`
 - `session.readStreamCsvDir(path)`
 - `session.streamSql(sql)`
+- `session.explainStreamSql(sql, options)`
 - `session.startStreamSql(sql, options)`
 - `StreamingDataFrame.writeStream(sink, options)`
 - `StreamingQuery.start() / awaitTermination() / stop()`
@@ -134,6 +135,14 @@ Current streaming entry points:
 
 These fields explain which local execution path was chosen and why it was selected or downgraded.
 
+`explainStreamSql(...)` renders three sections:
+
+- `logical`
+- `physical`
+- `strategy`
+
+The strategy section snapshots the selected mode, fallback reason, actor eligibility, transport, state/batch estimates, backpressure thresholds, and actor/shared-memory knobs before execution starts.
+
 ### Query-level actor and auto selection
 
 - `actor-credit` and `auto` only activate for explicitly supported hot paths: all upstream transforms must be partition-local and the final barrier must be `sum(value)` grouped by `window_start + key`.
@@ -144,15 +153,22 @@ These fields explain which local execution path was chosen and why it was select
 ### Backpressure semantics
 
 - Backpressure is controlled at `batch / partition` watermarks.
+- `backlog` is defined as the queued batch count after pull and before consumer drain.
+- `blocked_count` counts producer-side wait events caused by bounded backlog or partition pressure. It does not count loop iterations.
+- `max_backlog_batches` records the largest observed queued backlog immediately after enqueue.
+- `inflight_batches / inflight_partitions` report the queued backlog that still has not been consumed.
 - When backlog exceeds the threshold, source pull blocks instead of continuing to accumulate work.
 - Slow sinks, slow state updates, or too much local parallel partition work all feed back into the query-local backlog counters.
+- `last_batch_latency_ms` covers one batch from execution start through sink flush completion; `last_sink_latency_ms` is the sink write/flush portion; `last_state_latency_ms` is state/window finalize time and is `0` for stateless batches.
 - Minimum observable counters include `blocked_count / max_backlog_batches / inflight_batches / inflight_partitions / last_batch_latency_ms / last_sink_latency_ms / last_state_latency_ms`.
 
 ### Checkpoint and progress
 
-- After each batch, the runtime persists `batches_pulled / batches_processed / blocked_count / max_backlog_batches / last_source_offset` into the local checkpoint file.
-- `MemoryStreamSource` resumes by batch offset.
-- `DirectoryCsvStreamSource` resumes by the last completed file name.
+- After each batch, the runtime atomically persists `batches_pulled / batches_processed / blocked_count / max_backlog_batches / last_source_offset` into the local checkpoint file.
+- Default checkpoint delivery mode is `at-least-once`: source offset is not restored, replay is allowed, and sinks may observe duplicate output after restart.
+- `best-effort` restores the source offset only when the source implements `restoreOffsetToken(...)`; it still does not claim exactly-once sink delivery.
+- `MemoryStreamSource` resumes by batch offset when `best-effort` restore is enabled.
+- `DirectoryCsvStreamSource` resumes by the last completed file name when `best-effort` restore is enabled.
 - `snapshotJson()` also carries `execution_mode / execution_reason` for actor-credit and auto fallback diagnostics.
 
 ### State indexing and window eviction
@@ -224,7 +240,7 @@ LIMIT 10;
 - Only single-table queries
 - No `JOIN`
 - No `AVG / MIN / MAX`
-- No window SQL syntax
+- Minimal window SQL only: `WINDOW BY <time_col> EVERY <window_ms> AS <output_col>`
 - No streaming `INSERT INTO ... VALUES`
 - `LIMIT` follows current streaming API semantics and should not be read as a full infinite-stream global SQL limit
 
@@ -327,6 +343,7 @@ These operations explicitly release the GIL during native execution:
 - `Session.sql(...)`
 - `Session.stream_sql(...)`
 - `Session.start_stream_sql(...)`
+- `Session.explain_stream_sql(...)`
 - `DataFrame.count()`
 - `DataFrame.to_rows()`
 - `DataFrame.show()`
@@ -349,6 +366,7 @@ Out of scope in this first version:
 - `Session.create_temp_view(name, df_or_stream_df)`
 - `Session.read_stream_csv_dir(path, delimiter=',')`
 - `Session.stream_sql(sql_text)`
+- `Session.explain_stream_sql(sql_text, trigger_interval_ms=1000, checkpoint_path='')`
 - `Session.start_stream_sql(sql_text, trigger_interval_ms=1000, checkpoint_path='')`
 - `DataFrame.to_rows() / to_arrow() / count() / show()`
 - `StreamingDataFrame.select(...) / filter(...) / with_column(...) / drop(...) / limit(...)`
@@ -360,6 +378,7 @@ Notes:
 
 - `create_dataframe_from_arrow(...)` accepts `pyarrow.Table` and objects that can be normalized by `pyarrow.table(...)`
 - `create_stream_from_arrow(...)` accepts a single `pyarrow.Table` or `RecordBatch`, and also Python sequences of multiple `Table` or `RecordBatch` batches
+- `explain_stream_sql(...)` exposes the same logical / physical / strategy breakdown as `DataflowSession::explainStreamSql(...)`
 - Python may still use CSV, but it can also skip file materialization entirely and feed Arrow data directly into batch or stream execution
 
 ### Build and run
@@ -443,16 +462,19 @@ bazel test //:stream_runtime_test
 bazel run //:stream_benchmark
 bazel run //:stream_actor_benchmark
 bazel test //:stream_actor_credit_test
+./scripts/run_stream_observability_regression.sh
 bazel build //:velaria_pyext
 uv sync --project python_api --python python3.12
 uv run --project python_api python python_api/demo_batch_sql_arrow.py
 uv run --project python_api python python_api/demo_stream_sql.py
+uv run --project python_api python python_api/bench_arrow_ingestion.py
 ```
 
 ### Local actor-stream experiments
 
 - `stream_actor_benchmark`: validates the local worker process path with partition credits and actor RPC for window + key partial aggregation.
 - `stream_benchmark`: validates `single-process / local-workers / actor-credit / auto` execution modes from the `StreamingQuery` entry point.
+- Both benchmarks now emit machine-readable JSON lines in addition to the existing human-readable summaries.
 - `stream_actor_credit_test`: verifies that:
   - credit limits are respected
   - blocked counters are triggered
@@ -479,6 +501,12 @@ Parameter order:
 - `worker_delay_ms`
 - `cpu_spin_per_row`
 - optional seventh parameter: `mode = single / actor / auto / all`
+
+For same-host observability regression, use:
+
+```bash
+./scripts/run_stream_observability_regression.sh
+```
 
 Reference result for the query-level `stream_benchmark`:
 

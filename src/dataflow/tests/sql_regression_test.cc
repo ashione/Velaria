@@ -139,6 +139,17 @@ void runParserRegression() {
         expect(st.create.options.at("path") == "/tmp/stream-input", "parser_create_csv_path");
         expect(st.create.options.at("delimiter") == ",", "parser_create_csv_delimiter");
       });
+
+  expectNoThrow(
+      "parser_stream_window_clause",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT window_start, key, SUM(value) AS value_sum FROM stream_events "
+            "WINDOW BY ts EVERY 60000 AS window_start GROUP BY window_start, key");
+        expect(st.query.window.has_value(), "parser_window_present");
+        expect(st.query.window->every_ms == 60000, "parser_window_ms");
+        expect(st.query.window->output_column == "window_start", "parser_window_output");
+      });
 }
 
 void runSemanticRegression() {
@@ -168,6 +179,15 @@ void runSemanticRegression() {
         s.submit("SELECT not_exists FROM t_users_v1");
       },
       "column not found");
+
+  expectThrows(
+      "planner_batch_window_sql_rejected",
+      [&]() {
+        s.submit(
+            "SELECT region, SUM(score) AS total_score FROM t_users_v1 "
+            "WINDOW BY score EVERY 60000 AS window_start GROUP BY region");
+      },
+      "only supported in stream SQL");
 }
 
 void runComplexDmlRegression() {
@@ -341,6 +361,63 @@ void runStreamSqlRegression() {
             "USING csv OPTIONS(path '" + input_dir + "')");
       },
       "requires CREATE SOURCE TABLE or CREATE SINK TABLE");
+
+  const std::string window_sink_path = "/tmp/velaria-stream-window-sql-regression-output.csv";
+  fs::remove(window_sink_path);
+
+  dataflow::Table window_batch;
+  window_batch.schema = dataflow::Schema({"ts", "key", "value"});
+  window_batch.rows = {
+      {Value("2026-03-29T10:00:00"), Value("userA"), Value(int64_t(1))},
+      {Value("2026-03-29T10:00:10"), Value("userA"), Value(int64_t(2))},
+      {Value("2026-03-29T10:01:05"), Value("userB"), Value(int64_t(3))},
+  };
+  s.createTempView(
+      "stream_window_events_v1",
+      s.readStream(std::make_shared<dataflow::MemoryStreamSource>(std::vector<Table>{window_batch})));
+  s.sql(
+      "CREATE SINK TABLE stream_window_summary_v1 (window_start STRING, key STRING, value_sum INT) "
+      "USING csv OPTIONS(path '" +
+      window_sink_path + "', delimiter ',')");
+
+  dataflow::StreamingQueryOptions window_options;
+  window_options.trigger_interval_ms = 0;
+  window_options.execution_mode = dataflow::StreamingExecutionMode::ActorCredit;
+  window_options.actor_workers = 2;
+  window_options.actor_max_inflight_partitions = 2;
+
+  auto window_query = s.startStreamSql(
+      "INSERT INTO stream_window_summary_v1 "
+      "SELECT window_start, key, SUM(value) AS value_sum "
+      "FROM stream_window_events_v1 "
+      "WINDOW BY ts EVERY 60000 AS window_start "
+      "GROUP BY window_start, key",
+      window_options);
+  expect(window_query.awaitTermination() == 1, "stream_sql_window_processed_batches");
+  expect(window_query.progress().execution_mode == "actor-credit",
+         "stream_sql_window_actor_hot_path");
+
+  const auto window_sink_table = s.read_csv(window_sink_path).toTable();
+  expect(window_sink_table.rows.size() == 2, "stream_sql_window_sink_rows");
+  bool has_window_user_a = false;
+  bool has_window_user_b = false;
+  const auto window_idx = window_sink_table.schema.indexOf("window_start");
+  const auto window_key_idx = window_sink_table.schema.indexOf("key");
+  const auto window_sum_idx = window_sink_table.schema.indexOf("value_sum");
+  for (const auto& row : window_sink_table.rows) {
+    if (row[window_idx].toString() == "2026-03-29T10:00:00" &&
+        row[window_key_idx].toString() == "userA" &&
+        row[window_sum_idx].asInt64() == 3) {
+      has_window_user_a = true;
+    }
+    if (row[window_idx].toString() == "2026-03-29T10:01:00" &&
+        row[window_key_idx].toString() == "userB" &&
+        row[window_sum_idx].asInt64() == 3) {
+      has_window_user_b = true;
+    }
+  }
+  expect(has_window_user_a, "stream_sql_window_sink_has_user_a");
+  expect(has_window_user_b, "stream_sql_window_sink_has_user_b");
 }
 
 }  // namespace

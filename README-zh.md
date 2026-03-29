@@ -76,7 +76,7 @@ client
 - Streaming query 配置：trigger interval、max in-flight batches、max queued partitions、checkpoint path，以及 `single-process / local-workers / actor-credit / auto`
 - 流控与反压：query-local backlog 水位、blocked 计数、有界 backlog、progress snapshot
 - Streaming source/sink：memory source、目录 CSV 增量 source、console sink、append 文件 sink
-- Python 数据交换路径：CSV 输入、进程内 Arrow batch/stream 输入、Arrow 输出
+- Python 数据交换路径：CSV 输入、进程内 Arrow batch/stream 输入、`RecordBatchReader`、`__arrow_c_stream__`、Arrow 输出
 - 基础算子：`select / filter / withColumn / drop / limit / window`
 - 聚合：`groupBy + sum/count`，以及 batch `SUM / COUNT / AVG / MIN / MAX`
 - 基础状态聚合：stateful `sum/count`
@@ -95,7 +95,7 @@ client
 - 本轮不扩展子查询。
 - 本轮不扩展 `UNION`。
 - `JOIN` 仍刻意保持最小能力。
-- 流式 SQL 不支持 `JOIN / AVG / MIN / MAX / window SQL / INSERT ... VALUES`。
+- 流式 SQL 不支持 `JOIN / AVG / MIN / MAX / INSERT ... VALUES`。
 - Python 绑定会通过仓库规则自动探测本机 CPython 头文件，支持 custom stream source 经 Arrow 转换接入，但仍不支持 Python callback/UDF 或 Python sink 直接下沉到 native sink ABI。
 - 反压当前是 query-local，不处理多 query 全局公平调度。
 - 多进程路径仍是同机实验，不包含真正的分布式调度、故障恢复、状态迁移和资源治理。
@@ -107,6 +107,7 @@ client
 - `session.readStream(source)`
 - `session.readStreamCsvDir(path)`
 - `session.streamSql(sql)`
+- `session.explainStreamSql(sql, options)`
 - `session.startStreamSql(sql, options)`
 - `StreamingDataFrame.writeStream(sink, options)`
 - `StreamingQuery.start() / awaitTermination() / stop()`
@@ -134,6 +135,14 @@ client
 
 这些字段用于说明 query 最终选择了哪条本地执行路径，以及为什么选择或回退。
 
+`explainStreamSql(...)` 会输出三段：
+
+- `logical`
+- `physical`
+- `strategy`
+
+其中 `strategy` 会在执行前给出 selected mode、fallback reason、actor eligibility、transport、state/batch 估算、backpressure 阈值，以及 actor/shared-memory 相关参数快照。
+
 ### query 级 actor / auto 选择
 
 - `actor-credit` 和 `auto` 只对明确支持的热路径生效：前置变换必须全部是 partition-local，最终 barrier 必须是按 `window_start + key` 分组的 `sum(value)`。
@@ -144,15 +153,22 @@ client
 ### 反压语义
 
 - 反压按 `batch / partition` 水位控制。
+- `backlog` 定义为 source pull 之后、consumer 消费之前的队列 batch 数。
+- `blocked_count` 统计的是 producer 侧因为 backlog / partition 压力进入 wait 的次数，不统计循环轮数。
+- `max_backlog_batches` 表示 enqueue 之后观测到的最大 backlog。
+- `inflight_batches / inflight_partitions` 表示当前仍在队列里等待消费的 backlog。
 - backlog 超过阈值时，source pull 会被阻塞，而不是继续无界积压。
 - sink 写慢、状态更新慢、或者局部并行分区过多，都会反馈到 query-local backlog 计数。
+- `last_batch_latency_ms` 表示单批从执行开始到 sink flush 完成；`last_sink_latency_ms` 只统计 sink write/flush；`last_state_latency_ms` 统计 state/window finalize，stateless batch 为 `0`。
 - 最少可观察指标包括 `blocked_count / max_backlog_batches / inflight_batches / inflight_partitions / last_batch_latency_ms / last_sink_latency_ms / last_state_latency_ms`。
 
 ### checkpoint / progress
 
-- 每批完成后，运行时会把 `batches_pulled / batches_processed / blocked_count / max_backlog_batches / last_source_offset` 落盘到本地 checkpoint 文件。
-- `MemoryStreamSource` 按 batch offset 恢复。
-- `DirectoryCsvStreamSource` 按最后完成的文件名恢复。
+- 每批完成后，运行时会以原子替换方式把 `batches_pulled / batches_processed / blocked_count / max_backlog_batches / last_source_offset` 落盘到本地 checkpoint 文件。
+- 默认 checkpoint delivery mode 是 `at-least-once`：不会恢复 source offset，允许 replay，sink 在重启后可能看到重复输出。
+- `best-effort` 只会在 source 实现了 `restoreOffsetToken(...)` 时恢复 offset；它仍然不是 exactly-once sink 交付。
+- `MemoryStreamSource` 在 `best-effort` 模式下按 batch offset 恢复。
+- `DirectoryCsvStreamSource` 在 `best-effort` 模式下按最后完成的文件名恢复。
 - `snapshotJson()` 还会携带 `execution_mode / execution_reason`，用于诊断 query 是否进入 actor-credit 或发生 auto 回退。
 
 ### 状态索引与窗口淘汰
@@ -224,7 +240,7 @@ LIMIT 10;
 - 只支持单表查询
 - 不支持 `JOIN`
 - 不支持 `AVG / MIN / MAX`
-- 不支持窗口 SQL 语法
+- 只支持最小 window SQL：`WINDOW BY <time_col> EVERY <window_ms> AS <output_col>`
 - 不支持流式 `INSERT INTO ... VALUES`
 - `LIMIT` 沿用当前 streaming API 语义，不应解读为完整无限流全局 SQL limit
 
@@ -327,6 +343,7 @@ GROUP BY name;
 - `Session.sql(...)`
 - `Session.stream_sql(...)`
 - `Session.start_stream_sql(...)`
+- `Session.explain_stream_sql(...)`
 - `DataFrame.count()`
 - `DataFrame.to_rows()`
 - `DataFrame.show()`
@@ -349,6 +366,7 @@ GROUP BY name;
 - `Session.create_temp_view(name, df_or_stream_df)`
 - `Session.read_stream_csv_dir(path, delimiter=',')`
 - `Session.stream_sql(sql_text)`
+- `Session.explain_stream_sql(sql_text, trigger_interval_ms=1000, checkpoint_path='')`
 - `Session.start_stream_sql(sql_text, trigger_interval_ms=1000, checkpoint_path='')`
 - `DataFrame.to_rows() / to_arrow() / count() / show()`
 - `StreamingDataFrame.select(...) / filter(...) / with_column(...) / drop(...) / limit(...)`
@@ -360,6 +378,7 @@ GROUP BY name;
 
 - `create_dataframe_from_arrow(...)` 支持 `pyarrow.Table` 以及可被 `pyarrow.table(...)` 归一化的对象
 - `create_stream_from_arrow(...)` 支持单个 `pyarrow.Table` 或 `RecordBatch`，也支持由多个 `Table` 或 `RecordBatch` 组成的 Python 序列
+- `explain_stream_sql(...)` 会暴露与 `DataflowSession::explainStreamSql(...)` 一致的 `logical / physical / strategy` 三段 explain
 - Python 既可以继续使用 CSV，也可以完全跳过文件落盘，直接把 Arrow 数据送进 batch 或 stream 执行链
 
 ### 构建与运行
@@ -443,16 +462,19 @@ bazel test //:stream_runtime_test
 bazel run //:stream_benchmark
 bazel run //:stream_actor_benchmark
 bazel test //:stream_actor_credit_test
+./scripts/run_stream_observability_regression.sh
 bazel build //:velaria_pyext
 uv sync --project python_api --python python3.12
 uv run --project python_api python python_api/demo_batch_sql_arrow.py
 uv run --project python_api python python_api/demo_stream_sql.py
+uv run --project python_api python python_api/bench_arrow_ingestion.py
 ```
 
 ### 本机 actor-stream 实验
 
 - `stream_actor_benchmark`：验证本地 worker 进程、partition credit 和 actor RPC 下的窗口 + key partial aggregate 路径。
 - `stream_benchmark`：从 `StreamingQuery` 入口验证 `single-process / local-workers / actor-credit / auto` 四种执行模式。
+- 这两个 benchmark 现在都会额外输出 JSON 行，便于做同机 profile / regression 校验。
 - `stream_actor_credit_test`：验证：
   - credit 上限不会被突破
   - blocked 计数会触发
@@ -479,6 +501,12 @@ bazel run //:stream_actor_benchmark -- 16 65536 4 4 0 400
 - `worker_delay_ms`
 - `cpu_spin_per_row`
 - 可选第 7 个参数：`mode = single / actor / auto / all`
+
+同机 observability regression 可直接运行：
+
+```bash
+./scripts/run_stream_observability_regression.sh
+```
 
 `stream_benchmark` 的一组参考结果：
 

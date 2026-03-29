@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -78,6 +79,37 @@ bool isAggregateQuery(const SqlQuery& query) {
   return !query.group_by.empty() ||
          std::any_of(query.select_items.begin(), query.select_items.end(),
                      [](const SelectItem& item) { return item.is_aggregate; });
+}
+
+const char* streamNodeKindName(StreamPlanNodeKind kind) {
+  switch (kind) {
+    case StreamPlanNodeKind::Scan:
+      return "Scan";
+    case StreamPlanNodeKind::Filter:
+      return "Filter";
+    case StreamPlanNodeKind::Project:
+      return "Project";
+    case StreamPlanNodeKind::WithColumn:
+      return "WithColumn";
+    case StreamPlanNodeKind::Limit:
+      return "Limit";
+    case StreamPlanNodeKind::WindowAssign:
+      return "WindowAssign";
+    case StreamPlanNodeKind::Aggregate:
+      return "Aggregate";
+    case StreamPlanNodeKind::Sink:
+      return "Sink";
+  }
+  return "Unknown";
+}
+
+std::string joinStrings(const std::vector<std::string>& values, const std::string& delim) {
+  std::ostringstream out;
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (i > 0) out << delim;
+    out << values[i];
+  }
+  return out.str();
 }
 
 void ensureSingleTableStreamQuery(const SqlQuery& query) {
@@ -296,6 +328,9 @@ bool streamPlanIsPartitionLocal(const StreamPlanNode& node) {
 }  // namespace
 
 LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalog& catalog) const {
+  if (query.window.has_value()) {
+    throw SQLSemanticError("WINDOW BY ... EVERY ... AS ... is only supported in stream SQL");
+  }
   LogicalPlan logical;
 
   if (!query.has_from) {
@@ -681,6 +716,15 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query) cons
     logical.nodes.push_back(filter);
   }
 
+  if (query.window.has_value()) {
+    StreamPlanNode window;
+    window.kind = StreamPlanNodeKind::WindowAssign;
+    window.column = resolveStreamColumnName(query.window->time_column, query.from);
+    window.window_ms = query.window->every_ms;
+    window.output_column = query.window->output_column;
+    logical.nodes.push_back(window);
+  }
+
   if (isAggregateQuery(query)) {
     if (query.having.has_value() && query.group_by.empty()) {
       throw SQLSemanticError("GROUP BY required for HAVING");
@@ -747,7 +791,11 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query) cons
         project.columns.push_back(resolveStreamColumnName(item.column, query.from));
       }
     }
-    logical.nodes.push_back(project);
+    std::vector<std::string> natural_columns = group_keys;
+    natural_columns.push_back(aggregate.output_column);
+    if (project.columns != natural_columns) {
+      logical.nodes.push_back(project);
+    }
   } else {
     if (!query.group_by.empty()) {
       throw SQLSemanticError("GROUP BY used without aggregate");
@@ -841,6 +889,57 @@ StreamPhysicalPlan SqlPlanner::buildStreamPhysicalPlan(const StreamLogicalPlan& 
 
   physical.actor_eligibility_reason = "query plan is not eligible for actor acceleration";
   return physical;
+}
+
+std::string SqlPlanner::explainStreamLogicalPlan(const StreamLogicalPlan& logical) const {
+  std::ostringstream out;
+  out << "source=" << logical.source_name << "\n";
+  for (std::size_t i = 0; i < logical.nodes.size(); ++i) {
+    const auto& node = logical.nodes[i];
+    out << i + 1 << ". " << streamNodeKindName(node.kind);
+    if (node.kind == StreamPlanNodeKind::Scan) {
+      out << " source=" << node.source_name;
+    } else if (node.kind == StreamPlanNodeKind::Filter) {
+      out << " column=" << node.column << " op=" << node.op;
+    } else if (node.kind == StreamPlanNodeKind::Project) {
+      out << " columns=[" << joinStrings(node.columns, ", ") << "]";
+    } else if (node.kind == StreamPlanNodeKind::WithColumn) {
+      out << " output=" << node.output_column << " from=" << node.value_column;
+    } else if (node.kind == StreamPlanNodeKind::Limit) {
+      out << " limit=" << node.limit;
+    } else if (node.kind == StreamPlanNodeKind::WindowAssign) {
+      out << " time_column=" << node.column << " window_ms=" << node.window_ms
+          << " output=" << node.output_column;
+    } else if (node.kind == StreamPlanNodeKind::Aggregate) {
+      out << " keys=[" << joinStrings(node.group_keys, ", ") << "]"
+          << " output=" << node.output_column
+          << " agg=" << (node.is_count_star ? "COUNT(*)" : "SUM(" + node.value_column + ")")
+          << " stateful=" << (node.stateful ? "true" : "false");
+    } else if (node.kind == StreamPlanNodeKind::Sink) {
+      out << " sink=" << node.sink_name;
+    }
+    out << "\n";
+  }
+  return out.str();
+}
+
+std::string SqlPlanner::explainStreamPhysicalPlan(const StreamPhysicalPlan& physical) const {
+  std::ostringstream out;
+  out << "has_window=" << (physical.has_window ? "true" : "false") << "\n";
+  out << "has_stateful_ops=" << (physical.has_stateful_ops ? "true" : "false") << "\n";
+  out << "partition_local_prefix_nodes=" << physical.partition_local_prefix_nodes << "\n";
+  out << "actor_eligible=" << (physical.actor_eligible ? "true" : "false") << "\n";
+  out << "actor_eligibility_reason=" << physical.actor_eligibility_reason << "\n";
+  for (std::size_t i = 0; i < physical.logical.nodes.size(); ++i) {
+    const auto& node = physical.logical.nodes[i];
+    out << i + 1 << ". " << streamNodeKindName(node.kind)
+        << " partition_local=" << (streamPlanIsPartitionLocal(node) ? "true" : "false");
+    if (node.kind == StreamPlanNodeKind::Aggregate) {
+      out << " stateful=" << (node.stateful ? "true" : "false");
+    }
+    out << "\n";
+  }
+  return out.str();
 }
 
 StreamingDataFrame SqlPlanner::materializeStreamFromPhysical(

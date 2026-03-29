@@ -6,6 +6,7 @@
 
 #include <cstdlib>
 
+#include "src/dataflow/runtime/observability.h"
 #include "src/dataflow/stream/actor_stream_runtime.h"
 
 namespace {
@@ -30,6 +31,7 @@ std::vector<dataflow::Table> makeBatches(size_t batch_count, size_t rows_per_bat
 
 void printMetrics(const std::string& label, const dataflow::LocalActorStreamResult& result,
                   size_t rows_per_batch) {
+  using namespace dataflow::observability;
   const double elapsed_s = static_cast<double>(result.elapsed_ms) / 1000.0;
   const double rows_per_s =
       elapsed_s > 0.0 ? (result.processed_batches * rows_per_batch) / elapsed_s : 0.0;
@@ -54,9 +56,63 @@ void printMetrics(const std::string& label, const dataflow::LocalActorStreamResu
             << " output_shm_bytes=" << result.output_shared_memory_bytes
             << " used_shm=" << (result.used_shared_memory ? "true" : "false")
             << std::endl;
+
+  const std::string control_plane = object({
+      field("blocked_count", result.blocked_count),
+      field("max_inflight_partitions", result.max_inflight_partitions),
+      field("coordinator_wait_ms", result.coordinator_wait_ms),
+  });
+  const std::string data_plane_copy = object({
+      field("input_payload_bytes", result.input_payload_bytes),
+      field("output_payload_bytes", result.output_payload_bytes),
+      field("coordinator_serialize_ms", result.coordinator_serialize_ms),
+      field("coordinator_deserialize_ms", result.coordinator_deserialize_ms),
+      field("worker_deserialize_ms", result.worker_deserialize_ms),
+      field("worker_serialize_ms", result.worker_serialize_ms),
+  });
+  const std::string data_plane_shared_memory = object({
+      field("used_shared_memory", result.used_shared_memory),
+      field("input_shared_memory_bytes", result.input_shared_memory_bytes),
+      field("output_shared_memory_bytes", result.output_shared_memory_bytes),
+  });
+  const std::string coordinator_merge = object({
+      field("split_ms", result.split_ms),
+      field("coordinator_merge_ms", result.coordinator_merge_ms),
+      field("worker_compute_ms", result.worker_compute_ms),
+  });
+  const std::string raw_metrics = object({
+      field("processed_batches", result.processed_batches),
+      field("processed_partitions", result.processed_partitions),
+      field("elapsed_ms", result.elapsed_ms),
+      field("rows_per_s", std::to_string(rows_per_s), true),
+      field("result_rows", result.final_table.rowCount()),
+      field("split_ms", result.split_ms),
+      field("coordinator_serialize_ms", result.coordinator_serialize_ms),
+      field("coordinator_wait_ms", result.coordinator_wait_ms),
+      field("coordinator_deserialize_ms", result.coordinator_deserialize_ms),
+      field("coordinator_merge_ms", result.coordinator_merge_ms),
+      field("worker_deserialize_ms", result.worker_deserialize_ms),
+      field("worker_compute_ms", result.worker_compute_ms),
+      field("worker_serialize_ms", result.worker_serialize_ms),
+      field("input_payload_bytes", result.input_payload_bytes),
+      field("output_payload_bytes", result.output_payload_bytes),
+      field("input_shared_memory_bytes", result.input_shared_memory_bytes),
+      field("output_shared_memory_bytes", result.output_shared_memory_bytes),
+  });
+  std::cout << "[actor-stream-json] "
+            << object({
+                   field("label", label),
+                   field("control_plane", control_plane, true),
+                   field("data_plane_copy", data_plane_copy, true),
+                   field("data_plane_shared_memory", data_plane_shared_memory, true),
+                   field("coordinator_merge", coordinator_merge, true),
+                   field("raw_metrics", raw_metrics, true),
+               })
+            << std::endl;
 }
 
 void printDecision(const dataflow::LocalExecutionDecision& decision) {
+  using namespace dataflow::observability;
   std::cout << "[actor-stream] auto-decision chosen=" << dataflow::localExecutionModeName(decision.chosen_mode)
             << " sampled_batches=" << decision.sampled_batches
             << " rows_per_batch=" << decision.rows_per_batch
@@ -67,6 +123,21 @@ void printDecision(const dataflow::LocalExecutionDecision& decision) {
             << " compute_to_overhead=" << decision.compute_to_overhead_ratio
             << " thresholds_met=" << (decision.thresholds_met ? "true" : "false")
             << " reason=" << decision.reason << std::endl;
+  std::cout << "[actor-stream-decision-json] "
+            << object({
+                   field("chosen_mode", dataflow::localExecutionModeName(decision.chosen_mode)),
+                   field("sampled_batches", decision.sampled_batches),
+                   field("rows_per_batch", decision.rows_per_batch),
+                   field("average_projected_payload_bytes", decision.average_projected_payload_bytes),
+                   field("single_rows_per_s", std::to_string(decision.single_rows_per_s), true),
+                   field("actor_rows_per_s", std::to_string(decision.actor_rows_per_s), true),
+                   field("actor_speedup", std::to_string(decision.actor_speedup), true),
+                   field("compute_to_overhead_ratio",
+                         std::to_string(decision.compute_to_overhead_ratio), true),
+                   field("thresholds_met", decision.thresholds_met),
+                   field("reason", decision.reason),
+               })
+            << std::endl;
 }
 
 }  // namespace

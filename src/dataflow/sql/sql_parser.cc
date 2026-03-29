@@ -37,7 +37,8 @@ bool isClauseKeyword(const std::string& value) {
   return u == "FROM" || u == "WHERE" || u == "GROUP" || u == "BY" || u == "HAVING" ||
          u == "LIMIT" || u == "JOIN" || u == "INNER" || u == "LEFT" || u == "ON" || u == "AS" ||
          u == "SELECT" || u == "CREATE" || u == "TABLE" || u == "INSERT" || u == "INTO" ||
-         u == "VALUES" || u == "USING" || u == "OPTIONS" || u == "SOURCE" || u == "SINK";
+         u == "VALUES" || u == "USING" || u == "OPTIONS" || u == "SOURCE" || u == "SINK" ||
+         u == "WINDOW" || u == "EVERY";
 }
 
 bool isJoinKeyword(const std::string& value) {
@@ -471,6 +472,25 @@ SqlQuery parseSelectQuery(ParseState& state, bool alreadyConsumedSelect) {
 
   if (state.consumeWord("WHERE")) {
     out.where = parsePredicate(state);
+  }
+
+  if (state.consumeWord("WINDOW")) {
+    WindowSpec window;
+    state.expectWord("BY");
+    window.time_column = parseColumn(state);
+    state.expectWord("EVERY");
+    Token window_ms = state.expectToken();
+    if (!window_ms.is_number) {
+      throw SQLSyntaxError("WINDOW EVERY must be numeric");
+    }
+    try {
+      window.every_ms = static_cast<uint64_t>(std::stoull(window_ms.text));
+    } catch (...) {
+      throw SQLSyntaxError("invalid WINDOW EVERY value: " + window_ms.text);
+    }
+    state.expectWord("AS");
+    window.output_column = state.expectToken().text;
+    out.window = std::move(window);
   }
 
   if (state.consumeWord("GROUP")) {

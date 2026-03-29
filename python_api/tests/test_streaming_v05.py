@@ -58,6 +58,33 @@ class StreamingV05Test(unittest.TestCase):
             snapshot_json = json.dumps(progress)
             self.assertIn("execution_mode", snapshot_json)
 
+    def test_explain_stream_sql_returns_strategy_sections(self):
+        session = velaria.Session()
+        table = pa.table(
+            {
+                "ts": ["2026-03-29T10:00:00", "2026-03-29T10:00:10"],
+                "key": ["u1", "u1"],
+                "value": [1, 2],
+            }
+        )
+        stream_df = session.create_stream_from_arrow(table)
+        session.create_temp_view("events_stream_explain", stream_df)
+
+        explain = session.explain_stream_sql(
+            "SELECT window_start, key, SUM(value) AS value_sum "
+            "FROM events_stream_explain "
+            "WINDOW BY ts EVERY 60000 AS window_start "
+            "GROUP BY window_start, key",
+            trigger_interval_ms=0,
+            checkpoint_delivery_mode="best-effort",
+        )
+
+        self.assertIn("logical\n", explain)
+        self.assertIn("physical\n", explain)
+        self.assertIn("strategy\n", explain)
+        self.assertIn("selected_mode", explain)
+        self.assertIn("checkpoint_delivery_mode=best-effort", explain)
+
 
 if __name__ == "__main__":
     unittest.main()

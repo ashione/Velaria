@@ -41,15 +41,20 @@ Tag-based release publishing is separate:
 
 - `python_api/demo_batch_sql_arrow.py`：Arrow batch + SQL 临时视图路径。
 - `python_api/demo_stream_sql.py`：stream SQL + sink 路径。
+- `python_api/bench_arrow_ingestion.py`：对比 table / `RecordBatchReader` / `__arrow_c_stream__` ingestion 路径。
 - `bazel test //python_api:streaming_v05_test`：自动化覆盖 Arrow 输入、stream SQL 启动、progress 合同字段。
+- `Session.explain_stream_sql(...)`：直接返回 `logical / physical / strategy` 三段 explain 文本。
+- `bazel test //python_api:arrow_stream_ingestion_test`：自动化覆盖 `RecordBatchReader`、`__arrow_c_stream__` 和 stream batch 边界。
 
 建议本地顺序：
 
 ```bash
 bazel build //:velaria_pyext
 bazel test //python_api:streaming_v05_test
+bazel test //python_api:arrow_stream_ingestion_test
 uv run --project python_api python python_api/demo_batch_sql_arrow.py
 uv run --project python_api python python_api/demo_stream_sql.py
+uv run --project python_api python python_api/bench_arrow_ingestion.py
 ```
 
 
@@ -58,6 +63,7 @@ uv run --project python_api python python_api/demo_stream_sql.py
 现在 Python API 提供可复用的 custom stream source 适配：
 
 - `CustomArrowStreamSource`：把 Python 行数据转换成 Arrow micro-batches。
+- `Session.create_dataframe_from_arrow(...)` / `Session.create_stream_from_arrow(...)` 现在优先接受 `RecordBatchReader` 和实现 `__arrow_c_stream__` 的对象，再回退到 `Table / RecordBatch / batch sequence`。
 - 默认 emit 策略：`1 秒` 或 `1024 行` 触发一次 batch（可配置）。
 - `create_stream_from_custom_source(session, rows, ...)`：直接转换并调用 `session.create_stream_from_arrow(...)`。
 - `CustomArrowStreamSink`：消费 Arrow micro-batches，并按“1秒或N条”聚合后触发 `on_emit` 回调。
@@ -90,3 +96,10 @@ bazel test //python_api:custom_stream_source_test
 
 - `at-least-once`（默认）
 - `best-effort`
+
+`Session.explain_stream_sql(...)` 复用同一组选项参数：
+
+- `sql`
+- `trigger_interval_ms`
+- `checkpoint_path`
+- `checkpoint_delivery_mode`

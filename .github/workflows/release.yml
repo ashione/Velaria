@@ -1,0 +1,143 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  validate-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read package version
+        id: version
+        run: |
+          VERSION="$(./scripts/get_velaria_version.sh)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Read tag name
+        id: tag
+        run: |
+          TAG="${GITHUB_REF_NAME:-}"
+          if [[ -z "${TAG}" ]]; then
+            echo "workflow_dispatch requires a tag ref" >&2
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag matches package version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_VERSION="${{ steps.version.outputs.version }}"
+          if [[ "${TAG_VERSION}" != "${PACKAGE_VERSION}" ]]; then
+            echo "tag ${GITHUB_REF_NAME} does not match package version ${PACKAGE_VERSION}" >&2
+            exit 1
+          fi
+
+  wheel-manylinux:
+    runs-on: ubuntu-22.04
+    needs: validate-version
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bazelisk
+        uses: bazelbuild/setup-bazelisk@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Configure Python for Bazel
+        run: |
+          echo "VELARIA_PYTHON_BIN=$(which python)" >> "$GITHUB_ENV"
+
+      - name: Build native wheel
+        run: |
+          bazel build //python_api:velaria_native_whl
+          mkdir -p dist/linux
+          cp bazel-bin/python_api/velaria-*-native.whl dist/linux/
+
+      - name: Repair wheel to manylinux
+        run: |
+          python -m pip install auditwheel
+          auditwheel repair \
+            --wheel-dir dist/linux \
+            dist/linux/velaria-*-native.whl
+          rm -f dist/linux/velaria-*-native.whl
+
+      - name: Upload manylinux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: velaria-manylinux-wheel
+          path: dist/linux/*.whl
+
+  wheel-macos:
+    runs-on: macos-14
+    needs: validate-version
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bazelisk
+        uses: bazelbuild/setup-bazelisk@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Configure Python for Bazel
+        run: |
+          echo "VELARIA_PYTHON_BIN=$(which python)" >> "$GITHUB_ENV"
+
+      - name: Build macOS native wheel
+        run: |
+          bazel build //python_api:velaria_native_whl
+          mkdir -p dist/macos
+          cp bazel-bin/python_api/velaria-*-native.whl dist/macos/
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: velaria-macos-wheel
+          path: dist/macos/*.whl
+
+  publish-release:
+    runs-on: ubuntu-latest
+    needs:
+      - validate-version
+      - wheel-manylinux
+      - wheel-macos
+    steps:
+      - name: Download manylinux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: velaria-manylinux-wheel
+          path: dist/linux
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: velaria-macos-wheel
+          path: dist/macos
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.validate-version.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            dist/linux/*.whl
+            dist/macos/*.whl

@@ -30,6 +30,12 @@ PR CI builds and uploads two native wheel variants:
 
 The Linux path uses `auditwheel repair` after building `//python_api:velaria_native_whl`. The macOS path uploads the Bazel-built native wheel directly.
 
+Tag-based release publishing is separate:
+
+- bump the package version with `./scripts/bump_velaria_version.sh <version>`
+- create a matching Git tag such as `v0.1.1`
+- the release workflow verifies the tag matches `velaria.__version__` and publishes Linux and macOS wheel assets
+
 
 ## v0.5 Python 用例与测试
 

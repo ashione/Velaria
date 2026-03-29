@@ -507,6 +507,12 @@ Current CI jobs:
 
 This keeps routine development cheaper while still validating PRs and producing native wheel artifacts for review.
 
+Release publishing is separate from PR CI:
+
+- Create a Git tag in the form `vX.Y.Z`
+- The release workflow validates that the tag matches `velaria.__version__`
+- It then builds a manylinux wheel and a macOS wheel and publishes both assets to the GitHub release
+
 ### Smoke check
 
 ```bash

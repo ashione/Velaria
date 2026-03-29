@@ -97,10 +97,9 @@ bazel build //:sql_demo //:df_demo //:stream_demo \
 
 ```bash
 bazel build //:velaria_pyext
-PYTHONPATH=python_api \
-  uv run --with pyarrow python -m unittest \
-  python_api.tests.test_custom_stream_source \
-  python_api.tests.test_streaming_v05
+bazel test //python_api:custom_stream_source_test
+bazel test //python_api:streaming_v05_test
+bazel test //python_api:arrow_stream_ingestion_test
 ```
 
 ## 最小验收清单
@@ -174,7 +173,9 @@ bazel run //:stream_demo
 ## 当前边界
 
 - 当前 SQL 仍是 v1 子集。
-- 当前版本不扩展 window / CTE / 子查询 / `UNION`。
+- 当前版本已支持最小 window SQL：`WINDOW BY <time_col> EVERY <window_ms> AS <output_col>`；但不继续横向扩展 ANSI window 语法。
+- 当前版本不扩展 CTE / 子查询 / `UNION`。
 - `JOIN` 仅保留现有最小能力，不在本轮继续做更复杂 join 扩展。
+- Python 继续只做 Arrow 交换层和前端入口，不引入 Python callback/UDF 进入热路径。
 - 错误恢复能力还需继续加强，当前优先依赖清晰日志与失败文案。
 - 分布式运行时尚未真正接入，当前以本地执行器与本地多进程协作为准。

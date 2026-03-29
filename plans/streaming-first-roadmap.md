@@ -46,7 +46,7 @@
   - `startStreamSql("INSERT INTO sink_table SELECT ...")`
   - `CREATE SOURCE TABLE ... USING csv`
   - `CREATE SINK TABLE ... USING csv`
-- 当前流式 SQL 仍只覆盖 `SELECT/WHERE/GROUP BY/HAVING/LIMIT + SUM/COUNT(*)` 的单表路径；`from_json / watermark / window SQL / JOIN` 仍在后续范围
+- 当前流式 SQL 仍只覆盖 `SELECT/WHERE/GROUP BY/HAVING/LIMIT + SUM/COUNT(*)` 的单表路径；`from_json / watermark / JOIN` 仍在后续范围，最小 `window SQL` 已落地。
 
 ## 当前已落地的最小流式 SQL 设计
 
@@ -59,6 +59,7 @@
 ### 当前入口
 
 - `DataflowSession::streamSql(const std::string&)`
+- `DataflowSession::explainStreamSql(const std::string&, StreamingQueryOptions)`
 - `DataflowSession::startStreamSql(const std::string&, StreamingQueryOptions)`
 
 ### 当前映射关系
@@ -77,9 +78,10 @@
 - 只支持 `USING csv`
 - 只支持单表查询
 - 只支持 `SUM` 与 `COUNT(*)`
+- 只支持最小 `WINDOW BY <time_col> EVERY <window_ms> AS <output_col>`
 - `HAVING` 只作用于当前已支持的聚合输出
 - `LIMIT` 沿用现有 streaming API 的 batch 级实现
-- 不支持 `JOIN / AVG / MIN / MAX / INSERT ... VALUES / window SQL`
+- 不支持 `JOIN / AVG / MIN / MAX / INSERT ... VALUES`
 
 ---
 
@@ -101,10 +103,14 @@
 
 ### v0.5 已完成（当前仓库）
 - 新增 ABI 适配层回归测试，覆盖 open/next/checkpoint/ack/close。
-- 新增 Python 自动化用例，覆盖 Arrow batch、stream SQL 与 progress 字段语义。
-- README 与 runtime 设计文档补齐版本边界说明与测试矩阵。
+- 新增 runtime contract 测试，覆盖 backpressure、checkpoint delivery mode、execution-mode consistency。
+- 新增 `explainStreamSql(...)` 与 strategy explain，把 mode/fallback reason 收口为统一决策出口。
+- 新增 Python 自动化用例，覆盖 Arrow batch、`RecordBatchReader`、`__arrow_c_stream__`、stream SQL 与 progress 字段语义。
+- 新增同机 observability regression 脚本，覆盖 `stream_benchmark / stream_actor_benchmark / actor_rpc_smoke`。
+- 最小 `window SQL` 已落地，并映射回现有 streaming operators。
+- README 与 runtime 设计文档补齐版本边界、contract 与测试矩阵说明。
 
 ### 仍在后续版本范围
 - Parquet/S3 source 的生产级实现。
 - checkpoint 与外部 sink 的更强语义保证（例如重放幂等与恢复策略细化）。
-- Python UDF 与自定义 sink（暂不纳入当前版本）；custom stream source 通过 Arrow 适配已纳入 v0.5。
+- Python UDF 与 callback sink 仍暂不纳入当前版本；custom stream source 通过 Arrow 适配已纳入 v0.5。

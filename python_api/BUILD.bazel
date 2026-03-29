@@ -88,7 +88,7 @@ genrule(
         + "$(location @velaria_local_python//:python_tag.txt) "
         + "$(location @velaria_local_python//:abi_tag.txt) "
         + "$(location @velaria_local_python//:platform_tag.txt) "
-        + "velaria $@",
+        + "velaria $@"
         + " $(locations :velaria_python_sources)",
     tools = ["//scripts:build_native_wheel.py"],
 )

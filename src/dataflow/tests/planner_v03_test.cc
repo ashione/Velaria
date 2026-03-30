@@ -2,8 +2,8 @@
 #include <memory>
 #include <stdexcept>
 
-#include "src/dataflow/planner/plan.h"
-#include "src/dataflow/runtime/executor.h"
+#include "src/dataflow/core/logical/planner/plan.h"
+#include "src/dataflow/core/execution/runtime/executor.h"
 
 namespace {
 

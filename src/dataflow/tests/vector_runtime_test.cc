@@ -6,11 +6,11 @@
 #include <unistd.h>
 #include <vector>
 
-#include "src/dataflow/api/session.h"
-#include "src/dataflow/rpc/actor_rpc_codec.h"
-#include "src/dataflow/rpc/rpc_codec.h"
-#include "src/dataflow/serial/serializer.h"
-#include "src/dataflow/stream/binary_row_batch.h"
+#include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/experimental/rpc/actor_rpc_codec.h"
+#include "src/dataflow/experimental/rpc/rpc_codec.h"
+#include "src/dataflow/core/execution/serial/serializer.h"
+#include "src/dataflow/core/execution/stream/binary_row_batch.h"
 
 namespace {
 

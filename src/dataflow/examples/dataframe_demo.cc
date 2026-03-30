@@ -1,5 +1,5 @@
-#include "src/dataflow/api/dataframe.h"
-#include "src/dataflow/api/session.h"
+#include "src/dataflow/core/contract/api/dataframe.h"
+#include "src/dataflow/core/contract/api/session.h"
 
 #include <fstream>
 

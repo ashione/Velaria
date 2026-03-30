@@ -144,11 +144,18 @@ Repository view:
 
 ## Full-Reorg Note
 
-This reorg is implemented first through repository-facing structure:
+This reorg is now implemented in two layers:
 
-- layered Bazel source groups
-- layered regression suites
-- layered documentation
-- README and Python ecosystem reordering
+- repository-facing structure:
+  - layered Bazel source groups
+  - layered regression suites
+  - layered documentation
+  - README and Python ecosystem reordering
+- physical source layout:
+  - `src/dataflow/core/logical`
+  - `src/dataflow/core/execution`
+  - `src/dataflow/core/contract`
+  - `src/dataflow/interop`
+  - `src/dataflow/experimental`
 
-Source paths still live under the existing `src/dataflow` and `python_api` roots so the current build graph and examples remain stable while the layer boundaries become explicit and enforceable.
+The build graph is still being separated incrementally. Some targets still depend across layers for compatibility while the physical directory split is established and validated.

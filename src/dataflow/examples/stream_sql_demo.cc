@@ -3,8 +3,8 @@
 #include <iostream>
 #include <string>
 
-#include "src/dataflow/api/session.h"
-#include "src/dataflow/stream/stream.h"
+#include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/execution/stream/stream.h"
 
 int main() {
   namespace fs = std::filesystem;

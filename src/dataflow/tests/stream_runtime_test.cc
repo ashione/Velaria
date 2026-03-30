@@ -9,8 +9,8 @@
 #include <thread>
 #include <vector>
 
-#include "src/dataflow/api/session.h"
-#include "src/dataflow/stream/stream.h"
+#include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/execution/stream/stream.h"
 
 namespace {
 

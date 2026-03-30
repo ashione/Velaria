@@ -8,10 +8,10 @@
 #include <utility>
 #include <vector>
 
-#include "src/dataflow/catalog/catalog.h"
-#include "src/dataflow/api/session.h"
-#include "src/dataflow/sql/sql_planner.h"
-#include "src/dataflow/sql/sql_parser.h"
+#include "src/dataflow/core/contract/catalog/catalog.h"
+#include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/logical/sql/sql_planner.h"
+#include "src/dataflow/core/logical/sql/sql_parser.h"
 
 namespace {
 

@@ -3,8 +3,8 @@
 #include <string>
 #include <vector>
 
-#include "src/dataflow/api/session.h"
-#include "src/dataflow/core/value.h"
+#include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/execution/value.h"
 
 namespace {
 

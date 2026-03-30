@@ -1,7 +1,7 @@
 #include <iostream>
 #include <vector>
 
-#include "src/dataflow/stream/stream.h"
+#include "src/dataflow/core/execution/stream/stream.h"
 
 int main() {
   auto state = dataflow::makeStateStore("memory");

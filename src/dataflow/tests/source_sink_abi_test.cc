@@ -4,9 +4,9 @@
 #include <string>
 #include <vector>
 
-#include "src/dataflow/api/session.h"
-#include "src/dataflow/stream/source_sink_abi.h"
-#include "src/dataflow/stream/stream.h"
+#include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/contract/source_sink_abi.h"
+#include "src/dataflow/core/execution/stream/stream.h"
 
 namespace {
 

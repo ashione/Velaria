@@ -6,8 +6,8 @@
 
 #include <cstdlib>
 
-#include "src/dataflow/runtime/observability.h"
-#include "src/dataflow/stream/actor_stream_runtime.h"
+#include "src/dataflow/core/execution/runtime/observability.h"
+#include "src/dataflow/experimental/stream/actor_stream_runtime.h"
 
 namespace {
 

@@ -1,6 +1,9 @@
 #include "src/dataflow/planner/plan.h"
 
 #include <cstdint>
+#include <cstring>
+#include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -71,7 +74,36 @@ bool (*predicateForOp(const std::string& op))(const Value&, const Value&) {
 std::string serializeValue(const Value& value) {
   std::string out;
   appendInt(&out, static_cast<int>(value.type()));
-  appendToken(&out, value.toString());
+  switch (value.type()) {
+    case DataType::Nil:
+      appendToken(&out, "");
+      break;
+    case DataType::Int64:
+      appendToken(&out, std::to_string(value.asInt64()));
+      break;
+    case DataType::Double: {
+      std::ostringstream oss;
+      oss.precision(std::numeric_limits<double>::max_digits10);
+      oss << value.asDouble();
+      appendToken(&out, oss.str());
+      break;
+    }
+    case DataType::String:
+      appendToken(&out, value.asString());
+      break;
+    case DataType::FixedVector: {
+      std::ostringstream oss;
+      const auto& vec = value.asFixedVector();
+      oss << vec.size();
+      for (float v : vec) {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &v, sizeof(bits));
+        oss << ";" << bits;
+      }
+      appendToken(&out, oss.str());
+      break;
+    }
+  }
   return out;
 }
 
@@ -88,6 +120,24 @@ Value deserializeValue(const std::string& payload) {
       return Value(std::stod(raw));
     case DataType::String:
       return Value(raw);
+    case DataType::FixedVector: {
+      std::vector<float> vec;
+      std::stringstream ss(raw);
+      std::string token;
+      if (!std::getline(ss, token, ';')) return Value(vec);
+      const std::size_t n = static_cast<std::size_t>(std::stoull(token));
+      vec.reserve(n);
+      for (std::size_t i = 0; i < n; ++i) {
+        if (!std::getline(ss, token, ';')) {
+          throw std::runtime_error("plan decode: invalid fixed vector payload");
+        }
+        const uint32_t bits = static_cast<uint32_t>(std::stoul(token));
+        float v = 0.0f;
+        std::memcpy(&v, &bits, sizeof(v));
+        vec.push_back(v);
+      }
+      return Value(std::move(vec));
+    }
   }
   throw std::runtime_error("plan decode: unsupported value type");
 }

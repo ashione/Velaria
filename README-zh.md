@@ -229,6 +229,42 @@ uv run --project python_api python python_api/demo_batch_sql_arrow.py
 uv run --project python_api python python_api/demo_stream_sql.py
 ```
 
+同时在 Session 侧新增了向量查询入口：`Session.vectorQuery(table, vector_column, query_vector, top_k, metric)`（metric 支持 cosine/dot/l2），以及 explain 接口 `Session.explainVectorQuery(...)`。
+
+支持打包单文件 CLI 可执行产物（内含 Python 运行时依赖 + native `_velaria.so`）：
+
+```bash
+./scripts/build_py_cli_executable.sh
+./dist/velaria-cli csv-sql \
+  --csv /path/to/input.csv \
+  --query "SELECT * FROM input_table LIMIT 5"
+```
+
+额外支持直接编译 native CLI 二进制（运行时不依赖 Python 环境）：
+
+```bash
+bazel build //:velaria_cli
+./bazel-bin/velaria_cli \
+  --csv /path/to/input.csv \
+  --query "SELECT * FROM input_table LIMIT 5"
+```
+
+native CLI 向量查询（fixed length vector，支持 cosine/cosin、dot 与 l2）：
+
+```bash
+./bazel-bin/velaria_cli \
+  --csv /path/to/vectors.csv \
+  --vector-column embedding \
+  --query-vector "0.1,0.2,0.3" \
+  --metric cosine \
+  --top-k 5
+```
+
+runtime 传输层现已在 proto-like 与 binary row batch codec 中保留 `FixedVector` 类型，跨进程传输时不会丢失向量维度语义。
+FixedVector 在内部 codec 里改为 raw float bit payload 编码，避免文本往返造成的精度损耗。
+当前向量检索范围为本地 exact scan（`mode=exact-scan`）+ 固定维度 float 向量；v0.1 不包含 ANN 与分布式执行路径。
+Arrow ingestion 已增加 `FixedSizeList<float32>` 的 native 快路径，可减少向量列的 Python 对象转换开销。
+
 ## 同机多进程实验路径
 
 同机路径刻意保持最小：
@@ -270,6 +306,7 @@ Dashboard：
 - `//:stream_benchmark`
 - `//:stream_actor_benchmark`
 - `//:tpch_q1_style_benchmark`
+- `//:vector_search_benchmark`
 
 同机 observability regression：
 

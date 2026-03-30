@@ -190,6 +190,8 @@ Main API:
 - `Session.stream_sql(...)`
 - `Session.explain_stream_sql(...)`
 - `Session.start_stream_sql(...)`
+- `Session.vectorQuery(table, vector_column, query_vector, top_k, metric)` (`metric`: cosine/dot/l2)
+- `Session.explainVectorQuery(table, vector_column, query_vector, top_k, metric)`
 
 Arrow ingestion accepts:
 
@@ -207,6 +209,40 @@ uv sync --project python_api --python python3.12
 uv run --project python_api python python_api/demo_batch_sql_arrow.py
 uv run --project python_api python python_api/demo_stream_sql.py
 ```
+
+Build a single-file CLI executable (bundles Python runtime deps + native `_velaria.so`):
+
+```bash
+./scripts/build_py_cli_executable.sh
+./dist/velaria-cli csv-sql \
+  --csv /path/to/input.csv \
+  --query "SELECT * FROM input_table LIMIT 5"
+```
+
+Build a native CLI binary (no Python runtime dependency required at runtime):
+
+```bash
+bazel build //:velaria_cli
+./bazel-bin/velaria_cli \
+  --csv /path/to/input.csv \
+  --query "SELECT * FROM input_table LIMIT 5"
+```
+
+Vector query (fixed-length vector, cosine/dot/l2) via native CLI:
+
+```bash
+./bazel-bin/velaria_cli \
+  --csv /path/to/vectors.csv \
+  --vector-column embedding \
+  --query-vector "0.1,0.2,0.3" \
+  --metric cosine \
+  --top-k 5
+```
+
+Runtime-level vector transport now preserves `FixedVector` through proto-like and binary row batch codecs, so cross-process payloads keep vector type and dimensions.
+FixedVector serialization now uses raw float bit payload encoding in internal codecs to avoid text round-trip precision loss.
+Current vector search scope is local-only exact scan (`mode=exact-scan`) with fixed-dimension float vectors; no ANN/distributed path in v0.1.
+Arrow ingestion now includes a direct `FixedSizeList<float32>` fast path in the native bridge, reducing Python object conversion overhead on vector columns.
 
 ## Same-Host Multi-Process Experiment
 
@@ -249,6 +285,7 @@ Useful local targets:
 - `//:stream_benchmark`
 - `//:stream_actor_benchmark`
 - `//:tpch_q1_style_benchmark`
+- `//:vector_search_benchmark`
 
 Same-host observability regression:
 

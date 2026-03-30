@@ -5,10 +5,11 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace dataflow {
 
-enum class DataType { Nil = 0, Int64 = 1, Double = 2, String = 3 };
+enum class DataType { Nil = 0, Int64 = 1, Double = 2, String = 3, FixedVector = 4 };
 
 class Value {
  public:
@@ -17,6 +18,8 @@ class Value {
   Value(double v) : type_(DataType::Double), i64_(0), d_(v), s_("") {}
   Value(const char* s) : type_(DataType::String), i64_(0), d_(0.0), s_(s) {}
   Value(std::string s) : type_(DataType::String), i64_(0), d_(0.0), s_(std::move(s)) {}
+  Value(std::vector<float> v)
+      : type_(DataType::FixedVector), i64_(0), d_(0.0), s_(""), vec_(std::move(v)) {}
 
   DataType type() const { return type_; }
 
@@ -52,6 +55,32 @@ class Value {
     return s_;
   }
 
+  const std::vector<float>& asFixedVector() const {
+    if (type_ != DataType::FixedVector) {
+      throw std::runtime_error("value is not fixed vector");
+    }
+    return vec_;
+  }
+
+  static std::vector<float> parseFixedVector(const std::string& raw) {
+    std::string text = raw;
+    if (!text.empty() && text.front() == '[' && text.back() == ']') {
+      text = text.substr(1, text.size() - 2);
+    }
+    std::vector<float> out;
+    std::stringstream ss(text);
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+      if (token.empty()) continue;
+      std::stringstream trim(token);
+      std::string cleaned;
+      trim >> cleaned;
+      if (cleaned.empty()) continue;
+      out.push_back(std::stof(cleaned));
+    }
+    return out;
+  }
+
   std::string toString() const {
     switch (type_) {
       case DataType::Nil:
@@ -65,6 +94,16 @@ class Value {
       }
       case DataType::String:
         return s_;
+      case DataType::FixedVector: {
+        std::ostringstream oss;
+        oss << "[";
+        for (std::size_t i = 0; i < vec_.size(); ++i) {
+          if (i > 0) oss << ",";
+          oss << std::fixed << std::setprecision(6) << vec_[i];
+        }
+        oss << "]";
+        return oss.str();
+      }
     }
     return "";
   }
@@ -79,6 +118,7 @@ class Value {
   int64_t i64_;
   double d_;
   std::string s_;
+  std::vector<float> vec_;
 
   int compare(const Value& rhs) const {
     if (type_ != rhs.type_) {
@@ -98,6 +138,16 @@ class Value {
         return (d_ < rhs.d_) ? -1 : (d_ > rhs.d_ ? 1 : 0);
       case DataType::String:
         return (s_ < rhs.s_) ? -1 : (s_ > rhs.s_ ? 1 : 0);
+      case DataType::FixedVector: {
+        if (vec_.size() != rhs.vec_.size()) {
+          return vec_.size() < rhs.vec_.size() ? -1 : 1;
+        }
+        for (std::size_t i = 0; i < vec_.size(); ++i) {
+          if (vec_[i] < rhs.vec_[i]) return -1;
+          if (vec_[i] > rhs.vec_[i]) return 1;
+        }
+        return 0;
+      }
     }
     return 0;
   }

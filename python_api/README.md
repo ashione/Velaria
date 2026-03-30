@@ -21,6 +21,36 @@ uv run --project python_api python python_api/demo_batch_sql_arrow.py
 uv run --project python_api python python_api/demo_stream_sql.py
 ```
 
+Single-file CLI packaging (Python deps + native `_velaria.so`):
+
+```bash
+./scripts/build_py_cli_executable.sh
+./dist/velaria-cli csv-sql --csv /path/to/input.csv --query "SELECT * FROM input_table LIMIT 5"
+./dist/velaria-cli vector-search --csv /path/to/vectors.csv --vector-column embedding --query-vector "0.1,0.2,0.3" --metric cosine --top-k 5
+```
+
+Python Session API for local vector search:
+
+```python
+from velaria import Session
+
+session = Session()
+# assume a temp view named "vec_src" already exists
+out = session.vector_search("vec_src", "embedding", [0.1, 0.2, 0.3], top_k=5, metric="dot")
+print(out.to_rows())
+print(session.explain_vector_search("vec_src", "embedding", [0.1, 0.2, 0.3], top_k=5, metric="dot"))
+```
+
+Current vector search scope is local exact scan only (`cosine`/`dot`/`l2`) on fixed-dimension float vectors.
+
+Native binary CLI alternative (runtime does not require Python environment):
+
+```bash
+bazel build //:velaria_cli
+./bazel-bin/velaria_cli --csv /path/to/input.csv --query "SELECT * FROM input_table LIMIT 5"
+./bazel-bin/velaria_cli --csv /path/to/vectors.csv --vector-column embedding --query-vector "0.1,0.2,0.3" --metric l2 --top-k 5
+```
+
 ## CI packaging
 
 PR CI builds and uploads two native wheel variants:

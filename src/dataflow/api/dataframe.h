@@ -13,6 +13,7 @@
 namespace dataflow {
 
 class DataFrame;
+enum class VectorDistanceMetric { Cosine, Dot, L2 };
 
 class GroupedDataFrame {
  public:
@@ -45,6 +46,14 @@ class DataFrame {
   DataFrame cache() const;
   DataFrame aggregate(const std::vector<size_t>& keys,
                      const std::vector<AggregateSpec>& aggs) const;
+  DataFrame vectorQuery(const std::string& vectorColumn,
+                        const std::vector<float>& queryVector,
+                        size_t top_k,
+                        VectorDistanceMetric metric = VectorDistanceMetric::Cosine) const;
+  std::string explainVectorQuery(const std::string& vectorColumn,
+                                 const std::vector<float>& queryVector,
+                                 size_t top_k,
+                                 VectorDistanceMetric metric = VectorDistanceMetric::Cosine) const;
 
   GroupedDataFrame groupBy(const std::vector<std::string>& keys) const;
   DataFrame join(const DataFrame& right, const std::string& leftOn, const std::string& rightOn,

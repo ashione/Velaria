@@ -7,6 +7,7 @@
 #include <sstream>
 
 #include "src/dataflow/ai/plugin_runtime.h"
+#include "src/dataflow/runtime/vector_index.h"
 
 namespace dataflow {
 
@@ -268,6 +269,78 @@ DataFrame DataFrame::aggregate(const std::vector<size_t>& keys,
                               const std::vector<AggregateSpec>& aggs) const {
   auto node = std::make_shared<AggregatePlan>(plan_, keys, aggs);
   return DataFrame(node, executor_);
+}
+
+DataFrame DataFrame::vectorQuery(const std::string& vectorColumn,
+                                 const std::vector<float>& queryVector,
+                                 size_t top_k,
+                                 VectorDistanceMetric metric) const {
+  if (queryVector.empty()) {
+    throw std::invalid_argument("query vector cannot be empty");
+  }
+  const auto source = materialize();
+  const size_t vector_index = source.schema.indexOf(vectorColumn);
+  std::vector<std::vector<float>> vectors;
+  vectors.reserve(source.rows.size());
+  for (size_t i = 0; i < source.rows.size(); ++i) {
+    if (vector_index >= source.rows[i].size()) continue;
+    const auto& cell = source.rows[i][vector_index];
+    std::vector<float> vec;
+    if (cell.type() == DataType::FixedVector) {
+      vec = cell.asFixedVector();
+    } else {
+      vec = Value::parseFixedVector(cell.toString());
+    }
+    if (vec.size() != queryVector.size()) {
+      throw std::invalid_argument("fixed vector length mismatch in vectorQuery");
+    }
+    vectors.push_back(std::move(vec));
+  }
+  VectorSearchOptions options;
+  options.top_k = top_k;
+  options.metric = metric == VectorDistanceMetric::L2
+                       ? VectorSearchMetric::L2
+                       : (metric == VectorDistanceMetric::Dot ? VectorSearchMetric::Dot
+                                                              : VectorSearchMetric::Cosine);
+  const auto index = makeExactScanVectorIndex(std::move(vectors));
+  const auto scored = index->search(queryVector, options);
+  const size_t take = scored.size();
+  Table out;
+  out.schema = Schema({"row_id", "score"});
+  out.rows.reserve(take);
+  for (size_t i = 0; i < take; ++i) {
+    Row row;
+    row.emplace_back(static_cast<int64_t>(scored[i].row_id));
+    row.emplace_back(scored[i].score);
+    out.rows.push_back(std::move(row));
+  }
+  return DataFrame(std::move(out));
+}
+
+std::string DataFrame::explainVectorQuery(const std::string& vectorColumn,
+                                          const std::vector<float>& queryVector, size_t top_k,
+                                          VectorDistanceMetric metric) const {
+  const auto source = materialize();
+  const size_t vector_index = source.schema.indexOf(vectorColumn);
+  std::vector<std::vector<float>> vectors;
+  vectors.reserve(source.rows.size());
+  for (const auto& row : source.rows) {
+    if (vector_index >= row.size()) continue;
+    vectors.push_back(row[vector_index].type() == DataType::FixedVector
+                          ? row[vector_index].asFixedVector()
+                          : Value::parseFixedVector(row[vector_index].toString()));
+  }
+  VectorSearchOptions options;
+  options.top_k = top_k;
+  options.metric = metric == VectorDistanceMetric::L2
+                       ? VectorSearchMetric::L2
+                       : (metric == VectorDistanceMetric::Dot ? VectorSearchMetric::Dot
+                                                              : VectorSearchMetric::Cosine);
+  const auto index = makeExactScanVectorIndex(std::move(vectors));
+  if (!queryVector.empty() && index->dimension() != 0 && queryVector.size() != index->dimension()) {
+    throw std::invalid_argument("query vector dimension mismatch in explainVectorQuery");
+  }
+  return index->explain(options);
 }
 
 GroupedDataFrame DataFrame::groupBy(const std::vector<std::string>& keys) const {

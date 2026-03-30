@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/execution/nanoarrow_ipc_codec.h"
 #include "src/dataflow/core/execution/source_materialization.h"
 #include "src/dataflow/core/execution/stream/binary_row_batch.h"
 
@@ -27,10 +28,11 @@ void expect_table_value(const dataflow::Table& table, std::size_t row, std::size
   expect(column < table.rows[row].size(), msg + ": column out of range");
   const auto& actual = table.rows[row][column];
   if (expected.isNull()) {
-    expect(actual.isNull(), msg + ": expected null");
+    expect(actual.isNull(), msg + ": expected null but got " + actual.toString());
     return;
   }
-  expect(actual == expected, msg);
+  expect(actual == expected,
+         msg + ": expected " + expected.toString() + ", got " + actual.toString());
 }
 
 std::string make_temp_dir(const std::string& pattern) {
@@ -64,6 +66,17 @@ void write_csv(const std::string& path, const std::string& body) {
   out << body;
 }
 
+void expect_roundtrip_sample_table(const dataflow::Table& table, const std::string& label) {
+  expect(table.schema.fields.size() == 5, label + ": schema width mismatch");
+  expect(table.rows.size() == 2, label + ": row count mismatch");
+  expect_table_value(table, 0, 0, dataflow::Value(int64_t(1)), label + ": int mismatch");
+  expect_table_value(table, 0, 1, dataflow::Value(3.5), label + ": double mismatch");
+  expect_table_value(table, 0, 2, dataflow::Value("alice"), label + ": string mismatch");
+  expect_table_value(table, 0, 3, dataflow::Value(std::vector<float>{1.0f, 0.5f}),
+                     label + ": vector mismatch");
+  expect_table_value(table, 0, 4, dataflow::Value(), label + ": null mismatch");
+}
+
 }  // namespace
 
 int main() {
@@ -86,11 +99,12 @@ int main() {
     expect(dataflow::materialization_data_format_is_available(
                dataflow::MaterializationDataFormat::BinaryRowBatch),
            "binary data format should be available");
-    expect(!dataflow::materialization_data_format_is_available(
+    expect(dataflow::materialization_data_format_is_available(
                dataflow::MaterializationDataFormat::NanoArrowIpc),
-           "nanoarrow data format should remain a future backend until wired");
+           "nanoarrow data format should be available");
 
     const auto binary_path = make_temp_file("velaria-binary-materialized");
+    const auto nanoarrow_path = make_temp_file("velaria-nanoarrow-materialized");
     dataflow::Table roundtrip_source;
     roundtrip_source.schema = dataflow::Schema({"id", "score", "name", "embedding", "note"});
     roundtrip_source.rows = {
@@ -116,19 +130,13 @@ int main() {
     const auto roundtrip_loaded = codec.deserialize(loaded_payload);
     expect(roundtrip_loaded.schema.fields == roundtrip_source.schema.fields,
            "binary roundtrip schema mismatch");
-    expect(roundtrip_loaded.rows.size() == roundtrip_source.rows.size(),
-           "binary roundtrip row count mismatch");
-    expect_table_value(roundtrip_loaded, 0, 0, dataflow::Value(int64_t(1)),
-                       "binary roundtrip int mismatch");
-    expect_table_value(roundtrip_loaded, 0, 1, dataflow::Value(3.5),
-                       "binary roundtrip double mismatch");
-    expect_table_value(roundtrip_loaded, 0, 2, dataflow::Value("alice"),
-                       "binary roundtrip string mismatch");
-    expect_table_value(roundtrip_loaded, 0, 3,
-                       dataflow::Value(std::vector<float>{1.0f, 0.5f}),
-                       "binary roundtrip vector mismatch");
-    expect_table_value(roundtrip_loaded, 0, 4, dataflow::Value(),
-                       "binary roundtrip null mismatch");
+    expect_roundtrip_sample_table(roundtrip_loaded, "binary roundtrip");
+
+    dataflow::save_nanoarrow_ipc_table(roundtrip_source, nanoarrow_path);
+    const auto nanoarrow_loaded = dataflow::load_nanoarrow_ipc_table(nanoarrow_path);
+    expect(nanoarrow_loaded.schema.fields == roundtrip_source.schema.fields,
+           "nanoarrow roundtrip schema mismatch");
+    expect_roundtrip_sample_table(nanoarrow_loaded, "nanoarrow roundtrip");
 
     const auto csv_path = make_temp_file("velaria-materialized-source");
     write_csv(csv_path, "id,score,name\n1,10,alice\n2,20,bob\n");
@@ -184,10 +192,53 @@ int main() {
     expect(updated_cache_mtime != second_cache_mtime,
            "cache invalidation should rewrite binary materialization file");
 
-    std::cout << "[test] source materialization binary cache ok" << std::endl;
+    const auto nanoarrow_cache_root = make_temp_dir("velaria-source-materialization-nanoarrow");
+    expect(setenv("VELARIA_MATERIALIZATION_DIR", nanoarrow_cache_root.c_str(), 1) == 0,
+           "failed to reset materialization dir env");
+    expect(setenv("VELARIA_MATERIALIZATION_FORMAT", "nanoarrow_ipc", 1) == 0,
+           "failed to switch materialization format env");
+
+    const auto nanoarrow_csv_path = make_temp_file("velaria-nanoarrow-source");
+    write_csv(nanoarrow_csv_path, "id,score,name\n1,10,alice\n2,20,bob\n");
+    const auto nanoarrow_first = session.read_csv(nanoarrow_csv_path).toTable();
+    expect(nanoarrow_first.rows.size() == 2, "nanoarrow csv read row count mismatch");
+    expect_table_value(nanoarrow_first, 1, 2, dataflow::Value("bob"),
+                       "nanoarrow csv read content mismatch");
+
+    dataflow::SourceMaterializationStore nanoarrow_store(
+        dataflow::default_source_materialization_root(),
+        dataflow::MaterializationDataFormat::NanoArrowIpc);
+    const auto nanoarrow_fingerprint =
+        dataflow::capture_file_source_fingerprint(nanoarrow_csv_path, "csv", "delimiter=,");
+    const auto nanoarrow_entry = nanoarrow_store.lookup(nanoarrow_fingerprint);
+    expect(nanoarrow_entry.has_value(), "nanoarrow source materialization entry should exist");
+    expect(nanoarrow_entry->data_format == dataflow::MaterializationDataFormat::NanoArrowIpc,
+           "nanoarrow source materialization data format mismatch");
+    expect(nanoarrow_entry->data_path.size() >= 10 &&
+               nanoarrow_entry->data_path.substr(nanoarrow_entry->data_path.size() - 10) ==
+                   ".nanoarrow",
+           "nanoarrow materialization file suffix mismatch");
+    const auto nanoarrow_first_cache_mtime =
+        std::filesystem::last_write_time(nanoarrow_entry->data_path);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    const auto nanoarrow_second = session.read_csv(nanoarrow_csv_path).toTable();
+    expect(nanoarrow_second.rows.size() == 2, "nanoarrow second csv read row count mismatch");
+    expect_table_value(nanoarrow_second, 0, 1, dataflow::Value(int64_t(10)),
+                       "nanoarrow second csv read content mismatch");
+    const auto nanoarrow_second_entry = nanoarrow_store.lookup(
+        dataflow::capture_file_source_fingerprint(nanoarrow_csv_path, "csv", "delimiter=,"));
+    expect(nanoarrow_second_entry.has_value(),
+           "nanoarrow source materialization entry should still exist");
+    const auto nanoarrow_second_cache_mtime =
+        std::filesystem::last_write_time(nanoarrow_second_entry->data_path);
+    expect(nanoarrow_first_cache_mtime == nanoarrow_second_cache_mtime,
+           "nanoarrow cache hit should not rewrite materialization file");
+
+    std::cout << "[test] source materialization binary+nanoarrow cache ok" << std::endl;
     return 0;
   } catch (const std::exception& ex) {
-    std::cerr << "[test] source materialization binary cache failed: " << ex.what() << std::endl;
+    std::cerr << "[test] source materialization cache failed: " << ex.what() << std::endl;
     return 1;
   }
 }

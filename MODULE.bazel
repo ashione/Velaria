@@ -6,6 +6,62 @@ bazel_dep(name = "rules_python", version = "1.7.0")
 local_python_configure = use_repo_rule("//tools:python_configure.bzl", "local_python_configure")
 local_python_configure(name = "velaria_local_python")
 
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "nanoarrow_src",
+    build_file_content = """load("@rules_cc//cc:defs.bzl", "cc_library")
+
+genrule(
+    name = "nanoarrow_config_header",
+    srcs = ["src/nanoarrow/nanoarrow_config.h.in"],
+    outs = ["src/nanoarrow/nanoarrow_config.h"],
+    cmd = ("sed " +
+           "-e 's/@NANOARROW_VERSION_MAJOR@/0/g' " +
+           "-e 's/@NANOARROW_VERSION_MINOR@/8/g' " +
+           "-e 's/@NANOARROW_VERSION_PATCH@/0/g' " +
+           "-e 's/@NANOARROW_VERSION@/0.8.0/g' " +
+           "-e 's/@NANOARROW_NAMESPACE_DEFINE@//g' " +
+           "$< >$@"),
+)
+
+cc_library(
+    name = "nanoarrow",
+    srcs = [
+        "src/nanoarrow/common/array.c",
+        "src/nanoarrow/common/array_stream.c",
+        "src/nanoarrow/common/schema.c",
+        "src/nanoarrow/common/utils.c",
+        "src/nanoarrow/ipc/codecs.c",
+        "src/nanoarrow/ipc/decoder.c",
+        "src/nanoarrow/ipc/encoder.c",
+        "src/nanoarrow/ipc/reader.c",
+        "src/nanoarrow/ipc/writer.c",
+        "thirdparty/flatcc/src/runtime/builder.c",
+        "thirdparty/flatcc/src/runtime/emitter.c",
+        "thirdparty/flatcc/src/runtime/refmap.c",
+        "thirdparty/flatcc/src/runtime/verifier.c",
+    ],
+    hdrs = glob([
+        "src/nanoarrow/**/*.h",
+        "thirdparty/flatcc/include/**/*.h",
+    ]) + [":nanoarrow_config_header"],
+    includes = [
+        "src",
+        "thirdparty/flatcc/include",
+    ],
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "1c5136edf5c1e9cd8c47c4e31dfe07d0e09c25f27be20c8d6e78a0f4a4ed3fae",
+    strip_prefix = "arrow-nanoarrow-apache-arrow-nanoarrow-0.8.0",
+    type = "tar.gz",
+    urls = [
+        "https://codeload.github.com/apache/arrow-nanoarrow/tar.gz/refs/tags/apache-arrow-nanoarrow-0.8.0",
+    ],
+)
+
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(python_version = "3.12")
 use_repo(python, "python_3_12")

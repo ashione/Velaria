@@ -10,6 +10,7 @@
 #include <system_error>
 #include <vector>
 
+#include "src/dataflow/core/execution/nanoarrow_ipc_codec.h"
 #include "src/dataflow/core/execution/stream/binary_row_batch.h"
 
 namespace dataflow {
@@ -205,8 +206,8 @@ void serialize_materialized_table(MaterializationDataFormat format, const Table&
       return;
     }
     case MaterializationDataFormat::NanoArrowIpc:
-      throw std::runtime_error(
-          "materialization data format nanoarrow_ipc is not wired yet");
+      save_nanoarrow_ipc_table(table, path);
+      return;
   }
 }
 
@@ -219,8 +220,7 @@ Table deserialize_materialized_table(MaterializationDataFormat format,
       return codec.deserialize(payload);
     }
     case MaterializationDataFormat::NanoArrowIpc:
-      throw std::runtime_error(
-          "materialization data format nanoarrow_ipc is not wired yet");
+      return load_nanoarrow_ipc_table(path);
   }
   throw std::runtime_error("unsupported materialization data format");
 }
@@ -263,7 +263,7 @@ bool materialization_data_format_is_available(MaterializationDataFormat format) 
     case MaterializationDataFormat::BinaryRowBatch:
       return true;
     case MaterializationDataFormat::NanoArrowIpc:
-      return false;
+      return true;
   }
   return false;
 }

@@ -20,6 +20,8 @@ filegroup(
     srcs = [
         "src/dataflow/core/execution/csv.cc",
         "src/dataflow/core/execution/csv.h",
+        "src/dataflow/core/execution/nanoarrow_ipc_codec.cc",
+        "src/dataflow/core/execution/nanoarrow_ipc_codec.h",
         "src/dataflow/core/execution/source_materialization.cc",
         "src/dataflow/core/execution/source_materialization.h",
         "src/dataflow/core/execution/table.cc",
@@ -108,6 +110,7 @@ cc_library(
         "src/dataflow/core/execution/value.cc",
         "src/dataflow/core/execution/table.cc",
         "src/dataflow/core/execution/csv.cc",
+        "src/dataflow/core/execution/nanoarrow_ipc_codec.cc",
         "src/dataflow/core/execution/source_materialization.cc",
         "src/dataflow/core/contract/catalog/catalog.cc",
         "src/dataflow/core/contract/api/dataframe.cc",
@@ -132,6 +135,7 @@ cc_library(
         "src/dataflow/core/execution/value.h",
         "src/dataflow/core/execution/table.h",
         "src/dataflow/core/execution/csv.h",
+        "src/dataflow/core/execution/nanoarrow_ipc_codec.h",
         "src/dataflow/core/execution/source_materialization.h",
         "src/dataflow/core/contract/catalog/catalog.h",
         "src/dataflow/core/contract/api/dataframe.h",
@@ -157,6 +161,7 @@ cc_library(
         "src/dataflow/core/contract/source_sink_abi.h",
         "src/dataflow/core/execution/stream/stream.h",
     ],
+    deps = ["@nanoarrow_src//:nanoarrow"],
     visibility = ["//visibility:public"],
 )
 

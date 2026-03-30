@@ -55,63 +55,33 @@ class ExactScanVectorIndex : public VectorIndex {
     }
 
     const std::size_t k = std::max<std::size_t>(1, options.top_k);
-    auto cmp_desc = [](const VectorSearchResult& lhs, const VectorSearchResult& rhs) {
+    auto cmp_max = [](const VectorSearchResult& lhs, const VectorSearchResult& rhs) {
       return lhs.score < rhs.score;
     };
-    auto cmp_asc = [](const VectorSearchResult& lhs, const VectorSearchResult& rhs) {
+    auto cmp_min = [](const VectorSearchResult& lhs, const VectorSearchResult& rhs) {
       return lhs.score > rhs.score;
     };
-    std::priority_queue<VectorSearchResult, std::vector<VectorSearchResult>, decltype(cmp_desc)>
-        max_heap(cmp_desc);
-    std::priority_queue<VectorSearchResult, std::vector<VectorSearchResult>, decltype(cmp_asc)>
-        min_heap(cmp_asc);
-
-    double query_norm = 0.0;
-    for (float v : query) query_norm += static_cast<double>(v) * static_cast<double>(v);
-    query_norm = std::sqrt(query_norm);
-
-    for (std::size_t row = 0; row < row_count_; ++row) {
-      const float* base = data_.data() + row * dimension_;
-      double score = 0.0;
-      if (options.metric == VectorSearchMetric::L2) {
-        double sum = 0.0;
-        for (std::size_t col = 0; col < dimension_; ++col) {
-          const double diff = static_cast<double>(base[col]) - static_cast<double>(query[col]);
-          sum += diff * diff;
-        }
-        score = std::sqrt(sum);
-      } else {
+    std::vector<VectorSearchResult> scored;
+    scored.reserve(std::min(k, row_count_));
+    if (options.metric == VectorSearchMetric::Dot) {
+      std::vector<VectorSearchResult> heap_storage;
+      heap_storage.reserve(k);
+      std::priority_queue<VectorSearchResult, std::vector<VectorSearchResult>, decltype(cmp_min)>
+          min_heap(cmp_min, std::move(heap_storage));
+      for (std::size_t row = 0; row < row_count_; ++row) {
+        const float* base = data_.data() + row * dimension_;
         double dot = 0.0;
         for (std::size_t col = 0; col < dimension_; ++col) {
           dot += static_cast<double>(base[col]) * static_cast<double>(query[col]);
         }
-        if (options.metric == VectorSearchMetric::Dot) {
-          score = dot;
-        } else {
-          const double denom = norms_[row] * query_norm;
-          score = denom == 0.0 ? 1.0 : (1.0 - std::max(-1.0, std::min(1.0, dot / denom)));
-        }
-      }
-      VectorSearchResult current{row, score};
-      if (options.metric == VectorSearchMetric::Dot) {
+        VectorSearchResult current{row, dot};
         if (min_heap.size() < k) {
           min_heap.push(current);
         } else if (current.score > min_heap.top().score) {
           min_heap.pop();
           min_heap.push(current);
         }
-      } else {
-        if (max_heap.size() < k) {
-          max_heap.push(current);
-        } else if (current.score < max_heap.top().score) {
-          max_heap.pop();
-          max_heap.push(current);
-        }
       }
-    }
-
-    std::vector<VectorSearchResult> scored;
-    if (options.metric == VectorSearchMetric::Dot) {
       while (!min_heap.empty()) {
         scored.push_back(min_heap.top());
         min_heap.pop();
@@ -120,7 +90,29 @@ class ExactScanVectorIndex : public VectorIndex {
                 [](const VectorSearchResult& lhs, const VectorSearchResult& rhs) {
                   return lhs.score > rhs.score;
                 });
-    } else {
+      return scored;
+    }
+
+    std::vector<VectorSearchResult> heap_storage;
+    heap_storage.reserve(k);
+    std::priority_queue<VectorSearchResult, std::vector<VectorSearchResult>, decltype(cmp_max)>
+        max_heap(cmp_max, std::move(heap_storage));
+    if (options.metric == VectorSearchMetric::L2) {
+      for (std::size_t row = 0; row < row_count_; ++row) {
+        const float* base = data_.data() + row * dimension_;
+        double squared_l2 = 0.0;
+        for (std::size_t col = 0; col < dimension_; ++col) {
+          const double diff = static_cast<double>(base[col]) - static_cast<double>(query[col]);
+          squared_l2 += diff * diff;
+        }
+        VectorSearchResult current{row, squared_l2};
+        if (max_heap.size() < k) {
+          max_heap.push(current);
+        } else if (current.score < max_heap.top().score) {
+          max_heap.pop();
+          max_heap.push(current);
+        }
+      }
       while (!max_heap.empty()) {
         scored.push_back(max_heap.top());
         max_heap.pop();
@@ -129,7 +121,40 @@ class ExactScanVectorIndex : public VectorIndex {
                 [](const VectorSearchResult& lhs, const VectorSearchResult& rhs) {
                   return lhs.score < rhs.score;
                 });
+      for (auto& item : scored) {
+        item.score = std::sqrt(item.score);
+      }
+      return scored;
     }
+
+    double query_norm = 0.0;
+    for (float v : query) query_norm += static_cast<double>(v) * static_cast<double>(v);
+    query_norm = std::sqrt(query_norm);
+    for (std::size_t row = 0; row < row_count_; ++row) {
+      const float* base = data_.data() + row * dimension_;
+      double dot = 0.0;
+      for (std::size_t col = 0; col < dimension_; ++col) {
+        dot += static_cast<double>(base[col]) * static_cast<double>(query[col]);
+      }
+      const double denom = norms_[row] * query_norm;
+      const double cosine_distance =
+          denom == 0.0 ? 1.0 : (1.0 - std::max(-1.0, std::min(1.0, dot / denom)));
+      VectorSearchResult current{row, cosine_distance};
+      if (max_heap.size() < k) {
+        max_heap.push(current);
+      } else if (current.score < max_heap.top().score) {
+        max_heap.pop();
+        max_heap.push(current);
+      }
+    }
+    while (!max_heap.empty()) {
+      scored.push_back(max_heap.top());
+      max_heap.pop();
+    }
+    std::sort(scored.begin(), scored.end(),
+              [](const VectorSearchResult& lhs, const VectorSearchResult& rhs) {
+                return lhs.score < rhs.score;
+              });
     return scored;
   }
 

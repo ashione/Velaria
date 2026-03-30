@@ -243,6 +243,7 @@ Runtime-level vector transport now preserves `FixedVector` through proto-like an
 FixedVector serialization now uses raw float bit payload encoding in internal codecs to avoid text round-trip precision loss.
 Current vector search scope is local-only exact scan (`mode=exact-scan`) with fixed-dimension float vectors; no ANN/distributed path in v0.1.
 Arrow ingestion now includes a direct `FixedSizeList<float32>` fast path in the native bridge, reducing Python object conversion overhead on vector columns.
+For same-host actor runtime results, the control message stays on `actor-rpc-v1`, while the result table is forwarded as a separate `table-bin-v1` `DataBatch` frame linked by `correlation_id`. The hot result path no longer puts row payloads inside the actor JSON body.
 
 ## Same-Host Multi-Process Experiment
 
@@ -263,6 +264,8 @@ Smoke:
 ```bash
 bazel run //:actor_rpc_smoke
 ```
+
+The smoke target now verifies both the actor control message and the correlated binary `DataBatch` result frame.
 
 Three-process local run:
 
@@ -286,6 +289,17 @@ Useful local targets:
 - `//:stream_actor_benchmark`
 - `//:tpch_q1_style_benchmark`
 - `//:vector_search_benchmark`
+
+Vector benchmark:
+
+```bash
+bazel run //:vector_search_benchmark
+```
+
+It emits JSON lines for:
+
+- `vector-query`: cold query, warm query, and warm explain latency
+- `vector-transport`: proto-like vs `BinaryRowBatch` serialize/deserialize cost and payload size, plus actor control-frame overhead
 
 Same-host observability regression:
 

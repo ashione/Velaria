@@ -246,7 +246,10 @@ cc_binary(
 cc_binary(
     name = "vector_search_benchmark",
     srcs = ["src/dataflow/examples/vector_search_benchmark.cc"],
-    deps = [":dataflow_core"],
+    deps = [
+        ":dataflow_actor_rpc_codec",
+        ":dataflow_core",
+    ],
 )
 
 cc_test(
@@ -288,5 +291,8 @@ cc_test(
 cc_test(
     name = "vector_runtime_test",
     srcs = ["src/dataflow/tests/vector_runtime_test.cc"],
-    deps = [":dataflow_core"],
+    deps = [
+        ":dataflow_actor_rpc_codec",
+        ":dataflow_core",
+    ],
 )

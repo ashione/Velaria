@@ -264,6 +264,7 @@ runtime 传输层现已在 proto-like 与 binary row batch codec 中保留 `Fixe
 FixedVector 在内部 codec 里改为 raw float bit payload 编码，避免文本往返造成的精度损耗。
 当前向量检索范围为本地 exact scan（`mode=exact-scan`）+ 固定维度 float 向量；v0.1 不包含 ANN 与分布式执行路径。
 Arrow ingestion 已增加 `FixedSizeList<float32>` 的 native 快路径，可减少向量列的 Python 对象转换开销。
+同机 actor runtime 的结果回传现在采用“双帧”模型：控制消息继续走 `actor-rpc-v1`，结果表单独走 `table-bin-v1` 的 `DataBatch` 帧，并通过 `correlation_id` 关联；热路径不再把整张结果表塞进 actor JSON body。
 
 ## 同机多进程实验路径
 
@@ -284,6 +285,8 @@ smoke：
 ```bash
 bazel run //:actor_rpc_smoke
 ```
+
+该 smoke 现会同时校验 actor 控制消息和关联的二进制 `DataBatch` 结果帧。
 
 三进程本地运行：
 
@@ -307,6 +310,17 @@ Dashboard：
 - `//:stream_actor_benchmark`
 - `//:tpch_q1_style_benchmark`
 - `//:vector_search_benchmark`
+
+向量 benchmark：
+
+```bash
+bazel run //:vector_search_benchmark
+```
+
+会输出两类 JSON 行：
+
+- `vector-query`：cold query、warm query、warm explain 延迟
+- `vector-transport`：proto-like 与 `BinaryRowBatch` 的编解码耗时、payload 大小，以及 actor 控制帧开销
 
 同机 observability regression：
 

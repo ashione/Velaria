@@ -1819,7 +1819,7 @@ int runActorSmoke() {
     std::cerr << "[smoke] data batch decode mismatch\n";
     return 1;
   }
-  std::cout << "[smoke] actor rpc control/data-batch roundtrip ok\n";
+  std::cout << "[smoke] actor rpc codec roundtrip ok (control/data-batch)\n";
   return 0;
 }
 

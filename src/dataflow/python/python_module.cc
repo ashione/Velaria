@@ -919,6 +919,16 @@ PyObject* pyProgressFromNative(const df::StreamingQueryProgress& progress) {
   setDictItem(out, "actor_speedup", PyFloat_FromDouble(progress.actor_speedup));
   setDictItem(out, "compute_to_overhead_ratio",
               PyFloat_FromDouble(progress.compute_to_overhead_ratio));
+  setDictItem(out, "estimated_state_size_bytes",
+              PyLong_FromUnsignedLongLong(progress.estimated_state_size_bytes));
+  setDictItem(out, "estimated_batch_cost",
+              PyLong_FromUnsignedLongLong(progress.estimated_batch_cost));
+  setDictItem(out, "backpressure_max_queue_batches",
+              PyLong_FromUnsignedLongLong(progress.backpressure_max_queue_batches));
+  setDictItem(out, "backpressure_high_watermark",
+              PyLong_FromUnsignedLongLong(progress.backpressure_high_watermark));
+  setDictItem(out, "backpressure_low_watermark",
+              PyLong_FromUnsignedLongLong(progress.backpressure_low_watermark));
   return out;
 }
 

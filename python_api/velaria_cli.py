@@ -1,8 +1,6 @@
 import argparse
 import json
-import math
 import pathlib
-from typing import Iterable
 
 from velaria import Session
 
@@ -36,37 +34,6 @@ def _parse_vector_text(text: str) -> list[float]:
     return [float(part.strip()) for part in value.split(",") if part.strip()]
 
 
-def _extract_row_vector(raw_value) -> list[float]:
-    if isinstance(raw_value, (list, tuple)):
-        return [float(v) for v in raw_value]
-    return _parse_vector_text(str(raw_value))
-
-
-def _cosine_distance(lhs: Iterable[float], rhs: Iterable[float]) -> float:
-    lhs_values = list(lhs)
-    rhs_values = list(rhs)
-    dot = sum(a * b for a, b in zip(lhs_values, rhs_values))
-    lhs_norm = math.sqrt(sum(a * a for a in lhs_values))
-    rhs_norm = math.sqrt(sum(b * b for b in rhs_values))
-    if lhs_norm == 0.0 or rhs_norm == 0.0:
-        return 1.0
-    similarity = dot / (lhs_norm * rhs_norm)
-    similarity = max(-1.0, min(1.0, similarity))
-    return 1.0 - similarity
-
-
-def _l2_distance(lhs: Iterable[float], rhs: Iterable[float]) -> float:
-    lhs_values = list(lhs)
-    rhs_values = list(rhs)
-    return math.sqrt(sum((a - b) * (a - b) for a, b in zip(lhs_values, rhs_values)))
-
-
-def _dot_score(lhs: Iterable[float], rhs: Iterable[float]) -> float:
-    lhs_values = list(lhs)
-    rhs_values = list(rhs)
-    return sum(a * b for a, b in zip(lhs_values, rhs_values))
-
-
 def _run_vector_search(
     csv_path: pathlib.Path,
     vector_column: str,
@@ -75,35 +42,32 @@ def _run_vector_search(
     top_k: int,
 ) -> int:
     session = Session()
-    table = session.read_csv(str(csv_path)).to_arrow()
-    rows = table.to_pylist()
+    df = session.read_csv(str(csv_path))
+    session.create_temp_view("input_table", df)
     needle = _parse_vector_text(query_vector)
     if not needle:
         raise ValueError("--query-vector must not be empty")
 
-    scored = []
-    expected_dim = len(needle)
-    for row_index, row in enumerate(rows):
-        if vector_column not in row:
-            raise KeyError(f"vector column not found: {vector_column}")
-        vector = _extract_row_vector(row[vector_column])
-        if len(vector) != expected_dim:
-            raise ValueError(
-                f"fixed length vector mismatch at row {row_index}: expect {expected_dim}, got {len(vector)}"
-            )
-        if metric in ("cosine", "cosin"):
-            distance = _cosine_distance(vector, needle)
-        elif metric == "dot":
-            distance = _dot_score(vector, needle)
-        else:
-            distance = _l2_distance(vector, needle)
-        scored.append({"row_index": row_index, "distance": distance, "row": row})
-
-    scored.sort(key=lambda item: item["distance"], reverse=(metric == "dot"))
+    result = session.vector_search(
+        table="input_table",
+        vector_column=vector_column,
+        query_vector=needle,
+        top_k=top_k,
+        metric=metric,
+    ).to_arrow()
+    explain = session.explain_vector_search(
+        table="input_table",
+        vector_column=vector_column,
+        query_vector=needle,
+        top_k=top_k,
+        metric=metric,
+    )
     payload = {
         "metric": "cosine" if metric in ("cosine", "cosin") else metric,
         "top_k": top_k,
-        "rows": scored[:top_k],
+        "schema": result.schema.names,
+        "rows": result.to_pylist(),
+        "explain": explain,
     }
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0
@@ -144,7 +108,7 @@ def _build_parser() -> argparse.ArgumentParser:
     vector_search.add_argument(
         "--vector-column",
         required=True,
-        help="Vector column name. Row value format supports '1,2,3' or '[1,2,3]'.",
+        help="Vector column name. CSV row value format should use bracketed vectors like '[1 2 3]' or '[1,2,3]'.",
     )
     vector_search.add_argument(
         "--query-vector",

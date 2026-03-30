@@ -1,5 +1,105 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 
+filegroup(
+    name = "velaria_core_logical_sources",
+    srcs = [
+        "src/dataflow/planner/plan.cc",
+        "src/dataflow/planner/plan.h",
+        "src/dataflow/sql/sql_ast.h",
+        "src/dataflow/sql/sql_errors.h",
+        "src/dataflow/sql/sql_parser.cc",
+        "src/dataflow/sql/sql_parser.h",
+        "src/dataflow/sql/sql_planner.cc",
+        "src/dataflow/sql/sql_planner.h",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "velaria_core_execution_sources",
+    srcs = [
+        "src/dataflow/core/csv.cc",
+        "src/dataflow/core/csv.h",
+        "src/dataflow/core/table.cc",
+        "src/dataflow/core/table.h",
+        "src/dataflow/core/value.cc",
+        "src/dataflow/core/value.h",
+        "src/dataflow/runtime/executor.cc",
+        "src/dataflow/runtime/executor.h",
+        "src/dataflow/runtime/job_master.cc",
+        "src/dataflow/runtime/job_master.h",
+        "src/dataflow/runtime/observability.h",
+        "src/dataflow/runtime/rpc_contract.h",
+        "src/dataflow/runtime/vector_index.cc",
+        "src/dataflow/runtime/vector_index.h",
+        "src/dataflow/serial/serializer.cc",
+        "src/dataflow/serial/serializer.h",
+        "src/dataflow/stream/binary_row_batch.cc",
+        "src/dataflow/stream/binary_row_batch.h",
+        "src/dataflow/stream/stream.cc",
+        "src/dataflow/stream/stream.h",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "velaria_core_contract_sources",
+    srcs = [
+        "src/dataflow/api/dataframe.cc",
+        "src/dataflow/api/dataframe.h",
+        "src/dataflow/api/session.cc",
+        "src/dataflow/api/session.h",
+        "src/dataflow/catalog/catalog.cc",
+        "src/dataflow/catalog/catalog.h",
+        "src/dataflow/stream/source_sink_abi.h",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "velaria_python_ecosystem_sources",
+    srcs = [
+        "//python_api:velaria_python_supported_sources",
+        "//python_api:velaria_python_example_sources",
+        "//python_api:velaria_python_experimental_sources",
+        "src/dataflow/python/python_module.cc",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "velaria_experimental_sources",
+    srcs = [
+        "src/dataflow/ai/plugin_runtime.cc",
+        "src/dataflow/ai/plugin_runtime.h",
+        "src/dataflow/rpc/actor_rpc_codec.cc",
+        "src/dataflow/rpc/actor_rpc_codec.h",
+        "src/dataflow/rpc/rpc_codec.cc",
+        "src/dataflow/rpc/rpc_codec.h",
+        "src/dataflow/rpc/serialization.cc",
+        "src/dataflow/rpc/serialization.h",
+        "src/dataflow/runner/actor_runtime.cc",
+        "src/dataflow/runner/actor_runtime.h",
+        "src/dataflow/runtime/actor_runtime.cc",
+        "src/dataflow/runtime/actor_runtime.h",
+        "src/dataflow/runtime/byte_transport.cc",
+        "src/dataflow/runtime/byte_transport.h",
+        "src/dataflow/runtime/rpc_runner.cc",
+        "src/dataflow/runtime/rpc_runner.h",
+        "src/dataflow/stream/actor_stream_runtime.cc",
+        "src/dataflow/stream/actor_stream_runtime.h",
+        "src/dataflow/transport/ipc_transport.cc",
+        "src/dataflow/transport/ipc_transport.h",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "velaria_examples_sources",
+    srcs = glob(["src/dataflow/examples/*.cc"]),
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "dataflow_core",
     srcs = [
@@ -54,6 +154,32 @@ cc_library(
         "src/dataflow/stream/stream.h",
     ],
     visibility = ["//visibility:public"],
+)
+
+test_suite(
+    name = "core_regression",
+    tests = [
+        ":planner_v03_test",
+        ":source_sink_abi_test",
+        ":sql_regression_test",
+        ":stream_runtime_test",
+        ":stream_strategy_explain_test",
+        ":vector_runtime_test",
+    ],
+)
+
+test_suite(
+    name = "python_ecosystem_regression",
+    tests = [
+        "//python_api:velaria_python_supported_regression",
+    ],
+)
+
+test_suite(
+    name = "experimental_regression",
+    tests = [
+        ":stream_actor_credit_test",
+    ],
 )
 
 cc_binary(
@@ -195,22 +321,7 @@ cc_library(
 cc_binary(
     name = "actor_rpc_scheduler",
     srcs = ["src/dataflow/examples/actor_rpc_scheduler.cc"],
-    data = [
-        ":dashboard_app_js",
-        "src/dataflow/runner/dashboard/index.html",
-    ],
     deps = [":dataflow_actor_runner"],
-)
-
-genrule(
-    name = "dashboard_app_js",
-    srcs = [
-        "src/dataflow/runner/dashboard/app.ts",
-        "//scripts:build_dashboard_frontend.sh",
-    ],
-    outs = ["src/dataflow/runner/dashboard/app.js"],
-    cmd = "$(location //scripts:build_dashboard_frontend.sh) $(location src/dataflow/runner/dashboard/app.ts) $@",
-    tools = ["//scripts:build_dashboard_frontend.sh"],
 )
 
 cc_binary(

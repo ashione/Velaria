@@ -18,15 +18,6 @@ int main(int argc, char* argv[]) {
       config.node_id = argv[++i];
       continue;
     }
-    if (std::string(argv[i]) == "--dashboard-listen" && i + 1 < argc) {
-      config.dashboard_listen_address = argv[++i];
-      config.dashboard_enabled = true;
-      continue;
-    }
-    if (std::string(argv[i]) == "--dashboard-enabled") {
-      config.dashboard_enabled = true;
-      continue;
-    }
     if (std::string(argv[i]) == "--auto-worker") {
       config.auto_worker = true;
       continue;

@@ -67,16 +67,14 @@ class Value {
     if (!text.empty() && text.front() == '[' && text.back() == ']') {
       text = text.substr(1, text.size() - 2);
     }
+    for (char& ch : text) {
+      if (ch == ',') ch = ' ';
+    }
     std::vector<float> out;
     std::stringstream ss(text);
-    std::string token;
-    while (std::getline(ss, token, ',')) {
-      if (token.empty()) continue;
-      std::stringstream trim(token);
-      std::string cleaned;
-      trim >> cleaned;
-      if (cleaned.empty()) continue;
-      out.push_back(std::stof(cleaned));
+    float value = 0.0f;
+    while (ss >> value) {
+      out.push_back(value);
     }
     return out;
   }

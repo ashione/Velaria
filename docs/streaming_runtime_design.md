@@ -1,5 +1,7 @@
 # Streaming Runtime Design
 
+This document describes runtime internals and current implementation shape. For the stable repository-facing contract, see [runtime-contract.md](./runtime-contract.md). For repository layering and ownership boundaries, see [core-boundary.md](./core-boundary.md).
+
 ## Scope
 
 当前文档只描述 Velaria 单机 `StreamingQuery` 路径，以及其与本机 actor-stream 运行时的接合点。
@@ -182,7 +184,7 @@ actor-stream payload 当前使用 typed binary batch：
 - query 级 `Auto` 当前阈值更接近“保守正确”，还不是最终调优状态。
 - `split_ms / merge_ms` 仍是毫秒级指标，对极短阶段不够敏感。
 - SQL 路径仍未自动下推到 actor runtime；当前优化主要落在 streaming 执行内核。
-- 同机 observability 仍是 experiment profile，不是完整 dashboard / distributed telemetry 体系。
+- 同机 observability 仍是 experiment profile，不是完整 distributed telemetry 体系。
 
 ## Recommended Next Steps
 

@@ -29,6 +29,12 @@ bool isDouble(const std::string& s) {
 
 Value parseCell(const std::string& cell) {
   if (cell.empty()) return Value();
+  if (cell.size() >= 2 && cell.front() == '[' && cell.back() == ']') {
+    const auto vec = Value::parseFixedVector(cell);
+    if (!vec.empty()) {
+      return Value(vec);
+    }
+  }
   if (isInt(cell)) {
     return Value(static_cast<int64_t>(std::stoll(cell)));
   }

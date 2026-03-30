@@ -80,6 +80,13 @@ void expect(bool condition, const std::string& message) {
   }
 }
 
+void expectContains(const std::string& haystack, const std::string& needle,
+                    const std::string& message) {
+  if (haystack.find(needle) == std::string::npos) {
+    throw std::runtime_error(message + ": missing " + needle);
+  }
+}
+
 void testBackpressure() {
   dataflow::DataflowSession& session = dataflow::DataflowSession::builder();
   std::vector<dataflow::Table> batches;
@@ -290,6 +297,73 @@ void testWindowEviction() {
          "window eviction should keep newest window key");
 }
 
+void testSnapshotJsonContract() {
+  dataflow::DataflowSession& session = dataflow::DataflowSession::builder();
+  auto sink = std::make_shared<CollectSink>();
+
+  dataflow::Table batch;
+  batch.schema = dataflow::Schema({"ts", "key", "value"});
+  batch.rows = {
+      {dataflow::Value("2026-03-28T12:00:00"), dataflow::Value("userA"), dataflow::Value(int64_t(1))},
+      {dataflow::Value("2026-03-28T12:00:10"), dataflow::Value("userB"), dataflow::Value(int64_t(2))},
+  };
+
+  dataflow::StreamingQueryOptions options;
+  options.trigger_interval_ms = 0;
+  options.checkpoint_delivery_mode = dataflow::CheckpointDeliveryMode::BestEffort;
+
+  auto query = session.readStream(std::make_shared<dataflow::MemoryStreamSource>(std::vector<dataflow::Table>{batch}))
+                   .writeStream(sink, options);
+  query.start();
+  expect(query.awaitTermination() == 1, "snapshot contract query should process one batch");
+
+  const std::string snapshot = query.snapshotJson();
+  expectContains(snapshot, "\"query_id\":", "snapshot should expose query_id");
+  expectContains(snapshot, "\"status\":", "snapshot should expose status");
+  expectContains(snapshot, "\"requested_execution_mode\":",
+                 "snapshot should expose requested_execution_mode");
+  expectContains(snapshot, "\"execution_mode\":", "snapshot should expose execution_mode");
+  expectContains(snapshot, "\"execution_reason\":", "snapshot should expose execution_reason");
+  expectContains(snapshot, "\"transport_mode\":", "snapshot should expose transport_mode");
+  expectContains(snapshot, "\"blocked_count\":", "snapshot should expose blocked_count");
+  expectContains(snapshot, "\"max_backlog_batches\":", "snapshot should expose max_backlog_batches");
+  expectContains(snapshot, "\"inflight_batches\":", "snapshot should expose inflight_batches");
+  expectContains(snapshot, "\"inflight_partitions\":", "snapshot should expose inflight_partitions");
+  expectContains(snapshot, "\"last_batch_latency_ms\":", "snapshot should expose last_batch_latency_ms");
+  expectContains(snapshot, "\"last_sink_latency_ms\":", "snapshot should expose last_sink_latency_ms");
+  expectContains(snapshot, "\"last_state_latency_ms\":", "snapshot should expose last_state_latency_ms");
+  expectContains(snapshot, "\"last_source_offset\":", "snapshot should expose last_source_offset");
+  expectContains(snapshot, "\"backpressure_active\":", "snapshot should expose backpressure_active");
+  expectContains(snapshot, "\"actor_eligible\":", "snapshot should expose actor_eligible");
+  expectContains(snapshot, "\"used_actor_runtime\":", "snapshot should expose used_actor_runtime");
+  expectContains(snapshot, "\"used_shared_memory\":", "snapshot should expose used_shared_memory");
+  expectContains(snapshot, "\"has_stateful_ops\":", "snapshot should expose has_stateful_ops");
+  expectContains(snapshot, "\"has_window\":", "snapshot should expose has_window");
+  expectContains(snapshot, "\"sink_is_blocking\":", "snapshot should expose sink_is_blocking");
+  expectContains(snapshot, "\"source_is_bounded\":", "snapshot should expose source_is_bounded");
+  expectContains(snapshot, "\"estimated_partitions\":", "snapshot should expose estimated_partitions");
+  expectContains(snapshot, "\"projected_payload_bytes\":", "snapshot should expose projected_payload_bytes");
+  expectContains(snapshot, "\"sampled_batches\":", "snapshot should expose sampled_batches");
+  expectContains(snapshot, "\"sampled_rows_per_batch\":",
+                 "snapshot should expose sampled_rows_per_batch");
+  expectContains(snapshot, "\"average_projected_payload_bytes\":",
+                 "snapshot should expose average_projected_payload_bytes");
+  expectContains(snapshot, "\"actor_speedup\":", "snapshot should expose actor_speedup");
+  expectContains(snapshot, "\"compute_to_overhead_ratio\":",
+                 "snapshot should expose compute_to_overhead_ratio");
+  expectContains(snapshot, "\"estimated_state_size_bytes\":",
+                 "snapshot should expose estimated_state_size_bytes");
+  expectContains(snapshot, "\"estimated_batch_cost\":", "snapshot should expose estimated_batch_cost");
+  expectContains(snapshot, "\"backpressure_max_queue_batches\":",
+                 "snapshot should expose backpressure_max_queue_batches");
+  expectContains(snapshot, "\"backpressure_high_watermark\":",
+                 "snapshot should expose backpressure_high_watermark");
+  expectContains(snapshot, "\"backpressure_low_watermark\":",
+                 "snapshot should expose backpressure_low_watermark");
+  expectContains(snapshot, "\"checkpoint_delivery_mode\":\"best-effort\"",
+                 "snapshot should expose checkpoint_delivery_mode");
+}
+
 }  // namespace
 
 int main() {
@@ -300,6 +374,7 @@ int main() {
     testCheckpointRestoreBestEffort();
     testCheckpointRestoreDuplicatesSinkOutputAtLeastOnce();
     testWindowEviction();
+    testSnapshotJsonContract();
     std::cout << "[test] stream runtime ok" << std::endl;
     return 0;
   } catch (const std::exception& ex) {

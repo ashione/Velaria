@@ -47,7 +47,7 @@
 ### 调度执行模型
 
 - scheduler 负责接入、快照记录、分发与状态收集，不在本地执行 SQL。
-- dashboard/客户端提交均应走 worker 执行链路。
+- 客户端提交均应走 worker 执行链路。
 
 ### 当前调度策略（v1）
 
@@ -78,10 +78,9 @@ bazel run //:sql_demo
 bazel run //:df_demo
 bazel run //:stream_demo
 bazel run //:actor_rpc_smoke
-./scripts/run_actor_rpc_scheduler.sh -- --listen 127.0.0.1:61000 --node-id scheduler --dashboard-enabled --dashboard-listen 127.0.0.1:8080
+./scripts/run_actor_rpc_scheduler.sh -- --listen 127.0.0.1:61000 --node-id scheduler
 bazel run //:actor_rpc_worker -- --connect 127.0.0.1:61000 --node-id worker-1
 bazel run //:actor_rpc_client -- --connect 127.0.0.1:61000 --payload "demo payload"
-bazel build //:dashboard_app_js
 ```
 
 ### 一次 build/smoke 摘要
@@ -131,12 +130,6 @@ bazel run //:actor_rpc_client -- --connect 127.0.0.1:61000 --payload "demo paylo
 
 ```bash
 ./scripts/run_actor_rpc_e2e.sh --payload "demo payload"
-```
-
-可选：通过 dashboard 启动同一运行链路：
-
-```bash
-./scripts/run_actor_rpc_scheduler.sh -- --listen 127.0.0.1:61000 --node-id scheduler --dashboard-enabled --dashboard-listen 127.0.0.1:8080
 ```
 
 通过标准：

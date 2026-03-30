@@ -1,148 +1,217 @@
-# Velaria Python API
+# Velaria Python Ecosystem
 
-Python API package for the Velaria dataflow engine.
+This document is the entrypoint for Velaria's supported Python ecosystem layer.
 
-Notes:
+Python is a supported ingress, interop, and packaging surface. It is not the execution core. Core semantics still come from the native kernel and the runtime contract in [docs/runtime-contract.md](../docs/runtime-contract.md).
 
-- Dependency management and demo execution use `uv`.
-- The pure-Python wheel is built by Bazel target `//python_api:velaria_whl`.
-- The native extension is built separately by Bazel target `//:velaria_pyext`.
-- Bazel runtime loading uses `//python_api:velaria_py_pkg`, which packages the Python sources together with a package-local `_velaria.so`.
-- `python_api/pyproject.toml` also declares `velaria/_velaria.so` as package data so setuptools/uv packaging will include the native module whenever that file is present in the package tree.
-- Runtime loading prefers the package-local extension, then auto-discovers `bazel-bin/_velaria.so` in a source checkout.
-- Version bumps should use `./scripts/bump_velaria_version.sh <version>`, which updates the Bazel version source, Python package version source, and refreshes `uv.lock`.
+## Scope
 
-Quick start:
+### Supported
+
+The supported Python ecosystem includes:
+
+- the `velaria/` package and `Session` API
+- Arrow ingestion and Arrow output
+- `uv`-based local workflow
+- native extension build
+- wheel / native wheel packaging
+- the supported CLI entrypoint `velaria_cli.py`
+- Excel ingestion via `read_excel(...)`
+- Bitable adapters and stream source integration
+- custom source / custom sink adapters
+- vector search and vector explain APIs
+
+### Examples
+
+Examples and helper assets include:
+
+- `examples/demo_batch_sql_arrow.py`
+- `examples/demo_stream_sql.py`
+- `examples/demo_bitable_group_by_owner.py`
+- `examples/demo_vector_search.py`
+- `benchmarks/bench_arrow_ingestion.py`
+- local ecosystem scripts and skills
+
+### Experimental
+
+The Python experimental area is currently reserved under `experimental/`.
+
+Anything placed there is explicitly outside the supported ecosystem surface until it is promoted into `velaria/`, `velaria_cli.py`, or a supported adapter module.
+
+### Not In Scope
+
+Python does not define:
+
+- execution hot-path semantics
+- a separate progress schema
+- a separate checkpoint contract
+- a separate vector scoring implementation for supported APIs
+- Python UDFs in the hot path
+
+## API Surface
+
+Main `Session` API:
+
+- `Session.read_csv(...)`
+- `Session.sql(...)`
+- `Session.create_dataframe_from_arrow(...)`
+- `Session.create_stream_from_arrow(...)`
+- `Session.create_temp_view(...)`
+- `Session.read_stream_csv_dir(...)`
+- `Session.stream_sql(...)`
+- `Session.explain_stream_sql(...)`
+- `Session.start_stream_sql(...)`
+- `Session.vector_search(...)`
+- `Session.explain_vector_search(...)`
+
+Additional ecosystem helpers:
+
+- `read_excel(...)`
+- `CustomArrowStreamSource`
+- `CustomArrowStreamSink`
+- `create_stream_from_custom_source(...)`
+- `consume_arrow_batches_with_custom_sink(...)`
+
+Mapping rule:
+
+- Python names may be ecosystem-friendly
+- behavior must map back to the same native kernel contract exposed by C++
+
+## Repository Layout
+
+Stable Python layout in this repo:
+
+- supported library:
+  - `python_api/velaria/`
+- supported CLI tool:
+  - `python_api/velaria_cli.py`
+- examples:
+  - `python_api/examples/`
+- benchmarks:
+  - `python_api/benchmarks/`
+- reserved experimental area:
+  - `python_api/experimental/`
+- regression tests:
+  - `python_api/tests/`
+
+## Toolchain and Environment
+
+Repository Python commands use `uv`.
+
+Recommended local baseline:
+
+- CPython `3.12`
+- `uv`
+- local CPython headers (`Python.h`)
+
+Bazel Python detection currently probes local CPython interpreters in the `3.9` to `3.13` range. If auto-discovery fails, set:
+
+```bash
+export VELARIA_PYTHON_BIN=/path/to/python3.12
+```
+
+That interpreter must expose `Python.h`; otherwise Bazel cannot build the native extension.
+
+## Development Workflow
+
+Bootstrap:
 
 ```bash
 bazel build //:velaria_pyext
 uv sync --project python_api --python python3.12
-uv run --project python_api python python_api/demo_batch_sql_arrow.py
-uv run --project python_api python python_api/demo_stream_sql.py
 ```
 
-Single-file CLI packaging (Python deps + native `_velaria.so`):
+Run demos:
+
+```bash
+uv run --project python_api python python_api/examples/demo_batch_sql_arrow.py
+uv run --project python_api python python_api/examples/demo_stream_sql.py
+uv run --project python_api python python_api/examples/demo_vector_search.py
+```
+
+Recommended regression entrypoint:
+
+```bash
+./scripts/run_python_ecosystem_regression.sh
+```
+
+That script covers:
+
+- native extension build
+- wheel and native wheel build
+- Bazel Python regression targets
+- demo smoke
+- CLI smoke
+
+## Packaging
+
+Build targets:
+
+- native extension:
+  - `//:velaria_pyext`
+- pure-Python wheel wrapper:
+  - `//python_api:velaria_whl`
+- native wheel:
+  - `//python_api:velaria_native_whl`
+- Python CLI:
+  - `//python_api:velaria_cli`
+
+Single-file CLI packaging:
 
 ```bash
 ./scripts/build_py_cli_executable.sh
-./dist/velaria-cli csv-sql --csv /path/to/input.csv --query "SELECT * FROM input_table LIMIT 5"
-./dist/velaria-cli vector-search --csv /path/to/vectors.csv --vector-column embedding --query-vector "0.1,0.2,0.3" --metric cosine --top-k 5
+./dist/velaria-cli csv-sql \
+  --csv /path/to/input.csv \
+  --query "SELECT * FROM input_table LIMIT 5"
 ```
 
-Python Session API for local vector search:
+The CLI is part of the ecosystem layer. For supported paths, it should delegate to the same native session contract as Python and C++.
 
-```python
-from velaria import Session
+Python ecosystem source groups:
 
-session = Session()
-# assume a temp view named "vec_src" already exists
-out = session.vector_search("vec_src", "embedding", [0.1, 0.2, 0.3], top_k=5, metric="dot")
-print(out.to_rows())
-print(session.explain_vector_search("vec_src", "embedding", [0.1, 0.2, 0.3], top_k=5, metric="dot"))
-```
+- supported:
+  - `//python_api:velaria_python_supported_sources`
+- examples and benchmarks:
+  - `//python_api:velaria_python_example_sources`
+- experimental placeholder:
+  - `//python_api:velaria_python_experimental_sources`
 
-Current vector search scope is local exact scan only (`cosine`/`dot`/`l2`) on fixed-dimension float vectors.
+## Arrow Contract
 
-Native binary CLI alternative (runtime does not require Python environment):
+Supported Arrow ingestion inputs:
 
-```bash
-bazel build //:velaria_cli
-./bazel-bin/velaria_cli --csv /path/to/input.csv --query "SELECT * FROM input_table LIMIT 5"
-./bazel-bin/velaria_cli --csv /path/to/vectors.csv --vector-column embedding --query-vector "0.1,0.2,0.3" --metric l2 --top-k 5
-```
+- `pyarrow.Table`
+- `pyarrow.RecordBatch`
+- `pyarrow.RecordBatchReader`
+- objects implementing `__arrow_c_stream__`
+- Python sequences of Arrow batches
 
-## CI packaging
+Vector-preferred Arrow shape:
 
-PR CI builds and uploads two native wheel variants:
+- `FixedSizeList<float32>`
 
-- manylinux wheel from the Linux job
-- macOS wheel from the macOS job
+Preferred local CSV vector text shape:
 
-The Linux path uses `auditwheel repair` after building `//python_api:velaria_native_whl`. The macOS path uploads the Bazel-built native wheel directly.
+- `[1 2 3]`
+- `[1,2,3]`
 
-Tag-based release publishing is separate:
+Current vector search scope:
 
-- bump the package version with `./scripts/bump_velaria_version.sh <version>`
-- create a matching Git tag such as `v0.1.1`
-- the release workflow verifies the tag matches `velaria.__version__` and publishes Linux and macOS wheel assets
+- local exact scan only
+- metrics: `cosine`, `dot`, `l2`
+- no ANN / distributed execution / standalone vector DB behavior
 
+## Excel, Bitable, and Custom Streams
 
-## v0.5 Python 用例与测试
+### Excel
 
-- `python_api/demo_batch_sql_arrow.py`：Arrow batch + SQL 临时视图路径。
-- `python_api/demo_stream_sql.py`：stream SQL + sink 路径。
-- `python_api/bench_arrow_ingestion.py`：对比 table / `RecordBatchReader` / `__arrow_c_stream__` ingestion 路径。
-- `bazel test //python_api:streaming_v05_test`：自动化覆盖 Arrow 输入、stream SQL 启动、progress 合同字段。
-- `Session.explain_stream_sql(...)`：直接返回 `logical / physical / strategy` 三段 explain 文本。
-- `bazel test //python_api:arrow_stream_ingestion_test`：自动化覆盖 `RecordBatchReader`、`__arrow_c_stream__` 和 stream batch 边界。
+`read_excel(...)` reads `.xlsx` through:
 
-建议本地顺序：
+1. `pandas.read_excel`
+2. `pyarrow.Table` conversion
+3. `Session.create_dataframe_from_arrow(...)`
 
-```bash
-bazel build //:velaria_pyext
-bazel test //python_api:streaming_v05_test
-bazel test //python_api:arrow_stream_ingestion_test
-uv run --project python_api python python_api/demo_batch_sql_arrow.py
-uv run --project python_api python python_api/demo_stream_sql.py
-uv run --project python_api python python_api/bench_arrow_ingestion.py
-```
-
-
-## Custom Stream Source（Python）
-
-现在 Python API 提供可复用的 custom stream source 适配：
-
-- `CustomArrowStreamSource`：把 Python 行数据转换成 Arrow micro-batches。
-- `Session.create_dataframe_from_arrow(...)` / `Session.create_stream_from_arrow(...)` 现在优先接受 `RecordBatchReader` 和实现 `__arrow_c_stream__` 的对象，再回退到 `Table / RecordBatch / batch sequence`。
-- 默认 emit 策略：`1 秒` 或 `1024 行` 触发一次 batch（可配置）。
-- `create_stream_from_custom_source(session, rows, ...)`：直接转换并调用 `session.create_stream_from_arrow(...)`。
-- `CustomArrowStreamSink`：消费 Arrow micro-batches，并按“1秒或N条”聚合后触发 `on_emit` 回调。
-
-示例：
-
-```python
-from velaria import (
-    CustomArrowStreamSink,
-    CustomArrowStreamSource,
-    consume_arrow_batches_with_custom_sink,
-)
-
-source = CustomArrowStreamSource(emit_interval_seconds=1.0, emit_rows=500)
-stream_df = source.to_stream_dataframe(session, rows_iterable)
-
-sink = CustomArrowStreamSink(lambda table: print(table.num_rows), emit_interval_seconds=1.0, emit_rows=500)
-consume_arrow_batches_with_custom_sink([stream_df_batch_1, stream_df_batch_2], sink)
-```
-
-测试：
-
-```bash
-bazel test //python_api:custom_stream_source_test
-# 该测试同时覆盖 custom source 与 custom sink 的 emit 逻辑
-```
-
-
-`Session.start_stream_sql(...)` 额外支持 `checkpoint_delivery_mode` 参数：
-
-- `at-least-once`（默认）
-- `best-effort`
-
-`Session.explain_stream_sql(...)` 复用同一组选项参数：
-
-- `sql`
-- `trigger_interval_ms`
-- `checkpoint_path`
-- `checkpoint_delivery_mode`
-
-### XLSX 数据读取
-
-仓库里已提供 `velaria.read_excel(...)` 直接读 `.xlsx`：
-
-- 先调用 `pandas.read_excel`
-- 再转成 `pyarrow.Table`
-- 再通过 `Session.create_dataframe_from_arrow(...)` 变成 Velaria DataFrame
-
-示例：
+Example:
 
 ```python
 from velaria import Session, read_excel
@@ -150,12 +219,52 @@ from velaria import Session, read_excel
 session = Session()
 df = read_excel(session, "/path/to/file.xlsx", sheet_name="Sheet1")
 session.create_temp_view("staff", df)
-out = session.sql("SELECT * FROM staff LIMIT 5")
-print(out.to_rows())
+print(session.sql("SELECT * FROM staff LIMIT 5").to_rows())
 ```
 
-该能力依赖运行时安装 `pandas` 与 `openpyxl`（已作为 Python 包依赖）：
+### Bitable and Custom Streams
 
-```bash
-uv run python -c "import pandas, openpyxl"
-```
+Supported ecosystem integrations include:
+
+- Bitable-backed stream source flows
+- custom Arrow stream sources
+- custom Arrow stream sinks
+
+These are supported as ecosystem integrations, not as alternate execution cores.
+
+## Regression Matrix
+
+Python ecosystem regression targets:
+
+- `//python_api:streaming_v05_test`
+- `//python_api:arrow_stream_ingestion_test`
+- `//python_api:vector_search_test`
+- `//python_api:read_excel_test`
+- `//python_api:custom_stream_source_test`
+- `//python_api:bitable_stream_source_test`
+- `//python_api:bitable_group_by_owner_integration_test`
+
+Python-layer grouped suite:
+
+- `//python_api:velaria_python_supported_regression`
+
+Root-level grouped suite:
+
+- `//:python_ecosystem_regression`
+
+## Relation to Core
+
+Python may:
+
+- wrap
+- package
+- automate
+- project ecosystem-friendly names
+
+Python may not:
+
+- redefine progress/checkpoint/explain semantics
+- become the source of truth for runtime decisions
+- introduce a second vector-search implementation for supported interfaces
+
+For core boundaries, see [docs/core-boundary.md](../docs/core-boundary.md). For stable runtime semantics, see [docs/runtime-contract.md](../docs/runtime-contract.md).

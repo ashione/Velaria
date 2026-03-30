@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <stdexcept>
 #include <random>
 #include <string>
 #include <vector>
@@ -164,10 +165,31 @@ void runTransportCase(std::size_t rows, std::size_t dim) {
 
 }  // namespace
 
-int main() {
-  std::cout << "[vector-benchmark] exact scan regression baseline" << std::endl;
-  for (std::size_t rows : {10000ULL, 100000ULL}) {
-    for (std::size_t dim : {128ULL, 768ULL}) {
+int main(int argc, char** argv) {
+  bool quick = false;
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if (arg == "--quick") {
+      quick = true;
+      continue;
+    }
+    if (arg == "-h" || arg == "--help") {
+      std::cout << "Usage: " << argv[0] << " [--quick]\n";
+      std::cout << "  --quick  run a smaller exact-scan baseline for repo verification\n";
+      return 0;
+    }
+    throw std::runtime_error("unknown argument: " + arg);
+  }
+
+  const std::vector<std::size_t> rows_cases = quick ? std::vector<std::size_t>{10000ULL}
+                                                    : std::vector<std::size_t>{10000ULL, 100000ULL};
+  const std::vector<std::size_t> dim_cases = quick ? std::vector<std::size_t>{128ULL}
+                                                   : std::vector<std::size_t>{128ULL, 768ULL};
+
+  std::cout << "[vector-benchmark] exact scan regression baseline"
+            << (quick ? " (quick)" : " (full)") << std::endl;
+  for (std::size_t rows : rows_cases) {
+    for (std::size_t dim : dim_cases) {
       runCase(rows, dim, dataflow::VectorDistanceMetric::Cosine, "cosine");
       runCase(rows, dim, dataflow::VectorDistanceMetric::Dot, "dot");
       runCase(rows, dim, dataflow::VectorDistanceMetric::L2, "l2");

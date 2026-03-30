@@ -1,63 +1,139 @@
-# Velaria：纯 C++17 Streaming-First 数据流内核
+# Velaria：纯 C++17 本地数据流内核
 
 `README-zh.md` 是中文镜像文档，对应英文主文档位于 [README.md](./README.md)。后续修改必须保持这两份文件结构和语义同步。
 
-Velaria 是一个本地优先的 C++17 数据流引擎研究项目。当前目标刻意收敛：先把单机流式主链路稳定下来，让 batch 和 stream 落在同一个执行模型里，再谨慎扩展到本机多进程执行，而不是宣称已经完成分布式运行时。
+Velaria 是一个本地优先的 C++17 数据流引擎研究项目。仓库现在围绕“一个内核 + 两个非内核层”组织：
 
-## 它当前是什么
+- `Core Kernel`
+  - 本地执行语义
+  - batch + stream 共用一个模型
+  - 稳定的 explain / progress / checkpoint contract
+- `Python Ecosystem`
+  - 正式支持 Arrow / wheel / CLI / `uv` / Excel / Bitable / custom stream adapter
+  - 向外投影内核能力，但不进入热路径
+- `Experimental Runtime`
+  - 同机 `actor/rpc/jobmaster`
+  - 用于执行与观测研究，不是第二套内核
 
-当前主执行路线是：
+## 黄金路径
 
-`micro-batch in-proc + query-local backpressure + local worker scale-up`
+唯一黄金路径是：
 
-仓库里同时保留 `actor + rpc + jobmaster` 作为同机多进程实验路径。这个路径用于执行和观测研究，不代表已经具备完整分布式调度、故障恢复、状态迁移或资源治理能力。
+```text
+Arrow / CSV / Python ingress
+  -> DataflowSession / DataFrame / StreamingDataFrame
+  -> local runtime kernel
+  -> sink
+  -> explain / progress / checkpoint
+```
 
-核心公开对象：
+公开 session 入口：
 
 - `DataflowSession`
+
+核心对外对象：
+
 - `DataFrame`
 - `StreamingDataFrame`
 - `StreamingQuery`
 
-核心本地执行链：
+同机 actor/rpc 路径仍保留在仓库里，但不再作为主叙事。
 
-```text
-source -> StreamingDataFrame/operator chain -> sink
-```
+## 仓库分层
 
-同机实验链：
+### Core Kernel
 
-```text
-client -> scheduler(jobmaster) -> worker -> in-proc operator chain -> result
-```
+Core 负责：
 
-## 当前能力边界
+- logical planning 与最小 SQL 映射
+- table/value 执行模型
+- 本地 batch 与 streaming runtime
+- source/sink ABI
+- runtime contract surface
+- 本地 vector search 能力
 
-当前已具备：
+仓库入口：
 
-- batch + streaming 共用一个本地执行框架
-- `read_csv`, `readStream(...)`, `readStreamCsvDir(...)`
-- query-local 反压、有界 backlog、progress snapshot、checkpoint path
-- 执行模式：`single-process`、`local-workers`、`actor-credit`、`auto`
-- 本地文件 source/sink
-- 基础流式算子：`select / filter / withColumn / drop / limit / window`
-- stateful `sum` 和 `count`
-- 建立在现有 streaming operators 上的最小 stream SQL
-- Python Arrow 输入/输出
-- 同机 actor/rpc/jobmaster smoke 链路
+- 文档：
+  - [docs/core-boundary.md](./docs/core-boundary.md)
+  - [docs/runtime-contract.md](./docs/runtime-contract.md)
+  - [docs/streaming_runtime_design.md](./docs/streaming_runtime_design.md)
+- Bazel source group：
+  - `//:velaria_core_logical_sources`
+  - `//:velaria_core_execution_sources`
+  - `//:velaria_core_contract_sources`
+- 回归套件：
+  - `//:core_regression`
 
-当前明确不做：
+### Python Ecosystem
 
-- 宣称完成 distributed runtime
-- 把 Python callback 拉进热路径
-- Python UDF
-- Python sink callback 直接进入 native sink ABI
-- 把 `actor-credit` 扩成通用计划并行化
-- 横向扩很多 SQL 面，例如完整 `JOIN / CTE / subquery / UNION / streaming AVG/MIN/MAX`
+Python 是正式支持的生态层，不是顺手附带的 wrapper。
 
-## Streaming 运行时 Contract
+它包括：
 
-主要 streaming 入口：
+- `python_api` 里的 native binding
+- Arrow 输入与输出
+- `uv` 工作流
+- wheel / native wheel / CLI 打包
+- Excel 与 Bitable 适配
+- custom source / custom sink adapter
+- `python_api/velaria_cli.py` 里的正式 CLI 工具入口
+- `python_api/examples` 里的 Python 生态 demo
+- `python_api/benchmarks` 里的 Python benchmark
+
+它不定义：
+
+- 执行热路径行为
+- 独立的 progress/checkpoint 语义
+- 独立的 vector-search 语义
+
+仓库入口：
+
+- 文档：
+  - [python_api/README.md](./python_api/README.md)
+- Bazel source group：
+  - `//:velaria_python_ecosystem_sources`
+- Python 层 source group：
+  - `//python_api:velaria_python_supported_sources`
+  - `//python_api:velaria_python_example_sources`
+  - `//python_api:velaria_python_experimental_sources`
+- 回归套件：
+  - `//:python_ecosystem_regression`
+- Python 层回归套件：
+  - `//python_api:velaria_python_supported_regression`
+- shell 入口：
+  - `./scripts/run_python_ecosystem_regression.sh`
+
+### Experimental Runtime
+
+Experimental runtime 包括：
+
+- actor runtime
+- rpc codec / transport 实验
+- scheduler / worker / client 链路
+- 同机 smoke 与 benchmark 工具
+
+仓库入口：
+
+- Bazel source group：
+  - `//:velaria_experimental_sources`
+- 回归套件：
+  - `//:experimental_regression`
+- shell 入口：
+  - `./scripts/run_experimental_regression.sh`
+
+### Examples
+
+examples 与 helper scripts 只用于说明各层，不定义各层。
+
+- Bazel source group：
+  - `//:velaria_examples_sources`
+
+## Runtime Contract
+
+稳定的 runtime contract 文档位于 [docs/runtime-contract.md](./docs/runtime-contract.md)。
+
+主要 stream 入口：
 
 - `session.readStream(source)`
 - `session.readStreamCsvDir(path)`
@@ -66,120 +142,53 @@ client -> scheduler(jobmaster) -> worker -> in-proc operator chain -> result
 - `session.startStreamSql(sql, options)`
 - `StreamingDataFrame.writeStream(sink, options)`
 
-### Progress 与 Strategy
+稳定 stream contract surface：
 
-`StreamingQueryProgress` 和 `snapshotJson()` 会暴露：
+- `StreamingQueryProgress`
+- `snapshotJson()`
+- `explainStreamSql(...)`
+- `execution_mode / execution_reason / transport_mode`
+- `checkpoint_delivery_mode`
+- source/sink lifecycle：`open -> nextBatch -> checkpoint -> ack -> close`
 
-- 执行选择：`execution_mode`、`execution_reason`、`transport_mode`
-- 工作量估算：`estimated_state_size_bytes`、`estimated_batch_cost`
-- source/sink 状态：`source_is_bounded`、`sink_is_blocking`
-- 流控计数：backlog、inflight、blocked、水位字段
-- checkpoint 字段：`checkpoint_delivery_mode`、`last_source_offset`
-
-`explainStreamSql(...)` 返回三段：
+`explainStreamSql(...)` 固定返回：
 
 - `logical`
 - `physical`
 - `strategy`
 
-其中 `strategy` 会解释 selected mode、fallback reason、actor 热路径命中与否、transport、batch/state 估算，以及 actor/shared-memory 决策参数。
+其中 `strategy` 是 mode 选择、fallback reason、transport、backpressure threshold 与 checkpoint delivery mode 的唯一解释出口。
 
-### 反压
+## 当前能力边界
 
-当前反压语义是 query-local 且有界：
+当前已具备：
 
-- `backlog` 表示 pull 之后、drain 之前的队列 batch 数
-- `blocked_count` 统计 producer 进入 wait 的事件次数，不统计循环轮数
-- `max_backlog_batches` 表示 enqueue 后观测到的最大 backlog
-- `inflight_batches` 和 `inflight_partitions` 表示尚未消费的排队工作量
-- sink 变慢、state finalize 变慢、或局部分区压力过大，都会反馈到同一个 query-local backlog 计数
+- 本地 batch + streaming 共用一个内核
+- `read_csv`, `readStream(...)`, `readStreamCsvDir(...)`
+- query-local 反压、有界 backlog、progress snapshot、checkpoint path
+- 执行模式：`single-process`、`local-workers`、`actor-credit`、`auto`
+- 文件 source/sink
+- 基础 streaming operators：`select / filter / withColumn / drop / limit / window`
+- stateful `sum` 和 `count`
+- 最小 stream SQL 子集
+- 固定维度 float vector 的本地检索
+- Python Arrow 输入/输出
+- 同机 actor/rpc/jobmaster smoke 链路
 
-延迟字段定义：
+当前明确不做：
 
-- `last_batch_latency_ms`：从 batch 开始执行到 sink flush 完成
-- `last_sink_latency_ms`：sink write + flush
-- `last_state_latency_ms`：state/window finalize，stateless batch 为 `0`
+- 宣称已完成 distributed runtime
+- 把 Python callback 拉进热路径
+- Python UDF
+- 把 actor 并行化扩成任意 plan 的通用机制
+- 宽泛 SQL 扩展，例如完整 `JOIN / CTE / subquery / UNION`
+- ANN / 独立 vector DB / 分布式 vector 执行
 
-### Checkpoint 与 Resume
+## Python Ecosystem
 
-checkpoint 文件是本地文件，并采用原子替换写入。
+Python 继续是正式支持的 ingress 与打包层，但不成为执行内核。
 
-当前交付语义：
-
-- 默认 `at-least-once`：不恢复 source offset；允许 replay，sink 允许重复输出
-- `best-effort`：仅当 source 实现了 `restoreOffsetToken(...)` 时恢复 offset；仍然不是 exactly-once sink 交付
-
-当前内置 source 行为：
-
-- `MemoryStreamSource`：在 `best-effort` 下可按 batch offset 恢复
-- `DirectoryCsvStreamSource`：在 `best-effort` 下可按最后完成的文件恢复
-
-### Actor-Credit 与 Auto
-
-`actor-credit` 和 `auto` 只服务一个很窄的热路径：
-
-- 前置变换必须全部是 partition-local
-- 最终 barrier 必须按 `window_start + key` 分组
-- 聚合必须是 `sum(value)`
-
-不满足这组条件的 query 必须回退到 `single-process`，并通过 `execution_reason` 说明原因。
-
-## 流式 SQL
-
-Velaria 刻意把 stream SQL 保持在一个很小的子集内，并映射回现有 streaming operators。
-
-### 入口
-
-- `session.streamSql("SELECT ...") -> StreamingDataFrame`
-- `session.startStreamSql("INSERT INTO sink_table SELECT ...", options) -> StreamingQuery`
-- `session.explainStreamSql(...) -> string`
-
-### 当前支持
-
-- 单表 `SELECT`
-- `WHERE`
-- `GROUP BY`
-- `HAVING`
-- `LIMIT`
-- `SUM(col)`
-- `COUNT(*)`
-- 最小 window SQL：`WINDOW BY <time_col> EVERY <window_ms> AS <output_col>`
-
-支持的 DDL/DML：
-
-- `CREATE SOURCE TABLE ... USING csv`
-- `CREATE SINK TABLE ... USING csv`
-- `INSERT INTO sink_table SELECT ...`
-
-当前 stream SQL 不支持：
-
-- `JOIN`
-- `AVG / MIN / MAX`
-- `INSERT INTO ... VALUES`
-- 宽泛 ANSI window SQL
-- CTE / 子查询 / `UNION`
-
-示例：
-
-```sql
-CREATE SOURCE TABLE stream_events (ts STRING, key STRING, value INT)
-USING csv OPTIONS(path '/tmp/stream-input', delimiter ',');
-
-CREATE SINK TABLE stream_summary (window_start STRING, key STRING, value_sum INT)
-USING csv OPTIONS(path '/tmp/stream-output.csv', delimiter ',');
-
-INSERT INTO stream_summary
-SELECT window_start, key, SUM(value) AS value_sum
-FROM stream_events
-WINDOW BY ts EVERY 60000 AS window_start
-GROUP BY window_start, key;
-```
-
-## Python API
-
-Python 继续只做前端和交换层，不进入执行热路径。
-
-主要 API：
+当前支持的 Python surface：
 
 - `Session.read_csv(...)`
 - `Session.sql(...)`
@@ -190,69 +199,66 @@ Python 继续只做前端和交换层，不进入执行热路径。
 - `Session.stream_sql(...)`
 - `Session.explain_stream_sql(...)`
 - `Session.start_stream_sql(...)`
+- `Session.vector_search(...)`
+- `Session.explain_vector_search(...)`
+- `read_excel(...)`
+- custom source / custom sink adapter
 
-Arrow ingestion 支持：
-
-- `pyarrow.Table`
-- `pyarrow.RecordBatch`
-- `RecordBatchReader`
-- 实现了 `__arrow_c_stream__` 的对象
-- Arrow batch 的 Python 序列
-
-### XLSX 读取
-
-仓库也支持直接读取 `.xlsx` 文件为 Velaria DataFrame。
-
-使用方式为 `velaria.read_excel(session, path, ...)`：
-
-```python
-from velaria import Session, read_excel
-
-session = Session()
-df = read_excel(session, "/path/to/file.xlsx", sheet_name="Sheet1")
-session.create_temp_view("excel_source", df)
-print(session.sql("SELECT * FROM excel_source LIMIT 5").to_rows())
-```
-
-该能力依赖 `pandas` 与 `openpyxl`（已作为 Python 包依赖）：
-
-```bash
-uv run python -c "import pandas, openpyxl"
-```
-
-本仓库里的 Python 命令统一使用 `uv`：
+本仓库中的 Python 命令统一使用 `uv`：
 
 ```bash
 bazel build //:velaria_pyext
 uv sync --project python_api --python python3.12
-uv run --project python_api python python_api/demo_batch_sql_arrow.py
-uv run --project python_api python python_api/demo_stream_sql.py
+uv run --project python_api python python_api/examples/demo_batch_sql_arrow.py
+uv run --project python_api python python_api/examples/demo_stream_sql.py
+uv run --project python_api python python_api/examples/demo_vector_search.py
 ```
 
-同时在 Session 侧新增了向量查询入口：`Session.vectorQuery(table, vector_column, query_vector, top_k, metric)`（metric 支持 cosine/dot/l2），以及 explain 接口 `Session.explainVectorQuery(...)`。
+Python ecosystem 构建 / 测试前提：
 
-支持打包单文件 CLI 可执行产物（内含 Python 运行时依赖 + native `_velaria.so`）：
+- `uv`
+- 一个带 `Python.h` 的本地 CPython
+- 当 Bazel 不能自动发现可用解释器时，设置 `VELARIA_PYTHON_BIN`
+
+推荐回归入口：
 
 ```bash
-./scripts/build_py_cli_executable.sh
-./dist/velaria-cli csv-sql \
-  --csv /path/to/input.csv \
-  --query "SELECT * FROM input_table LIMIT 5"
+./scripts/run_python_ecosystem_regression.sh
 ```
 
-额外支持直接编译 native CLI 二进制（运行时不依赖 Python 环境）：
+## Local Vector Search
+
+vector search 是本地内核能力，不是新子系统。
+
+`v0.1` 范围：
+
+- fixed-dimension `float32`
+- 指标：`cosine`、`dot`、`l2`
+- `top-k`
+- exact scan only
+- `DataFrame` / `DataflowSession`
+- Python `Session.vector_search(...)`
+- Arrow `FixedSizeList<float32>`
+- explain 输出
+
+推荐的本地 CSV vector 文本格式：
+
+- `[1 2 3]`
+- `[1,2,3]`
+
+设计文档：
+
+- [docs/local_vector_search_v01.md](./docs/local_vector_search_v01.md)
+
+CLI 示例：
 
 ```bash
 bazel build //:velaria_cli
 ./bazel-bin/velaria_cli \
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
-```
 
-native CLI 向量查询（fixed length vector，支持 cosine/cosin、dot 与 l2）：
-
-```bash
-./bazel-bin/velaria_cli \
+./dist/velaria-cli vector-search \
   --csv /path/to/vectors.csv \
   --vector-column embedding \
   --query-vector "0.1,0.2,0.3" \
@@ -260,19 +266,44 @@ native CLI 向量查询（fixed length vector，支持 cosine/cosin、dot 与 l2
   --top-k 5
 ```
 
-runtime 传输层现已在 proto-like 与 binary row batch codec 中保留 `FixedVector` 类型，跨进程传输时不会丢失向量维度语义。
-FixedVector 在内部 codec 里改为 raw float bit payload 编码，避免文本往返造成的精度损耗。
-当前向量检索范围为本地 exact scan（`mode=exact-scan`）+ 固定维度 float 向量；v0.1 不包含 ANN 与分布式执行路径。
-Arrow ingestion 已增加 `FixedSizeList<float32>` 的 native 快路径，可减少向量列的 Python 对象转换开销。
-同机 actor runtime 的结果回传现在采用“双帧”模型：控制消息继续走 `actor-rpc-v1`，结果表单独走 `table-bin-v1` 的 `DataBatch` 帧，并通过 `correlation_id` 关联；热路径不再把整张结果表塞进 actor JSON body。
+vector explain 是稳定 contract 的一部分，当前要求至少包含：
 
-## 同机多进程实验路径
+- `mode=exact-scan`
+- `metric=<cosine|dot|l2>`
+- `dimension=<N>`
+- `top_k=<K>`
+- `candidate_rows=<M>`
+- `filter_pushdown=false`
+- `acceleration=flat-buffer+heap-topk`
 
-同机路径刻意保持最小：
+benchmark 基线入口：
 
-- scheduler 接收提交并维护 snapshot
-- worker 执行本地 operator chain
-- dashboard 和 client 都必须走 worker 执行链
+```bash
+./scripts/run_vector_search_benchmark.sh
+```
+
+该脚本默认跑轻量 `--quick` 基线；如需完整 sweep，直接执行 `bazel run //:vector_search_benchmark`。
+
+## Experimental Runtime
+
+同机路径继续刻意保持收敛：
+
+```text
+client -> scheduler(jobmaster) -> worker -> in-proc operator chain -> result
+```
+
+它存在的目的：
+
+- 同机执行实验
+- transport 与 codec 观测
+- benchmark 与 observability 开发
+
+它不代表：
+
+- 已完成 distributed scheduling
+- 已完成 distributed fault recovery
+- 已完成 cluster resource governance
+- 已支持 production 级 distributed vector execution
 
 构建：
 
@@ -286,49 +317,13 @@ smoke：
 bazel run //:actor_rpc_smoke
 ```
 
-该 smoke 现会同时校验 actor 控制消息和关联的二进制 `DataBatch` 结果帧。
-
 三进程本地运行：
 
 ```bash
-bazel run //:actor_rpc_scheduler -- --listen 127.0.0.1:61000 --node-id scheduler --dashboard-enabled --dashboard-listen 127.0.0.1:8080
+bazel run //:actor_rpc_scheduler -- --listen 127.0.0.1:61000 --node-id scheduler
 bazel run //:actor_rpc_worker -- --connect 127.0.0.1:61000 --node-id worker-1
 bazel run //:actor_rpc_client -- --connect 127.0.0.1:61000 --payload "demo payload"
 ```
-
-Dashboard：
-
-- 地址：`http://127.0.0.1:8080`
-- 源码：`src/dataflow/runner/dashboard/app.ts`
-- 构建目标：`//:dashboard_app_js`
-
-## Benchmark 与 Observability
-
-常用本地目标：
-
-- `//:stream_benchmark`
-- `//:stream_actor_benchmark`
-- `//:tpch_q1_style_benchmark`
-- `//:vector_search_benchmark`
-
-向量 benchmark：
-
-```bash
-bazel run //:vector_search_benchmark
-```
-
-会输出两类 JSON 行：
-
-- `vector-query`：cold query、warm query、warm explain 延迟
-- `vector-transport`：proto-like 与 `BinaryRowBatch` 的编解码耗时、payload 大小，以及 actor 控制帧开销
-
-同机 observability regression：
-
-```bash
-./scripts/run_stream_observability_regression.sh
-```
-
-这些 benchmark 会输出结构化 profile，用于同机执行路径诊断和回归跟踪，不用于把绝对吞吐做成机器敏感的硬门槛。
 
 ## 构建与验证
 
@@ -340,20 +335,26 @@ bazel run //:df_demo
 bazel run //:stream_demo
 ```
 
-核心回归集：
+分层回归入口：
 
 ```bash
-bazel test //:sql_regression_test //:planner_v03_test //:stream_runtime_test //:stream_actor_credit_test //:source_sink_abi_test //:stream_strategy_explain_test
-bazel test //python_api:custom_stream_source_test //python_api:streaming_v05_test //python_api:arrow_stream_ingestion_test
+./scripts/run_core_regression.sh
+./scripts/run_python_ecosystem_regression.sh
+./scripts/run_experimental_regression.sh
 ```
 
-一行 build/smoke 摘要：
+直接使用 Bazel suite：
 
 ```bash
-bazel build //:sql_demo //:df_demo //:stream_demo \
-  //:actor_rpc_scheduler //:actor_rpc_worker //:actor_rpc_client //:actor_rpc_smoke \
-  && bazel run //:actor_rpc_smoke \
-  && echo '[summary] build+smoke ok'
+bazel test //:core_regression
+bazel test //:python_ecosystem_regression
+bazel test //:experimental_regression
+```
+
+同机 observability regression：
+
+```bash
+./scripts/run_stream_observability_regression.sh
 ```
 
 ## 仓库规则
@@ -361,16 +362,7 @@ bazel build //:sql_demo //:df_demo //:stream_demo \
 - 语言基线：`C++17`
 - 构建系统：`Bazel`
 - 对外 session 入口保持为 `DataflowSession`
-- 扩展同机实验时不要破坏 `sql_demo / df_demo / stream_demo`
+- 不要破坏 `sql_demo / df_demo / stream_demo`
 - 示例源码统一使用 `.cc`
 - 本仓库中的 Python 命令统一使用 `uv`
-
-## CI 与打包
-
-CI 维持收敛：
-
-- PR CI 覆盖 native build、回归测试和 Python smoke
-- wheel job 生成 Linux 与 macOS native wheel
-- release 通过 tag 驱动，并校验 `velaria.__version__`
-
-目标是让日常开发成本保持可控，同时验证当前真正暴露出去的接口面。
+- `README.md` 与 `README-zh.md` 必须保持同步

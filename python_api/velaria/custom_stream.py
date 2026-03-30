@@ -107,9 +107,11 @@ class CustomArrowStreamSink:
         self.options.validate()
         self._pending: List[pa.Table] = []
         self._pending_rows = 0
-        self._window_start = time.monotonic()
+        self._window_start: Optional[float] = None
 
     def write_batch(self, batch: pa.Table) -> None:
+        if self._window_start is None:
+            self._window_start = time.monotonic()
         self._pending.append(batch)
         self._pending_rows += batch.num_rows
         now = time.monotonic()
@@ -128,7 +130,7 @@ class CustomArrowStreamSink:
         self.on_emit(merged)
         self._pending = []
         self._pending_rows = 0
-        self._window_start = now
+        self._window_start = None if not self._pending else now
 
 
 def create_stream_from_custom_source(

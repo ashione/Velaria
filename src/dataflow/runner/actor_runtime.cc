@@ -6,16 +6,13 @@
 #include <csignal>
 #include <cerrno>
 #include <cstdint>
-#include <fstream>
 #include <iostream>
 #include <mutex>
 #include <sstream>
-#include <cctype>
 #include <string>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
-#include <filesystem>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -106,11 +103,6 @@ std::string summarizeTable(const Table& table) {
   return out.str();
 }
 
-[[maybe_unused]] std::string nextDashboardJobId() {
-  static std::atomic<std::uint64_t> seq{1};
-  return "dashboard_job_" + std::to_string(seq.fetch_add(1));
-}
-
 Table makeDemoInputTable(const std::string& payload) {
   Table table(Schema({"token", "bucket", "score"}), {});
   const int64_t base = static_cast<int64_t>(payload.size());
@@ -142,251 +134,9 @@ DataFrame buildClientPlan(const std::string& payload, const std::string& sql) {
   return buildPayloadPlan(payload);
 }
 
-std::string toLowerCopy(std::string value) {
-  for (char& ch : value) {
-    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-  }
-  return value;
-}
-
-std::string toUpperCopy(std::string value) {
-  for (char& ch : value) {
-    ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
-  }
-  return value;
-}
-
-std::string urlDecode(const std::string& input) {
-  std::string out;
-  out.reserve(input.size());
-  auto hexToInt = [](char h) -> int {
-    if (h >= '0' && h <= '9') return h - '0';
-    if (h >= 'a' && h <= 'f') return 10 + (h - 'a');
-    if (h >= 'A' && h <= 'F') return 10 + (h - 'A');
-    return -1;
-  };
-  for (std::size_t i = 0; i < input.size(); ++i) {
-    const char ch = input[i];
-    if (ch == '+') {
-      out.push_back(' ');
-      continue;
-    }
-    if (ch == '%' && i + 2 < input.size()) {
-      const int hi = hexToInt(input[i + 1]);
-      const int lo = hexToInt(input[i + 2]);
-      if (hi >= 0 && lo >= 0) {
-        out.push_back(static_cast<char>((hi << 4) | lo));
-        i += 2;
-        continue;
-      }
-    }
-    out.push_back(ch);
-  }
-  return out;
-}
-
-std::unordered_map<std::string, std::string> parseFormBody(const std::string& body) {
-  std::unordered_map<std::string, std::string> out;
-  std::size_t start = 0;
-  while (start < body.size()) {
-    const std::size_t sep = body.find('&', start);
-    const std::string pair = body.substr(start, sep == std::string::npos ? std::string::npos : sep - start);
-    if (!pair.empty()) {
-      const std::size_t eq = pair.find('=');
-      if (eq == std::string::npos) {
-        out[urlDecode(pair)] = "";
-      } else {
-        out[urlDecode(pair.substr(0, eq))] = urlDecode(pair.substr(eq + 1));
-      }
-    }
-    if (sep == std::string::npos) break;
-    start = sep + 1;
-  }
-  return out;
-}
-
-void sendHttpResponse(int fd, int code, const std::string& reason, const std::string& body,
-                     const std::string& content_type) {
-  std::ostringstream out;
-  out << "HTTP/1.1 " << code << " " << reason << "\r\n"
-      << "Content-Type: " << content_type << "; charset=utf-8\r\n"
-      << "Content-Length: " << body.size() << "\r\n"
-      << "Access-Control-Allow-Origin: *\r\n"
-      << "Connection: close\r\n"
-      << "\r\n"
-      << body;
-  const std::string text = out.str();
-  sendAllBytes(fd, reinterpret_cast<const uint8_t*>(text.data()), text.size());
-}
-
 bool isLocalWorkerNodeId(const std::string& node_id, const std::string& scheduler_node_id) {
   const std::string prefix = scheduler_node_id + "-worker-";
   return node_id.compare(0, prefix.size(), prefix) == 0;
-}
-
-bool readHttpRequest(int fd, std::string* method, std::string* path, std::string* body) {
-  if (!method || !path || !body) return false;
-  method->clear();
-  path->clear();
-  body->clear();
-
-  std::string request;
-  std::size_t content_length = 0;
-  std::size_t header_end = std::string::npos;
-  while (true) {
-    char buffer[4096];
-    const ssize_t n = ::recv(fd, buffer, sizeof(buffer), 0);
-    if (n <= 0) return false;
-    request.append(buffer, n);
-    if (header_end == std::string::npos) {
-      header_end = request.find("\r\n\r\n");
-      if (header_end == std::string::npos) {
-        if (request.size() > 64 * 1024) return false;
-        continue;
-      }
-      std::istringstream header_stream(request.substr(0, header_end));
-      if (!(header_stream >> *method >> *path)) return false;
-      std::string version;
-      header_stream >> version;
-      if (version.empty()) return false;
-      std::string line;
-      while (std::getline(header_stream, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        const std::size_t split = line.find(':');
-        if (split == std::string::npos) continue;
-        const std::string key = toLowerCopy(line.substr(0, split));
-        const std::string value = line.substr(split + 1);
-        if (key == "content-length") {
-          try {
-            content_length = static_cast<std::size_t>(std::stoul(value));
-          } catch (...) {
-            content_length = 0;
-          }
-        }
-      }
-      *method = toUpperCopy(*method);
-    }
-    const std::size_t header_pos = header_end + 4;
-    if (request.size() < header_pos) return false;
-    const std::size_t body_available = request.size() - header_pos;
-    if (body_available < content_length) {
-      if (request.size() > 128 * 1024) return false;
-      continue;
-    }
-    body->assign(request.substr(header_pos, content_length));
-    return true;
-  }
-}
-
-std::string dashboardRoot() {
-  static const std::string root = [] {
-    auto fileExists = [](const std::string& path) {
-      return std::ifstream(path).good();
-    };
-    auto appendDash = [](const std::string& dir) {
-      return dir + "/src/dataflow/runner/dashboard";
-    };
-
-    auto testCandidate = [&](const std::string& candidate) {
-      if (fileExists(candidate + "/index.html")) {
-        return candidate;
-      }
-      return std::string();
-    };
-    auto tryCandidate = [&](const std::string& candidate) -> std::string {
-      if (!candidate.empty()) {
-        const auto hit = testCandidate(candidate);
-        if (!hit.empty()) return hit;
-      }
-      return std::string();
-    };
-
-    auto testRunfile = [&](const std::string& runfileRoot) -> std::string {
-      const std::string workspaceRoot = runfileRoot + "/src/dataflow/runner/dashboard";
-      const std::string mainAliasRoot = runfileRoot + "/__main__/src/dataflow/runner/dashboard";
-      const std::string workspace = getenv("TEST_WORKSPACE") ? getenv("TEST_WORKSPACE") : "cpp-dataflow-distributed-engine";
-      const std::string wsAliasRoot = runfileRoot + "/" + workspace + "/src/dataflow/runner/dashboard";
-      const auto hit = testCandidate(workspaceRoot);
-      if (!hit.empty()) return hit;
-      const auto hit2 = testCandidate(mainAliasRoot);
-      if (!hit2.empty()) return hit2;
-      return testCandidate(wsAliasRoot);
-    };
-
-    std::string source_file(__FILE__);
-    const std::size_t sep = source_file.find_last_of("/\\");
-    if (sep != std::string::npos) {
-      const std::string candidate = source_file.substr(0, sep) + "/dashboard";
-      const std::string hit = testCandidate(candidate);
-      if (!hit.empty()) return hit;
-    }
-
-    if (const char* workspace = std::getenv("BUILD_WORKSPACE_DIRECTORY")) {
-      const std::string hit = tryCandidate(appendDash(std::string(workspace)));
-      if (!hit.empty()) return hit;
-      const std::string hit_bin = tryCandidate(std::string(workspace) + "/bazel-bin/src/dataflow/runner/dashboard");
-      if (!hit_bin.empty()) return hit_bin;
-      const std::string hit_bin2 = tryCandidate(std::string(workspace) + "/bazel-out/bin/src/dataflow/runner/dashboard");
-      if (!hit_bin2.empty()) return hit_bin2;
-    }
-
-    if (const char* test_srcdir = std::getenv("TEST_SRCDIR")) {
-      const std::string hit = tryCandidate(appendDash(std::string(test_srcdir)));
-      if (!hit.empty()) return hit;
-      const std::string hit_workspace = tryCandidate(std::string(test_srcdir) + "/cpp-dataflow-distributed-engine/src/dataflow/runner/dashboard");
-      if (!hit_workspace.empty()) return hit_workspace;
-    }
-
-    if (const char* runfiles = std::getenv("RUNFILES_DIR")) {
-      const std::string runfiles_root = runfiles;
-      const std::string hit = testRunfile(runfiles_root);
-      if (!hit.empty()) return hit;
-    }
-
-    if (const char* test_tmpdir = std::getenv("TEST_TMPDIR")) {
-      const std::string base = test_tmpdir;
-      const auto slash = base.find_last_of("/\\");
-      if (slash != std::string::npos) {
-        const std::string root = base.substr(0, slash);
-        const std::string hit = tryCandidate(appendDash(root));
-        if (!hit.empty()) return hit;
-      }
-    }
-
-    const std::string cwd = std::filesystem::current_path().string();
-    std::filesystem::path path = std::filesystem::path(cwd);
-    for (int i = 0; i < 10; ++i) {
-      const std::string candidate = appendDash(path.string());
-      const std::string hit = testCandidate(candidate);
-      if (!hit.empty()) return hit;
-      if (!path.has_parent_path()) break;
-      path = path.parent_path();
-    }
-
-    return appendDash(".");
-  }();
-  return root;
-}
-
-std::string dashboardMimeType(const std::string& path) {
-  if (path.size() >= 5 && path.compare(path.size() - 5, 5, ".html") == 0) return "text/html";
-  if (path.size() >= 3 && path.compare(path.size() - 3, 3, ".js") == 0) return "text/javascript";
-  if (path.size() >= 3 && path.compare(path.size() - 3, 3, ".ts") == 0) return "text/plain";
-  if (path.size() >= 4 && path.compare(path.size() - 4, 4, ".css") == 0) return "text/css";
-  return "text/plain";
-}
-
-std::string dashboardReadFile(const std::string& relative_path, bool* ok) {
-  std::string full_path = dashboardRoot() + relative_path;
-  std::ifstream file(full_path, std::ios::binary);
-  if (!file.is_open()) {
-    if (ok) *ok = false;
-    return {};
-  }
-  if (ok) *ok = true;
-  std::ostringstream out;
-  out << file.rdbuf();
-  return out.str();
 }
 
 struct LocalWorkerProcess {
@@ -394,29 +144,6 @@ struct LocalWorkerProcess {
   std::string node_id;
   bool registered;
 };
-
-void serveDashboardAsset(int fd, const std::string& raw_path) {
-  std::string path = raw_path;
-  const std::size_t qmark = path.find('?');
-  if (qmark != std::string::npos) path = path.substr(0, qmark);
-  if (path.empty() || path == "/") path = "/index.html";
-  if (path.front() != '/') path = "/" + path;
-
-  if (path.find("..") != std::string::npos) {
-    sendHttpResponse(fd, 403, "Forbidden", R"json({"ok":false,"message":"invalid file path"})json",
-                     "application/json");
-    return;
-  }
-
-  bool ok = false;
-  const std::string content = dashboardReadFile(path, &ok);
-  if (!ok) {
-    sendHttpResponse(fd, 404, "Not Found", R"json({"ok":false,"message":"not found"})json",
-                     "application/json");
-    return;
-  }
-  sendHttpResponse(fd, 200, "OK", content, dashboardMimeType(path));
-}
 
 struct RpcTaskSnapshot {
   std::string task_id;
@@ -491,27 +218,6 @@ std::string snapshotToJson(const RpcJobSnapshot& snapshot) {
       field("result_payload", snapshot.result_payload),
       field("chain", chain_json, true),
       field("task", task_json, true),
-  });
-}
-
-std::string buildJobsJson(const std::unordered_map<std::string, RpcJobSnapshot>& job_snapshots) {
-  std::vector<std::string> jobs;
-  std::vector<std::string> job_ids;
-  job_ids.reserve(job_snapshots.size());
-  for (const auto& item : job_snapshots) {
-    job_ids.push_back(item.first);
-  }
-  std::sort(job_ids.begin(), job_ids.end());
-  for (const auto& job_id : job_ids) {
-    const auto it = job_snapshots.find(job_id);
-    if (it != job_snapshots.end()) {
-      jobs.push_back(snapshotToJson(it->second));
-    }
-  }
-  using namespace observability;
-  return object({
-      field("count", static_cast<uint64_t>(jobs.size())),
-      field("jobs", array(jobs), true),
   });
 }
 
@@ -623,22 +329,6 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
 
   std::cout << "[scheduler] listen " << config.listen_address << "\n";
 
-  std::string dashboard_host;
-  uint16_t dashboard_port = 0;
-  int dashboard_server_fd = -1;
-  if (config.dashboard_enabled) {
-    if (!parseConfigEndpoint(config.dashboard_listen_address, &dashboard_host, &dashboard_port)) {
-      std::cerr << "Invalid --dashboard-listen endpoint: " << config.dashboard_listen_address << "\n";
-      return 1;
-    }
-    dashboard_server_fd = createServerSocket(dashboard_host, dashboard_port);
-    if (dashboard_server_fd < 0) {
-      std::cerr << "scheduler failed to listen dashboard on " << config.dashboard_listen_address << "\n";
-      return 1;
-    }
-    std::cout << "[dashboard] listen " << config.dashboard_listen_address << "\n";
-  }
-
   LengthPrefixedFrameCodec codec;
   std::vector<int> conns;
   std::unordered_map<int, std::string> conn_role;
@@ -650,7 +340,6 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
   std::unordered_map<std::string, int> task_to_worker;
   std::unordered_map<int, ActorRpcMessage> pending_worker_result_msgs;
   std::unordered_map<std::string, RpcJobSnapshot> job_snapshots;
-  std::vector<int> dashboard_conns;
   uint64_t next_message_id = 1;
   std::unordered_set<std::string> local_worker_nodes;
   int launching_local_workers = 0;
@@ -778,8 +467,6 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
     worker_config.node_id = config.node_id + "-worker-" + std::to_string(worker_index);
     worker_config.connect_address = config.listen_address;
     worker_config.single_node = false;
-    worker_config.dashboard_enabled = false;
-
     const pid_t pid = fork();
     if (pid < 0) {
       emitRpcEvent("actor_scheduler", "local_worker_spawn_failed", config.node_id,
@@ -818,140 +505,6 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
   auto emitSnapshotEvent = [&](const RpcJobSnapshot& snapshot) {
     emitRpcEvent("actor_scheduler", "job_snapshot", config.node_id, snapshot.status_code, snapshot.job_id,
                  {observability::field("snapshot", snapshotToJson(snapshot), true)});
-  };
-
-  auto submitDashboardJob = [&](const std::string& payload_input,
-                               const std::string& sql,
-                               std::string* job_id_out,
-                               std::string* summary_out) -> bool {
-    if (workers.empty()) {
-      ensureLocalWorkers();
-      if (!config.auto_worker && workers.empty()) {
-        if (job_id_out) {
-          job_id_out->clear();
-        }
-        if (summary_out) {
-          summary_out->assign("scheduler reject: no worker available");
-        }
-        emitRpcEvent("actor_scheduler", "dashboard_submit", config.node_id,
-                     "JOB_SUBMIT_REJECTED", "",
-                     {observability::field("reason", "no worker available")});
-        return false;
-      }
-      if (workers.empty() && launching_local_workers > 0 && summary_out) {
-        summary_out->assign("scheduler started local worker, job submitted to remote execution queue");
-      }
-    }
-
-    DataFrame plan_df;
-    try {
-      plan_df = buildClientPlan(payload_input, sql);
-    } catch (const std::exception& e) {
-      if (job_id_out) job_id_out->clear();
-      if (summary_out) summary_out->assign(e.what());
-      return false;
-    }
-
-    const auto handle = JobMaster::instance().submitRemote(plan_df.serializePlan());
-    const std::string job_id = handle.id();
-
-    RpcJobSnapshot snapshot;
-    snapshot.job_id = job_id;
-    snapshot.client_node = "dashboard";
-    snapshot.sql = sql;
-    snapshot.payload = flattenText(sql.empty() ? plan_df.explain() : sql);
-    snapshot.state = "SUBMITTED";
-    snapshot.status_code = "JOB_SUBMITTED";
-    job_snapshots[job_id] = snapshot;
-
-    if (job_id_out) *job_id_out = job_id;
-    if (summary_out) *summary_out = snapshot.payload;
-    emitSnapshotEvent(snapshot);
-    return true;
-  };
-
-  auto handleDashboardConnection = [&](int fd) {
-    std::string method;
-    std::string path;
-    std::string body;
-    if (!readHttpRequest(fd, &method, &path, &body)) {
-      sendHttpResponse(fd, 400, "Bad Request", R"json({"ok":false,"message":"invalid request"})json",
-                       "application/json");
-      return;
-    }
-
-    const std::size_t qmark = path.find('?');
-    if (qmark != std::string::npos) path = path.substr(0, qmark);
-
-    if (method == "GET" && (path == "/" || path == "/index.html" || path == "/app.js" || path == "/app.ts")) {
-      serveDashboardAsset(fd, path);
-      return;
-    }
-
-    if (method == "GET" && path.rfind("/api/", 0) != 0 && path.find('.') == std::string::npos) {
-      serveDashboardAsset(fd, "/index.html");
-      return;
-    }
-
-    if (method == "GET" && path == "/api/jobs") {
-      sendHttpResponse(fd, 200, "OK", buildJobsJson(job_snapshots), "application/json");
-      return;
-    }
-
-    if (method == "GET" && path.compare(0, 10, "/api/jobs/") == 0 && path.size() > 10) {
-      const std::string job_id = path.substr(10);
-      const auto it = job_snapshots.find(job_id);
-      if (it == job_snapshots.end()) {
-        sendHttpResponse(fd, 404, "Not Found", R"json({"ok":false,"message":"job not found"})json",
-                         "application/json");
-      } else {
-        sendHttpResponse(fd, 200, "OK", snapshotToJson(it->second), "application/json");
-      }
-      return;
-    }
-
-    if (method == "POST" && path == "/api/jobs") {
-      const auto fields = parseFormBody(body);
-      const std::string payload_input = fields.count("payload") ? fields.at("payload") : "";
-      const std::string sql = fields.count("sql") ? fields.at("sql") : "";
-      if (payload_input.empty() && sql.empty()) {
-        sendHttpResponse(fd, 400, "Bad Request", R"json({"ok":false,"message":"payload or sql required"})json",
-                         "application/json");
-        return;
-      }
-
-      std::string job_id;
-      std::string summary;
-      if (!submitDashboardJob(payload_input, sql, &job_id, &summary)) {
-        const bool unavailable_worker = summary.find("no worker available") != std::string::npos;
-        const std::string detail = observability::object({
-            observability::field("ok", false),
-            observability::field("message", summary.empty() ? "submit failed" : summary),
-        });
-        sendHttpResponse(fd, unavailable_worker ? 503 : 500,
-                         unavailable_worker ? "Service Unavailable" : "Internal Server Error",
-                         detail, "application/json");
-        return;
-      }
-
-      const std::string detail = observability::object({
-          observability::field("ok", true),
-          observability::field("job_id", job_id),
-          observability::field("state", job_snapshots[job_id].state),
-          observability::field("status_code", job_snapshots[job_id].status_code),
-          observability::field("payload", summary),
-          observability::field("result_payload", job_snapshots[job_id].result_payload),
-      });
-      sendHttpResponse(fd, 200, "OK", detail, "application/json");
-      emitRpcEvent("actor_scheduler", "dashboard_submit", config.node_id, "JOB_SUBMITTED", job_id,
-                   {observability::field("job_id", job_id),
-                    observability::field("client_node", "dashboard"),
-                    observability::field("payload", summary)});
-      return;
-    }
-
-    sendHttpResponse(fd, 404, "Not Found", R"json({"ok":false,"message":"not found"})json",
-                     "application/json");
   };
 
   auto sendTo = [&](int fd, const ActorRpcMessage& message) {
@@ -1100,16 +653,7 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
     FD_ZERO(&reads);
     FD_SET(server_fd, &reads);
     int max_fd = server_fd;
-    if (dashboard_server_fd >= 0) {
-      FD_SET(dashboard_server_fd, &reads);
-      if (dashboard_server_fd > max_fd) max_fd = dashboard_server_fd;
-    }
     for (int fd : conns) {
-      FD_SET(fd, &reads);
-      if (fd > max_fd) max_fd = fd;
-    }
-
-    for (int fd : dashboard_conns) {
       FD_SET(fd, &reads);
       if (fd > max_fd) max_fd = fd;
     }
@@ -1131,13 +675,6 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
         conn_role[conn_fd] = "unknown";
         emitRpcEvent("actor_scheduler", "connection_accepted", config.node_id, "RPC_CONNECTION_ACCEPTED", "",
                      {observability::field("fd", conn_fd)});
-      }
-    }
-
-    if (dashboard_server_fd >= 0 && FD_ISSET(dashboard_server_fd, &reads)) {
-      const int conn_fd = accept(dashboard_server_fd, nullptr, nullptr);
-      if (conn_fd >= 0) {
-        dashboard_conns.push_back(conn_fd);
       }
     }
 
@@ -1419,26 +956,10 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
       ++i;
     }
 
-    for (std::size_t i = 0; i < dashboard_conns.size();) {
-      const int fd = dashboard_conns[i];
-      if (!FD_ISSET(fd, &reads)) {
-        ++i;
-        continue;
-      }
-      handleDashboardConnection(fd);
-      dashboard_conns.erase(std::remove(dashboard_conns.begin(), dashboard_conns.end(), fd), dashboard_conns.end());
-      ::close(fd);
-    }
   }
 
   for (const int fd : conns) {
     close(fd);
-  }
-  for (const int fd : dashboard_conns) {
-    ::close(fd);
-  }
-  if (dashboard_server_fd >= 0) {
-    ::close(dashboard_server_fd);
   }
   ::close(server_fd);
   stopAllLocalWorkers();

@@ -1,13 +1,10 @@
 #include <iostream>
-#include <cmath>
-#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include <sstream>
 
-#include "src/dataflow/api/session.h"
-#include "src/dataflow/core/value.h"
+#include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/execution/value.h"
 
 namespace {
 
@@ -49,6 +46,8 @@ std::string valueToJson(const dataflow::Value& value) {
       return value.toString();
     case dataflow::DataType::String:
       return "\"" + escapeJson(value.asString()) + "\"";
+    case dataflow::DataType::FixedVector:
+      return "\"" + escapeJson(value.toString()) + "\"";
   }
   return "null";
 }
@@ -58,64 +57,30 @@ void printUsage(const char* program) {
             << " --csv <path> [--query <sql>] [--table <name>] [--delimiter <char>]\n"
             << "       " << program
             << " --csv <path> --vector-column <name> --query-vector <v1,v2,...>\n"
-            << "       [--metric cosine|cosin|dot|l2] [--top-k <n>]\n";
+            << "       [--metric cosine|cosin|dot|l2] [--top-k <n>]\n"
+            << "       vector CSV cells should use bracketed values like '[1 2 3]' or '[1,2,3]'\n";
 }
 
-std::vector<double> parseVectorText(const std::string& raw) {
+std::vector<float> parseVectorText(const std::string& raw) {
   std::string input = raw;
   if (!input.empty() && input.front() == '[' && input.back() == ']') {
     input = input.substr(1, input.size() - 2);
   }
-  std::vector<double> out;
-  std::stringstream ss(input);
+  std::vector<float> out;
   std::string item;
-  while (std::getline(ss, item, ',')) {
-    if (item.empty()) continue;
-    out.push_back(std::stod(item));
+  std::size_t start = 0;
+  while (start <= input.size()) {
+    const std::size_t end = input.find(',', start);
+    item = input.substr(start, end == std::string::npos ? std::string::npos : end - start);
+    if (!item.empty()) {
+      out.push_back(static_cast<float>(std::stof(item)));
+    }
+    if (end == std::string::npos) {
+      break;
+    }
+    start = end + 1;
   }
   return out;
-}
-
-std::vector<double> parseVectorValue(const dataflow::Value& value) {
-  if (value.type() == dataflow::DataType::String) {
-    return parseVectorText(value.asString());
-  }
-  return parseVectorText(value.toString());
-}
-
-double l2Distance(const std::vector<double>& lhs, const std::vector<double>& rhs) {
-  double sum = 0.0;
-  for (std::size_t i = 0; i < lhs.size(); ++i) {
-    const double diff = lhs[i] - rhs[i];
-    sum += diff * diff;
-  }
-  return std::sqrt(sum);
-}
-
-double cosineDistance(const std::vector<double>& lhs, const std::vector<double>& rhs) {
-  double dot = 0.0;
-  double lhs_norm = 0.0;
-  double rhs_norm = 0.0;
-  for (std::size_t i = 0; i < lhs.size(); ++i) {
-    dot += lhs[i] * rhs[i];
-    lhs_norm += lhs[i] * lhs[i];
-    rhs_norm += rhs[i] * rhs[i];
-  }
-  if (lhs_norm == 0.0 || rhs_norm == 0.0) {
-    return 1.0;
-  }
-  double similarity = dot / (std::sqrt(lhs_norm) * std::sqrt(rhs_norm));
-  if (similarity > 1.0) similarity = 1.0;
-  if (similarity < -1.0) similarity = -1.0;
-  return 1.0 - similarity;
-}
-
-double dotScore(const std::vector<double>& lhs, const std::vector<double>& rhs) {
-  double dot = 0.0;
-  for (std::size_t i = 0; i < lhs.size(); ++i) {
-    dot += lhs[i] * rhs[i];
-  }
-  return dot;
 }
 
 }  // namespace
@@ -177,69 +142,42 @@ int main(int argc, char** argv) {
   try {
     auto& session = dataflow::DataflowSession::builder();
     auto df = session.read_csv(csv_path, delimiter);
+    session.createTempView(table, df);
 
     if (vector_mode) {
-      auto result = df.toTable();
-      if (!result.schema.has(vector_column)) {
-        throw std::runtime_error("vector column not found: " + vector_column);
-      }
-      const auto vector_index = result.schema.indexOf(vector_column);
       const auto needle = parseVectorText(query_vector);
       if (needle.empty()) {
         throw std::runtime_error("query vector cannot be empty");
       }
-
-      struct Candidate {
-        std::size_t row_index;
-        double distance;
-      };
-      std::vector<Candidate> candidates;
-      candidates.reserve(result.rows.size());
-
-      for (std::size_t i = 0; i < result.rows.size(); ++i) {
-        auto vec = parseVectorValue(result.rows[i][vector_index]);
-        if (vec.size() != needle.size()) {
-          throw std::runtime_error("fixed length vector mismatch at row " + std::to_string(i));
-        }
-        double distance = 0.0;
-        if (metric == "cosine" || metric == "cosin") {
-          distance = cosineDistance(vec, needle);
-        } else if (metric == "dot") {
-          distance = dotScore(vec, needle);
-        } else if (metric == "l2") {
-          distance = l2Distance(vec, needle);
-        } else {
-          throw std::runtime_error("unsupported metric: " + metric);
-        }
-        candidates.push_back(Candidate{i, distance});
-      }
-
+      dataflow::VectorDistanceMetric runtime_metric = dataflow::VectorDistanceMetric::Cosine;
       if (metric == "dot") {
-        std::sort(candidates.begin(), candidates.end(), [](const Candidate& lhs, const Candidate& rhs) {
-          return lhs.distance > rhs.distance;
-        });
-      } else {
-        std::sort(candidates.begin(), candidates.end(), [](const Candidate& lhs, const Candidate& rhs) {
-          return lhs.distance < rhs.distance;
-        });
+        runtime_metric = dataflow::VectorDistanceMetric::Dot;
+      } else if (metric == "l2") {
+        runtime_metric = dataflow::VectorDistanceMetric::L2;
+      } else if (metric != "cosine" && metric != "cosin") {
+        throw std::runtime_error("unsupported metric: " + metric);
       }
-
-      const std::size_t emit = std::min(top_k, candidates.size());
+      const auto result =
+          session.vectorQuery(table, vector_column, needle, top_k, runtime_metric).toTable();
+      const auto explain =
+          session.explainVectorQuery(table, vector_column, needle, top_k, runtime_metric);
       std::cout << "{\n";
       std::cout << "  \"metric\": \"" << (metric == "cosin" ? "cosine" : metric) << "\",\n";
       std::cout << "  \"top_k\": " << top_k << ",\n";
+      std::cout << "  \"explain\": \"" << escapeJson(explain) << "\",\n";
       std::cout << "  \"rows\": [\n";
-      for (std::size_t i = 0; i < emit; ++i) {
-        const auto& c = candidates[i];
-        std::cout << "    {\"row_index\": " << c.row_index << ", \"distance\": " << c.distance
-                  << ", \"row\": [";
-        const auto& row = result.rows[c.row_index];
+      for (std::size_t i = 0; i < result.rows.size(); ++i) {
+        const auto& row = result.rows[i];
+        std::cout << "    {";
         for (std::size_t j = 0; j < row.size(); ++j) {
           if (j > 0) std::cout << ", ";
-          std::cout << valueToJson(row[j]);
+          std::cout << "\"" << escapeJson(result.schema.fields[j]) << "\": "
+                    << valueToJson(row[j]);
         }
-        std::cout << "]}";
-        if (i + 1 < emit) std::cout << ",";
+        std::cout << "}";
+        if (i + 1 < result.rows.size()) {
+          std::cout << ",";
+        }
         std::cout << "\n";
       }
       std::cout << "  ]\n";
@@ -247,7 +185,6 @@ int main(int argc, char** argv) {
       return 0;
     }
 
-    session.createTempView(table, df);
     auto result = session.sql(query).toTable();
 
     std::cout << "{\n";

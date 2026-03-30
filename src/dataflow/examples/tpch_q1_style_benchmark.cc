@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "src/dataflow/stream/actor_stream_runtime.h"
+#include "src/dataflow/experimental/stream/actor_stream_runtime.h"
 
 namespace {
 

@@ -54,6 +54,11 @@ class StreamingV05Test(unittest.TestCase):
             self.assertEqual(progress["checkpoint_delivery_mode"], "best-effort")
             self.assertGreaterEqual(progress["batches_processed"], 1)
             self.assertIn(progress["source_is_bounded"], [True, False])
+            self.assertIn("estimated_state_size_bytes", progress)
+            self.assertIn("estimated_batch_cost", progress)
+            self.assertIn("backpressure_max_queue_batches", progress)
+            self.assertIn("backpressure_high_watermark", progress)
+            self.assertIn("backpressure_low_watermark", progress)
 
             snapshot_json = json.dumps(progress)
             self.assertIn("execution_mode", snapshot_json)

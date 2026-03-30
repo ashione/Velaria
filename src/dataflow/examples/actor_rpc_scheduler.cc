@@ -2,7 +2,7 @@
 
 #include <cstdlib>
 
-#include "src/dataflow/runner/actor_runtime.h"
+#include "src/dataflow/experimental/runner/actor_runtime.h"
 
 int main(int argc, char* argv[]) {
   dataflow::ActorRuntimeConfig config;
@@ -16,15 +16,6 @@ int main(int argc, char* argv[]) {
     }
     if (std::string(argv[i]) == "--node-id" && i + 1 < argc) {
       config.node_id = argv[++i];
-      continue;
-    }
-    if (std::string(argv[i]) == "--dashboard-listen" && i + 1 < argc) {
-      config.dashboard_listen_address = argv[++i];
-      config.dashboard_enabled = true;
-      continue;
-    }
-    if (std::string(argv[i]) == "--dashboard-enabled") {
-      config.dashboard_enabled = true;
       continue;
     }
     if (std::string(argv[i]) == "--auto-worker") {

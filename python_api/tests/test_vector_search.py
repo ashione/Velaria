@@ -43,7 +43,10 @@ class VectorSearchTest(unittest.TestCase):
         )
         self.assertIn("mode=exact-scan", explain)
         self.assertIn("metric=cosine", explain)
+        self.assertIn("dimension=3", explain)
         self.assertIn("top_k=2", explain)
+        self.assertIn("candidate_rows=3", explain)
+        self.assertIn("filter_pushdown=false", explain)
         self.assertIn("acceleration=flat-buffer+heap-topk", explain)
 
     def test_vector_dimension_mismatch(self):
@@ -61,6 +64,56 @@ class VectorSearchTest(unittest.TestCase):
                 top_k=1,
                 metric="l2",
             )
+
+    def test_vector_search_fixed_size_list_record_batch_reader(self):
+        session = Session()
+        vectors = pa.FixedSizeListArray.from_arrays(
+            pa.array(
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.8,
+                    0.2,
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.0,
+                ],
+                type=pa.float32(),
+            ),
+            3,
+        )
+        batch = pa.record_batch(
+            [pa.array([10, 20, 30], type=pa.int64()), vectors],
+            names=["id", "embedding"],
+        )
+        reader = pa.RecordBatchReader.from_batches(batch.schema, [batch])
+        df = session.create_dataframe_from_arrow(reader)
+        session.create_temp_view("vec_reader_py", df)
+
+        result = session.vector_search(
+            table="vec_reader_py",
+            vector_column="embedding",
+            query_vector=[1.0, 0.0, 0.0],
+            top_k=2,
+            metric="cosine",
+        ).to_rows()
+        self.assertEqual(result["rows"][0][0], 0)
+        self.assertEqual(len(result["rows"]), 2)
+
+        explain = session.explain_vector_search(
+            table="vec_reader_py",
+            vector_column="embedding",
+            query_vector=[1.0, 0.0, 0.0],
+            top_k=2,
+            metric="cosine",
+        )
+        self.assertIn("mode=exact-scan", explain)
+        self.assertIn("dimension=3", explain)
+        self.assertIn("top_k=2", explain)
+        self.assertIn("candidate_rows=3", explain)
+        self.assertIn("filter_pushdown=false", explain)
 
 
 if __name__ == "__main__":

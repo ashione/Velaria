@@ -1,14 +1,16 @@
 #include <cstdint>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
-#include "src/dataflow/api/session.h"
-#include "src/dataflow/rpc/actor_rpc_codec.h"
-#include "src/dataflow/rpc/rpc_codec.h"
-#include "src/dataflow/serial/serializer.h"
-#include "src/dataflow/stream/binary_row_batch.h"
+#include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/experimental/rpc/actor_rpc_codec.h"
+#include "src/dataflow/experimental/rpc/rpc_codec.h"
+#include "src/dataflow/core/execution/serial/serializer.h"
+#include "src/dataflow/core/execution/stream/binary_row_batch.h"
 
 namespace {
 
@@ -151,6 +153,9 @@ int main() {
     expect(explain.find("metric=cosine") != std::string::npos, "explain metric missing");
     expect(explain.find("dimension=3") != std::string::npos, "explain dimension missing");
     expect(explain.find("top_k=2") != std::string::npos, "explain top_k missing");
+    expect(explain.find("candidate_rows=3") != std::string::npos, "explain candidate_rows missing");
+    expect(explain.find("filter_pushdown=false") != std::string::npos,
+           "explain filter_pushdown contract missing");
     expect(explain.find("acceleration=flat-buffer+heap-topk") != std::string::npos,
            "explain acceleration hint missing");
 
@@ -167,6 +172,47 @@ int main() {
                       .toTable();
     expect(sparse.rows.size() == 1, "sparse vector query top-k mismatch");
     expect(sparse.rows[0][0].asInt64() == 2, "sparse vector query should preserve source row id");
+
+    const auto parsed_space = dataflow::Value::parseFixedVector("[1 0 0]");
+    expect(parsed_space.size() == 3, "space-separated vector parse should keep dimension");
+    expect(parsed_space[0] == 1.0f && parsed_space[1] == 0.0f && parsed_space[2] == 0.0f,
+           "space-separated vector parse content mismatch");
+
+    const auto parsed_comma = dataflow::Value::parseFixedVector("[0.9,0.1,0]");
+    expect(parsed_comma.size() == 3, "comma-separated vector parse should keep dimension");
+    expect(parsed_comma[0] == 0.9f && parsed_comma[1] == 0.1f && parsed_comma[2] == 0.0f,
+           "comma-separated vector parse content mismatch");
+
+    char csv_path_template[] = "/tmp/velaria-vector-runtime-XXXXXX";
+    const int csv_fd = mkstemp(csv_path_template);
+    expect(csv_fd != -1, "mkstemp failed for vector csv test");
+    close(csv_fd);
+    const std::string csv_path = csv_path_template;
+    {
+      std::ofstream csv(csv_path);
+      expect(csv.good(), "failed to open vector csv temp file");
+      csv << "id,embedding\n";
+      csv << "1,[1 0 0]\n";
+      csv << "2,[0.9 0.1 0]\n";
+      csv << "3,[0 1 0]\n";
+    }
+
+    auto csv_df = session.read_csv(csv_path);
+    session.createTempView("vec_csv_src", csv_df);
+    const auto csv_cosine = session.vectorQuery("vec_csv_src", "embedding", {1.0f, 0.0f, 0.0f}, 2,
+                                                dataflow::VectorDistanceMetric::Cosine)
+                                .toTable();
+    std::remove(csv_path.c_str());
+    expect(csv_cosine.rows.size() == 2, "csv vector query top-k mismatch");
+    expect(csv_cosine.rows[0][0].asInt64() == 0, "csv vector query nearest should be row 0");
+
+    const auto csv_explain = session.explainVectorQuery("vec_csv_src", "embedding",
+                                                        {1.0f, 0.0f, 0.0f}, 2,
+                                                        dataflow::VectorDistanceMetric::Cosine);
+    expect(csv_explain.find("mode=exact-scan") != std::string::npos,
+           "csv explain mode missing");
+    expect(csv_explain.find("candidate_rows=3") != std::string::npos,
+           "csv explain candidate_rows missing");
 
     std::cout << "[test] vector runtime query and transport ok" << std::endl;
     return 0;

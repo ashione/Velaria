@@ -1,6 +1,6 @@
 #include <string>
 
-#include "src/dataflow/runner/actor_runtime.h"
+#include "src/dataflow/experimental/runner/actor_runtime.h"
 
 int main(int argc, char* argv[]) {
   dataflow::ActorRuntimeConfig config;

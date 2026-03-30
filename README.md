@@ -1,63 +1,139 @@
-# Velaria: A Pure C++17 Streaming-First Dataflow Kernel
+# Velaria: A Pure C++17 Local Dataflow Kernel
 
 `README.md` is the English source of truth. The Chinese mirror lives in [README-zh.md](./README-zh.md). Keep both files aligned.
 
-Velaria is a local-first C++17 dataflow engine research project. The current goal is narrow on purpose: stabilize the single-machine streaming path, keep batch and stream inside one execution model, and extend carefully toward same-host multi-process execution without claiming a finished distributed runtime.
+Velaria is a local-first C++17 dataflow engine research project. The repository is now organized around one kernel plus two explicit non-kernel layers:
 
-## What It Is
+- `Core Kernel`
+  - local execution semantics
+  - batch + stream in one model
+  - stable explain / progress / checkpoint contract
+- `Python Ecosystem`
+  - supported Arrow / wheel / CLI / `uv` / Excel / Bitable / custom stream adapters
+  - projects the kernel outward without becoming the hot path
+- `Experimental Runtime`
+  - same-host `actor/rpc/jobmaster`
+  - execution and observability research lane, not a second kernel
 
-Today the main path is:
+## Golden Path
 
-`micro-batch in-proc + query-local backpressure + local worker scale-up`
+The only golden path is:
 
-The repository also keeps `actor + rpc + jobmaster` as a same-host multi-process experiment. That path is for observability and execution research, not for claiming distributed scheduling, fault recovery, state migration, or resource governance.
+```text
+Arrow / CSV / Python ingress
+  -> DataflowSession / DataFrame / StreamingDataFrame
+  -> local runtime kernel
+  -> sink
+  -> explain / progress / checkpoint
+```
 
-Core public objects:
+Public session entry:
 
 - `DataflowSession`
+
+Core user-facing objects:
+
 - `DataFrame`
 - `StreamingDataFrame`
 - `StreamingQuery`
 
-Core local flow:
+The same-host actor/rpc path stays in the repo, but it is not the main product story.
 
-```text
-source -> StreamingDataFrame/operator chain -> sink
-```
+## Repository Layers
 
-Same-host experimental flow:
+### Core Kernel
 
-```text
-client -> scheduler(jobmaster) -> worker -> in-proc operator chain -> result
-```
+Core owns:
 
-## Current Capability Boundary
+- logical planning and minimal SQL mapping
+- table/value execution model
+- local batch and streaming runtime
+- source/sink ABI
+- runtime contract surfaces
+- local vector search capability
 
-Available today:
+Repository entrypoints:
 
-- batch + streaming execution through one local runtime
-- `read_csv`, `readStream(...)`, `readStreamCsvDir(...)`
-- query-local backpressure, bounded backlog, progress snapshots, checkpoint path
-- execution modes: `single-process`, `local-workers`, `actor-credit`, `auto`
-- local file source/sink support
-- basic stream operators: `select / filter / withColumn / drop / limit / window`
-- stateful `sum` and `count`
-- stream SQL subset on top of existing streaming operators
-- Python Arrow ingestion and Arrow output
-- same-host actor/rpc/jobmaster smoke path
+- docs:
+  - [docs/core-boundary.md](./docs/core-boundary.md)
+  - [docs/runtime-contract.md](./docs/runtime-contract.md)
+  - [docs/streaming_runtime_design.md](./docs/streaming_runtime_design.md)
+- Bazel source groups:
+  - `//:velaria_core_logical_sources`
+  - `//:velaria_core_execution_sources`
+  - `//:velaria_core_contract_sources`
+- regression suite:
+  - `//:core_regression`
 
-Out of scope in the current repo state:
+### Python Ecosystem
 
-- completed distributed runtime claims
-- Python callback execution in the hot path
-- Python UDFs
-- Python sink callbacks into the native sink ABI
-- generic plan parallelization from `actor-credit`
-- broad SQL expansion such as full `JOIN / CTE / subquery / UNION / streaming AVG/MIN/MAX`
+Python is a supported ecosystem layer, not a convenience-only wrapper.
 
-## Streaming Runtime Contracts
+It includes:
 
-Main streaming entry points:
+- native binding in `python_api`
+- Arrow ingestion and output
+- `uv` workflow
+- wheel / native wheel / CLI packaging
+- Excel and Bitable adapters
+- custom source / custom sink adapters
+- supported CLI tooling in `python_api/velaria_cli.py`
+- Python ecosystem demos in `python_api/examples`
+- Python benchmarks in `python_api/benchmarks`
+
+It does not define:
+
+- execution hot-path behavior
+- independent progress/checkpoint semantics
+- independent vector-search semantics
+
+Repository entrypoints:
+
+- docs:
+  - [python_api/README.md](./python_api/README.md)
+- Bazel source group:
+  - `//:velaria_python_ecosystem_sources`
+- Python-layer source groups:
+  - `//python_api:velaria_python_supported_sources`
+  - `//python_api:velaria_python_example_sources`
+  - `//python_api:velaria_python_experimental_sources`
+- regression suite:
+  - `//:python_ecosystem_regression`
+- Python-layer regression suite:
+  - `//python_api:velaria_python_supported_regression`
+- shell entrypoint:
+  - `./scripts/run_python_ecosystem_regression.sh`
+
+### Experimental Runtime
+
+Experimental runtime includes:
+
+- actor runtime
+- rpc codec / transport experiments
+- scheduler / worker / client flow
+- same-host smoke and benchmark tools
+
+Repository entrypoints:
+
+- Bazel source group:
+  - `//:velaria_experimental_sources`
+- regression suite:
+  - `//:experimental_regression`
+- shell entrypoint:
+  - `./scripts/run_experimental_regression.sh`
+
+### Examples
+
+Examples and helper scripts illustrate layers; they do not define them.
+
+- Bazel source group:
+  - `//:velaria_examples_sources`
+
+## Runtime Contract
+
+The stable runtime-facing contract is documented in [docs/runtime-contract.md](./docs/runtime-contract.md).
+
+Main stream entry points:
 
 - `session.readStream(source)`
 - `session.readStreamCsvDir(path)`
@@ -66,120 +142,53 @@ Main streaming entry points:
 - `session.startStreamSql(sql, options)`
 - `StreamingDataFrame.writeStream(sink, options)`
 
-### Progress and Strategy
+Stable stream contract surfaces:
 
-`StreamingQueryProgress` and `snapshotJson()` expose:
+- `StreamingQueryProgress`
+- `snapshotJson()`
+- `explainStreamSql(...)`
+- `execution_mode / execution_reason / transport_mode`
+- `checkpoint_delivery_mode`
+- source/sink lifecycle: `open -> nextBatch -> checkpoint -> ack -> close`
 
-- execution choice: `execution_mode`, `execution_reason`, `transport_mode`
-- workload estimates: `estimated_state_size_bytes`, `estimated_batch_cost`
-- source/sink state: `source_is_bounded`, `sink_is_blocking`
-- flow-control counters: backlog, inflight, blocked, watermark fields
-- checkpoint fields: `checkpoint_delivery_mode`, `last_source_offset`
-
-`explainStreamSql(...)` returns three sections:
+`explainStreamSql(...)` always returns:
 
 - `logical`
 - `physical`
 - `strategy`
 
-The strategy section explains selected mode, fallback reason, actor hot-path eligibility, transport, batch/state estimates, and the actor/shared-memory knobs used for the decision.
+`strategy` is the single explanation outlet for mode selection, fallback reason, transport, backpressure thresholds, and checkpoint delivery mode.
 
-### Backpressure
+## Current Capability Boundary
 
-Velaria currently defines backpressure as query-local and bounded:
+Available today:
 
-- `backlog` is the queued batch count after pull and before drain
-- `blocked_count` counts producer wait events, not loop iterations
-- `max_backlog_batches` is the largest observed backlog immediately after enqueue
-- `inflight_batches` and `inflight_partitions` describe queued work not yet consumed
-- slow sink, slow state finalize, or local partition pressure feed back into the same query-local backlog counters
+- local batch + streaming execution through one kernel
+- `read_csv`, `readStream(...)`, `readStreamCsvDir(...)`
+- query-local backpressure, bounded backlog, progress snapshots, checkpoint path
+- execution modes: `single-process`, `local-workers`, `actor-credit`, `auto`
+- file source/sink support
+- basic stream operators: `select / filter / withColumn / drop / limit / window`
+- stateful `sum` and `count`
+- minimal stream SQL subset
+- local vector search on fixed-dimension float vectors
+- Python Arrow ingestion and output
+- same-host actor/rpc/jobmaster smoke path
 
-Latency fields:
+Out of scope in the current repo state:
 
-- `last_batch_latency_ms`: batch start to sink flush completion
-- `last_sink_latency_ms`: sink write + flush
-- `last_state_latency_ms`: state/window finalize time, `0` for stateless batches
+- completed distributed runtime claims
+- Python callback execution in the hot path
+- Python UDFs
+- generic actor parallelization for arbitrary plans
+- broad SQL expansion such as full `JOIN / CTE / subquery / UNION`
+- ANN / standalone vector DB / distributed vector execution
 
-### Checkpoint and Resume
+## Python Ecosystem
 
-Checkpoint files are local and persisted atomically.
+Python remains a supported ingress and packaging layer. It does not become the execution core.
 
-Current delivery semantics:
-
-- default `at-least-once`: source offset is not restored; replay and duplicate sink output are allowed
-- `best-effort`: restore source offset only when the source implements `restoreOffsetToken(...)`; still not exactly-once sink delivery
-
-Current built-in source behavior:
-
-- `MemoryStreamSource`: can resume by batch offset under `best-effort`
-- `DirectoryCsvStreamSource`: can resume by last completed file under `best-effort`
-
-### Actor-Credit and Auto
-
-`actor-credit` and `auto` only target one narrow hot path:
-
-- all upstream transforms must be partition-local
-- the final barrier must be grouped by `window_start + key`
-- the aggregate must be `sum(value)`
-
-Queries outside that shape must fall back to `single-process`, and the reason is recorded in `execution_reason`.
-
-## Streaming SQL
-
-Velaria keeps stream SQL intentionally small and maps it back to existing streaming operators.
-
-### Entry Points
-
-- `session.streamSql("SELECT ...") -> StreamingDataFrame`
-- `session.startStreamSql("INSERT INTO sink_table SELECT ...", options) -> StreamingQuery`
-- `session.explainStreamSql(...) -> string`
-
-### Supported Subset
-
-- single-table `SELECT`
-- `WHERE`
-- `GROUP BY`
-- `HAVING`
-- `LIMIT`
-- `SUM(col)`
-- `COUNT(*)`
-- minimal window SQL: `WINDOW BY <time_col> EVERY <window_ms> AS <output_col>`
-
-Supported DDL/DML:
-
-- `CREATE SOURCE TABLE ... USING csv`
-- `CREATE SINK TABLE ... USING csv`
-- `INSERT INTO sink_table SELECT ...`
-
-Not supported in stream SQL:
-
-- `JOIN`
-- `AVG / MIN / MAX`
-- `INSERT INTO ... VALUES`
-- broad ANSI window SQL
-- CTE / subquery / `UNION`
-
-Example:
-
-```sql
-CREATE SOURCE TABLE stream_events (ts STRING, key STRING, value INT)
-USING csv OPTIONS(path '/tmp/stream-input', delimiter ',');
-
-CREATE SINK TABLE stream_summary (window_start STRING, key STRING, value_sum INT)
-USING csv OPTIONS(path '/tmp/stream-output.csv', delimiter ',');
-
-INSERT INTO stream_summary
-SELECT window_start, key, SUM(value) AS value_sum
-FROM stream_events
-WINDOW BY ts EVERY 60000 AS window_start
-GROUP BY window_start, key;
-```
-
-## Python API
-
-Python remains an exchange/front-end layer. It does not become the execution hot path.
-
-Main API:
+Main supported Python surfaces:
 
 - `Session.read_csv(...)`
 - `Session.sql(...)`
@@ -190,48 +199,66 @@ Main API:
 - `Session.stream_sql(...)`
 - `Session.explain_stream_sql(...)`
 - `Session.start_stream_sql(...)`
-- `Session.vectorQuery(table, vector_column, query_vector, top_k, metric)` (`metric`: cosine/dot/l2)
-- `Session.explainVectorQuery(table, vector_column, query_vector, top_k, metric)`
+- `Session.vector_search(...)`
+- `Session.explain_vector_search(...)`
+- `read_excel(...)`
+- custom source / custom sink adapters
 
-Arrow ingestion accepts:
-
-- `pyarrow.Table`
-- `pyarrow.RecordBatch`
-- `RecordBatchReader`
-- objects implementing `__arrow_c_stream__`
-- Python sequences of Arrow batches
-
-Python commands in this repo should use `uv`:
+Python ecosystem commands in this repo use `uv`:
 
 ```bash
 bazel build //:velaria_pyext
 uv sync --project python_api --python python3.12
-uv run --project python_api python python_api/demo_batch_sql_arrow.py
-uv run --project python_api python python_api/demo_stream_sql.py
+uv run --project python_api python python_api/examples/demo_batch_sql_arrow.py
+uv run --project python_api python python_api/examples/demo_stream_sql.py
+uv run --project python_api python python_api/examples/demo_vector_search.py
 ```
 
-Build a single-file CLI executable (bundles Python runtime deps + native `_velaria.so`):
+Python ecosystem build/test prerequisites:
+
+- `uv`
+- a local CPython interpreter with `Python.h`
+- `VELARIA_PYTHON_BIN` when Bazel cannot auto-discover a usable interpreter
+
+Recommended regression entrypoint:
 
 ```bash
-./scripts/build_py_cli_executable.sh
-./dist/velaria-cli csv-sql \
-  --csv /path/to/input.csv \
-  --query "SELECT * FROM input_table LIMIT 5"
+./scripts/run_python_ecosystem_regression.sh
 ```
 
-Build a native CLI binary (no Python runtime dependency required at runtime):
+## Local Vector Search
+
+Vector search is a local kernel capability, not a new subsystem.
+
+Scope in `v0.1`:
+
+- fixed-dimension `float32`
+- metrics: `cosine`, `dot`, `l2`
+- `top-k`
+- exact scan only
+- `DataFrame` / `DataflowSession`
+- Python `Session.vector_search(...)`
+- Arrow `FixedSizeList<float32>`
+- explain output
+
+Preferred local CSV vector text shape:
+
+- `[1 2 3]`
+- `[1,2,3]`
+
+Design doc:
+
+- [docs/local_vector_search_v01.md](./docs/local_vector_search_v01.md)
+
+CLI examples:
 
 ```bash
 bazel build //:velaria_cli
 ./bazel-bin/velaria_cli \
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
-```
 
-Vector query (fixed-length vector, cosine/dot/l2) via native CLI:
-
-```bash
-./bazel-bin/velaria_cli \
+./dist/velaria-cli vector-search \
   --csv /path/to/vectors.csv \
   --vector-column embedding \
   --query-vector "0.1,0.2,0.3" \
@@ -239,19 +266,44 @@ Vector query (fixed-length vector, cosine/dot/l2) via native CLI:
   --top-k 5
 ```
 
-Runtime-level vector transport now preserves `FixedVector` through proto-like and binary row batch codecs, so cross-process payloads keep vector type and dimensions.
-FixedVector serialization now uses raw float bit payload encoding in internal codecs to avoid text round-trip precision loss.
-Current vector search scope is local-only exact scan (`mode=exact-scan`) with fixed-dimension float vectors; no ANN/distributed path in v0.1.
-Arrow ingestion now includes a direct `FixedSizeList<float32>` fast path in the native bridge, reducing Python object conversion overhead on vector columns.
-For same-host actor runtime results, the control message stays on `actor-rpc-v1`, while the result table is forwarded as a separate `table-bin-v1` `DataBatch` frame linked by `correlation_id`. The hot result path no longer puts row payloads inside the actor JSON body.
+Vector explain is part of the stable contract. Current required fields include:
 
-## Same-Host Multi-Process Experiment
+- `mode=exact-scan`
+- `metric=<cosine|dot|l2>`
+- `dimension=<N>`
+- `top_k=<K>`
+- `candidate_rows=<M>`
+- `filter_pushdown=false`
+- `acceleration=flat-buffer+heap-topk`
 
-The same-host path is intentionally minimal:
+Benchmark baseline:
 
-- scheduler accepts submission and keeps snapshots
-- worker runs the local operator chain
-- dashboard and client both submit through the worker execution path
+```bash
+./scripts/run_vector_search_benchmark.sh
+```
+
+The script runs a quick exact-scan baseline. Use `bazel run //:vector_search_benchmark` for the full sweep.
+
+## Experimental Runtime
+
+The same-host path stays intentionally narrow:
+
+```text
+client -> scheduler(jobmaster) -> worker -> in-proc operator chain -> result
+```
+
+It exists for:
+
+- same-host execution experiments
+- transport and codec observation
+- benchmark and observability development
+
+It does not imply:
+
+- distributed scheduling
+- distributed fault recovery
+- cluster resource governance
+- production distributed vector execution
 
 Build:
 
@@ -265,49 +317,13 @@ Smoke:
 bazel run //:actor_rpc_smoke
 ```
 
-The smoke target now verifies both the actor control message and the correlated binary `DataBatch` result frame.
-
 Three-process local run:
 
 ```bash
-bazel run //:actor_rpc_scheduler -- --listen 127.0.0.1:61000 --node-id scheduler --dashboard-enabled --dashboard-listen 127.0.0.1:8080
+bazel run //:actor_rpc_scheduler -- --listen 127.0.0.1:61000 --node-id scheduler
 bazel run //:actor_rpc_worker -- --connect 127.0.0.1:61000 --node-id worker-1
 bazel run //:actor_rpc_client -- --connect 127.0.0.1:61000 --payload "demo payload"
 ```
-
-Dashboard:
-
-- URL: `http://127.0.0.1:8080`
-- source: `src/dataflow/runner/dashboard/app.ts`
-- build target: `//:dashboard_app_js`
-
-## Benchmarks and Observability
-
-Useful local targets:
-
-- `//:stream_benchmark`
-- `//:stream_actor_benchmark`
-- `//:tpch_q1_style_benchmark`
-- `//:vector_search_benchmark`
-
-Vector benchmark:
-
-```bash
-bazel run //:vector_search_benchmark
-```
-
-It emits JSON lines for:
-
-- `vector-query`: cold query, warm query, and warm explain latency
-- `vector-transport`: proto-like vs `BinaryRowBatch` serialize/deserialize cost and payload size, plus actor control-frame overhead
-
-Same-host observability regression:
-
-```bash
-./scripts/run_stream_observability_regression.sh
-```
-
-The benchmark path exposes structured profile output for same-host execution diagnosis. This is for regression tracking and explainability, not for machine-stable absolute throughput gates.
 
 ## Build and Verification
 
@@ -319,20 +335,26 @@ bazel run //:df_demo
 bazel run //:stream_demo
 ```
 
-Core regression set:
+Layered regression entrypoints:
 
 ```bash
-bazel test //:sql_regression_test //:planner_v03_test //:stream_runtime_test //:stream_actor_credit_test //:source_sink_abi_test //:stream_strategy_explain_test
-bazel test //python_api:custom_stream_source_test //python_api:streaming_v05_test //python_api:arrow_stream_ingestion_test
+./scripts/run_core_regression.sh
+./scripts/run_python_ecosystem_regression.sh
+./scripts/run_experimental_regression.sh
 ```
 
-One-line build/smoke summary:
+Direct Bazel suites:
 
 ```bash
-bazel build //:sql_demo //:df_demo //:stream_demo \
-  //:actor_rpc_scheduler //:actor_rpc_worker //:actor_rpc_client //:actor_rpc_smoke \
-  && bazel run //:actor_rpc_smoke \
-  && echo '[summary] build+smoke ok'
+bazel test //:core_regression
+bazel test //:python_ecosystem_regression
+bazel test //:experimental_regression
+```
+
+Same-host observability regression:
+
+```bash
+./scripts/run_stream_observability_regression.sh
 ```
 
 ## Repository Rules
@@ -340,16 +362,7 @@ bazel build //:sql_demo //:df_demo //:stream_demo \
 - language baseline: `C++17`
 - build system: `Bazel`
 - keep `DataflowSession` as the public session entry
-- do not break `sql_demo / df_demo / stream_demo` while extending same-host experiments
+- do not break `sql_demo / df_demo / stream_demo`
 - keep example source files as `.cc`
 - use `uv` for Python commands in this repository
-
-## CI and Packaging
-
-CI stays intentionally narrow:
-
-- PR CI covers native build, regression tests, and Python smoke
-- wheel jobs build Linux and macOS native wheels
-- releases are tag-driven and validated against `velaria.__version__`
-
-The goal is to keep routine development cheap while still validating the public surfaces that currently matter.
+- keep `README.md` and `README-zh.md` aligned

@@ -13,7 +13,6 @@ Env:
   PAYLOAD           default "demo payload"
   TIMEOUT_SECONDS   default 20
   DO_BUILD          default 0 (set to 1 to run build first)
-  BUILD_DASHBOARD   default 1 (set to 0 to skip dashboard frontend build)
 
 Examples:
   scripts/run_actor_rpc_e2e.sh
@@ -27,7 +26,6 @@ WORKER_ID="${WORKER_ID:-worker-1}"
 PAYLOAD="${PAYLOAD:-demo payload}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-20}"
 DO_BUILD="${DO_BUILD:-0}"
-BUILD_DASHBOARD="${BUILD_DASHBOARD:-1}"
 MODE_SQL=""
 MODE_PAYLOAD=""
 
@@ -66,10 +64,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 
-if [[ "${BUILD_DASHBOARD}" != "0" ]]; then
-  bazel build //:dashboard_app_js
-fi
-
 if [[ "${DO_BUILD}" == "1" ]]; then
   bazel build //:actor_rpc_scheduler //:actor_rpc_worker //:actor_rpc_client //:actor_rpc_smoke
 fi
@@ -89,23 +83,9 @@ wait_tcp_open() {
   local start
   start="$(date +%s)"
   while true; do
-    if python3 - "${host}" "${port}" <<'PY' >/dev/null 2>&1
-import socket
-import sys
-
-host = sys.argv[1]
-port = int(sys.argv[2])
-
-try:
-  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-  s.settimeout(0.3)
-  s.connect((host, port))
-  s.close()
-  print("ok")
-except Exception:
-  raise SystemExit(1)
-PY
-    then
+    if (exec 3<>"/dev/tcp/${host}/${port}") >/dev/null 2>&1; then
+      exec 3<&-
+      exec 3>&-
       return 0
     fi
     if (( $(date +%s) - start >= timeout )); then

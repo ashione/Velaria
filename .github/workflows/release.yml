@@ -62,7 +62,6 @@ jobs:
       - name: Configure Python for Bazel
         run: |
           echo "VELARIA_PYTHON_BIN=$(which python)" >> "$GITHUB_ENV"
-          echo "VELARIA_PLATFORM_TAG=macosx_11_0_arm64" >> "$GITHUB_ENV"
 
       - name: Build native wheel
         run: |

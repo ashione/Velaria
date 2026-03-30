@@ -1177,8 +1177,8 @@ PyObject* sessionVectorSearch(PyVelariaSession* self, PyObject* args, PyObject* 
     df::DataFrame result;
     {
       AllowThreads allow;
-      result = self->session_ptr->vectorQuery(table, vector_column, query, static_cast<size_t>(top_k),
-                                              parseVectorMetric(metric));
+      result = self->session->vectorQuery(table, vector_column, query, static_cast<size_t>(top_k),
+                                          parseVectorMetric(metric));
     }
     return wrapDataFrame(result);
   });
@@ -1201,9 +1201,9 @@ PyObject* sessionExplainVectorSearch(PyVelariaSession* self, PyObject* args, PyO
     std::string explain;
     {
       AllowThreads allow;
-      explain = self->session_ptr->explainVectorQuery(table, vector_column, query,
-                                                      static_cast<size_t>(top_k),
-                                                      parseVectorMetric(metric));
+      explain = self->session->explainVectorQuery(table, vector_column, query,
+                                                  static_cast<size_t>(top_k),
+                                                  parseVectorMetric(metric));
     }
     return PyUnicode_FromString(explain.c_str());
   });

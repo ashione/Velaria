@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "src/dataflow/core/execution/csv.h"
+#include "src/dataflow/core/execution/source_materialization.h"
 #include "src/dataflow/ai/plugin_runtime.h"
 
 namespace dataflow {
@@ -73,7 +74,26 @@ DataflowSession& DataflowSession::builder() {
 }
 
 DataFrame DataflowSession::read_csv(const std::string& path, char delimiter) {
-  return DataFrame(load_csv(path, delimiter));
+  std::ostringstream options;
+  options << "delimiter=" << delimiter;
+  const auto fingerprint = capture_file_source_fingerprint(path, "csv", options.str());
+  const SourceMaterializationStore store(default_source_materialization_root(),
+                                         default_source_materialization_data_format());
+  if (const auto entry = store.lookup(fingerprint); entry.has_value()) {
+    try {
+      return DataFrame(store.load(*entry));
+    } catch (...) {
+      // Fall through to the CSV source path on cache corruption or decode errors.
+    }
+  }
+
+  Table table = load_csv(fingerprint.abs_path, delimiter);
+  try {
+    store.save(fingerprint, table);
+  } catch (...) {
+    // CSV remains the source of truth; cache write failures must not change read semantics.
+  }
+  return DataFrame(std::move(table));
 }
 
 StreamingDataFrame DataflowSession::readStream(std::shared_ptr<StreamSource> source) {

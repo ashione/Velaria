@@ -3,6 +3,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "src/dataflow/core/table.h"
@@ -13,6 +14,13 @@
 namespace dataflow {
 
 class DataFrame;
+class VectorIndex;
+enum class VectorDistanceMetric { Cosine, Dot, L2 };
+
+struct CachedVectorColumn {
+  std::shared_ptr<VectorIndex> index;
+  std::vector<size_t> row_ids;
+};
 
 class GroupedDataFrame {
  public:
@@ -45,6 +53,14 @@ class DataFrame {
   DataFrame cache() const;
   DataFrame aggregate(const std::vector<size_t>& keys,
                      const std::vector<AggregateSpec>& aggs) const;
+  DataFrame vectorQuery(const std::string& vectorColumn,
+                        const std::vector<float>& queryVector,
+                        size_t top_k,
+                        VectorDistanceMetric metric = VectorDistanceMetric::Cosine) const;
+  std::string explainVectorQuery(const std::string& vectorColumn,
+                                 const std::vector<float>& queryVector,
+                                 size_t top_k,
+                                 VectorDistanceMetric metric = VectorDistanceMetric::Cosine) const;
 
   GroupedDataFrame groupBy(const std::vector<std::string>& keys) const;
   DataFrame join(const DataFrame& right, const std::string& leftOn, const std::string& rightOn,
@@ -63,11 +79,13 @@ class DataFrame {
 
  private:
   const Table& materialize() const;
+  const CachedVectorColumn& vectorColumnCache(const std::string& vectorColumn) const;
 
   PlanNodePtr plan_;
   std::shared_ptr<Executor> executor_;
   mutable bool cached_ = false;
   mutable Table cached_table_;
+  mutable std::unordered_map<size_t, CachedVectorColumn> vector_cache_;
 };
 
 }  // namespace dataflow

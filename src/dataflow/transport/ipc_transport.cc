@@ -15,6 +15,12 @@
 
 namespace dataflow {
 
+namespace {
+
+constexpr uint32_t kMaxFramePayloadBytes = 512u * 1024u * 1024u;
+
+}  // namespace
+
 bool parseEndpoint(const std::string& endpoint, std::string* host, uint16_t* port) {
   if (host == nullptr || port == nullptr) return false;
   const std::string::size_type sep = endpoint.find(':');
@@ -141,7 +147,7 @@ bool recvFrameOverSocket(int fd,
                                 (static_cast<uint32_t>(length_prefix[1]) << 8) |
                                 (static_cast<uint32_t>(length_prefix[2]) << 16) |
                                 (static_cast<uint32_t>(length_prefix[3]) << 24);
-  if (payload_bytes == 0 || payload_bytes > 32u * 1024u * 1024u) return false;
+  if (payload_bytes == 0 || payload_bytes > kMaxFramePayloadBytes) return false;
 
   std::vector<uint8_t> bytes(4 + payload_bytes);
   memcpy(&bytes[0], length_prefix, 4);

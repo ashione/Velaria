@@ -15,6 +15,7 @@ cc_library(
         "src/dataflow/runtime/job_master.cc",
         "src/dataflow/runtime/byte_transport.cc",
         "src/dataflow/runtime/rpc_runner.cc",
+        "src/dataflow/runtime/vector_index.cc",
         "src/dataflow/rpc/rpc_codec.cc",
         "src/dataflow/transport/ipc_transport.cc",
         "src/dataflow/ai/plugin_runtime.cc",
@@ -43,6 +44,7 @@ cc_library(
         "src/dataflow/runtime/job_master.h",
         "src/dataflow/runtime/observability.h",
         "src/dataflow/runtime/rpc_runner.h",
+        "src/dataflow/runtime/vector_index.h",
         "src/dataflow/ai/plugin_runtime.h",
         "src/dataflow/rpc/rpc_codec.h",
         "src/dataflow/transport/ipc_transport.h",
@@ -125,6 +127,12 @@ cc_binary(
 cc_binary(
     name = "sql_demo",
     srcs = ["src/dataflow/examples/sql_demo.cc"],
+    deps = [":dataflow_core"],
+)
+
+cc_binary(
+    name = "velaria_cli",
+    srcs = ["src/dataflow/examples/velaria_cli.cc"],
     deps = [":dataflow_core"],
 )
 
@@ -235,6 +243,15 @@ cc_binary(
     deps = [":dataflow_stream_actor_runtime"],
 )
 
+cc_binary(
+    name = "vector_search_benchmark",
+    srcs = ["src/dataflow/examples/vector_search_benchmark.cc"],
+    deps = [
+        ":dataflow_actor_rpc_codec",
+        ":dataflow_core",
+    ],
+)
+
 cc_test(
     name = "sql_regression_test",
     srcs = ["src/dataflow/tests/sql_regression_test.cc"],
@@ -269,4 +286,13 @@ cc_test(
     name = "stream_strategy_explain_test",
     srcs = ["src/dataflow/tests/stream_strategy_explain_test.cc"],
     deps = [":dataflow_core"],
+)
+
+cc_test(
+    name = "vector_runtime_test",
+    srcs = ["src/dataflow/tests/vector_runtime_test.cc"],
+    deps = [
+        ":dataflow_actor_rpc_codec",
+        ":dataflow_core",
+    ],
 )

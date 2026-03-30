@@ -5,7 +5,7 @@
 #include <sstream>
 #include <string>
 
-#include "src/dataflow/serial/serializer.h"
+#include "src/dataflow/stream/binary_row_batch.h"
 
 namespace dataflow {
 
@@ -180,9 +180,10 @@ class TableBatchRpcSerializer : public IRpcSerializer {
     if (envelope.type != RpcMessageType::DataBatch) return {};
     const auto* batch = static_cast<const RpcDataBatchMessage*>(message);
     if (batch == nullptr) return {};
-    const ProtoLikeSerializer serializer;
-    const std::string payload = serializer.serialize(batch->table);
-    return std::vector<uint8_t>(payload.begin(), payload.end());
+    BinaryRowBatchCodec serializer;
+    std::vector<uint8_t> payload;
+    serializer.serialize(batch->table, &payload);
+    return payload;
   }
 
   bool deserialize(const RpcEnvelope& envelope,
@@ -191,10 +192,8 @@ class TableBatchRpcSerializer : public IRpcSerializer {
     if (envelope.type != RpcMessageType::DataBatch) return false;
     auto* batch = static_cast<RpcDataBatchMessage*>(out_message);
     if (batch == nullptr) return false;
-    const ProtoLikeSerializer serializer;
-    const std::string payload_str(reinterpret_cast<const char*>(payload.data()),
-                                 payload.size());
-    batch->table = serializer.deserialize(payload_str);
+    BinaryRowBatchCodec serializer;
+    batch->table = serializer.deserialize(payload);
     return true;
   }
 };

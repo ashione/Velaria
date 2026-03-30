@@ -28,7 +28,7 @@
 #include "src/dataflow/rpc/rpc_codec.h"
 #include "src/dataflow/runtime/job_master.h"
 #include "src/dataflow/runtime/observability.h"
-#include "src/dataflow/serial/serializer.h"
+#include "src/dataflow/stream/binary_row_batch.h"
 #include "src/dataflow/sql/sql_parser.h"
 #include "src/dataflow/transport/ipc_transport.h"
 
@@ -516,6 +516,7 @@ std::string buildJobsJson(const std::unordered_map<std::string, RpcJobSnapshot>&
 }
 
 RpcFrame makeFrameFromMessage(uint64_t msg_id,
+                              uint64_t correlation_id,
                               const std::string& source,
                               const std::string& target,
                               const ActorRpcMessage& message) {
@@ -523,12 +524,47 @@ RpcFrame makeFrameFromMessage(uint64_t msg_id,
   frame.header.protocol_version = 1;
   frame.header.type = RpcMessageType::Control;
   frame.header.message_id = msg_id;
-  frame.header.correlation_id = 0;
+  frame.header.correlation_id = correlation_id;
   frame.header.codec_id = "actor-rpc-v1";
   frame.header.source = source;
   frame.header.target = target;
   frame.payload = encodeActorRpcMessage(message);
   return frame;
+}
+
+RpcFrame makeFrameFromMessage(uint64_t msg_id,
+                              const std::string& source,
+                              const std::string& target,
+                              const ActorRpcMessage& message) {
+  return makeFrameFromMessage(msg_id, 0, source, target, message);
+}
+
+RpcFrame makeDataBatchFrame(uint64_t msg_id,
+                            uint64_t correlation_id,
+                            const std::string& source,
+                            const std::string& target,
+                            const Table& table) {
+  RpcFrame frame;
+  frame.header.protocol_version = 1;
+  frame.header.type = RpcMessageType::DataBatch;
+  frame.header.message_id = msg_id;
+  frame.header.correlation_id = correlation_id;
+  frame.header.codec_id = "table-bin-v1";
+  frame.header.source = source;
+  frame.header.target = target;
+  BinaryRowBatchCodec codec;
+  codec.serialize(table, &frame.payload);
+  return frame;
+}
+
+bool decodeDataBatchFrame(const RpcFrame& frame, Table* out) {
+  if (out == nullptr || frame.header.type != RpcMessageType::DataBatch ||
+      frame.header.codec_id != "table-bin-v1") {
+    return false;
+  }
+  BinaryRowBatchCodec codec;
+  *out = codec.deserialize(frame.payload);
+  return true;
 }
 
 void removeWorker(std::vector<int>* workers, int fd) {
@@ -612,6 +648,7 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
   std::unordered_set<int> idle_workers;
   std::unordered_map<std::string, int> job_to_client;
   std::unordered_map<std::string, int> task_to_worker;
+  std::unordered_map<int, ActorRpcMessage> pending_worker_result_msgs;
   std::unordered_map<std::string, RpcJobSnapshot> job_snapshots;
   std::vector<int> dashboard_conns;
   uint64_t next_message_id = 1;
@@ -929,6 +966,7 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
     conn_role.erase(fd);
     conn_node.erase(fd);
     worker_node_by_fd.erase(fd);
+    pending_worker_result_msgs.erase(fd);
     if (role == "worker" && isLocalWorkerNodeId(worker_node, config.node_id)) {
       local_worker_nodes.erase(worker_node);
     }
@@ -1114,6 +1152,89 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
         cleanup(fd);
         continue;
       }
+      if (frame.header.type == RpcMessageType::DataBatch) {
+        auto pending_it = pending_worker_result_msgs.find(fd);
+        if (pending_it == pending_worker_result_msgs.end()) {
+          emitRpcEvent("actor_scheduler", "unexpected_data_batch", config.node_id,
+                       "RPC_UNEXPECTED_DATA_BATCH", "",
+                       {observability::field("fd", fd),
+                        observability::field("codec_id", frame.header.codec_id)});
+          ++i;
+          continue;
+        }
+        Table result_table;
+        if (!decodeDataBatchFrame(frame, &result_table)) {
+          emitRpcEvent("actor_scheduler", "data_batch_decode_error", config.node_id,
+                       "RPC_DATA_BATCH_DECODE_ERROR", pending_it->second.job_id,
+                       {observability::field("fd", fd),
+                        observability::field("task_id", pending_it->second.task_id)});
+          pending_worker_result_msgs.erase(pending_it);
+          ++i;
+          continue;
+        }
+
+        const ActorRpcMessage& result_msg = pending_it->second;
+        RemoteTaskCompletion completion;
+        completion.job_id = result_msg.job_id;
+        completion.chain_id = result_msg.chain_id;
+        completion.task_id = result_msg.task_id;
+        completion.attempt = static_cast<Attempt>(result_msg.attempt);
+        completion.ok = true;
+        completion.payload.clear();
+        completion.error_message = result_msg.reason;
+        completion.output_rows = static_cast<std::size_t>(result_msg.output_rows);
+        completion.worker_id = result_msg.node_id;
+        completion.result_table = result_table;
+        completion.has_result_table = true;
+        if (completion.output_rows == 0) {
+          completion.output_rows = completion.result_table.rowCount();
+        }
+        JobMaster::instance().completeRemoteTask(completion);
+
+        const auto worker_it = task_to_worker.find(result_msg.task_id);
+        if (worker_it != task_to_worker.end()) {
+          idle_workers.insert(worker_it->second);
+          auto snap_it = job_snapshots.find(result_msg.job_id);
+          if (snap_it != job_snapshots.end()) {
+            snap_it->second.worker_node = result_msg.node_id;
+            snap_it->second.result_payload =
+                result_msg.summary.empty() ? result_msg.reason : result_msg.summary;
+            snap_it->second.state = "FINISHED";
+            snap_it->second.status_code = "JOB_FINISHED";
+            snap_it->second.chain.state = "FINISHED";
+            snap_it->second.chain.status_code = "CHAIN_FINISHED";
+            snap_it->second.task.state = "FINISHED";
+            snap_it->second.task.status_code = "TASK_FINISHED";
+            snap_it->second.task.worker_id = result_msg.node_id;
+            snap_it->second.task.fail_reason.clear();
+            snap_it->second.task.worker_finished_at = std::chrono::steady_clock::now();
+            snap_it->second.task.result_returned_at = snap_it->second.task.worker_finished_at;
+            emitSnapshotEvent(snap_it->second);
+          }
+          task_to_worker.erase(worker_it);
+        }
+
+        const auto client_it = job_to_client.find(result_msg.job_id);
+        if (client_it != job_to_client.end()) {
+          const uint64_t control_id = next_message_id++;
+          ActorRpcMessage forward = result_msg;
+          forward.payload.clear();
+          if (sendFrameOverSocket(client_it->second, codec,
+                                  makeFrameFromMessage(control_id, 0, config.node_id,
+                                                       std::to_string(client_it->second),
+                                                       forward))) {
+            sendFrameOverSocket(client_it->second, codec,
+                                makeDataBatchFrame(next_message_id++, control_id, config.node_id,
+                                                   std::to_string(client_it->second),
+                                                   completion.result_table));
+          }
+          job_to_client.erase(client_it);
+        }
+        pending_worker_result_msgs.erase(pending_it);
+        dispatchPending();
+        ++i;
+        continue;
+      }
       ActorRpcMessage msg;
       if (!decodeActorRpcMessage(frame.payload, &msg)) {
         emitRpcEvent("actor_scheduler", "decode_error", config.node_id, "RPC_DECODE_ERROR", "",
@@ -1199,6 +1320,12 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
                      {observability::field("client_fd", fd)});
         dispatchPending();
       } else if (msg.action == ActorRpcAction::Result) {
+        if (msg.ok && !msg.result_location.empty()) {
+          pending_worker_result_msgs[fd] = msg;
+          ++i;
+          continue;
+        }
+
         RemoteTaskCompletion completion;
         completion.job_id = msg.job_id;
         completion.chain_id = msg.chain_id;
@@ -1209,37 +1336,29 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
         completion.error_message = msg.reason;
         completion.output_rows = static_cast<std::size_t>(msg.output_rows);
         completion.worker_id = msg.node_id;
-        if (msg.ok) {
-          const ProtoLikeSerializer serializer;
-          completion.result_table = serializer.deserialize(msg.payload);
-          completion.has_result_table = true;
-          if (completion.output_rows == 0) {
-            completion.output_rows = completion.result_table.rowCount();
-          }
-        }
         JobMaster::instance().completeRemoteTask(completion);
 
         const auto worker_it = task_to_worker.find(msg.task_id);
         if (worker_it != task_to_worker.end()) {
           idle_workers.insert(worker_it->second);
           auto snap_it = job_snapshots.find(msg.job_id);
-        if (snap_it != job_snapshots.end()) {
-          snap_it->second.worker_node = msg.node_id;
-          snap_it->second.result_payload = msg.summary.empty() ? msg.reason : msg.summary;
-          snap_it->second.state = msg.ok ? "FINISHED" : "FAILED";
+          if (snap_it != job_snapshots.end()) {
+            snap_it->second.worker_node = msg.node_id;
+            snap_it->second.result_payload = msg.summary.empty() ? msg.reason : msg.summary;
+            snap_it->second.state = msg.ok ? "FINISHED" : "FAILED";
             snap_it->second.status_code = msg.ok ? "JOB_FINISHED" : "JOB_FAILED";
             snap_it->second.chain.state = msg.ok ? "FINISHED" : "FAILED";
             snap_it->second.chain.status_code = msg.ok ? "CHAIN_FINISHED" : "CHAIN_FAILED";
-          snap_it->second.task.state = msg.ok ? "FINISHED" : "FAILED";
-          snap_it->second.task.status_code = msg.ok ? "TASK_FINISHED" : "TASK_FAILED";
-          snap_it->second.task.worker_id = msg.node_id;
-          snap_it->second.task.fail_reason = msg.ok ? "" : msg.reason;
-          snap_it->second.task.worker_finished_at = std::chrono::steady_clock::now();
-          snap_it->second.task.result_returned_at = snap_it->second.task.worker_finished_at;
-          emitSnapshotEvent(snap_it->second);
+            snap_it->second.task.state = msg.ok ? "FINISHED" : "FAILED";
+            snap_it->second.task.status_code = msg.ok ? "TASK_FINISHED" : "TASK_FAILED";
+            snap_it->second.task.worker_id = msg.node_id;
+            snap_it->second.task.fail_reason = msg.ok ? "" : msg.reason;
+            snap_it->second.task.worker_finished_at = std::chrono::steady_clock::now();
+            snap_it->second.task.result_returned_at = snap_it->second.task.worker_finished_at;
+            emitSnapshotEvent(snap_it->second);
+          }
+          task_to_worker.erase(worker_it);
         }
-        task_to_worker.erase(worker_it);
-      }
 
         const auto client_it = job_to_client.find(msg.job_id);
         if (client_it == job_to_client.end()) {
@@ -1250,7 +1369,7 @@ int runActorScheduler(const ActorRuntimeConfig& config) {
         ActorRpcMessage forward = msg;
         forward.payload = msg.ok ? msg.summary : (msg.summary.empty() ? msg.reason : msg.summary);
         sendFrameOverSocket(client_it->second, codec,
-                            makeFrameFromMessage(next_message_id++, config.node_id,
+                            makeFrameFromMessage(next_message_id++, 0, config.node_id,
                                                  std::to_string(client_it->second), forward));
         job_to_client.erase(client_it);
         dispatchPending();
@@ -1406,6 +1525,11 @@ int runActorWorker(const ActorRuntimeConfig& config) {
       });
 
       ActorRpcMessage result;
+      Table output_table;
+      bool has_output_table = false;
+      std::size_t result_batch_bytes = 0;
+      RpcFrame result_batch_frame;
+      bool has_result_batch_frame = false;
       result.action = ActorRpcAction::Result;
       result.job_id = msg.job_id;
       result.chain_id = msg.chain_id;
@@ -1415,24 +1539,18 @@ int runActorWorker(const ActorRuntimeConfig& config) {
       try {
         const auto plan = deserializePlan(msg.payload);
         const LocalExecutor executor;
-        const Table output = executor.execute(plan);
+        output_table = executor.execute(plan);
+        has_output_table = true;
         emitRpcEvent("actor_worker", "task_executed", config.node_id, "TASK_EXECUTED", msg.job_id,
                      {observability::field("task_id", msg.task_id),
                       observability::field("chain_id", msg.chain_id),
-                      observability::field("output_rows", output.rowCount())});
-        const ProtoLikeSerializer serializer;
-        const std::string serialized_output = serializer.serialize(output);
+                      observability::field("output_rows", output_table.rowCount())});
         result.ok = true;
         result.state = "FINISHED";
-        result.output_rows = output.rowCount();
+        result.output_rows = output_table.rowCount();
         result.result_location = "inline://" + msg.job_id + "/" + msg.task_id;
-        result.summary = summarizeTable(output);
-        result.payload = serialized_output;
-        emitRpcEvent("actor_worker", "result_serialized", config.node_id, "TASK_RESULT_SERIALIZED", msg.job_id,
-                     {observability::field("task_id", msg.task_id),
-                      observability::field("chain_id", msg.chain_id),
-                      observability::field("payload_bytes", serialized_output.size()),
-                      observability::field("summary", result.summary)});
+        result.summary = summarizeTable(output_table);
+        result.payload.clear();
       } catch (const std::exception& e) {
         result.ok = false;
         result.state = "FAILED";
@@ -1442,9 +1560,26 @@ int runActorWorker(const ActorRuntimeConfig& config) {
 
       stop_heartbeat.store(true);
       if (heartbeat_thread.joinable()) heartbeat_thread.join();
-      sendFrameOverSocket(fd, codec,
-                          makeFrameFromMessage(next_message_id.fetch_add(1), config.node_id,
-                                               "scheduler", result));
+      const uint64_t control_id = next_message_id.fetch_add(1);
+      if (result.ok && has_output_table) {
+        result_batch_frame =
+            makeDataBatchFrame(next_message_id.fetch_add(1), control_id, config.node_id,
+                               "scheduler", output_table);
+        result_batch_bytes = result_batch_frame.payload.size();
+        has_result_batch_frame = true;
+      }
+      RpcFrame control_frame =
+          makeFrameFromMessage(control_id, 0, config.node_id, "scheduler", result);
+      emitRpcEvent("actor_worker", "result_serialized", config.node_id, "TASK_RESULT_SERIALIZED", msg.job_id,
+                   {observability::field("task_id", msg.task_id),
+                    observability::field("chain_id", msg.chain_id),
+                    observability::field("control_payload_bytes", control_frame.payload.size()),
+                    observability::field("result_batch_bytes", result_batch_bytes),
+                    observability::field("summary", result.summary)});
+      sendFrameOverSocket(fd, codec, std::move(control_frame));
+      if (has_result_batch_frame) {
+        sendFrameOverSocket(fd, codec, std::move(result_batch_frame));
+      }
       emitRpcEvent("actor_worker", "job_completed", config.node_id,
                    result.ok ? "TASK_FINISHED" : "TASK_FAILED", msg.job_id,
                    {observability::field("task_id", msg.task_id),
@@ -1519,6 +1654,9 @@ int runActorClient(const ActorRuntimeConfig& config,
 
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
   bool awaiting_result = true;
+  bool awaiting_result_table = false;
+  uint64_t expected_result_correlation = 0;
+  ActorRpcMessage pending_result;
   while (awaiting_result) {
     const auto now = std::chrono::steady_clock::now();
     if (now >= deadline) {
@@ -1537,6 +1675,34 @@ int runActorClient(const ActorRuntimeConfig& config,
       emitRpcEvent("actor_client", "connection_closed", config.node_id, "RPC_CONNECTION_CLOSED", submit.job_id);
       return 1;
     }
+    if (frame.header.type == RpcMessageType::DataBatch) {
+      if (!awaiting_result_table || frame.header.correlation_id != expected_result_correlation) {
+        continue;
+      }
+      Table result_table;
+      if (!decodeDataBatchFrame(frame, &result_table)) {
+        emitRpcEvent("actor_client", "result_decode_failed", config.node_id,
+                     "JOB_RESULT_DECODE_FAILED", pending_result.job_id);
+        std::cerr << "[client] job result decode failed\n";
+        return 1;
+      }
+      const std::string summary = summarizeTable(result_table);
+      emitRpcEvent("actor_client", "job_result", config.node_id, "JOB_RESULT_RECEIVED",
+                   pending_result.job_id,
+                   {observability::field("payload", summary),
+                    observability::field("task_id", pending_result.task_id),
+                    observability::field("chain_id", pending_result.chain_id),
+                    observability::field("result_location", pending_result.result_location),
+                    observability::field("summary", pending_result.summary)});
+      std::cout << "[client] job result: " << summary;
+      if (!pending_result.result_location.empty()) {
+        std::cout << " @ " << pending_result.result_location;
+      }
+      std::cout << "\n";
+      awaiting_result_table = false;
+      awaiting_result = false;
+      continue;
+    }
     ActorRpcMessage msg;
     if (!decodeActorRpcMessage(frame.payload, &msg)) {
       continue;
@@ -1551,19 +1717,25 @@ int runActorClient(const ActorRuntimeConfig& config,
                    {observability::field("reason", msg.reason)});
       std::cout << "[client] job accepted: " << msg.job_id << "\n";
     } else if (msg.action == ActorRpcAction::Result) {
-      emitRpcEvent("actor_client", "job_result", config.node_id,
-                   msg.ok ? "JOB_RESULT_RECEIVED" : "JOB_RESULT_FAILED", msg.job_id,
-                   {observability::field("payload", msg.payload),
-                    observability::field("task_id", msg.task_id),
-                    observability::field("chain_id", msg.chain_id),
-                    observability::field("result_location", msg.result_location),
-                    observability::field("summary", msg.summary)});
       if (!msg.ok) {
         std::cerr << "[client] job failed: "
                   << (msg.payload.empty() ? msg.reason : msg.payload) << "\n";
         return 1;
       }
-      std::cout << "[client] job result: " << msg.payload;
+      if (!msg.result_location.empty()) {
+        pending_result = msg;
+        awaiting_result_table = true;
+        expected_result_correlation = frame.header.message_id;
+        continue;
+      }
+      emitRpcEvent("actor_client", "job_result", config.node_id, "JOB_RESULT_RECEIVED", msg.job_id,
+                   {observability::field("payload", msg.summary.empty() ? msg.payload : msg.summary),
+                    observability::field("task_id", msg.task_id),
+                    observability::field("chain_id", msg.chain_id),
+                    observability::field("result_location", msg.result_location),
+                    observability::field("summary", msg.summary)});
+      std::cout << "[client] job result: "
+                << (msg.summary.empty() ? msg.payload : msg.summary);
       if (!msg.result_location.empty()) {
         std::cout << " @ " << msg.result_location;
       }
@@ -1606,7 +1778,48 @@ int runActorSmoke() {
     std::cerr << "[smoke] codec mismatch\n";
     return 1;
   }
-  std::cout << "[smoke] actor rpc codec roundtrip ok\n";
+  RpcFrame control_frame = makeFrameFromMessage(17, "smoke-worker", "smoke-client", origin);
+  Table result_table;
+  result_table.schema = Schema({"token", "score"});
+  result_table.rows = {
+      {Value("smoke"), Value(42.0)},
+      {Value("payload"), Value(7.0)},
+  };
+  RpcFrame batch_frame =
+      makeDataBatchFrame(18, control_frame.header.message_id, "smoke-worker", "smoke-client",
+                         result_table);
+
+  LengthPrefixedFrameCodec frame_codec;
+  std::size_t consumed = 0;
+  RpcFrame decoded_control;
+  const auto control_wire = frame_codec.encode(control_frame);
+  if (!frame_codec.decode(control_wire, &decoded_control, &consumed)) {
+    std::cerr << "[smoke] control frame roundtrip failed\n";
+    return 1;
+  }
+  ActorRpcMessage framed_copy;
+  if (!decodeActorRpcMessage(decoded_control.payload, &framed_copy) ||
+      framed_copy.summary != origin.summary) {
+    std::cerr << "[smoke] control payload decode mismatch\n";
+    return 1;
+  }
+
+  RpcFrame decoded_batch;
+  const auto batch_wire = frame_codec.encode(batch_frame);
+  if (!frame_codec.decode(batch_wire, &decoded_batch, &consumed)) {
+    std::cerr << "[smoke] data batch frame roundtrip failed\n";
+    return 1;
+  }
+  if (decoded_batch.header.correlation_id != decoded_control.header.message_id) {
+    std::cerr << "[smoke] data batch correlation mismatch\n";
+    return 1;
+  }
+  Table batch_copy;
+  if (!decodeDataBatchFrame(decoded_batch, &batch_copy) || batch_copy.rowCount() != result_table.rowCount()) {
+    std::cerr << "[smoke] data batch decode mismatch\n";
+    return 1;
+  }
+  std::cout << "[smoke] actor rpc codec roundtrip ok (control/data-batch)\n";
   return 0;
 }
 

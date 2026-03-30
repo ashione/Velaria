@@ -174,6 +174,29 @@ std::vector<std::string> parseStringList(PyObject* obj, const char* arg_name) {
   return values;
 }
 
+std::vector<float> parseFloatVector(PyObject* obj, const char* arg_name) {
+  if (!PySequence_Check(obj)) {
+    throw std::runtime_error(std::string(arg_name) + " must be a sequence of floats");
+  }
+  PyObject* seq = PySequence_Fast(obj, arg_name);
+  if (seq == nullptr) {
+    throw std::runtime_error(std::string("failed to read ") + arg_name);
+  }
+  std::vector<float> values;
+  const Py_ssize_t count = PySequence_Fast_GET_SIZE(seq);
+  values.reserve(static_cast<size_t>(count));
+  PyObject** items = PySequence_Fast_ITEMS(seq);
+  for (Py_ssize_t i = 0; i < count; ++i) {
+    if (!PyFloat_Check(items[i]) && !PyLong_Check(items[i])) {
+      Py_DECREF(seq);
+      throw std::runtime_error(std::string(arg_name) + " must contain only numbers");
+    }
+    values.push_back(static_cast<float>(PyFloat_AsDouble(items[i])));
+  }
+  Py_DECREF(seq);
+  return values;
+}
+
 df::Value valueFromPy(PyObject* obj) {
   if (obj == Py_None) {
     return df::Value();
@@ -190,6 +213,9 @@ df::Value valueFromPy(PyObject* obj) {
   if (PyUnicode_Check(obj)) {
     return df::Value(std::string(PyUnicode_AsUTF8(obj)));
   }
+  if (PyList_Check(obj) || PyTuple_Check(obj)) {
+    return df::Value(parseFloatVector(obj, "value"));
+  }
   throw std::runtime_error("value must be None, int, float, bool, or string");
 }
 
@@ -204,6 +230,12 @@ enum class FastArrowColumnKind {
   Float64,
   Utf8,
   LargeUtf8,
+  FixedSizeListFloat32,
+};
+
+struct FastArrowColumnSpec {
+  FastArrowColumnKind kind = FastArrowColumnKind::Unsupported;
+  int32_t fixed_list_size = 0;
 };
 
 bool bitmapHasValue(const uint8_t* bitmap, int64_t index) {
@@ -213,31 +245,42 @@ bool bitmapHasValue(const uint8_t* bitmap, int64_t index) {
   return ((bitmap[index >> 3] >> (index & 7)) & 0x01u) != 0;
 }
 
-FastArrowColumnKind fastArrowColumnKind(const ArrowSchema* schema) {
+FastArrowColumnSpec fastArrowColumnSpec(const ArrowSchema* schema) {
+  FastArrowColumnSpec spec;
   if (schema == nullptr || schema->format == nullptr) {
-    return FastArrowColumnKind::Unsupported;
+    return spec;
   }
   const std::string format(schema->format);
-  if (format == "b") return FastArrowColumnKind::Bool;
-  if (format == "i") return FastArrowColumnKind::Int32;
-  if (format == "I") return FastArrowColumnKind::UInt32;
-  if (format == "l") return FastArrowColumnKind::Int64;
-  if (format == "L") return FastArrowColumnKind::UInt64;
-  if (format == "f") return FastArrowColumnKind::Float32;
-  if (format == "g") return FastArrowColumnKind::Float64;
-  if (format == "u") return FastArrowColumnKind::Utf8;
-  if (format == "U") return FastArrowColumnKind::LargeUtf8;
-  return FastArrowColumnKind::Unsupported;
+  if (format == "b") spec.kind = FastArrowColumnKind::Bool;
+  if (format == "i") spec.kind = FastArrowColumnKind::Int32;
+  if (format == "I") spec.kind = FastArrowColumnKind::UInt32;
+  if (format == "l") spec.kind = FastArrowColumnKind::Int64;
+  if (format == "L") spec.kind = FastArrowColumnKind::UInt64;
+  if (format == "f") spec.kind = FastArrowColumnKind::Float32;
+  if (format == "g") spec.kind = FastArrowColumnKind::Float64;
+  if (format == "u") spec.kind = FastArrowColumnKind::Utf8;
+  if (format == "U") spec.kind = FastArrowColumnKind::LargeUtf8;
+  if (spec.kind != FastArrowColumnKind::Unsupported) return spec;
+
+  // Arrow C data interface fixed-size list format: +w:<list_size>
+  if (format.rfind("+w:", 0) == 0 && schema->n_children == 1 && schema->children != nullptr &&
+      schema->children[0] != nullptr && std::string(schema->children[0]->format) == "f") {
+    spec.kind = FastArrowColumnKind::FixedSizeListFloat32;
+    spec.fixed_list_size = static_cast<int32_t>(std::stoi(format.substr(3)));
+    return spec;
+  }
+  return spec;
 }
 
-df::Value valueFromFastArrowColumn(FastArrowColumnKind kind, const ArrowArray* array, int64_t row_index) {
+df::Value valueFromFastArrowColumn(const FastArrowColumnSpec& spec, const ArrowArray* array,
+                                   int64_t row_index) {
   const int64_t offset_row = row_index + array->offset;
   const auto* validity = reinterpret_cast<const uint8_t*>(array->n_buffers > 0 ? array->buffers[0] : nullptr);
   if (array->null_count != 0 && !bitmapHasValue(validity, offset_row)) {
     return df::Value();
   }
 
-  switch (kind) {
+  switch (spec.kind) {
     case FastArrowColumnKind::Bool: {
       const auto* bits = reinterpret_cast<const uint8_t*>(array->buffers[1]);
       return df::Value(static_cast<int64_t>(((bits[offset_row >> 3] >> (offset_row & 7)) & 0x01u) != 0));
@@ -267,6 +310,23 @@ df::Value valueFromFastArrowColumn(FastArrowColumnKind kind, const ArrowArray* a
       const auto begin = offsets[offset_row];
       const auto end = offsets[offset_row + 1];
       return df::Value(std::string(data + begin, data + end));
+    }
+    case FastArrowColumnKind::FixedSizeListFloat32: {
+      if (array->n_children != 1 || array->children == nullptr || array->children[0] == nullptr ||
+          spec.fixed_list_size <= 0) {
+        throw std::runtime_error("invalid Arrow fixed-size-list<float32> column");
+      }
+      const ArrowArray* child = array->children[0];
+      const int64_t base_index = (offset_row * static_cast<int64_t>(spec.fixed_list_size)) + child->offset;
+      const auto* values = reinterpret_cast<const float*>(child->buffers[1]);
+      if (values == nullptr) {
+        throw std::runtime_error("missing child value buffer for fixed-size-list<float32>");
+      }
+      std::vector<float> out(static_cast<size_t>(spec.fixed_list_size));
+      for (int32_t i = 0; i < spec.fixed_list_size; ++i) {
+        out[static_cast<size_t>(i)] = values[base_index + i];
+      }
+      return df::Value(std::move(out));
     }
     case FastArrowColumnKind::Unsupported:
       break;
@@ -301,19 +361,19 @@ bool tryTableFromArrowCapsules(PyObject* obj, df::Table* table) {
 
   std::vector<std::string> names;
   names.reserve(static_cast<size_t>(schema->n_children));
-  std::vector<FastArrowColumnKind> kinds;
-  kinds.reserve(static_cast<size_t>(schema->n_children));
+  std::vector<FastArrowColumnSpec> specs;
+  specs.reserve(static_cast<size_t>(schema->n_children));
   for (int64_t i = 0; i < schema->n_children; ++i) {
     const auto* child_schema = schema->children[i];
-    const auto kind = fastArrowColumnKind(child_schema);
-    if (kind == FastArrowColumnKind::Unsupported) {
+    const auto spec = fastArrowColumnSpec(child_schema);
+    if (spec.kind == FastArrowColumnKind::Unsupported) {
       Py_DECREF(pair);
       return false;
     }
     names.emplace_back(child_schema != nullptr && child_schema->name != nullptr
                            ? child_schema->name
                            : ("col_" + std::to_string(static_cast<long long>(i))));
-    kinds.push_back(kind);
+    specs.push_back(spec);
   }
 
   std::vector<df::Row> rows(static_cast<size_t>(array->length),
@@ -326,7 +386,7 @@ bool tryTableFromArrowCapsules(PyObject* obj, df::Table* table) {
     }
     for (int64_t row = 0; row < array->length; ++row) {
       rows[static_cast<size_t>(row)][static_cast<size_t>(column)] =
-          valueFromFastArrowColumn(kinds[static_cast<size_t>(column)], child_array, row);
+          valueFromFastArrowColumn(specs[static_cast<size_t>(column)], child_array, row);
     }
   }
 
@@ -540,6 +600,14 @@ PyObject* pyFromValue(const df::Value& value) {
       return PyFloat_FromDouble(value.asDouble());
     case df::DataType::String:
       return PyUnicode_FromString(value.asString().c_str());
+    case df::DataType::FixedVector: {
+      const auto& vec = value.asFixedVector();
+      PyObject* out = PyList_New(static_cast<Py_ssize_t>(vec.size()));
+      for (size_t i = 0; i < vec.size(); ++i) {
+        PyList_SET_ITEM(out, static_cast<Py_ssize_t>(i), PyFloat_FromDouble(vec[i]));
+      }
+      return out;
+    }
   }
   Py_RETURN_NONE;
 }
@@ -577,6 +645,8 @@ std::string arrowFormatForValue(const df::Value& value) {
       return "l";
     case df::DataType::Double:
       return "g";
+    case df::DataType::FixedVector:
+      return "u";
   }
   return "u";
 }
@@ -1083,6 +1153,62 @@ PyObject* sessionExplainStreamSql(PyVelariaSession* self, PyObject* args, PyObje
   });
 }
 
+df::VectorDistanceMetric parseVectorMetric(const std::string& metric) {
+  if (metric == "cosine" || metric == "cosin") return df::VectorDistanceMetric::Cosine;
+  if (metric == "dot") return df::VectorDistanceMetric::Dot;
+  if (metric == "l2") return df::VectorDistanceMetric::L2;
+  throw std::runtime_error("metric must be one of: cosine/cosin, dot, l2");
+}
+
+PyObject* sessionVectorSearch(PyVelariaSession* self, PyObject* args, PyObject* kwargs) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    const char* table = nullptr;
+    const char* vector_column = nullptr;
+    PyObject* query_vector = nullptr;
+    unsigned long long top_k = 10;
+    const char* metric = "cosine";
+    static const char* kwlist[] = {"table", "vector_column", "query_vector", "top_k", "metric",
+                                   nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ssO|Ks", const_cast<char**>(kwlist), &table,
+                                     &vector_column, &query_vector, &top_k, &metric)) {
+      return nullptr;
+    }
+    const auto query = parseFloatVector(query_vector, "query_vector");
+    df::DataFrame result;
+    {
+      AllowThreads allow;
+      result = self->session->vectorQuery(table, vector_column, query, static_cast<size_t>(top_k),
+                                          parseVectorMetric(metric));
+    }
+    return wrapDataFrame(result);
+  });
+}
+
+PyObject* sessionExplainVectorSearch(PyVelariaSession* self, PyObject* args, PyObject* kwargs) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    const char* table = nullptr;
+    const char* vector_column = nullptr;
+    PyObject* query_vector = nullptr;
+    unsigned long long top_k = 10;
+    const char* metric = "cosine";
+    static const char* kwlist[] = {"table", "vector_column", "query_vector", "top_k", "metric",
+                                   nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ssO|Ks", const_cast<char**>(kwlist), &table,
+                                     &vector_column, &query_vector, &top_k, &metric)) {
+      return nullptr;
+    }
+    const auto query = parseFloatVector(query_vector, "query_vector");
+    std::string explain;
+    {
+      AllowThreads allow;
+      explain = self->session->explainVectorQuery(table, vector_column, query,
+                                                  static_cast<size_t>(top_k),
+                                                  parseVectorMetric(metric));
+    }
+    return PyUnicode_FromString(explain.c_str());
+  });
+}
+
 PyObject* dataFrameToRows(PyVelariaDataFrame* self, PyObject*) {
   return withExceptionTranslation([&]() -> PyObject* {
     std::unique_ptr<df::Table> table;
@@ -1379,6 +1505,10 @@ PyMethodDef sessionMethods[] = {
     {"explain_stream_sql", reinterpret_cast<PyCFunction>(sessionExplainStreamSql),
      METH_VARARGS | METH_KEYWORDS,
      "Explain a SELECT or INSERT INTO ... SELECT ... streaming SQL query."},
+    {"vector_search", reinterpret_cast<PyCFunction>(sessionVectorSearch),
+     METH_VARARGS | METH_KEYWORDS, "Run exact local vector search on a temp view."},
+    {"explain_vector_search", reinterpret_cast<PyCFunction>(sessionExplainVectorSearch),
+     METH_VARARGS | METH_KEYWORDS, "Explain exact local vector search strategy."},
     {nullptr, nullptr, 0, nullptr},
 };
 

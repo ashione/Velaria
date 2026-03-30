@@ -45,6 +45,13 @@ py_binary(
     deps = [":velaria_py_pkg"],
 )
 
+py_binary(
+    name = "velaria_cli",
+    srcs = ["velaria_cli.py"],
+    main = "velaria_cli.py",
+    deps = [":velaria_py_pkg"],
+)
+
 py_package(
     name = "velaria_pkg",
     packages = ["velaria"],
@@ -155,5 +162,16 @@ py_test(
     imports = ["."],
     deps = [
         ":velaria_py_pkg",
+    ],
+)
+
+py_test(
+    name = "vector_search_test",
+    srcs = ["tests/test_vector_search.py"],
+    main = "tests/test_vector_search.py",
+    imports = ["."],
+    deps = [
+        ":velaria_py_pkg",
+        requirement("pyarrow"),
     ],
 )

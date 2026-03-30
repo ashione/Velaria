@@ -298,11 +298,16 @@ size_t estimateValueSize(const Value& value, const PreparedBinaryRowColumn& colu
     case DataType::Double:
       return sizeof(uint64_t);
     case DataType::String:
-    case DataType::Nil:
-    default:
       if (column.encoding == kEncodingDictionary) {
         return varintSize(column.dictionary_index.at(value.toString()));
       }
+      return stringEncodedSize(value.toString());
+    case DataType::FixedVector: {
+      const auto& vec = value.asFixedVector();
+      return varintSize(vec.size()) + vec.size() * sizeof(uint32_t);
+    }
+    case DataType::Nil:
+    default:
       return stringEncodedSize(value.toString());
   }
 }
@@ -384,6 +389,14 @@ size_t serializeRangeInternal(const Table& table, size_t row_begin, size_t row_e
         uint64_t raw = 0;
         std::memcpy(&raw, &d, sizeof(raw));
         writeU64(writer, raw);
+      } else if (columns[i].type == DataType::FixedVector) {
+        const auto& vec = value.asFixedVector();
+        writeVarint(writer, vec.size());
+        for (float item : vec) {
+          uint32_t bits = 0;
+          std::memcpy(&bits, &item, sizeof(bits));
+          writeU32(writer, bits);
+        }
       } else {
         writeString(writer, value.toString());
       }
@@ -415,6 +428,21 @@ bool readValue(const BufferCursor& src, size_t* offset, DataType type, Value* ou
       std::string text;
       if (!readString(src, offset, &text)) return false;
       *out = Value(std::move(text));
+      return true;
+    }
+    case DataType::FixedVector: {
+      uint64_t dim = 0;
+      if (!readVarint(src, offset, &dim)) return false;
+      std::vector<float> vec;
+      vec.reserve(static_cast<size_t>(dim));
+      for (uint64_t i = 0; i < dim; ++i) {
+        uint32_t bits = 0;
+        if (!readU32(src, offset, &bits)) return false;
+        float v = 0.0f;
+        std::memcpy(&v, &bits, sizeof(v));
+        vec.push_back(v);
+      }
+      *out = Value(std::move(vec));
       return true;
     }
   }

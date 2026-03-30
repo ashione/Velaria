@@ -7,6 +7,7 @@
 #include <sstream>
 
 #include "src/dataflow/ai/plugin_runtime.h"
+#include "src/dataflow/runtime/vector_index.h"
 
 namespace dataflow {
 
@@ -20,6 +21,13 @@ bool ltePred(const Value& lhs, const Value& rhs) { return lhs < rhs || lhs == rh
 bool gtePred(const Value& lhs, const Value& rhs) { return lhs > rhs || lhs == rhs; }
 
 std::shared_ptr<Executor> defaultExecutor() { return std::make_shared<LocalExecutor>(); }
+
+VectorSearchMetric toRuntimeMetric(VectorDistanceMetric metric) {
+  return metric == VectorDistanceMetric::L2
+             ? VectorSearchMetric::L2
+             : (metric == VectorDistanceMetric::Dot ? VectorSearchMetric::Dot
+                                                    : VectorSearchMetric::Cosine);
+}
 
 std::string planKindName(PlanKind kind) {
   switch (kind) {
@@ -178,6 +186,44 @@ const Table& DataFrame::materialize() const {
   return cached_table_;
 }
 
+const CachedVectorColumn& DataFrame::vectorColumnCache(const std::string& vectorColumn) const {
+  const auto& source = materialize();
+  const size_t vector_index = source.schema.indexOf(vectorColumn);
+  const auto it = vector_cache_.find(vector_index);
+  if (it != vector_cache_.end()) {
+    return it->second;
+  }
+
+  CachedVectorColumn cache;
+  cache.row_ids.reserve(source.rows.size());
+  std::vector<std::vector<float>> vectors;
+  vectors.reserve(source.rows.size());
+
+  std::size_t expected_dim = 0;
+  bool has_dimension = false;
+  for (size_t row_id = 0; row_id < source.rows.size(); ++row_id) {
+    if (vector_index >= source.rows[row_id].size()) continue;
+    const auto& cell = source.rows[row_id][vector_index];
+    if (cell.isNull()) continue;
+
+    std::vector<float> vec = cell.type() == DataType::FixedVector
+                                 ? cell.asFixedVector()
+                                 : Value::parseFixedVector(cell.toString());
+    if (!has_dimension) {
+      expected_dim = vec.size();
+      has_dimension = true;
+    } else if (vec.size() != expected_dim) {
+      throw std::invalid_argument("fixed vector length mismatch in vector column cache");
+    }
+    cache.row_ids.push_back(row_id);
+    vectors.push_back(std::move(vec));
+  }
+
+  cache.index = std::shared_ptr<VectorIndex>(makeExactScanVectorIndex(std::move(vectors)).release());
+  const auto inserted = vector_cache_.emplace(vector_index, std::move(cache));
+  return inserted.first->second;
+}
+
 std::string DataFrame::explain() const {
   std::ostringstream out;
   explainPlan(plan_, out, 0);
@@ -268,6 +314,48 @@ DataFrame DataFrame::aggregate(const std::vector<size_t>& keys,
                               const std::vector<AggregateSpec>& aggs) const {
   auto node = std::make_shared<AggregatePlan>(plan_, keys, aggs);
   return DataFrame(node, executor_);
+}
+
+DataFrame DataFrame::vectorQuery(const std::string& vectorColumn,
+                                 const std::vector<float>& queryVector,
+                                 size_t top_k,
+                                 VectorDistanceMetric metric) const {
+  if (queryVector.empty()) {
+    throw std::invalid_argument("query vector cannot be empty");
+  }
+  const auto& cache = vectorColumnCache(vectorColumn);
+  if (cache.index->dimension() != 0 && cache.index->dimension() != queryVector.size()) {
+    throw std::invalid_argument("fixed vector length mismatch in vectorQuery");
+  }
+  VectorSearchOptions options;
+  options.top_k = top_k;
+  options.metric = toRuntimeMetric(metric);
+  const auto scored = cache.index->search(queryVector, options);
+  const size_t take = scored.size();
+  Table out;
+  out.schema = Schema({"row_id", "score"});
+  out.rows.reserve(take);
+  for (size_t i = 0; i < take; ++i) {
+    Row row;
+    row.emplace_back(static_cast<int64_t>(cache.row_ids.at(scored[i].row_id)));
+    row.emplace_back(scored[i].score);
+    out.rows.push_back(std::move(row));
+  }
+  return DataFrame(std::move(out));
+}
+
+std::string DataFrame::explainVectorQuery(const std::string& vectorColumn,
+                                          const std::vector<float>& queryVector, size_t top_k,
+                                          VectorDistanceMetric metric) const {
+  const auto& cache = vectorColumnCache(vectorColumn);
+  VectorSearchOptions options;
+  options.top_k = top_k;
+  options.metric = toRuntimeMetric(metric);
+  if (!queryVector.empty() && cache.index->dimension() != 0 &&
+      queryVector.size() != cache.index->dimension()) {
+    throw std::invalid_argument("query vector dimension mismatch in explainVectorQuery");
+  }
+  return cache.index->explain(options);
 }
 
 GroupedDataFrame DataFrame::groupBy(const std::vector<std::string>& keys) const {

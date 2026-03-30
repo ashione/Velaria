@@ -26,6 +26,12 @@ class DataflowSession {
   void createTempView(const std::string& name, const StreamingDataFrame& df);
   void registerStreamSink(const std::string& name, std::shared_ptr<StreamSink> sink);
   DataFrame sql(const std::string& sql);
+  DataFrame vectorQuery(const std::string& table, const std::string& vector_column,
+                        const std::vector<float>& query_vector, size_t top_k,
+                        VectorDistanceMetric metric = VectorDistanceMetric::Cosine);
+  std::string explainVectorQuery(const std::string& table, const std::string& vector_column,
+                                 const std::vector<float>& query_vector, size_t top_k,
+                                 VectorDistanceMetric metric = VectorDistanceMetric::Cosine);
   StreamingDataFrame streamSql(const std::string& sql);
   std::string explainStreamSql(const std::string& sql,
                                const StreamingQueryOptions& options = {});

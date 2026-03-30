@@ -670,6 +670,19 @@ DataFrame DataflowSession::sql(const std::string& sql) {
   return result;
 }
 
+DataFrame DataflowSession::vectorQuery(const std::string& table, const std::string& vector_column,
+                                       const std::vector<float>& query_vector, size_t top_k,
+                                       VectorDistanceMetric metric) {
+  return catalog_.getView(table).vectorQuery(vector_column, query_vector, top_k, metric);
+}
+
+std::string DataflowSession::explainVectorQuery(const std::string& table,
+                                                const std::string& vector_column,
+                                                const std::vector<float>& query_vector,
+                                                size_t top_k, VectorDistanceMetric metric) {
+  return catalog_.getView(table).explainVectorQuery(vector_column, query_vector, top_k, metric);
+}
+
 StreamingDataFrame DataflowSession::streamSql(const std::string& sql) {
   const auto statement = sql::SqlParser::parse(sql);
   if (statement.kind != sql::SqlStatementKind::Select) {

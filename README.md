@@ -166,7 +166,7 @@ Available today:
 - local batch + streaming execution through one kernel
 - `read_csv`, `readStream(...)`, `readStreamCsvDir(...)`
 - query-local backpressure, bounded backlog, progress snapshots, checkpoint path
-- execution modes: `single-process`, `local-workers`, `actor-credit`, `auto`
+- execution modes: `single-process`, `local-workers`
 - file source/sink support
 - basic stream operators: `select / filter / withColumn / drop / limit / window`
 - stateful `sum` and `count`

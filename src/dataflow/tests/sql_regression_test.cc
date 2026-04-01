@@ -382,9 +382,9 @@ void runStreamSqlRegression() {
 
   dataflow::StreamingQueryOptions window_options;
   window_options.trigger_interval_ms = 0;
-  window_options.execution_mode = dataflow::StreamingExecutionMode::ActorCredit;
-  window_options.actor_workers = 2;
-  window_options.actor_max_inflight_partitions = 2;
+  window_options.execution_mode = dataflow::StreamingExecutionMode::LocalWorkers;
+  window_options.local_workers = 2;
+  window_options.max_inflight_partitions = 2;
 
   auto window_query = s.startStreamSql(
       "INSERT INTO stream_window_summary_v1 "
@@ -394,8 +394,10 @@ void runStreamSqlRegression() {
       "GROUP BY window_start, key",
       window_options);
   expect(window_query.awaitTermination() == 1, "stream_sql_window_processed_batches");
-  expect(window_query.progress().execution_mode == "actor-credit",
-         "stream_sql_window_actor_hot_path");
+  expect(window_query.progress().execution_mode == "local-workers",
+         "stream_sql_window_local_workers_mode");
+  expect(window_query.progress().used_actor_runtime,
+         "stream_sql_window_credit_accelerator_used");
 
   const auto window_sink_table = s.read_csv(window_sink_path).toTable();
   expect(window_sink_table.rows.size() == 2, "stream_sql_window_sink_rows");

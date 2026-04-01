@@ -332,10 +332,6 @@ const char* streamingExecutionModeName(StreamingExecutionMode mode) {
       return "single-process";
     case StreamingExecutionMode::LocalWorkers:
       return "local-workers";
-    case StreamingExecutionMode::ActorCredit:
-      return "actor-credit";
-    case StreamingExecutionMode::Auto:
-      return "auto";
   }
   return "single-process";
 }
@@ -394,30 +390,19 @@ struct ActorAccelerationAnalysis {
   bool eligible = false;
   size_t transform_index = 0;
   StreamAcceleratorSpec accelerator;
-  std::string reason = "query plan is not eligible for actor acceleration";
+  std::string reason = "query plan is not eligible for local-worker credit acceleration";
 };
 
-LocalActorStreamOptions makeActorOptions(const StreamingQueryOptions& options) {
+LocalActorStreamOptions makeAcceleratorOptions(const StreamingQueryOptions& options) {
   LocalActorStreamOptions actor;
-  actor.worker_count = std::max<size_t>(2, options.effectiveActorWorkers());
+  actor.worker_count = options.effectiveLocalWorkers();
   actor.max_inflight_partitions =
-      std::max<size_t>(1, options.actor_max_inflight_partitions > 0
-                              ? options.actor_max_inflight_partitions
+      std::max<size_t>(1, options.max_inflight_partitions > 0
+                              ? options.max_inflight_partitions
                               : actor.worker_count);
-  actor.shared_memory_transport = options.actor_shared_memory_transport;
-  actor.shared_memory_min_payload_bytes = options.actor_shared_memory_min_payload_bytes;
+  actor.shared_memory_transport = options.shared_memory_transport;
+  actor.shared_memory_min_payload_bytes = options.shared_memory_min_payload_bytes;
   return actor;
-}
-
-LocalExecutionAutoOptions makeActorAutoOptions(const StreamingAutoExecutionOptions& options) {
-  LocalExecutionAutoOptions out;
-  out.sample_batches = options.sample_batches;
-  out.min_rows_per_batch = options.min_rows_per_batch;
-  out.min_projected_payload_bytes = options.min_projected_payload_bytes;
-  out.min_compute_to_overhead_ratio = options.min_compute_to_overhead_ratio;
-  out.min_actor_speedup = options.min_actor_speedup;
-  out.strong_actor_speedup = options.strong_actor_speedup;
-  return out;
 }
 
 bool findActorAcceleratorTransform(const std::vector<StreamTransform>& transforms, size_t* index,
@@ -522,23 +507,20 @@ StreamingStrategyDecision describeStreamingStrategy(const StreamingDataFrame& ro
 
   const auto actor = analyzeActorAcceleration(root.transforms_);
   decision.actor_eligible = actor.eligible;
-  decision.reason = actor.reason;
+  decision.reason = actor.eligible ? "configured single-process execution"
+                                   : actor.reason;
 
   if (options.execution_mode == StreamingExecutionMode::SingleProcess) {
     decision.reason = "configured single-process execution";
   } else if (options.execution_mode == StreamingExecutionMode::LocalWorkers) {
-    decision.reason = "configured local-workers execution";
-  } else if (options.execution_mode == StreamingExecutionMode::ActorCredit) {
-    if (actor.eligible) {
-      decision.reason = "configured actor-credit execution";
+    if (actor.eligible && options.effectiveLocalWorkers() > 1) {
+      decision.reason =
+          "configured local-workers execution; credit-based scheduling is available for the eligible hot path";
+    } else if (actor.eligible) {
+      decision.reason =
+          "configured local-workers execution; credit acceleration requires local_workers > 1";
     } else {
-      decision.resolved_execution_mode = streamingExecutionModeName(StreamingExecutionMode::SingleProcess);
-    }
-  } else if (options.execution_mode == StreamingExecutionMode::Auto) {
-    if (actor.eligible) {
-      decision.reason = "actor-eligible query requires runtime auto sampling";
-    } else {
-      decision.resolved_execution_mode = streamingExecutionModeName(StreamingExecutionMode::SingleProcess);
+      decision.reason = "configured local-workers execution";
     }
   }
 
@@ -1607,7 +1589,6 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
   const StreamAcceleratorSpec actor_accelerator = actor_analysis.accelerator;
   const bool actor_pipeline_supported = actor_analysis.eligible;
   strategy_decision_.actor_eligible = actor_analysis.eligible;
-  strategy_decision_.reason = actor_analysis.reason;
   applyStrategyDecision(strategy_decision_);
   std::vector<StreamTransform> actor_prefix_transforms;
   if (actor_pipeline_supported) {
@@ -1756,97 +1737,40 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
     size_t partitions_used = 1;
     Table out;
     bool used_actor_runtime = false;
-    const bool wants_actor_mode =
-        options_.execution_mode == StreamingExecutionMode::ActorCredit ||
-        options_.execution_mode == StreamingExecutionMode::Auto;
-    if (wants_actor_mode && actor_pipeline_supported) {
+    const bool credit_acceleration_enabled =
+        options_.execution_mode == StreamingExecutionMode::LocalWorkers &&
+        actor_pipeline_supported && options_.effectiveLocalWorkers() > 1;
+    if (credit_acceleration_enabled) {
       Table actor_input =
           executePartitionStage(envelope.table, actor_prefix_transforms, options_, 1);
       if (canRunActorWindowKeySum(actor_input, actor_accelerator)) {
-        const auto actor_options = makeActorOptions(options_);
-        if (options_.execution_mode == StreamingExecutionMode::ActorCredit) {
-          auto actor_result =
-              runLocalActorStreamWindowKeySum(std::vector<Table>{actor_input}, actor_options);
-          out = finalizeActorWindowKeySumOutput(std::move(actor_result.final_table), actor_accelerator,
-                                               root_.state_, options_, &state_ms);
-          partitions_used = std::max<size_t>(1, actor_result.processed_partitions);
-          used_actor_runtime = true;
-          execution_decided_ = true;
-          resolved_execution_mode_ = StreamingExecutionMode::ActorCredit;
-          execution_reason_ = "configured actor-credit execution";
-          strategy_decision_.resolved_execution_mode =
-              streamingExecutionModeName(resolved_execution_mode_);
-          strategy_decision_.reason = execution_reason_;
-          strategy_decision_.transport_mode = actor_result.used_shared_memory
-                                                  ? streamingTransportModeName(
-                                                        StreamingTransportMode::SharedMemory)
-                                                  : streamingTransportModeName(
-                                                        StreamingTransportMode::RpcCopy);
-          strategy_decision_.used_actor_runtime = true;
-          strategy_decision_.used_shared_memory = actor_result.used_shared_memory;
-          applyStrategyDecision(strategy_decision_);
-        } else if (!execution_decided_) {
-          LocalExecutionDecision decision;
-          auto actor_result = runAutoLocalActorStreamWindowKeySum(std::vector<Table>{actor_input},
-                                                                  actor_options,
-                                                                  makeActorAutoOptions(options_.actor_auto_options),
-                                                                  &decision);
-          resolved_execution_mode_ =
-              decision.chosen_mode == LocalExecutionMode::ActorCredit
-                  ? StreamingExecutionMode::ActorCredit
-                  : StreamingExecutionMode::SingleProcess;
-          execution_reason_ = decision.reason;
-          execution_decided_ = true;
-          strategy_decision_.resolved_execution_mode =
-              streamingExecutionModeName(resolved_execution_mode_);
-          strategy_decision_.reason = execution_reason_;
-          strategy_decision_.sampled_batches = decision.sampled_batches;
-          strategy_decision_.sampled_rows_per_batch = decision.rows_per_batch;
-          strategy_decision_.average_projected_payload_bytes =
-              decision.average_projected_payload_bytes;
-          strategy_decision_.actor_speedup = decision.actor_speedup;
-          strategy_decision_.compute_to_overhead_ratio =
-              decision.compute_to_overhead_ratio;
-          if (resolved_execution_mode_ == StreamingExecutionMode::ActorCredit) {
-            out = finalizeActorWindowKeySumOutput(std::move(actor_result.final_table),
-                                                  actor_accelerator, root_.state_, options_,
-                                                  &state_ms);
-            partitions_used = std::max<size_t>(1, actor_result.processed_partitions);
-            used_actor_runtime = true;
-            strategy_decision_.transport_mode = actor_result.used_shared_memory
-                                                    ? streamingTransportModeName(
-                                                          StreamingTransportMode::SharedMemory)
-                                                    : streamingTransportModeName(
-                                                          StreamingTransportMode::RpcCopy);
-            strategy_decision_.used_actor_runtime = true;
-            strategy_decision_.used_shared_memory = actor_result.used_shared_memory;
-          } else {
-            strategy_decision_.transport_mode =
-                streamingTransportModeName(StreamingTransportMode::InProcess);
-            strategy_decision_.used_actor_runtime = false;
-            strategy_decision_.used_shared_memory = false;
-          }
-          applyStrategyDecision(strategy_decision_);
-        } else if (resolved_execution_mode_ == StreamingExecutionMode::ActorCredit) {
-          auto actor_result =
-              runLocalActorStreamWindowKeySum(std::vector<Table>{actor_input}, actor_options);
-          out = finalizeActorWindowKeySumOutput(std::move(actor_result.final_table), actor_accelerator,
-                                               root_.state_, options_, &state_ms);
-          partitions_used = std::max<size_t>(1, actor_result.processed_partitions);
-          used_actor_runtime = true;
-          strategy_decision_.used_actor_runtime = true;
-          strategy_decision_.used_shared_memory = actor_result.used_shared_memory;
-          strategy_decision_.transport_mode = actor_result.used_shared_memory
-                                                  ? streamingTransportModeName(
-                                                        StreamingTransportMode::SharedMemory)
-                                                  : streamingTransportModeName(
-                                                        StreamingTransportMode::RpcCopy);
-          applyStrategyDecision(strategy_decision_);
-        }
-      } else if (options_.execution_mode == StreamingExecutionMode::Auto && !execution_decided_) {
+        const auto actor_options = makeAcceleratorOptions(options_);
+        auto actor_result =
+            runLocalActorStreamWindowKeySum(std::vector<Table>{actor_input}, actor_options);
+        out = finalizeActorWindowKeySumOutput(std::move(actor_result.final_table), actor_accelerator,
+                                             root_.state_, options_, &state_ms);
+        partitions_used = std::max<size_t>(1, actor_result.processed_partitions);
+        used_actor_runtime = true;
         execution_decided_ = true;
-        resolved_execution_mode_ = StreamingExecutionMode::SingleProcess;
-        execution_reason_ = "actor path requires window_start/key/value schema after partition-local transforms";
+        resolved_execution_mode_ = StreamingExecutionMode::LocalWorkers;
+        execution_reason_ =
+            "configured local-workers execution; using credit-based scheduling for the eligible hot path";
+        strategy_decision_.resolved_execution_mode =
+            streamingExecutionModeName(resolved_execution_mode_);
+        strategy_decision_.reason = execution_reason_;
+        strategy_decision_.transport_mode = actor_result.used_shared_memory
+                                                ? streamingTransportModeName(
+                                                      StreamingTransportMode::SharedMemory)
+                                                : streamingTransportModeName(
+                                                      StreamingTransportMode::RpcCopy);
+        strategy_decision_.used_actor_runtime = true;
+        strategy_decision_.used_shared_memory = actor_result.used_shared_memory;
+        applyStrategyDecision(strategy_decision_);
+      } else if (!execution_decided_) {
+        execution_decided_ = true;
+        resolved_execution_mode_ = StreamingExecutionMode::LocalWorkers;
+        execution_reason_ =
+            "configured local-workers execution; using generic partition workers because credit scheduling requires window_start/key/value after partition-local transforms";
         strategy_decision_.resolved_execution_mode =
             streamingExecutionModeName(resolved_execution_mode_);
         strategy_decision_.reason = execution_reason_;
@@ -1854,10 +1778,13 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
             streamingTransportModeName(StreamingTransportMode::InProcess);
         applyStrategyDecision(strategy_decision_);
       }
-    } else if (wants_actor_mode && !actor_pipeline_supported && !execution_decided_) {
+    } else if (options_.execution_mode == StreamingExecutionMode::LocalWorkers &&
+               !execution_decided_) {
       execution_decided_ = true;
-      resolved_execution_mode_ = StreamingExecutionMode::SingleProcess;
-      execution_reason_ = "query plan is not eligible for actor acceleration";
+      resolved_execution_mode_ = StreamingExecutionMode::LocalWorkers;
+      execution_reason_ = !actor_pipeline_supported
+                              ? "configured local-workers execution; using generic partition workers because the query plan is not eligible for credit acceleration"
+                              : "configured local-workers execution; using generic partition workers because credit acceleration requires local_workers > 1";
       strategy_decision_.resolved_execution_mode =
           streamingExecutionModeName(resolved_execution_mode_);
       strategy_decision_.reason = execution_reason_;
@@ -1872,10 +1799,16 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
       strategy_decision_.used_shared_memory = false;
       strategy_decision_.transport_mode =
           streamingTransportModeName(StreamingTransportMode::InProcess);
+      if (!execution_decided_) {
+        execution_decided_ = true;
+        resolved_execution_mode_ = options_.execution_mode;
+        execution_reason_ = options_.execution_mode == StreamingExecutionMode::LocalWorkers
+                                ? "configured local-workers execution"
+                                : "configured single-process execution";
+      }
       strategy_decision_.resolved_execution_mode =
-          streamingExecutionModeName(options_.execution_mode == StreamingExecutionMode::Auto
-                                         ? resolved_execution_mode_
-                                         : options_.execution_mode);
+          streamingExecutionModeName(resolved_execution_mode_);
+      strategy_decision_.reason = execution_reason_;
       applyStrategyDecision(strategy_decision_);
     }
     const auto before_sink = std::chrono::steady_clock::now();

@@ -166,7 +166,7 @@ examples 与 helper scripts 只用于说明各层，不定义各层。
 - 本地 batch + streaming 共用一个内核
 - `read_csv`, `readStream(...)`, `readStreamCsvDir(...)`
 - query-local 反压、有界 backlog、progress snapshot、checkpoint path
-- 执行模式：`single-process`、`local-workers`、`actor-credit`、`auto`
+- 执行模式：`single-process`、`local-workers`
 - 文件 source/sink
 - 基础 streaming operators：`select / filter / withColumn / drop / limit / window`
 - stateful `sum` 和 `count`

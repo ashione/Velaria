@@ -72,14 +72,7 @@ QueryRun runHotPath(StreamingExecutionMode mode) {
   options.trigger_interval_ms = 0;
   options.execution_mode = mode;
   options.local_workers = 4;
-  options.actor_workers = 4;
-  options.actor_max_inflight_partitions = 4;
-  options.actor_auto_options.sample_batches = 1;
-  options.actor_auto_options.min_rows_per_batch = 0;
-  options.actor_auto_options.min_projected_payload_bytes = 0;
-  options.actor_auto_options.min_compute_to_overhead_ratio = 0.0;
-  options.actor_auto_options.min_actor_speedup = 0.0;
-  options.actor_auto_options.strong_actor_speedup = 0.0;
+  options.max_inflight_partitions = 4;
 
   auto query = session.readStream(std::make_shared<MemoryStreamSource>(std::vector<Table>{makeHotPathBatch()}))
                    .withStateStore(dataflow::makeMemoryStateStore())
@@ -101,15 +94,9 @@ void testExplainStreamSql() {
       "USING csv OPTIONS(path '/tmp/velaria-stream-strategy-explain.csv', delimiter ',')");
 
   StreamingQueryOptions options;
-  options.execution_mode = StreamingExecutionMode::Auto;
-  options.actor_workers = 4;
-  options.actor_max_inflight_partitions = 4;
-  options.actor_auto_options.sample_batches = 1;
-  options.actor_auto_options.min_rows_per_batch = 0;
-  options.actor_auto_options.min_projected_payload_bytes = 0;
-  options.actor_auto_options.min_compute_to_overhead_ratio = 0.0;
-  options.actor_auto_options.min_actor_speedup = 0.0;
-  options.actor_auto_options.strong_actor_speedup = 0.0;
+  options.execution_mode = StreamingExecutionMode::LocalWorkers;
+  options.local_workers = 4;
+  options.max_inflight_partitions = 4;
 
   const std::string explain = session.explainStreamSql(
       "INSERT INTO strategy_hot_sink "
@@ -124,51 +111,39 @@ void testExplainStreamSql() {
          "explain should describe aggregate keys");
   expect(explain.find("actor_eligible=true") != std::string::npos,
          "explain should expose actor eligibility");
-  expect(explain.find("selected_mode=auto") != std::string::npos,
-         "explain should expose the initial selected mode");
-  expect(explain.find("actor_shared_memory_transport=true") != std::string::npos,
+  expect(explain.find("selected_mode=local-workers") != std::string::npos,
+         "explain should expose the selected local-workers mode");
+  expect(explain.find("shared_memory_transport=true") != std::string::npos,
          "explain should expose shared-memory knobs");
 }
 
 void testExecutionModeConsistency() {
   const auto single = runHotPath(StreamingExecutionMode::SingleProcess);
   const auto local = runHotPath(StreamingExecutionMode::LocalWorkers);
-  const auto actor = runHotPath(StreamingExecutionMode::ActorCredit);
-  const auto automatic = runHotPath(StreamingExecutionMode::Auto);
 
   const auto baseline = sumTableToMap(single.table);
   expect(sumTableToMap(local.table) == baseline, "local-workers result should match single-process");
-  expect(sumTableToMap(actor.table) == baseline, "actor-credit result should match single-process");
-  expect(sumTableToMap(automatic.table) == baseline, "auto result should match single-process");
 
   expect(single.progress.execution_mode == "single-process",
          "single-process progress should keep single-process mode");
   expect(local.progress.execution_mode == "local-workers",
          "local-workers progress should keep local-workers mode");
-  expect(actor.progress.execution_mode == "actor-credit",
-         "actor-credit progress should keep actor-credit mode");
-  expect(automatic.progress.execution_mode == "actor-credit",
-         "auto hot path should resolve to actor-credit with permissive thresholds");
-  expect(automatic.progress.transport_mode == "shared-memory" ||
-             automatic.progress.transport_mode == "rpc-copy",
-         "auto hot path should expose actor transport mode");
+  expect(local.progress.used_actor_runtime,
+         "eligible local-workers hot path should use the credit accelerator");
+  expect(local.progress.transport_mode == "shared-memory" ||
+             local.progress.transport_mode == "rpc-copy",
+         "eligible local-workers hot path should expose accelerator transport mode");
 }
 
-void testAutoFallbackForNonHotPath() {
+void testLocalWorkersFallbackForNonHotPath() {
   DataflowSession& session = DataflowSession::builder();
   auto sink = std::make_shared<MemoryStreamSink>();
 
   StreamingQueryOptions options;
   options.trigger_interval_ms = 0;
-  options.execution_mode = StreamingExecutionMode::Auto;
-  options.actor_workers = 4;
-  options.actor_max_inflight_partitions = 4;
-  options.actor_auto_options.sample_batches = 1;
-  options.actor_auto_options.min_rows_per_batch = 0;
-  options.actor_auto_options.min_projected_payload_bytes = 0;
-  options.actor_auto_options.min_compute_to_overhead_ratio = 0.0;
-  options.actor_auto_options.min_actor_speedup = 0.0;
-  options.actor_auto_options.strong_actor_speedup = 0.0;
+  options.execution_mode = StreamingExecutionMode::LocalWorkers;
+  options.local_workers = 4;
+  options.max_inflight_partitions = 4;
 
   auto query = session.readStream(std::make_shared<MemoryStreamSource>(std::vector<Table>{makeNonHotBatch()}))
                    .withStateStore(dataflow::makeMemoryStateStore())
@@ -179,10 +154,41 @@ void testAutoFallbackForNonHotPath() {
   expect(query.awaitTermination() == 1, "non-hot-path query should process one batch");
   const auto progress = query.progress();
 
-  expect(progress.execution_mode == "single-process",
-         "non-hot-path auto query should fall back to single-process");
-  expect(progress.execution_reason.find("not eligible") != std::string::npos,
-         "non-hot-path auto query should expose fallback reason");
+  expect(progress.execution_mode == "local-workers",
+         "non-hot-path local-workers query should stay in local-workers mode");
+  expect(!progress.used_actor_runtime,
+         "non-hot-path local-workers query should fall back to generic partition workers");
+  expect(progress.execution_reason.find("generic partition workers") != std::string::npos,
+         "non-hot-path local-workers query should expose fallback reason");
+}
+
+void testLocalWorkersSingleWorkerDisablesCreditAcceleration() {
+  DataflowSession& session = DataflowSession::builder();
+  auto sink = std::make_shared<MemoryStreamSink>();
+
+  StreamingQueryOptions options;
+  options.trigger_interval_ms = 0;
+  options.execution_mode = StreamingExecutionMode::LocalWorkers;
+  options.local_workers = 1;
+  options.max_inflight_partitions = 4;
+
+  auto query = session.readStream(std::make_shared<MemoryStreamSource>(std::vector<Table>{makeHotPathBatch()}))
+                   .withStateStore(dataflow::makeMemoryStateStore())
+                   .groupBy({"window_start", "key"})
+                   .sum("value", true, "value_sum")
+                   .writeStream(sink, options);
+  query.start();
+  expect(query.awaitTermination() == 1, "single-worker local-workers query should process one batch");
+  const auto progress = query.progress();
+
+  expect(progress.execution_mode == "local-workers",
+         "single-worker local-workers query should stay in local-workers mode");
+  expect(!progress.used_actor_runtime,
+         "single-worker local-workers query should not use credit acceleration");
+  expect(progress.transport_mode == "inproc",
+         "single-worker local-workers query should stay in inproc transport");
+  expect(progress.execution_reason.find("local_workers > 1") != std::string::npos,
+         "single-worker local-workers query should explain why credit acceleration was skipped");
 }
 
 }  // namespace
@@ -191,7 +197,8 @@ int main() {
   try {
     testExplainStreamSql();
     testExecutionModeConsistency();
-    testAutoFallbackForNonHotPath();
+    testLocalWorkersFallbackForNonHotPath();
+    testLocalWorkersSingleWorkerDisablesCreditAcceleration();
     std::cout << "[test] stream strategy explain ok" << std::endl;
     return 0;
   } catch (const std::exception& ex) {

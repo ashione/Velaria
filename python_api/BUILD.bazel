@@ -200,6 +200,16 @@ py_test(
 )
 
 py_test(
+    name = "source_materialization_test",
+    srcs = ["tests/test_source_materialization.py"],
+    main = "tests/test_source_materialization.py",
+    imports = ["."],
+    deps = [
+        ":velaria_py_pkg",
+    ],
+)
+
+py_test(
     name = "bitable_stream_source_test",
     srcs = ["tests/test_bitable_stream_source.py"],
     main = "tests/test_bitable_stream_source.py",

@@ -169,7 +169,8 @@ Available today:
 - execution modes: `single-process`, `local-workers`
 - file source/sink support
 - basic stream operators: `select / filter / withColumn / drop / limit / window`
-- stateful `sum` and `count`
+- stateful stream aggregates: `sum / count / min / max / avg`
+- stream SQL grouped aggregate outputs with `SUM(col)`, `COUNT(*)`, `MIN(col)`, `MAX(col)`, `AVG(col)`
 - minimal stream SQL subset
 - local vector search on fixed-dimension float vectors
 - Python Arrow ingestion and output
@@ -181,6 +182,7 @@ Out of scope in the current repo state:
 - Python callback execution in the hot path
 - Python UDFs
 - generic actor parallelization for arbitrary plans
+- actor acceleration beyond the current `window_start,key + SUM(value)` / `COUNT(*)` hot paths
 - broad SQL expansion such as full `JOIN / CTE / subquery / UNION`
 - ANN / standalone vector DB / distributed vector execution
 

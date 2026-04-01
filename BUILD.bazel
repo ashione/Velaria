@@ -20,6 +20,10 @@ filegroup(
     srcs = [
         "src/dataflow/core/execution/csv.cc",
         "src/dataflow/core/execution/csv.h",
+        "src/dataflow/core/execution/nanoarrow_ipc_codec.cc",
+        "src/dataflow/core/execution/nanoarrow_ipc_codec.h",
+        "src/dataflow/core/execution/source_materialization.cc",
+        "src/dataflow/core/execution/source_materialization.h",
         "src/dataflow/core/execution/table.cc",
         "src/dataflow/core/execution/table.h",
         "src/dataflow/core/execution/value.cc",
@@ -106,6 +110,8 @@ cc_library(
         "src/dataflow/core/execution/value.cc",
         "src/dataflow/core/execution/table.cc",
         "src/dataflow/core/execution/csv.cc",
+        "src/dataflow/core/execution/nanoarrow_ipc_codec.cc",
+        "src/dataflow/core/execution/source_materialization.cc",
         "src/dataflow/core/contract/catalog/catalog.cc",
         "src/dataflow/core/contract/api/dataframe.cc",
         "src/dataflow/core/contract/api/session.cc",
@@ -129,6 +135,8 @@ cc_library(
         "src/dataflow/core/execution/value.h",
         "src/dataflow/core/execution/table.h",
         "src/dataflow/core/execution/csv.h",
+        "src/dataflow/core/execution/nanoarrow_ipc_codec.h",
+        "src/dataflow/core/execution/source_materialization.h",
         "src/dataflow/core/contract/catalog/catalog.h",
         "src/dataflow/core/contract/api/dataframe.h",
         "src/dataflow/core/contract/api/session.h",
@@ -153,6 +161,7 @@ cc_library(
         "src/dataflow/core/contract/source_sink_abi.h",
         "src/dataflow/core/execution/stream/stream.h",
     ],
+    deps = ["@nanoarrow_src//:nanoarrow"],
     visibility = ["//visibility:public"],
 )
 
@@ -165,6 +174,7 @@ test_suite(
         ":stream_runtime_test",
         ":stream_strategy_explain_test",
         ":vector_runtime_test",
+        ":source_materialization_test",
     ],
 )
 
@@ -406,4 +416,10 @@ cc_test(
         ":dataflow_actor_rpc_codec",
         ":dataflow_core",
     ],
+)
+
+cc_test(
+    name = "source_materialization_test",
+    srcs = ["src/dataflow/tests/source_materialization_test.cc"],
+    deps = [":dataflow_core"],
 )

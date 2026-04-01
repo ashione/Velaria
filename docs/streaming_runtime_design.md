@@ -55,18 +55,21 @@ This document describes runtime internals and current implementation shape. For 
 
 ## Current Actor Pushdown Boundary
 
-当前只有一类 query 会被 `LocalWorkers` 内部的 credit-based hot path 接住：
+当前只有少数固定形状的 query 会被 `LocalWorkers` 内部的 credit-based hot path 接住：
 
 - 前置变换全部为 `PartitionLocal`
-- 最后一个 barrier 是 `groupBy({"window_start", "key"}).sum("value", ...)`
+- 最后一个 barrier 是以下其一：
+  - `groupBy({"window_start", "key"}).sum("value", ...)`
+  - `groupBy({"window_start", "key"}).count(...)`
 
 也就是说，当前 actor runtime 只服务于：
 
 - `window_start`
 - `key`
-- `value`
+- `value` 的窗口分组求和热路径
+- `COUNT(*)` 的窗口分组计数热路径
 
-这条窗口分组求和热路径。
+`MIN / MAX / AVG` 以及多 aggregate 输出当前仍走本地执行链；`LocalWorkers` 会明确写出 fallback reason。
 
 如果 query 不满足这个形状，`StreamingQuery` 会回退到普通执行链，并把原因写入：
 

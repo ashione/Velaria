@@ -985,14 +985,31 @@ PyObject* sessionNew(PyTypeObject* type, PyObject*, PyObject*) {
   return reinterpret_cast<PyObject*>(self);
 }
 
+df::StreamingExecutionMode parseExecutionMode(const char* execution_mode) {
+  const std::string mode = execution_mode == nullptr ? "single-process" : execution_mode;
+  if (mode == "single-process") {
+    return df::StreamingExecutionMode::SingleProcess;
+  }
+  if (mode == "local-workers") {
+    return df::StreamingExecutionMode::LocalWorkers;
+  }
+  throw std::runtime_error("execution_mode must be 'single-process' or 'local-workers'");
+}
+
 df::StreamingQueryOptions parseQueryOptions(uint64_t trigger_interval_ms,
                                             const char* checkpoint_path,
-                                            const char* checkpoint_delivery_mode) {
+                                            const char* checkpoint_delivery_mode,
+                                            const char* execution_mode = "single-process",
+                                            unsigned long long local_workers = 1,
+                                            unsigned long long max_inflight_partitions = 0) {
   df::StreamingQueryOptions options;
   options.trigger_interval_ms = trigger_interval_ms;
   if (checkpoint_path != nullptr) {
     options.checkpoint_path = checkpoint_path;
   }
+  options.execution_mode = parseExecutionMode(execution_mode);
+  options.local_workers = static_cast<size_t>(local_workers);
+  options.max_inflight_partitions = static_cast<size_t>(max_inflight_partitions);
   const std::string mode = checkpoint_delivery_mode == nullptr ? "at-least-once"
                                                                : checkpoint_delivery_mode;
   if (mode == "at-least-once") {
@@ -1120,11 +1137,16 @@ PyObject* sessionStartStreamSql(PyVelariaSession* self, PyObject* args, PyObject
     unsigned long long trigger_interval_ms = 1000;
     const char* checkpoint_path = "";
     const char* checkpoint_delivery_mode = "at-least-once";
+    const char* execution_mode = "single-process";
+    unsigned long long local_workers = 1;
+    unsigned long long max_inflight_partitions = 0;
     static const char* kwlist[] = {"sql", "trigger_interval_ms", "checkpoint_path",
-                                   "checkpoint_delivery_mode", nullptr};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|Kss", const_cast<char**>(kwlist), &sql,
+                                   "checkpoint_delivery_mode", "execution_mode",
+                                   "local_workers", "max_inflight_partitions", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|KsssKK", const_cast<char**>(kwlist), &sql,
                                      &trigger_interval_ms, &checkpoint_path,
-                                     &checkpoint_delivery_mode)) {
+                                     &checkpoint_delivery_mode, &execution_mode, &local_workers,
+                                     &max_inflight_partitions)) {
       return nullptr;
     }
     std::unique_ptr<df::StreamingQuery> out;
@@ -1132,7 +1154,8 @@ PyObject* sessionStartStreamSql(PyVelariaSession* self, PyObject* args, PyObject
       AllowThreads allow;
       out = std::make_unique<df::StreamingQuery>(self->session->startStreamSql(
           sql, parseQueryOptions(static_cast<uint64_t>(trigger_interval_ms), checkpoint_path,
-                                 checkpoint_delivery_mode)));
+                                 checkpoint_delivery_mode, execution_mode, local_workers,
+                                 max_inflight_partitions)));
     }
     return wrapStreamingQuery(std::move(*out));
   });
@@ -1144,11 +1167,16 @@ PyObject* sessionExplainStreamSql(PyVelariaSession* self, PyObject* args, PyObje
     unsigned long long trigger_interval_ms = 1000;
     const char* checkpoint_path = "";
     const char* checkpoint_delivery_mode = "at-least-once";
+    const char* execution_mode = "single-process";
+    unsigned long long local_workers = 1;
+    unsigned long long max_inflight_partitions = 0;
     static const char* kwlist[] = {"sql", "trigger_interval_ms", "checkpoint_path",
-                                   "checkpoint_delivery_mode", nullptr};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|Kss", const_cast<char**>(kwlist), &sql,
+                                   "checkpoint_delivery_mode", "execution_mode",
+                                   "local_workers", "max_inflight_partitions", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|KsssKK", const_cast<char**>(kwlist), &sql,
                                      &trigger_interval_ms, &checkpoint_path,
-                                     &checkpoint_delivery_mode)) {
+                                     &checkpoint_delivery_mode, &execution_mode, &local_workers,
+                                     &max_inflight_partitions)) {
       return nullptr;
     }
     std::string explain;
@@ -1156,7 +1184,8 @@ PyObject* sessionExplainStreamSql(PyVelariaSession* self, PyObject* args, PyObje
       AllowThreads allow;
       explain = self->session->explainStreamSql(
           sql, parseQueryOptions(static_cast<uint64_t>(trigger_interval_ms), checkpoint_path,
-                                 checkpoint_delivery_mode));
+                                 checkpoint_delivery_mode, execution_mode, local_workers,
+                                 max_inflight_partitions));
     }
     return PyUnicode_FromStringAndSize(explain.c_str(),
                                        static_cast<Py_ssize_t>(explain.size()));

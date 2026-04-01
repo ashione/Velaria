@@ -13,6 +13,7 @@
 #include <sys/wait.h>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -49,11 +50,290 @@ uint64_t actorOverheadMs(const LocalActorStreamResult& result) {
          result.worker_deserialize_ms + result.worker_serialize_ms;
 }
 
+std::string partialValueColumnName(const std::string& output_column) {
+  return "__partial_" + output_column;
+}
+
+std::string partialAverageSumColumnName(const std::string& output_column) {
+  return "__partial_sum_" + output_column;
+}
+
+std::string partialAverageCountColumnName(const std::string& output_column) {
+  return "__partial_count_" + output_column;
+}
+
+std::string stateAverageSumColumnName(const std::string& output_column) {
+  return "__state_sum_" + output_column;
+}
+
+std::string stateAverageCountColumnName(const std::string& output_column) {
+  return "__state_count_" + output_column;
+}
+
+struct RuntimeAggregateLayout {
+  LocalGroupedAggregateSpec::Aggregate aggregate;
+  std::string partial_value_column;
+  std::string partial_count_column;
+};
+
+double spinValue(double value, size_t cpu_spin_per_row);
+
+std::vector<size_t> resolveGroupKeyIndices(const Table& input,
+                                           const std::vector<std::string>& group_keys) {
+  std::vector<size_t> indices;
+  indices.reserve(group_keys.size());
+  for (const auto& key : group_keys) {
+    indices.push_back(input.schema.indexOf(key));
+  }
+  return indices;
+}
+
+std::vector<AggregateSpec> buildRuntimePartialAggregateSpecs(
+    const Table& input, const LocalGroupedAggregateSpec& aggregate,
+    std::vector<RuntimeAggregateLayout>* layouts) {
+  if (layouts == nullptr) {
+    throw std::invalid_argument("layouts cannot be null");
+  }
+  layouts->clear();
+
+  std::vector<AggregateSpec> specs;
+  specs.reserve(aggregate.aggregates.size() * 2);
+  for (const auto& aggregate_spec : aggregate.aggregates) {
+    RuntimeAggregateLayout layout;
+    layout.aggregate = aggregate_spec;
+    switch (aggregate_spec.function) {
+      case AggregateFunction::Sum:
+      case AggregateFunction::Min:
+      case AggregateFunction::Max: {
+        layout.partial_value_column = partialValueColumnName(aggregate_spec.output_column);
+        specs.push_back(AggregateSpec{aggregate_spec.function,
+                                      input.schema.indexOf(aggregate_spec.value_column),
+                                      layout.partial_value_column});
+        break;
+      }
+      case AggregateFunction::Count: {
+        layout.partial_count_column = partialValueColumnName(aggregate_spec.output_column);
+        specs.push_back(AggregateSpec{AggregateFunction::Count, static_cast<size_t>(-1),
+                                      layout.partial_count_column});
+        break;
+      }
+      case AggregateFunction::Avg: {
+        layout.partial_value_column = partialAverageSumColumnName(aggregate_spec.output_column);
+        layout.partial_count_column = partialAverageCountColumnName(aggregate_spec.output_column);
+        specs.push_back(AggregateSpec{AggregateFunction::Sum,
+                                      input.schema.indexOf(aggregate_spec.value_column),
+                                      layout.partial_value_column});
+        specs.push_back(AggregateSpec{AggregateFunction::Count, static_cast<size_t>(-1),
+                                      layout.partial_count_column});
+        break;
+      }
+    }
+    layouts->push_back(std::move(layout));
+  }
+  return specs;
+}
+
+std::vector<AggregateSpec> buildRuntimeMergeAggregateSpecs(
+    const Table& partials, const std::vector<RuntimeAggregateLayout>& layouts) {
+  std::vector<AggregateSpec> specs;
+  specs.reserve(layouts.size() * 2);
+  for (const auto& layout : layouts) {
+    switch (layout.aggregate.function) {
+      case AggregateFunction::Sum:
+        specs.push_back(AggregateSpec{AggregateFunction::Sum,
+                                      partials.schema.indexOf(layout.partial_value_column),
+                                      layout.partial_value_column});
+        break;
+      case AggregateFunction::Count:
+        specs.push_back(AggregateSpec{AggregateFunction::Sum,
+                                      partials.schema.indexOf(layout.partial_count_column),
+                                      layout.partial_count_column});
+        break;
+      case AggregateFunction::Min:
+        specs.push_back(AggregateSpec{AggregateFunction::Min,
+                                      partials.schema.indexOf(layout.partial_value_column),
+                                      layout.partial_value_column});
+        break;
+      case AggregateFunction::Max:
+        specs.push_back(AggregateSpec{AggregateFunction::Max,
+                                      partials.schema.indexOf(layout.partial_value_column),
+                                      layout.partial_value_column});
+        break;
+      case AggregateFunction::Avg:
+        specs.push_back(AggregateSpec{AggregateFunction::Sum,
+                                      partials.schema.indexOf(layout.partial_value_column),
+                                      layout.partial_value_column});
+        specs.push_back(AggregateSpec{AggregateFunction::Sum,
+                                      partials.schema.indexOf(layout.partial_count_column),
+                                      layout.partial_count_column});
+        break;
+    }
+  }
+  return specs;
+}
+
+Table makeAggregateOutputSkeleton(const LocalGroupedAggregateSpec& aggregate,
+                                  bool include_avg_state_helpers) {
+  Table table;
+  table.schema.fields = aggregate.group_keys;
+  for (const auto& aggregate_spec : aggregate.aggregates) {
+    table.schema.fields.push_back(aggregate_spec.output_column);
+    if (include_avg_state_helpers && aggregate_spec.function == AggregateFunction::Avg) {
+      table.schema.fields.push_back(stateAverageSumColumnName(aggregate_spec.output_column));
+      table.schema.fields.push_back(stateAverageCountColumnName(aggregate_spec.output_column));
+    }
+  }
+  for (size_t i = 0; i < table.schema.fields.size(); ++i) {
+    table.schema.index[table.schema.fields[i]] = i;
+  }
+  return table;
+}
+
+Table applyCpuSpin(Table input, const LocalGroupedAggregateSpec& aggregate, size_t cpu_spin_per_row) {
+  if (cpu_spin_per_row == 0) {
+    return input;
+  }
+
+  std::unordered_set<std::string> value_columns;
+  for (const auto& aggregate_spec : aggregate.aggregates) {
+    if (aggregate_spec.function != AggregateFunction::Count) {
+      value_columns.insert(aggregate_spec.value_column);
+    }
+  }
+  for (const auto& column : value_columns) {
+    if (!input.schema.has(column)) continue;
+    const auto column_index = input.schema.indexOf(column);
+    for (auto& row : input.rows) {
+      if (column_index >= row.size() || row[column_index].isNull()) continue;
+      row[column_index] = Value(spinValue(row[column_index].asDouble(), cpu_spin_per_row));
+    }
+  }
+  return input;
+}
+
+std::vector<std::string> buildInputProjectionColumns(const LocalGroupedAggregateSpec& aggregate) {
+  std::vector<std::string> columns = aggregate.group_keys;
+  std::unordered_set<std::string> seen(columns.begin(), columns.end());
+  for (const auto& aggregate_spec : aggregate.aggregates) {
+    if (aggregate_spec.function == AggregateFunction::Count) continue;
+    if (seen.insert(aggregate_spec.value_column).second) {
+      columns.push_back(aggregate_spec.value_column);
+    }
+  }
+  return columns;
+}
+
+Table appendTables(const std::vector<Table>& tables) {
+  Table merged;
+  for (const auto& table : tables) {
+    if (merged.schema.fields.empty()) {
+      merged.schema = table.schema;
+    }
+    merged.rows.insert(merged.rows.end(), table.rows.begin(), table.rows.end());
+  }
+  return merged;
+}
+
+Table aggregateInputToPartial(const Table& input, const LocalGroupedAggregateSpec& aggregate,
+                              size_t cpu_spin_per_row) {
+  if (aggregate.group_keys.empty() || aggregate.aggregates.empty()) {
+    return makeAggregateOutputSkeleton(aggregate, false);
+  }
+  Table spun = applyCpuSpin(input, aggregate, cpu_spin_per_row);
+  std::vector<RuntimeAggregateLayout> layouts;
+  const auto partial_specs = buildRuntimePartialAggregateSpecs(spun, aggregate, &layouts);
+  const auto key_indices = resolveGroupKeyIndices(spun, aggregate.group_keys);
+  return DataFrame(spun).aggregate(key_indices, partial_specs).toTable();
+}
+
+Table finalizeMergedPartialAggregates(const Table& partials,
+                                      const LocalGroupedAggregateSpec& aggregate) {
+  if (aggregate.group_keys.empty() || aggregate.aggregates.empty() || partials.rows.empty()) {
+    return makeAggregateOutputSkeleton(aggregate, true);
+  }
+
+  std::vector<RuntimeAggregateLayout> layouts;
+  for (const auto& aggregate_spec : aggregate.aggregates) {
+    RuntimeAggregateLayout layout;
+    layout.aggregate = aggregate_spec;
+    switch (aggregate_spec.function) {
+      case AggregateFunction::Sum:
+      case AggregateFunction::Min:
+      case AggregateFunction::Max:
+        layout.partial_value_column = partialValueColumnName(aggregate_spec.output_column);
+        break;
+      case AggregateFunction::Count:
+        layout.partial_count_column = partialValueColumnName(aggregate_spec.output_column);
+        break;
+      case AggregateFunction::Avg:
+        layout.partial_value_column = partialAverageSumColumnName(aggregate_spec.output_column);
+        layout.partial_count_column = partialAverageCountColumnName(aggregate_spec.output_column);
+        break;
+    }
+    layouts.push_back(std::move(layout));
+  }
+
+  const auto key_indices = resolveGroupKeyIndices(partials, aggregate.group_keys);
+  const auto merge_specs = buildRuntimeMergeAggregateSpecs(partials, layouts);
+  const Table merged = DataFrame(partials).aggregate(key_indices, merge_specs).toTable();
+
+  Table output = makeAggregateOutputSkeleton(aggregate, true);
+  output.rows.reserve(merged.rows.size());
+  for (const auto& merged_row : merged.rows) {
+    Row output_row;
+    output_row.reserve(output.schema.fields.size());
+    for (size_t i = 0; i < aggregate.group_keys.size(); ++i) {
+      output_row.push_back(merged_row[i]);
+    }
+    for (const auto& layout : layouts) {
+      switch (layout.aggregate.function) {
+        case AggregateFunction::Sum:
+        case AggregateFunction::Min:
+        case AggregateFunction::Max:
+          output_row.push_back(
+              merged_row[merged.schema.indexOf(layout.partial_value_column)]);
+          break;
+        case AggregateFunction::Count:
+          output_row.push_back(Value(static_cast<int64_t>(
+              merged_row[merged.schema.indexOf(layout.partial_count_column)].asDouble())));
+          break;
+        case AggregateFunction::Avg: {
+          const double sum =
+              merged_row[merged.schema.indexOf(layout.partial_value_column)].asDouble();
+          const int64_t count = static_cast<int64_t>(
+              merged_row[merged.schema.indexOf(layout.partial_count_column)].asDouble());
+          output_row.push_back(Value(count == 0 ? 0.0 : sum / static_cast<double>(count)));
+          output_row.push_back(Value(sum));
+          output_row.push_back(Value(count));
+          break;
+        }
+      }
+    }
+    output.rows.push_back(std::move(output_row));
+  }
+  return output;
+}
+
+Table runSingleProcessGroupedAggregateImpl(const std::vector<Table>& batches,
+                                           const LocalGroupedAggregateSpec& aggregate,
+                                           size_t cpu_spin_per_row) {
+  std::vector<Table> partials;
+  partials.reserve(batches.size());
+  for (const auto& batch : batches) {
+    partials.push_back(aggregateInputToPartial(batch, aggregate, cpu_spin_per_row));
+  }
+  return finalizeMergedPartialAggregates(appendTables(partials), aggregate);
+}
+
 LocalActorStreamResult measureSingleProcessWindowKeySum(const std::vector<Table>& batches,
                                                         size_t cpu_spin_per_row) {
   LocalActorStreamResult result;
   auto started = std::chrono::steady_clock::now();
-  result.final_table = runSingleProcessWindowKeySum(batches, cpu_spin_per_row);
+  LocalGroupedAggregateSpec aggregate;
+  aggregate.group_keys = {"window_start", "key"};
+  aggregate.aggregates.push_back(
+      {AggregateFunction::Sum, "value", "value_sum", false});
+  result.final_table = runSingleProcessGroupedAggregateImpl(batches, aggregate, cpu_spin_per_row);
   result.processed_batches = batches.size();
   result.processed_partitions = batches.size();
   result.elapsed_ms = static_cast<uint64_t>(
@@ -577,12 +857,10 @@ Table aggregatePartitionWithWork(const Table& input, size_t cpu_spin_per_row) {
   return aggregateVectorizedBatch(buildColumnarFromTable(input), cpu_spin_per_row);
 }
 
-void workerLoop(int fd, uint64_t delay_ms, size_t cpu_spin_per_row,
-                size_t shared_memory_min_payload_bytes) {
+void workerLoop(int fd, const LocalGroupedAggregateSpec& aggregate, uint64_t delay_ms,
+                size_t cpu_spin_per_row, size_t shared_memory_min_payload_bytes) {
   LengthPrefixedFrameCodec codec;
   BinaryRowBatchCodec batch_codec;
-  BinaryRowBatchOptions output_projection;
-  output_projection.projected_columns = {"window_start", "key", "partial_sum"};
   ByteBufferPool payload_pool;
   ByteBufferPool frame_pool;
 
@@ -609,26 +887,21 @@ void workerLoop(int fd, uint64_t delay_ms, size_t cpu_spin_per_row,
         request_region = openSharedMemoryReadRegion(
             SharedMemoryPayload{request.shared_memory_name, request.shared_memory_size});
       }
-      WindowKeyValueColumnarBatch input;
-      const bool decoded =
+      const Table input =
           request.shared_memory
-              ? batch_codec.deserializeWindowKeyValueFromBuffer(
-                    static_cast<const uint8_t*>(request_region.mapped), request_region.size, &input)
-              : batch_codec.deserializeWindowKeyValue(request.table_payload, &input);
+              ? batch_codec.deserializeFromBuffer(
+                    static_cast<const uint8_t*>(request_region.mapped), request_region.size)
+              : batch_codec.deserialize(request.table_payload);
       closeSharedMemoryReadRegion(&request_region);
-      if (!decoded) {
-        throw std::runtime_error("deserializeWindowKeyValue failed");
-      }
       const auto compute_started = std::chrono::steady_clock::now();
-      const Table partial = aggregateVectorizedBatch(input, cpu_spin_per_row);
+      const Table partial = aggregateInputToPartial(input, aggregate, cpu_spin_per_row);
       const auto serialize_started = std::chrono::steady_clock::now();
 
       result.ok = true;
       result.metrics.deserialize_ms = toMillis(compute_started - deserialize_started);
       result.metrics.compute_ms = toMillis(serialize_started - compute_started);
 
-      const PreparedBinaryRowBatch prepared_output =
-          batch_codec.prepare(partial, output_projection);
+      const PreparedBinaryRowBatch prepared_output = batch_codec.prepare(partial);
       const size_t estimated_payload = prepared_output.estimated_size;
       if (estimated_payload >= shared_memory_min_payload_bytes) {
         auto region = createSharedMemoryWriteRegion(estimated_payload);
@@ -676,7 +949,8 @@ void workerLoop(int fd, uint64_t delay_ms, size_t cpu_spin_per_row,
   _exit(0);
 }
 
-std::vector<WorkerHandle> startWorkers(const LocalActorStreamOptions& options) {
+std::vector<WorkerHandle> startWorkers(const LocalGroupedAggregateSpec& aggregate,
+                                       const LocalActorStreamOptions& options) {
   std::vector<WorkerHandle> workers;
   workers.reserve(options.worker_count);
   for (size_t i = 0; i < std::max<size_t>(1, options.worker_count); ++i) {
@@ -692,7 +966,7 @@ std::vector<WorkerHandle> startWorkers(const LocalActorStreamOptions& options) {
     }
     if (pid == 0) {
       ::close(fds[0]);
-      workerLoop(fds[1], options.worker_delay_ms, options.cpu_spin_per_row,
+      workerLoop(fds[1], aggregate, options.worker_delay_ms, options.cpu_spin_per_row,
                  options.shared_memory_min_payload_bytes);
     }
     ::close(fds[1]);
@@ -734,27 +1008,36 @@ const char* localExecutionModeName(LocalExecutionMode mode) {
 }
 
 Table runSingleProcessWindowKeySum(const std::vector<Table>& batches, size_t cpu_spin_per_row) {
-  std::unordered_map<std::string, double> sums;
-  std::vector<std::string> ordered_keys;
-  for (const auto& batch : batches) {
-    mergePartialTable(aggregatePartitionWithWork(batch, cpu_spin_per_row), &sums, &ordered_keys);
-  }
-  return materializeStateTable(sums, ordered_keys);
+  LocalGroupedAggregateSpec aggregate;
+  aggregate.group_keys = {"window_start", "key"};
+  aggregate.aggregates.push_back(
+      {AggregateFunction::Sum, "value", "value_sum", false});
+  return runSingleProcessGroupedAggregateImpl(batches, aggregate, cpu_spin_per_row);
 }
 
-LocalActorStreamResult runLocalActorStreamWindowKeySum(const std::vector<Table>& batches,
-                                                       const LocalActorStreamOptions& options) {
+Table runSingleProcessGroupedAggregate(const std::vector<Table>& batches,
+                                      const LocalGroupedAggregateSpec& aggregate,
+                                      size_t cpu_spin_per_row) {
+  return runSingleProcessGroupedAggregateImpl(batches, aggregate, cpu_spin_per_row);
+}
+
+LocalActorStreamResult runLocalActorStreamGroupedAggregate(
+    const std::vector<Table>& batches, const LocalGroupedAggregateSpec& aggregate,
+    const LocalActorStreamOptions& options) {
   if (options.max_inflight_partitions == 0) {
     throw std::invalid_argument("max_inflight_partitions must be positive");
+  }
+  if (aggregate.group_keys.empty() || aggregate.aggregates.empty()) {
+    throw std::invalid_argument("grouped aggregate spec cannot be empty");
   }
 
   LocalActorStreamResult result;
   auto started = std::chrono::steady_clock::now();
-  auto workers = startWorkers(options);
+  auto workers = startWorkers(aggregate, options);
   LengthPrefixedFrameCodec codec;
   BinaryRowBatchCodec batch_codec;
   BinaryRowBatchOptions input_projection;
-  input_projection.projected_columns = {"window_start", "key", "value"};
+  input_projection.projected_columns = buildInputProjectionColumns(aggregate);
   ByteBufferPool payload_pool;
   ByteBufferPool frame_pool;
 
@@ -797,8 +1080,7 @@ LocalActorStreamResult runLocalActorStreamWindowKeySum(const std::vector<Table>&
     }
   }
 
-  std::unordered_map<std::string, double> sums;
-  std::vector<std::string> ordered_keys;
+  Table merged_partials;
   size_t next_pending = 0;
   size_t inflight = 0;
   std::unordered_map<uint64_t, SharedMemoryPayload> inflight_input_shared_memory;
@@ -929,7 +1211,11 @@ LocalActorStreamResult runLocalActorStreamWindowKeySum(const std::vector<Table>&
           result.worker_serialize_ms += msg.metrics.serialize_ms;
 
           const auto merge_started = std::chrono::steady_clock::now();
-          mergePartialTable(partial, &sums, &ordered_keys);
+          if (merged_partials.schema.fields.empty()) {
+            merged_partials.schema = partial.schema;
+          }
+          merged_partials.rows.insert(merged_partials.rows.end(), partial.rows.begin(),
+                                      partial.rows.end());
           result.coordinator_merge_ms += toMillis(std::chrono::steady_clock::now() - merge_started);
           ++result.processed_partitions;
         } else {
@@ -943,7 +1229,11 @@ LocalActorStreamResult runLocalActorStreamWindowKeySum(const std::vector<Table>&
           result.worker_serialize_ms += msg.metrics.serialize_ms;
 
           const auto merge_started = std::chrono::steady_clock::now();
-          mergePartialTable(partial, &sums, &ordered_keys);
+          if (merged_partials.schema.fields.empty()) {
+            merged_partials.schema = partial.schema;
+          }
+          merged_partials.rows.insert(merged_partials.rows.end(), partial.rows.begin(),
+                                      partial.rows.end());
           result.coordinator_merge_ms += toMillis(std::chrono::steady_clock::now() - merge_started);
           ++result.processed_partitions;
         }
@@ -963,12 +1253,21 @@ LocalActorStreamResult runLocalActorStreamWindowKeySum(const std::vector<Table>&
   }
 
   stopWorkers(&workers);
-  result.final_table = materializeStateTable(sums, ordered_keys);
+  result.final_table = finalizeMergedPartialAggregates(merged_partials, aggregate);
   result.elapsed_ms = static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now() - started)
           .count());
   return result;
+}
+
+LocalActorStreamResult runLocalActorStreamWindowKeySum(const std::vector<Table>& batches,
+                                                       const LocalActorStreamOptions& options) {
+  LocalGroupedAggregateSpec aggregate;
+  aggregate.group_keys = {"window_start", "key"};
+  aggregate.aggregates.push_back(
+      {AggregateFunction::Sum, "value", "value_sum", false});
+  return runLocalActorStreamGroupedAggregate(batches, aggregate, options);
 }
 
 LocalActorStreamResult runAutoLocalActorStreamWindowKeySum(
@@ -994,11 +1293,15 @@ LocalActorStreamResult runAutoLocalActorStreamWindowKeySum(
   local_decision.sampled_batches = sampled_batches;
   const std::vector<Table> sample_batches_vec(batches.begin(),
                                               batches.begin() + sampled_batches);
+  LocalGroupedAggregateSpec aggregate;
+  aggregate.group_keys = {"window_start", "key"};
+  aggregate.aggregates.push_back(
+      {AggregateFunction::Sum, "value", "value_sum", false});
 
   const LocalActorStreamResult sample_single =
       measureSingleProcessWindowKeySum(sample_batches_vec, actor_options.cpu_spin_per_row);
   const LocalActorStreamResult sample_actor =
-      runLocalActorStreamWindowKeySum(sample_batches_vec, actor_options);
+      runLocalActorStreamGroupedAggregate(sample_batches_vec, aggregate, actor_options);
 
   const uint64_t total_projected_bytes =
       sample_actor.input_payload_bytes + sample_actor.input_shared_memory_bytes;
@@ -1056,7 +1359,7 @@ LocalActorStreamResult runAutoLocalActorStreamWindowKeySum(
                                                                          : sample_single;
   }
   if (local_decision.chosen_mode == LocalExecutionMode::ActorCredit) {
-    return runLocalActorStreamWindowKeySum(batches, actor_options);
+    return runLocalActorStreamGroupedAggregate(batches, aggregate, actor_options);
   }
   return measureSingleProcessWindowKeySum(batches, actor_options.cpu_spin_per_row);
 }

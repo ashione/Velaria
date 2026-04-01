@@ -115,6 +115,108 @@ class StreamingV05Test(unittest.TestCase):
             self.assertEqual(float(rows[0]["max_value"]), 10.0)
             self.assertAlmostEqual(float(rows[0]["avg_value"]), 22.0 / 3.0, places=5)
 
+    def test_start_stream_sql_hits_local_workers_grouped_hot_path(self):
+        session = velaria.Session()
+        table = pa.table(
+            {
+                "segment": ["alpha", "alpha", "alpha", "beta", "beta"],
+                "bucket": [1, 1, 2, 1, 1],
+                "value": [10, 14, 3, 6, 8],
+            }
+        )
+        stream_df = session.create_stream_from_arrow(table)
+        session.create_temp_view("events_stream_local_workers", stream_df)
+
+        with tempfile.TemporaryDirectory(prefix="velaria-py-stream-hot-path-") as tmp:
+            sink_path = str(pathlib.Path(tmp) / "sink.csv")
+            session.sql(
+                "CREATE SINK TABLE sink_local_workers "
+                "(segment STRING, bucket INT, value_sum INT, event_count INT, "
+                "min_value INT, max_value INT, avg_value DOUBLE) "
+                f"USING csv OPTIONS(path '{sink_path}', delimiter ',')"
+            )
+            query = session.start_stream_sql(
+                "INSERT INTO sink_local_workers "
+                "SELECT segment, bucket, SUM(value) AS value_sum, COUNT(*) AS event_count, "
+                "MIN(value) AS min_value, MAX(value) AS max_value, AVG(value) AS avg_value "
+                "FROM events_stream_local_workers GROUP BY segment, bucket",
+                trigger_interval_ms=0,
+                execution_mode="local-workers",
+                local_workers=4,
+                max_inflight_partitions=4,
+            )
+            query.start()
+            processed = query.await_termination()
+            progress = query.progress()
+
+            self.assertEqual(processed, 1)
+            self.assertEqual(progress["execution_mode"], "local-workers")
+            self.assertTrue(progress["actor_eligible"])
+            self.assertTrue(progress["used_actor_runtime"])
+            self.assertIn(progress["transport_mode"], ["shared-memory", "rpc-copy"])
+
+            with open(sink_path, newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+
+            keyed = {(row["segment"], int(float(row["bucket"]))): row for row in rows}
+            self.assertEqual(len(keyed), 3)
+            self.assertEqual(float(keyed[("alpha", 1)]["value_sum"]), 24.0)
+            self.assertEqual(float(keyed[("alpha", 1)]["event_count"]), 2.0)
+            self.assertEqual(float(keyed[("alpha", 1)]["min_value"]), 10.0)
+            self.assertEqual(float(keyed[("alpha", 1)]["max_value"]), 14.0)
+            self.assertAlmostEqual(float(keyed[("alpha", 1)]["avg_value"]), 12.0, places=5)
+            self.assertEqual(float(keyed[("alpha", 2)]["value_sum"]), 3.0)
+            self.assertEqual(float(keyed[("beta", 1)]["value_sum"]), 14.0)
+            self.assertAlmostEqual(float(keyed[("beta", 1)]["avg_value"]), 7.0, places=5)
+
+    def test_start_stream_sql_zero_worker_settings_fall_back_to_inproc_local_workers(self):
+        session = velaria.Session()
+        table = pa.table(
+            {
+                "ts": ["2026-03-29T10:00:00", "2026-03-29T10:00:10"],
+                "key": ["u1", "u1"],
+                "value": [1, 2],
+            }
+        )
+        stream_df = session.create_stream_from_arrow(table)
+        session.create_temp_view("events_stream_zero_workers", stream_df)
+
+        with tempfile.TemporaryDirectory(prefix="velaria-py-stream-zero-workers-") as tmp:
+            sink_path = str(pathlib.Path(tmp) / "sink.csv")
+            session.sql(
+                "CREATE SINK TABLE sink_zero_workers "
+                "(window_start STRING, key STRING, value_sum INT) "
+                f"USING csv OPTIONS(path '{sink_path}', delimiter ',')"
+            )
+            query = session.start_stream_sql(
+                "INSERT INTO sink_zero_workers "
+                "SELECT window_start, key, SUM(value) AS value_sum "
+                "FROM events_stream_zero_workers "
+                "WINDOW BY ts EVERY 60000 AS window_start "
+                "GROUP BY window_start, key",
+                trigger_interval_ms=0,
+                execution_mode="local-workers",
+                local_workers=0,
+                max_inflight_partitions=0,
+            )
+            query.start()
+            processed = query.await_termination()
+            progress = query.progress()
+
+            self.assertEqual(processed, 1)
+            self.assertEqual(progress["execution_mode"], "local-workers")
+            self.assertFalse(progress["used_actor_runtime"])
+            self.assertEqual(progress["transport_mode"], "inproc")
+            self.assertIn("local_workers > 1", progress["execution_reason"])
+
+            with open(sink_path, newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["window_start"], "2026-03-29T10:00:00")
+            self.assertEqual(rows[0]["key"], "u1")
+            self.assertEqual(float(rows[0]["value_sum"]), 3.0)
+
     def test_explain_stream_sql_returns_strategy_sections(self):
         session = velaria.Session()
         table = pa.table(
@@ -141,6 +243,33 @@ class StreamingV05Test(unittest.TestCase):
         self.assertIn("strategy\n", explain)
         self.assertIn("selected_mode", explain)
         self.assertIn("checkpoint_delivery_mode=best-effort", explain)
+
+    def test_explain_stream_sql_reports_local_workers_grouped_hot_path(self):
+        session = velaria.Session()
+        table = pa.table(
+            {
+                "segment": ["alpha", "alpha", "beta"],
+                "bucket": [1, 1, 1],
+                "value": [10, 14, 6],
+            }
+        )
+        stream_df = session.create_stream_from_arrow(table)
+        session.create_temp_view("events_stream_local_workers_explain", stream_df)
+
+        explain = session.explain_stream_sql(
+            "SELECT segment, bucket, SUM(value) AS value_sum, COUNT(*) AS event_count, "
+            "MIN(value) AS min_value, MAX(value) AS max_value, AVG(value) AS avg_value "
+            "FROM events_stream_local_workers_explain "
+            "GROUP BY segment, bucket",
+            trigger_interval_ms=0,
+            execution_mode="local-workers",
+            local_workers=4,
+            max_inflight_partitions=4,
+        )
+
+        self.assertIn("Aggregate keys=[segment, bucket]", explain)
+        self.assertIn("actor_eligible=true", explain)
+        self.assertIn("selected_mode=local-workers", explain)
 
     def test_explain_stream_sql_reports_having_actor_fallback_reason(self):
         session = velaria.Session()

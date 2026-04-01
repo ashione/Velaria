@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "src/dataflow/core/logical/planner/plan.h"
 #include "src/dataflow/core/execution/table.h"
 
 namespace dataflow {
@@ -67,7 +68,25 @@ struct LocalExecutionDecision {
   std::string reason;
 };
 
+struct LocalGroupedAggregateSpec {
+  struct Aggregate {
+    AggregateFunction function = AggregateFunction::Sum;
+    std::string value_column;
+    std::string output_column;
+    bool is_count_star = false;
+  };
+
+  std::vector<std::string> group_keys;
+  std::vector<Aggregate> aggregates;
+};
+
 const char* localExecutionModeName(LocalExecutionMode mode);
+Table runSingleProcessGroupedAggregate(const std::vector<Table>& batches,
+                                      const LocalGroupedAggregateSpec& aggregate,
+                                      size_t cpu_spin_per_row = 0);
+LocalActorStreamResult runLocalActorStreamGroupedAggregate(
+    const std::vector<Table>& batches, const LocalGroupedAggregateSpec& aggregate,
+    const LocalActorStreamOptions& options);
 Table runSingleProcessWindowKeySum(const std::vector<Table>& batches,
                                    size_t cpu_spin_per_row = 0);
 LocalActorStreamResult runLocalActorStreamWindowKeySum(const std::vector<Table>& batches,

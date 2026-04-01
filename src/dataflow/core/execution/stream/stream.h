@@ -382,7 +382,7 @@ class MemoryStreamSink : public StreamSink {
 
 enum class StreamTransformMode { PartitionLocal, GlobalBarrier };
 
-enum class StreamAcceleratorKind { None, WindowKeySum, WindowKeyCount };
+enum class StreamAcceleratorKind { None, GroupedAggregate };
 
 struct StreamAggregateSpec {
   AggregateFunction function = AggregateFunction::Sum;
@@ -395,7 +395,8 @@ struct StreamAggregateSpec {
 struct StreamAcceleratorSpec {
   StreamAcceleratorKind kind = StreamAcceleratorKind::None;
   bool stateful = false;
-  StreamAggregateSpec aggregate;
+  std::vector<std::string> group_keys;
+  std::vector<StreamAggregateSpec> aggregates;
 };
 
 class RuntimeSourceAdapter : public StreamSource {

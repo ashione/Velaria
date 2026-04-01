@@ -55,21 +55,24 @@ This document describes runtime internals and current implementation shape. For 
 
 ## Current Actor Pushdown Boundary
 
-当前只有少数固定形状的 query 会被 `LocalWorkers` 内部的 credit-based hot path 接住：
+当前只有满足 grouped-aggregate hot path 条件的 query 会被 `LocalWorkers` 内部的 credit-based 路径接住：
 
 - 前置变换全部为 `PartitionLocal`
-- 最后一个 barrier 是以下其一：
-  - `groupBy({"window_start", "key"}).sum("value", ...)`
-  - `groupBy({"window_start", "key"}).count(...)`
+- 最后一个 barrier 是 stateful grouped aggregate
+- aggregate 函数当前支持：
+  - `SUM`
+  - `COUNT(*)`
+  - `MIN`
+  - `MAX`
+  - `AVG`
 
-也就是说，当前 actor runtime 只服务于：
+也就是说，当前 actor runtime 现在服务于：
 
-- `window_start`
-- `key`
-- `value` 的窗口分组求和热路径
-- `COUNT(*)` 的窗口分组计数热路径
+- 任意 group key 列组合
+- 单聚合与多聚合输出
+- `AVG` 通过内部 `sum + count` helper state 收敛
 
-`MIN / MAX / AVG` 以及多 aggregate 输出当前仍走本地执行链；`LocalWorkers` 会明确写出 fallback reason。
+如果 query 不满足“最终 transform + stateful grouped aggregate + 支持函数集合”这条边界，`LocalWorkers` 会明确写出 fallback reason。
 
 如果 query 不满足这个形状，`StreamingQuery` 会回退到普通执行链，并把原因写入：
 
@@ -155,9 +158,9 @@ actor-stream payload 当前使用 typed binary batch：
 
 ## Recommended Next Steps
 
-1. 扩展 credit-based local acceleration 到 `count` 和更多 group aggregate。
-2. 给 query 级 progress 增加更细粒度的 accelerator 指标拆分。
-3. 继续把 source 到执行内核的中间 `Table/Row/Value` 转换收紧到更早的列式表示。
+1. 给 query 级 progress 增加更细粒度的 accelerator 指标拆分。
+2. 继续把 source 到执行内核的中间 `Table/Row/Value` 转换收紧到更早的列式表示。
+3. 评估是否要给 grouped-aggregate hot path 增加更细的 payload/schema 预编译缓存。
 
 
 ## Source/Sink ABI Bridge (v0.4)

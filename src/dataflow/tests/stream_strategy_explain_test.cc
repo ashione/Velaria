@@ -1,3 +1,5 @@
+#include <filesystem>
+#include <cmath>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -17,6 +19,7 @@ using dataflow::StreamingExecutionMode;
 using dataflow::StreamingQueryOptions;
 using dataflow::Table;
 using dataflow::Value;
+namespace fs = std::filesystem;
 
 void expect(bool condition, const std::string& message) {
   if (!condition) {
@@ -48,6 +51,19 @@ Table makeNonHotBatch() {
   return table;
 }
 
+Table makeGenericMultiAggregateBatch() {
+  Table table;
+  table.schema = dataflow::Schema({"segment", "bucket", "value"});
+  table.rows = {
+      {Value("alpha"), Value(int64_t(1)), Value(int64_t(10))},
+      {Value("alpha"), Value(int64_t(1)), Value(int64_t(14))},
+      {Value("alpha"), Value(int64_t(2)), Value(int64_t(3))},
+      {Value("beta"), Value(int64_t(1)), Value(int64_t(6))},
+      {Value("beta"), Value(int64_t(1)), Value(int64_t(8))},
+  };
+  return table;
+}
+
 std::unordered_map<std::string, double> sumTableToMap(const Table& table) {
   std::unordered_map<std::string, double> out;
   const auto window_idx = table.schema.indexOf("window_start");
@@ -68,6 +84,51 @@ std::unordered_map<std::string, double> countTableToMap(const Table& table) {
     out[row[window_idx].toString() + "|" + row[key_idx].toString()] = row[value_idx].asDouble();
   }
   return out;
+}
+
+struct AggregateRow {
+  int64_t sum = 0;
+  int64_t count = 0;
+  int64_t min = 0;
+  int64_t max = 0;
+  double avg = 0.0;
+};
+
+std::unordered_map<std::string, AggregateRow> multiAggregateTableToMap(const Table& table) {
+  std::unordered_map<std::string, AggregateRow> out;
+  const auto segment_idx = table.schema.indexOf("segment");
+  const auto bucket_idx = table.schema.indexOf("bucket");
+  const auto sum_idx = table.schema.indexOf("value_sum");
+  const auto count_idx = table.schema.indexOf("event_count");
+  const auto min_idx = table.schema.indexOf("min_value");
+  const auto max_idx = table.schema.indexOf("max_value");
+  const auto avg_idx = table.schema.indexOf("avg_value");
+  for (const auto& row : table.rows) {
+    out[row[segment_idx].toString() + "|" + row[bucket_idx].toString()] = AggregateRow{
+        row[sum_idx].asInt64(),
+        row[count_idx].asInt64(),
+        row[min_idx].asInt64(),
+        row[max_idx].asInt64(),
+        row[avg_idx].asDouble(),
+    };
+  }
+  return out;
+}
+
+void expectAggregateMapsEqual(const std::unordered_map<std::string, AggregateRow>& lhs,
+                              const std::unordered_map<std::string, AggregateRow>& rhs,
+                              const std::string& message) {
+  expect(lhs.size() == rhs.size(), message + ": size");
+  for (const auto& entry : lhs) {
+    const auto it = rhs.find(entry.first);
+    expect(it != rhs.end(), message + ": missing key " + entry.first);
+    expect(entry.second.sum == it->second.sum, message + ": sum mismatch for " + entry.first);
+    expect(entry.second.count == it->second.count, message + ": count mismatch for " + entry.first);
+    expect(entry.second.min == it->second.min, message + ": min mismatch for " + entry.first);
+    expect(entry.second.max == it->second.max, message + ": max mismatch for " + entry.first);
+    expect(std::fabs(entry.second.avg - it->second.avg) < 1e-9,
+           message + ": avg mismatch for " + entry.first);
+  }
 }
 
 struct QueryRun {
@@ -120,6 +181,10 @@ void testExplainStreamSql() {
   session.createTempView(
       "strategy_hot_events",
       session.readStream(std::make_shared<MemoryStreamSource>(std::vector<Table>{makeHotPathBatch()})));
+  session.createTempView(
+      "strategy_generic_events",
+      session.readStream(
+          std::make_shared<MemoryStreamSource>(std::vector<Table>{makeGenericMultiAggregateBatch()})));
   session.sql(
       "CREATE SINK TABLE strategy_hot_sink (window_start STRING, key STRING, value_sum INT) "
       "USING csv OPTIONS(path '/tmp/velaria-stream-strategy-explain.csv', delimiter ',')");
@@ -128,7 +193,7 @@ void testExplainStreamSql() {
       "USING csv OPTIONS(path '/tmp/velaria-stream-strategy-count-explain.csv', delimiter ',')");
   session.sql(
       "CREATE SINK TABLE strategy_multi_sink "
-      "(window_start STRING, key STRING, event_count INT, avg_value DOUBLE) "
+      "(segment STRING, bucket INT, value_sum INT, event_count INT, min_value INT, max_value INT, avg_value DOUBLE) "
       "USING csv OPTIONS(path '/tmp/velaria-stream-strategy-multi-explain.csv', delimiter ',')");
 
   StreamingQueryOptions options;
@@ -141,7 +206,6 @@ void testExplainStreamSql() {
       "SELECT window_start, key, SUM(value) AS value_sum "
       "FROM strategy_hot_events GROUP BY window_start, key",
       options);
-
   expect(explain.find("logical\n") != std::string::npos, "explain should contain logical section");
   expect(explain.find("physical\n") != std::string::npos, "explain should contain physical section");
   expect(explain.find("strategy\n") != std::string::npos, "explain should contain strategy section");
@@ -166,13 +230,16 @@ void testExplainStreamSql() {
 
   const std::string multi_explain = session.explainStreamSql(
       "INSERT INTO strategy_multi_sink "
-      "SELECT window_start, key, COUNT(*) AS event_count, AVG(value) AS avg_value "
-      "FROM strategy_hot_events GROUP BY window_start, key",
+      "SELECT segment, bucket, SUM(value) AS value_sum, COUNT(*) AS event_count, "
+      "MIN(value) AS min_value, MAX(value) AS max_value, AVG(value) AS avg_value "
+      "FROM strategy_generic_events GROUP BY segment, bucket",
       options);
   expect(multi_explain.find("AVG(value) AS avg_value") != std::string::npos,
          "multi explain should describe avg aggregate");
-  expect(multi_explain.find("actor_eligible=false") != std::string::npos,
-         "multi explain should disable actor eligibility for multi aggregate");
+  expect(multi_explain.find("Aggregate keys=[segment, bucket]") != std::string::npos,
+         "multi explain should describe generic aggregate keys");
+  expect(multi_explain.find("actor_eligible=true") != std::string::npos,
+         "multi explain should enable actor eligibility for grouped multi aggregate");
 
   const std::string having_explain = session.explainStreamSql(
       "INSERT INTO strategy_hot_sink "
@@ -196,7 +263,6 @@ void testExecutionModeConsistency() {
 
   const auto baseline = sumTableToMap(single.table);
   expect(sumTableToMap(local.table) == baseline, "local-workers result should match single-process");
-
   expect(single.progress.execution_mode == "single-process",
          "single-process progress should keep single-process mode");
   expect(local.progress.execution_mode == "local-workers",
@@ -206,6 +272,7 @@ void testExecutionModeConsistency() {
   expect(local.progress.transport_mode == "shared-memory" ||
              local.progress.transport_mode == "rpc-copy",
          "eligible local-workers hot path should expose accelerator transport mode");
+
   const auto count_single = runCountHotPath(StreamingExecutionMode::SingleProcess);
   const auto count_local = runCountHotPath(StreamingExecutionMode::LocalWorkers);
   expect(countTableToMap(count_local.table) == countTableToMap(count_single.table),
@@ -214,6 +281,63 @@ void testExecutionModeConsistency() {
          "count local-workers hot path should stay in local-workers mode");
   expect(count_local.progress.used_actor_runtime,
          "count local-workers hot path should use the credit accelerator");
+}
+
+void testMultiAggregateHotPathWithGenericKeys() {
+  DataflowSession& session = DataflowSession::builder();
+  fs::remove("/tmp/velaria-stream-strategy-generic-single.csv");
+  fs::remove("/tmp/velaria-stream-strategy-generic-local.csv");
+  session.createTempView(
+      "strategy_generic_multi_events_single",
+      session.readStream(
+          std::make_shared<MemoryStreamSource>(std::vector<Table>{makeGenericMultiAggregateBatch()})));
+  session.createTempView(
+      "strategy_generic_multi_events_local",
+      session.readStream(
+          std::make_shared<MemoryStreamSource>(std::vector<Table>{makeGenericMultiAggregateBatch()})));
+  session.sql(
+      "CREATE SINK TABLE strategy_generic_multi_single "
+      "(segment STRING, bucket INT, value_sum INT, event_count INT, min_value INT, max_value INT, avg_value DOUBLE) "
+      "USING csv OPTIONS(path '/tmp/velaria-stream-strategy-generic-single.csv', delimiter ',')");
+  session.sql(
+      "CREATE SINK TABLE strategy_generic_multi_local "
+      "(segment STRING, bucket INT, value_sum INT, event_count INT, min_value INT, max_value INT, avg_value DOUBLE) "
+      "USING csv OPTIONS(path '/tmp/velaria-stream-strategy-generic-local.csv', delimiter ',')");
+
+  StreamingQueryOptions single_options;
+  single_options.trigger_interval_ms = 0;
+  single_options.execution_mode = StreamingExecutionMode::SingleProcess;
+
+  StreamingQueryOptions local_options;
+  local_options.trigger_interval_ms = 0;
+  local_options.execution_mode = StreamingExecutionMode::LocalWorkers;
+  local_options.local_workers = 4;
+  local_options.max_inflight_partitions = 4;
+
+  auto single_query = session.startStreamSql(
+      "INSERT INTO strategy_generic_multi_single "
+      "SELECT segment, bucket, SUM(value) AS value_sum, COUNT(*) AS event_count, "
+      "MIN(value) AS min_value, MAX(value) AS max_value, AVG(value) AS avg_value "
+      "FROM strategy_generic_multi_events_single GROUP BY segment, bucket",
+      single_options);
+  auto local_query = session.startStreamSql(
+      "INSERT INTO strategy_generic_multi_local "
+      "SELECT segment, bucket, SUM(value) AS value_sum, COUNT(*) AS event_count, "
+      "MIN(value) AS min_value, MAX(value) AS max_value, AVG(value) AS avg_value "
+      "FROM strategy_generic_multi_events_local GROUP BY segment, bucket",
+      local_options);
+  expect(single_query.awaitTermination(1) == 1, "single-process multi aggregate should process one batch");
+  expect(local_query.awaitTermination(1) == 1, "local-workers multi aggregate should process one batch");
+
+  const auto single_table = session.read_csv("/tmp/velaria-stream-strategy-generic-single.csv").toTable();
+  const auto local_table = session.read_csv("/tmp/velaria-stream-strategy-generic-local.csv").toTable();
+  expectAggregateMapsEqual(multiAggregateTableToMap(local_table),
+                           multiAggregateTableToMap(single_table),
+                           "generic multi aggregate output should match single-process");
+  expect(local_query.progress().execution_mode == "local-workers",
+         "generic multi aggregate should stay in local-workers mode");
+  expect(local_query.progress().used_actor_runtime,
+         "generic multi aggregate should use the credit accelerator");
 }
 
 void testLocalWorkersFallbackForNonHotPath() {
@@ -230,6 +354,7 @@ void testLocalWorkersFallbackForNonHotPath() {
                    .withStateStore(dataflow::makeMemoryStateStore())
                    .groupBy({"key"})
                    .count(true, "event_count")
+                   .filter("event_count", ">", Value(int64_t(0)))
                    .writeStream(sink, options);
   query.start();
   expect(query.awaitTermination() == 1, "non-hot-path query should process one batch");
@@ -278,6 +403,7 @@ int main() {
   try {
     testExplainStreamSql();
     testExecutionModeConsistency();
+    testMultiAggregateHotPathWithGenericKeys();
     testLocalWorkersFallbackForNonHotPath();
     testLocalWorkersSingleWorkerDisablesCreditAcceleration();
     std::cout << "[test] stream strategy explain ok" << std::endl;

@@ -382,8 +382,7 @@ bool queryHasStatefulOps(const std::vector<StreamTransform>& transforms) {
 
 bool queryHasWindowOps(const std::vector<StreamTransform>& transforms) {
   return std::any_of(transforms.begin(), transforms.end(), [](const StreamTransform& transform) {
-    return transform.label().find("window") != std::string::npos ||
-           transform.accelerator().kind != StreamAcceleratorKind::None;
+    return transform.label().find("window") != std::string::npos;
   });
 }
 
@@ -432,8 +431,30 @@ ActorAccelerationAnalysis analyzeActorAcceleration(const std::vector<StreamTrans
     return analysis;
   }
   analysis.eligible = true;
-  analysis.reason = "query plan is eligible for actor acceleration";
+  analysis.reason = "query plan is eligible for local-worker credit acceleration";
   return analysis;
+}
+
+std::string actorStateAverageSumColumnName(const std::string& output_column) {
+  return "__state_sum_" + output_column;
+}
+
+std::string actorStateAverageCountColumnName(const std::string& output_column) {
+  return "__state_count_" + output_column;
+}
+
+LocalGroupedAggregateSpec toLocalGroupedAggregateSpec(const StreamAcceleratorSpec& accelerator) {
+  LocalGroupedAggregateSpec aggregate;
+  aggregate.group_keys = accelerator.group_keys;
+  for (const auto& stream_aggregate : accelerator.aggregates) {
+    aggregate.aggregates.push_back(LocalGroupedAggregateSpec::Aggregate{
+        stream_aggregate.function,
+        stream_aggregate.value_column,
+        stream_aggregate.output_column,
+        stream_aggregate.is_count_star,
+    });
+  }
+  return aggregate;
 }
 
 size_t estimateInitialBatchCost(const std::vector<StreamTransform>& transforms) {
@@ -682,28 +703,45 @@ Table applyStatefulGroupedAggregates(const Table& input, const std::vector<std::
   return out;
 }
 
-bool canRunActorWindowKeyAggregate(const Table& table, const StreamAcceleratorSpec& accelerator) {
-  if (!table.schema.has("window_start") || !table.schema.has("key")) {
+bool canRunActorGroupedAggregate(const Table& table, const StreamAcceleratorSpec& accelerator) {
+  if (accelerator.kind != StreamAcceleratorKind::GroupedAggregate ||
+      accelerator.group_keys.empty() || accelerator.aggregates.empty()) {
     return false;
   }
-  if (accelerator.kind == StreamAcceleratorKind::WindowKeySum) {
-    return table.schema.has("value");
+  for (const auto& key : accelerator.group_keys) {
+    if (!table.schema.has(key)) return false;
   }
-  return accelerator.kind == StreamAcceleratorKind::WindowKeyCount;
+  for (const auto& aggregate : accelerator.aggregates) {
+    if (aggregate.function != AggregateFunction::Count && !table.schema.has(aggregate.value_column)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 Table buildActorAggregateInput(const Table& table, const StreamAcceleratorSpec& accelerator) {
-  if (accelerator.kind != StreamAcceleratorKind::WindowKeyCount) {
+  if (accelerator.kind != StreamAcceleratorKind::GroupedAggregate) {
     return table;
   }
 
-  Table out(Schema({"window_start", "key", "value"}), {});
-  const auto window_idx = table.schema.indexOf("window_start");
-  const auto key_idx = table.schema.indexOf("key");
+  std::vector<std::string> columns = accelerator.group_keys;
+  for (const auto& aggregate : accelerator.aggregates) {
+    if (aggregate.function == AggregateFunction::Count) continue;
+    if (std::find(columns.begin(), columns.end(), aggregate.value_column) == columns.end()) {
+      columns.push_back(aggregate.value_column);
+    }
+  }
+
+  Table out;
+  out.schema = Schema(columns);
   out.rows.reserve(table.rows.size());
   for (const auto& row : table.rows) {
-    out.rows.push_back(
-        {row[window_idx], row[key_idx], Value(static_cast<int64_t>(1))});
+    Row projected;
+    projected.reserve(columns.size());
+    for (const auto& column : columns) {
+      projected.push_back(row[table.schema.indexOf(column)]);
+    }
+    out.rows.push_back(std::move(projected));
   }
   return out;
 }
@@ -716,46 +754,113 @@ void renameColumn(Table* table, const std::string& from, const std::string& to) 
   table->schema.index[to] = idx;
 }
 
-Table finalizeActorWindowKeyAggregateOutput(Table aggregated, const StreamAcceleratorSpec& accelerator,
-                                            std::shared_ptr<StateStore> state,
-                                            const StreamingQueryOptions& options,
-                                            uint64_t* state_ms) {
+Table finalizeActorGroupedAggregateOutput(Table aggregated, const StreamAcceleratorSpec& accelerator,
+                                          std::shared_ptr<StateStore> state,
+                                          const StreamingQueryOptions& options,
+                                          uint64_t* state_ms) {
   auto started = std::chrono::steady_clock::now();
-  const auto output_name = accelerator.aggregate.output_column.empty()
-                               ? "value_sum"
-                               : accelerator.aggregate.output_column;
-  renameColumn(&aggregated, "value_sum", output_name);
-  const auto value_idx = aggregated.schema.indexOf(output_name);
-  if (accelerator.kind == StreamAcceleratorKind::WindowKeyCount) {
-    for (auto& row : aggregated.rows) {
-      row[value_idx] = Value(static_cast<int64_t>(row[value_idx].asDouble()));
-    }
+  Table out;
+  out.schema.fields = accelerator.group_keys;
+  for (const auto& aggregate : accelerator.aggregates) {
+    out.schema.fields.push_back(aggregate.output_column);
   }
+  for (size_t i = 0; i < out.schema.fields.size(); ++i) {
+    out.schema.index[out.schema.fields[i]] = i;
+  }
+
   if (!accelerator.stateful) {
+    out.rows.reserve(aggregated.rows.size());
+    for (const auto& row : aggregated.rows) {
+      Row out_row;
+      out_row.reserve(out.schema.fields.size());
+      for (const auto& key : accelerator.group_keys) {
+        out_row.push_back(row[aggregated.schema.indexOf(key)]);
+      }
+      for (const auto& aggregate : accelerator.aggregates) {
+        out_row.push_back(row[aggregated.schema.indexOf(aggregate.output_column)]);
+      }
+      out.rows.push_back(std::move(out_row));
+    }
     if (state_ms != nullptr) *state_ms = 0;
-    return aggregated;
+    return out;
   }
 
   auto state_store = state ? state : makeMemoryStateStore();
-  const size_t window_idx = aggregated.schema.indexOf("window_start");
-  const size_t key_idx = aggregated.schema.indexOf("key");
-  const auto label = stateLabelForAggregate(accelerator.aggregate);
-  for (auto& row : aggregated.rows) {
-    const auto state_key = makeStateKey(row, {window_idx, key_idx}, label + ":");
-    const double delta = row[value_idx].asDouble();
-    const double next = state_store->addDouble(state_key, delta);
-    if (accelerator.kind == StreamAcceleratorKind::WindowKeyCount) {
-      row[value_idx] = Value(static_cast<int64_t>(next));
-    } else {
-      row[value_idx] = Value(next);
-    }
-    registerWindowState(state_store.get(), label, row[window_idx].toString(), state_key);
+  std::vector<size_t> state_key_indices;
+  state_key_indices.reserve(accelerator.group_keys.size());
+  for (size_t i = 0; i < accelerator.group_keys.size(); ++i) {
+    state_key_indices.push_back(i);
   }
-  evictExpiredWindows(state_store.get(), label, options);
+  size_t window_pos = 0;
+  const bool has_window = findWindowKeyPosition(accelerator.group_keys, &window_pos);
+  std::unordered_set<std::string> touched_labels;
+  out.rows.reserve(aggregated.rows.size());
+  for (const auto& row : aggregated.rows) {
+    Row out_row;
+    out_row.reserve(out.schema.fields.size());
+    for (const auto& key : accelerator.group_keys) {
+      out_row.push_back(row[aggregated.schema.indexOf(key)]);
+    }
+    for (const auto& aggregate : accelerator.aggregates) {
+      const auto label = stateLabelForAggregate(aggregate);
+      touched_labels.insert(label);
+      const auto state_key = makeStateKey(out_row, state_key_indices, label + ":");
+      if (aggregate.function == AggregateFunction::Sum) {
+        const double delta = row[aggregated.schema.indexOf(aggregate.output_column)].asDouble();
+        out_row.push_back(Value(state_store->addDouble(state_key, delta)));
+      } else if (aggregate.function == AggregateFunction::Count) {
+        const double delta = static_cast<double>(
+            row[aggregated.schema.indexOf(aggregate.output_column)].asInt64());
+        out_row.push_back(Value(static_cast<int64_t>(state_store->addDouble(state_key, delta))));
+      } else if (aggregate.function == AggregateFunction::Avg) {
+        const double delta_sum =
+            row[aggregated.schema.indexOf(actorStateAverageSumColumnName(aggregate.output_column))]
+                .asDouble();
+        const int64_t delta_count = row[aggregated.schema.indexOf(
+                                            actorStateAverageCountColumnName(aggregate.output_column))]
+                                        .asInt64();
+        std::string raw;
+        double current_sum = 0.0;
+        int64_t current_count = 0;
+        if (state_store->get(state_key, &raw)) {
+          parseAverageState(raw, &current_sum, &current_count);
+        }
+        current_sum += delta_sum;
+        current_count += delta_count;
+        state_store->put(state_key, serializeAverageState(current_sum, current_count));
+        out_row.push_back(
+            Value(current_count == 0 ? 0.0 : current_sum / static_cast<double>(current_count)));
+      } else {
+        const Value batch_value = row[aggregated.schema.indexOf(aggregate.output_column)];
+        std::string raw;
+        Value current_value;
+        const bool has_current =
+            state_store->get(state_key, &raw) && parseStateValue(raw, &current_value);
+        bool replace = !has_current;
+        if (aggregate.function == AggregateFunction::Min) {
+          replace = replace || batch_value < current_value;
+        } else {
+          replace = replace || batch_value > current_value;
+        }
+        if (replace) {
+          current_value = batch_value;
+          state_store->put(state_key, serializeStateValue(current_value));
+        }
+        out_row.push_back(current_value);
+      }
+      if (has_window && window_pos < out_row.size()) {
+        registerWindowState(state_store.get(), label, out_row[window_pos].toString(), state_key);
+      }
+    }
+    out.rows.push_back(std::move(out_row));
+  }
+  for (const auto& label : touched_labels) {
+    evictExpiredWindows(state_store.get(), label, options);
+  }
   if (state_ms != nullptr) {
     *state_ms = toMillis(std::chrono::steady_clock::now() - started);
   }
-  return aggregated;
+  return out;
 }
 
 }  // namespace
@@ -1666,17 +1771,11 @@ StreamingDataFrame GroupedStreamingDataFrame::aggregate(
     const std::vector<StreamAggregateSpec>& specs, bool stateful) const {
   auto t = transforms_;
   StreamAcceleratorSpec accelerator;
-  if (specs.size() == 1 && keys_ == std::vector<std::string>{"window_start", "key"}) {
-    const auto& spec = specs.front();
-    if (spec.function == AggregateFunction::Sum && spec.value_column == "value") {
-      accelerator.kind = StreamAcceleratorKind::WindowKeySum;
-      accelerator.stateful = stateful;
-      accelerator.aggregate = spec;
-    } else if (spec.function == AggregateFunction::Count && spec.is_count_star) {
-      accelerator.kind = StreamAcceleratorKind::WindowKeyCount;
-      accelerator.stateful = stateful;
-      accelerator.aggregate = spec;
-    }
+  if (stateful && !keys_.empty() && !specs.empty()) {
+    accelerator.kind = StreamAcceleratorKind::GroupedAggregate;
+    accelerator.stateful = true;
+    accelerator.group_keys = keys_;
+    accelerator.aggregates = specs;
   }
 
   if (!stateful) {
@@ -2002,19 +2101,20 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
       Table actor_input = buildActorAggregateInput(
           executePartitionStage(envelope.table, actor_prefix_transforms, options_, 1),
           actor_accelerator);
-      if (canRunActorWindowKeyAggregate(actor_input, actor_accelerator)) {
+      if (canRunActorGroupedAggregate(actor_input, actor_accelerator)) {
         const auto actor_options = makeAcceleratorOptions(options_);
-        auto actor_result =
-            runLocalActorStreamWindowKeySum(std::vector<Table>{actor_input}, actor_options);
-        out = finalizeActorWindowKeyAggregateOutput(std::move(actor_result.final_table),
-                                                    actor_accelerator, root_.state_, options_,
-                                                    &state_ms);
+        auto actor_result = runLocalActorStreamGroupedAggregate(
+            std::vector<Table>{actor_input}, toLocalGroupedAggregateSpec(actor_accelerator),
+            actor_options);
+        out = finalizeActorGroupedAggregateOutput(std::move(actor_result.final_table),
+                                                  actor_accelerator, root_.state_, options_,
+                                                  &state_ms);
         partitions_used = std::max<size_t>(1, actor_result.processed_partitions);
         used_actor_runtime = true;
         execution_decided_ = true;
         resolved_execution_mode_ = StreamingExecutionMode::LocalWorkers;
         execution_reason_ =
-            "configured local-workers execution; using credit-based scheduling for the eligible hot path";
+            "configured local-workers execution; using credit-based scheduling for the eligible grouped aggregate hot path";
         strategy_decision_.resolved_execution_mode =
             streamingExecutionModeName(resolved_execution_mode_);
         strategy_decision_.reason = execution_reason_;
@@ -2030,7 +2130,7 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
         execution_decided_ = true;
         resolved_execution_mode_ = StreamingExecutionMode::LocalWorkers;
         execution_reason_ =
-            "configured local-workers execution; using generic partition workers because credit scheduling requires window_start/key with supported SUM(value) or COUNT(*) shape";
+            "configured local-workers execution; using generic partition workers because credit scheduling requires a final stateful grouped aggregate with supported SUM/COUNT/MIN/MAX/AVG outputs";
         strategy_decision_.resolved_execution_mode =
             streamingExecutionModeName(resolved_execution_mode_);
         strategy_decision_.reason = execution_reason_;

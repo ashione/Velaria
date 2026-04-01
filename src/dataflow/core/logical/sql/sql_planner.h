@@ -77,10 +77,10 @@ struct StreamPlanNode {
   std::vector<std::string> columns;
   std::vector<std::pair<std::string, std::string>> aliases;
   std::vector<std::string> group_keys;
+  std::vector<StreamAggregateSpec> aggregates;
   std::string value_column;
   std::string output_column;
   bool stateful = false;
-  bool is_count_star = false;
   std::size_t limit = 0;
   uint64_t window_ms = 0;
 };

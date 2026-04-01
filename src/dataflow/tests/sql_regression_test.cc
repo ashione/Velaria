@@ -344,14 +344,63 @@ void runStreamSqlRegression() {
       },
       "does not support JOIN");
 
-  expectThrows(
-      "stream_sql_avg_rejected",
-      [&]() {
-        s.streamSql(
-            "SELECT key, AVG(value) AS avg_value "
-            "FROM stream_events_csv_v1 GROUP BY key");
-      },
-      "only supports SUM and COUNT(*)");
+  const std::string multi_sink_path = "/tmp/velaria-stream-sql-multi-aggregate-output.csv";
+  fs::remove(multi_sink_path);
+  dataflow::Table multi_batch;
+  multi_batch.schema = dataflow::Schema({"key", "value"});
+  multi_batch.rows = {
+      {Value("userA"), Value(int64_t(10))},
+      {Value("userA"), Value(int64_t(5))},
+      {Value("userA"), Value(int64_t(7))},
+      {Value("userB"), Value(int64_t(20))},
+  };
+  s.createTempView(
+      "stream_multi_events_v1",
+      s.readStream(std::make_shared<dataflow::MemoryStreamSource>(std::vector<Table>{multi_batch})));
+  s.sql(
+      "CREATE SINK TABLE stream_multi_summary_v1 "
+      "(key STRING, value_sum INT, event_count INT, min_value INT, max_value INT, avg_value DOUBLE) "
+      "USING csv OPTIONS(path '" +
+      multi_sink_path + "', delimiter ',')");
+
+  dataflow::StreamingQueryOptions multi_options;
+  multi_options.trigger_interval_ms = 0;
+
+  auto multi_query = s.startStreamSql(
+      "INSERT INTO stream_multi_summary_v1 "
+      "SELECT key, SUM(value) AS value_sum, COUNT(*) AS event_count, "
+      "MIN(value) AS min_value, MAX(value) AS max_value, AVG(value) AS avg_value "
+      "FROM stream_multi_events_v1 "
+      "GROUP BY key "
+      "HAVING avg_value > 7",
+      multi_options);
+  expect(multi_query.awaitTermination(1) == 1, "stream_sql_multi_aggregate_processed_batches");
+
+  const auto multi_sink_table = s.read_csv(multi_sink_path).toTable();
+  expect(multi_sink_table.rows.size() == 2, "stream_sql_multi_aggregate_rows");
+  bool has_multi_user_a = false;
+  bool has_multi_user_b = false;
+  const auto multi_key_idx = multi_sink_table.schema.indexOf("key");
+  const auto multi_sum_idx = multi_sink_table.schema.indexOf("value_sum");
+  const auto multi_count_idx = multi_sink_table.schema.indexOf("event_count");
+  const auto multi_min_idx = multi_sink_table.schema.indexOf("min_value");
+  const auto multi_max_idx = multi_sink_table.schema.indexOf("max_value");
+  const auto multi_avg_idx = multi_sink_table.schema.indexOf("avg_value");
+  for (const auto& row : multi_sink_table.rows) {
+    if (row[multi_key_idx].toString() == "userA" && row[multi_sum_idx].asInt64() == 22 &&
+        row[multi_count_idx].asInt64() == 3 && row[multi_min_idx].asInt64() == 5 &&
+        row[multi_max_idx].asInt64() == 10 && row[multi_avg_idx].asDouble() > 7.3 &&
+        row[multi_avg_idx].asDouble() < 7.4) {
+      has_multi_user_a = true;
+    }
+    if (row[multi_key_idx].toString() == "userB" && row[multi_sum_idx].asInt64() == 20 &&
+        row[multi_count_idx].asInt64() == 1 && row[multi_min_idx].asInt64() == 20 &&
+        row[multi_max_idx].asInt64() == 20 && row[multi_avg_idx].asDouble() == 20.0) {
+      has_multi_user_b = true;
+    }
+  }
+  expect(has_multi_user_a, "stream_sql_multi_aggregate_user_a");
+  expect(has_multi_user_b, "stream_sql_multi_aggregate_user_b");
 
   expectThrows(
       "stream_sql_regular_csv_rejected",
@@ -418,6 +467,47 @@ void runStreamSqlRegression() {
   }
   expect(has_window_user_a, "stream_sql_window_sink_has_user_a");
   expect(has_window_user_b, "stream_sql_window_sink_has_user_b");
+
+  const std::string window_count_sink_path = "/tmp/velaria-stream-window-count-sql-regression-output.csv";
+  fs::remove(window_count_sink_path);
+  s.sql(
+      "CREATE SINK TABLE stream_window_count_summary_v1 "
+      "(window_start STRING, key STRING, event_count INT) "
+      "USING csv OPTIONS(path '" +
+      window_count_sink_path + "', delimiter ',')");
+
+  auto window_count_query = s.startStreamSql(
+      "INSERT INTO stream_window_count_summary_v1 "
+      "SELECT window_start, key, COUNT(*) AS event_count "
+      "FROM stream_window_events_v1 "
+      "WINDOW BY ts EVERY 60000 AS window_start "
+      "GROUP BY window_start, key",
+      window_options);
+  expect(window_count_query.awaitTermination() == 1, "stream_sql_window_count_processed_batches");
+  expect(window_count_query.progress().execution_mode == "actor-credit",
+         "stream_sql_window_count_actor_hot_path");
+
+  const auto window_count_sink_table = s.read_csv(window_count_sink_path).toTable();
+  expect(window_count_sink_table.rows.size() == 2, "stream_sql_window_count_sink_rows");
+  bool has_count_user_a = false;
+  bool has_count_user_b = false;
+  const auto count_window_idx = window_count_sink_table.schema.indexOf("window_start");
+  const auto count_key_idx = window_count_sink_table.schema.indexOf("key");
+  const auto count_value_idx = window_count_sink_table.schema.indexOf("event_count");
+  for (const auto& row : window_count_sink_table.rows) {
+    if (row[count_window_idx].toString() == "2026-03-29T10:00:00" &&
+        row[count_key_idx].toString() == "userA" &&
+        row[count_value_idx].asInt64() == 2) {
+      has_count_user_a = true;
+    }
+    if (row[count_window_idx].toString() == "2026-03-29T10:01:00" &&
+        row[count_key_idx].toString() == "userB" &&
+        row[count_value_idx].asInt64() == 1) {
+      has_count_user_b = true;
+    }
+  }
+  expect(has_count_user_a, "stream_sql_window_count_sink_has_user_a");
+  expect(has_count_user_b, "stream_sql_window_count_sink_has_user_b");
 }
 
 }  // namespace

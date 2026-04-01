@@ -1,12 +1,16 @@
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <iomanip>
 #include <iostream>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "src/dataflow/core/contract/api/session.h"
@@ -52,6 +56,174 @@ class CollectSink : public dataflow::StreamSink {
   std::vector<dataflow::Table> batches_;
 };
 
+class PersistentStateStore : public dataflow::StateStore {
+ public:
+  explicit PersistentStateStore(std::string path) : path_(std::move(path)) { load(); }
+
+  bool get(const std::string& key, std::string* out) const override {
+    const auto it = values_.find(key);
+    if (it == values_.end()) return false;
+    if (out != nullptr) *out = it->second;
+    return true;
+  }
+
+  void put(const std::string& key, const std::string& value) override {
+    values_[key] = value;
+    flush();
+  }
+
+  bool remove(const std::string& key) override {
+    const bool removed = values_.erase(key) > 0;
+    if (removed) flush();
+    return removed;
+  }
+
+  bool getMapField(const std::string& mapKey, const std::string& field,
+                   std::string* out) const override {
+    const auto map_it = maps_.find(mapKey);
+    if (map_it == maps_.end()) return false;
+    const auto field_it = map_it->second.find(field);
+    if (field_it == map_it->second.end()) return false;
+    if (out != nullptr) *out = field_it->second;
+    return true;
+  }
+
+  void putMapField(const std::string& mapKey, const std::string& field,
+                   const std::string& value) override {
+    maps_[mapKey][field] = value;
+    flush();
+  }
+
+  bool removeMapField(const std::string& mapKey, const std::string& field) override {
+    const auto map_it = maps_.find(mapKey);
+    if (map_it == maps_.end()) return false;
+    const bool removed = map_it->second.erase(field) > 0;
+    if (map_it->second.empty()) {
+      maps_.erase(map_it);
+    }
+    if (removed) flush();
+    return removed;
+  }
+
+  bool getMapFields(const std::string& mapKey, std::vector<std::string>* fields) const override {
+    if (fields == nullptr) return false;
+    fields->clear();
+    const auto map_it = maps_.find(mapKey);
+    if (map_it == maps_.end()) return false;
+    for (const auto& entry : map_it->second) {
+      fields->push_back(entry.first);
+    }
+    return !fields->empty();
+  }
+
+  bool getValueList(const std::string& listKey, std::vector<std::string>* values) const override {
+    if (values == nullptr) return false;
+    values->clear();
+    const auto it = lists_.find(listKey);
+    if (it == lists_.end()) return false;
+    *values = it->second;
+    return true;
+  }
+
+  bool setValueList(const std::string& listKey,
+                    const std::vector<std::string>& values) override {
+    lists_[listKey] = values;
+    flush();
+    return true;
+  }
+
+  bool appendValueToList(const std::string& listKey, const std::string& value) override {
+    lists_[listKey].push_back(value);
+    flush();
+    return true;
+  }
+
+  bool popValueFromList(const std::string& listKey, std::string* value) override {
+    const auto it = lists_.find(listKey);
+    if (it == lists_.end() || it->second.empty()) return false;
+    if (value != nullptr) *value = it->second.back();
+    it->second.pop_back();
+    if (it->second.empty()) {
+      lists_.erase(it);
+    }
+    flush();
+    return true;
+  }
+
+  bool listKeys(std::vector<std::string>* keys) const override {
+    if (keys == nullptr) return false;
+    keys->clear();
+    for (const auto& entry : values_) {
+      keys->push_back(entry.first);
+    }
+    return !keys->empty();
+  }
+
+  void close() override { flush(); }
+
+ private:
+  void load() {
+    std::ifstream in(path_);
+    if (!in) return;
+    std::string tag;
+    while (in >> tag) {
+      if (tag == "K") {
+        std::string key;
+        std::string value;
+        in >> std::quoted(key) >> std::quoted(value);
+        values_[key] = value;
+      } else if (tag == "M") {
+        std::string map_key;
+        std::string field;
+        std::string value;
+        in >> std::quoted(map_key) >> std::quoted(field) >> std::quoted(value);
+        maps_[map_key][field] = value;
+      } else if (tag == "L") {
+        std::string list_key;
+        size_t size = 0;
+        in >> std::quoted(list_key) >> size;
+        auto& list = lists_[list_key];
+        list.clear();
+        for (size_t i = 0; i < size; ++i) {
+          std::string value;
+          in >> std::quoted(value);
+          list.push_back(value);
+        }
+      } else {
+        throw std::runtime_error("persistent state store encountered unknown record");
+      }
+    }
+  }
+
+  void flush() const {
+    std::ofstream out(path_, std::ios::trunc);
+    if (!out) {
+      throw std::runtime_error("cannot write persistent state store: " + path_);
+    }
+    for (const auto& entry : values_) {
+      out << "K " << std::quoted(entry.first) << " " << std::quoted(entry.second) << "\n";
+    }
+    for (const auto& map_entry : maps_) {
+      for (const auto& field_entry : map_entry.second) {
+        out << "M " << std::quoted(map_entry.first) << " " << std::quoted(field_entry.first)
+            << " " << std::quoted(field_entry.second) << "\n";
+      }
+    }
+    for (const auto& list_entry : lists_) {
+      out << "L " << std::quoted(list_entry.first) << " " << list_entry.second.size();
+      for (const auto& value : list_entry.second) {
+        out << " " << std::quoted(value);
+      }
+      out << "\n";
+    }
+  }
+
+  std::string path_;
+  std::unordered_map<std::string, std::string> values_;
+  std::unordered_map<std::string, std::unordered_map<std::string, std::string>> maps_;
+  std::unordered_map<std::string, std::vector<std::string>> lists_;
+};
+
 std::vector<std::string> readNonEmptyLines(const std::string& path) {
   std::ifstream in(path);
   std::vector<std::string> lines;
@@ -85,6 +257,24 @@ void expectContains(const std::string& haystack, const std::string& needle,
   if (haystack.find(needle) == std::string::npos) {
     throw std::runtime_error(message + ": missing " + needle);
   }
+}
+
+void expectNear(double actual, double expected, double tolerance, const std::string& message) {
+  if (std::abs(actual - expected) > tolerance) {
+    throw std::runtime_error(message);
+  }
+}
+
+double lookupMetric(const dataflow::Table& table, const std::string& output_column,
+                    const std::string& user) {
+  const auto key_idx = table.schema.indexOf("key");
+  const auto value_idx = table.schema.indexOf(output_column);
+  for (const auto& row : table.rows) {
+    if (row[key_idx].toString() == user) {
+      return row[value_idx].asDouble();
+    }
+  }
+  throw std::runtime_error("missing metric row for user " + user);
 }
 
 void testBackpressure() {
@@ -162,6 +352,141 @@ void testStatefulWindowCount() {
   }
   expect(user_a == 3, "userA count should accumulate to 3");
   expect(user_b == 2, "userB count should accumulate to 2");
+}
+
+void testAggregateVariants() {
+  dataflow::DataflowSession& session = dataflow::DataflowSession::builder();
+  std::vector<dataflow::Table> batches = {
+      makeWindowBatch({{"2026-03-28T09:00:00", "userA", 10},
+                       {"2026-03-28T09:00:10", "userA", 5},
+                       {"2026-03-28T09:00:20", "userB", 7}}),
+      makeWindowBatch({{"2026-03-28T09:00:30", "userA", 3},
+                       {"2026-03-28T09:00:40", "userB", 9}}),
+  };
+
+  const auto run_and_capture =
+      [&](const std::function<dataflow::StreamingDataFrame(const dataflow::StreamingDataFrame&)>& build) {
+        auto sink = std::make_shared<CollectSink>();
+        auto query = build(session.readStream(std::make_shared<dataflow::MemoryStreamSource>(batches))
+                               .withStateStore(dataflow::makeMemoryStateStore())
+                               .window("ts", 60000, "window_start"))
+                         .writeStream(sink, dataflow::StreamingQueryOptions{});
+        query.start();
+        expect(query.awaitTermination() == 2, "aggregate variant query should process all batches");
+        const auto outputs = sink->batches();
+        expect(outputs.size() == 2, "aggregate variant query should emit two batches");
+        return outputs.back();
+      };
+
+  const auto sum_table = run_and_capture([](const dataflow::StreamingDataFrame& df) {
+    return df.groupBy({"window_start", "key"}).sum("value", true, "value_sum");
+  });
+  const auto count_table = run_and_capture([](const dataflow::StreamingDataFrame& df) {
+    return df.groupBy({"window_start", "key"}).count(true, "event_count");
+  });
+  const auto min_table = run_and_capture([](const dataflow::StreamingDataFrame& df) {
+    return df.groupBy({"window_start", "key"}).min("value", true, "min_value");
+  });
+  const auto max_table = run_and_capture([](const dataflow::StreamingDataFrame& df) {
+    return df.groupBy({"window_start", "key"}).max("value", true, "max_value");
+  });
+  const auto avg_table = run_and_capture([](const dataflow::StreamingDataFrame& df) {
+    return df.groupBy({"window_start", "key"}).avg("value", true, "avg_value");
+  });
+
+  expect(lookupMetric(sum_table, "value_sum", "userA") == 18.0,
+         "sum aggregate should keep userA running sum");
+  expect(lookupMetric(sum_table, "value_sum", "userB") == 16.0,
+         "sum aggregate should keep userB running sum");
+  expect(lookupMetric(count_table, "event_count", "userA") == 3.0,
+         "count aggregate should keep userA running count");
+  expect(lookupMetric(count_table, "event_count", "userB") == 2.0,
+         "count aggregate should keep userB running count");
+  expect(lookupMetric(min_table, "min_value", "userA") == 3.0,
+         "min aggregate should keep userA running min");
+  expect(lookupMetric(min_table, "min_value", "userB") == 7.0,
+         "min aggregate should keep userB running min");
+  expect(lookupMetric(max_table, "max_value", "userA") == 10.0,
+         "max aggregate should keep userA running max");
+  expect(lookupMetric(max_table, "max_value", "userB") == 9.0,
+         "max aggregate should keep userB running max");
+  expect(lookupMetric(avg_table, "avg_value", "userA") == 6.0,
+         "avg aggregate should keep userA running avg");
+  expect(lookupMetric(avg_table, "avg_value", "userB") == 8.0,
+         "avg aggregate should keep userB running avg");
+}
+
+void testCheckpointRestoreAggregateVariants() {
+  namespace fs = std::filesystem;
+  dataflow::DataflowSession& session = dataflow::DataflowSession::builder();
+  const std::vector<dataflow::Table> batches = {
+      makeWindowBatch({{"2026-03-28T12:00:00", "userA", 10}}),
+      makeWindowBatch({{"2026-03-28T12:00:10", "userA", 4}}),
+      makeWindowBatch({{"2026-03-28T12:00:20", "userA", 8}}),
+  };
+
+  const auto run_checkpoint_restore =
+      [&](const std::string& checkpoint, const std::string& state_path,
+          const std::function<dataflow::StreamingDataFrame(const dataflow::StreamingDataFrame&)>& build) {
+        fs::remove(checkpoint);
+        fs::remove(state_path);
+        dataflow::StreamingQueryOptions options;
+        options.trigger_interval_ms = 0;
+        options.checkpoint_path = checkpoint;
+        options.checkpoint_delivery_mode = dataflow::CheckpointDeliveryMode::BestEffort;
+
+        auto first_state = std::make_shared<PersistentStateStore>(state_path);
+        auto first = build(session.readStream(std::make_shared<dataflow::MemoryStreamSource>(batches))
+                               .withStateStore(first_state)
+                               .window("ts", 60000, "window_start"))
+                         .writeStream(std::make_shared<CollectSink>(), options);
+        first.start();
+        expect(first.awaitTermination(1) == 1,
+               "aggregate restore first run should stop after one batch");
+        first_state->close();
+        first_state.reset();
+
+        auto second_sink = std::make_shared<CollectSink>();
+        auto second_state = std::make_shared<PersistentStateStore>(state_path);
+        auto second = build(session.readStream(std::make_shared<dataflow::MemoryStreamSource>(batches))
+                                .withStateStore(second_state)
+                                .window("ts", 60000, "window_start"))
+                          .writeStream(second_sink, options);
+        second.start();
+        expect(second.awaitTermination() == 2,
+               "aggregate restore second run should resume remaining batches");
+        second_state->close();
+        const auto outputs = second_sink->batches();
+        expect(!outputs.empty(), "aggregate restore should emit output after resume");
+        return outputs.back();
+      };
+
+  const auto min_table = run_checkpoint_restore(
+      "/tmp/velaria-stream-runtime-test-min.checkpoint",
+      "/tmp/velaria-stream-runtime-test-min.state",
+      [](const dataflow::StreamingDataFrame& df) {
+        return df.groupBy({"window_start", "key"}).min("value", true, "min_value");
+      });
+  expect(lookupMetric(min_table, "min_value", "userA") == 4.0,
+         "min aggregate should restore its running minimum");
+
+  const auto max_table = run_checkpoint_restore(
+      "/tmp/velaria-stream-runtime-test-max.checkpoint",
+      "/tmp/velaria-stream-runtime-test-max.state",
+      [](const dataflow::StreamingDataFrame& df) {
+        return df.groupBy({"window_start", "key"}).max("value", true, "max_value");
+      });
+  expect(lookupMetric(max_table, "max_value", "userA") == 10.0,
+         "max aggregate should restore its running maximum");
+
+  const auto avg_table = run_checkpoint_restore(
+      "/tmp/velaria-stream-runtime-test-avg.checkpoint",
+      "/tmp/velaria-stream-runtime-test-avg.state",
+      [](const dataflow::StreamingDataFrame& df) {
+        return df.groupBy({"window_start", "key"}).avg("value", true, "avg_value");
+      });
+  expectNear(lookupMetric(avg_table, "avg_value", "userA"), 22.0 / 3.0, 1e-9,
+             "avg aggregate should restore its running average");
 }
 
 void testCheckpointRestoreAtLeastOnceDefault() {
@@ -297,6 +622,54 @@ void testWindowEviction() {
          "window eviction should keep newest window key");
 }
 
+void testWindowEvictionAggregateVariants() {
+  dataflow::DataflowSession& session = dataflow::DataflowSession::builder();
+  const std::vector<dataflow::Table> batches = {
+      makeWindowBatch({{"2026-03-28T13:00:00", "userA", 10}}),
+      makeWindowBatch({{"2026-03-28T13:01:05", "userA", 4}}),
+      makeWindowBatch({{"2026-03-28T13:02:10", "userA", 8}}),
+  };
+
+  const auto run_eviction =
+      [&](const std::shared_ptr<dataflow::StateStore>& state,
+          const std::function<dataflow::StreamingDataFrame(const dataflow::StreamingDataFrame&)>& build,
+          const std::string& prefix) {
+        dataflow::StreamingQueryOptions options;
+        options.trigger_interval_ms = 0;
+        options.max_retained_windows = 1;
+
+        auto query = build(session.readStream(std::make_shared<dataflow::MemoryStreamSource>(batches))
+                               .withStateStore(state)
+                               .window("ts", 60000, "window_start"))
+                         .writeStream(std::make_shared<CollectSink>(), options);
+        query.start();
+        expect(query.awaitTermination() == 3, "aggregate eviction query should process all batches");
+
+        std::vector<std::string> state_keys;
+        state->listKeysByPrefix(prefix, &state_keys);
+        expect(state_keys.size() == 1,
+               "aggregate eviction should retain only the latest window state");
+        expect(state_keys.front().find("2026-03-28T13:02:00") != std::string::npos,
+               "aggregate eviction should keep the newest window key");
+      };
+
+  run_eviction(dataflow::makeMemoryStateStore(),
+               [](const dataflow::StreamingDataFrame& df) {
+                 return df.groupBy({"window_start", "key"}).min("value", true, "min_value");
+               },
+               "group_min:min_value");
+  run_eviction(dataflow::makeMemoryStateStore(),
+               [](const dataflow::StreamingDataFrame& df) {
+                 return df.groupBy({"window_start", "key"}).max("value", true, "max_value");
+               },
+               "group_max:max_value");
+  run_eviction(dataflow::makeMemoryStateStore(),
+               [](const dataflow::StreamingDataFrame& df) {
+                 return df.groupBy({"window_start", "key"}).avg("value", true, "avg_value");
+               },
+               "group_avg:avg_value");
+}
+
 void testSnapshotJsonContract() {
   dataflow::DataflowSession& session = dataflow::DataflowSession::builder();
   auto sink = std::make_shared<CollectSink>();
@@ -370,10 +743,13 @@ int main() {
   try {
     testBackpressure();
     testStatefulWindowCount();
+    testAggregateVariants();
+    testCheckpointRestoreAggregateVariants();
     testCheckpointRestoreAtLeastOnceDefault();
     testCheckpointRestoreBestEffort();
     testCheckpointRestoreDuplicatesSinkOutputAtLeastOnce();
     testWindowEviction();
+    testWindowEvictionAggregateVariants();
     testSnapshotJsonContract();
     std::cout << "[test] stream runtime ok" << std::endl;
     return 0;

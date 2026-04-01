@@ -1270,6 +1270,17 @@ PyObject* dataFrameCount(PyVelariaDataFrame* self, PyObject*) {
   });
 }
 
+PyObject* dataFrameExplain(PyVelariaDataFrame* self, PyObject*) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    std::string explain;
+    {
+      AllowThreads allow;
+      explain = self->df_ptr->explain();
+    }
+    return PyUnicode_FromStringAndSize(explain.c_str(), static_cast<Py_ssize_t>(explain.size()));
+  });
+}
+
 PyObject* dataFrameShow(PyVelariaDataFrame* self, PyObject* args, PyObject* kwargs) {
   return withExceptionTranslation([&]() -> PyObject* {
     unsigned long long max_rows = 20;
@@ -1525,6 +1536,17 @@ PyObject* queryProgress(PyVelariaStreamingQuery* self, PyObject*) {
   });
 }
 
+PyObject* querySnapshotJson(PyVelariaStreamingQuery* self, PyObject*) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    std::string snapshot;
+    {
+      AllowThreads allow;
+      snapshot = self->query_ptr->snapshotJson();
+    }
+    return PyUnicode_FromStringAndSize(snapshot.c_str(), static_cast<Py_ssize_t>(snapshot.size()));
+  });
+}
+
 PyMethodDef sessionMethods[] = {
     {"read_csv", reinterpret_cast<PyCFunction>(sessionReadCsv), METH_VARARGS | METH_KEYWORDS,
      "Read a CSV file into a DataFrame."},
@@ -1559,6 +1581,8 @@ PyMethodDef dataFrameMethods[] = {
     {"__arrow_c_array__", reinterpret_cast<PyCFunction>(dataFrameArrowCapsules),
      METH_VARARGS | METH_KEYWORDS, "Export the DataFrame through the Arrow PyCapsule interface."},
     {"count", reinterpret_cast<PyCFunction>(dataFrameCount), METH_NOARGS, "Return the row count."},
+    {"explain", reinterpret_cast<PyCFunction>(dataFrameExplain), METH_NOARGS,
+     "Return the logical plan explain string."},
     {"show", reinterpret_cast<PyCFunction>(dataFrameShow), METH_VARARGS | METH_KEYWORDS,
      "Print the DataFrame."},
     {nullptr, nullptr, 0, nullptr},
@@ -1596,6 +1620,8 @@ PyMethodDef streamingQueryMethods[] = {
      "Stop the streaming query."},
     {"progress", reinterpret_cast<PyCFunction>(queryProgress), METH_NOARGS,
      "Return the current query progress snapshot."},
+    {"snapshot_json", reinterpret_cast<PyCFunction>(querySnapshotJson), METH_NOARGS,
+     "Return the current query snapshotJson() payload."},
     {nullptr, nullptr, 0, nullptr},
 };
 

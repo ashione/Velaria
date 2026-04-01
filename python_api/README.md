@@ -118,7 +118,15 @@ Bootstrap:
 
 ```bash
 bazel build //:velaria_pyext
+bazel run //python_api:sync_native_extension
 uv sync --project python_api --python python3.12
+```
+
+If you run `python_api/velaria_cli.py` or other source-checkout Python entrypoints directly,
+keep `python_api/velaria/_velaria.so` in sync with:
+
+```bash
+bazel run //python_api:sync_native_extension
 ```
 
 Run demos:
@@ -149,6 +157,8 @@ Build targets:
 
 - native extension:
   - `//:velaria_pyext`
+- sync built native extension into the source checkout:
+  - `//python_api:sync_native_extension`
 - pure-Python wheel wrapper:
   - `//python_api:velaria_whl`
 - native wheel:
@@ -166,6 +176,93 @@ Single-file CLI packaging:
 ```
 
 The CLI is part of the ecosystem layer. For supported paths, it should delegate to the same native session contract as Python and C++.
+
+Repo-visible CLI entrypoints are:
+
+- source checkout:
+  - `uv run --project python_api python python_api/velaria_cli.py ...`
+- packaged binary:
+  - `./dist/velaria-cli ...`
+
+Do not assume a global `velaria-cli` command exists unless you have separately installed and exposed one in your environment.
+
+### Workspace + Artifacts
+
+The CLI also supports a local workspace layout for tracked runs and artifact indexing.
+
+Default paths:
+
+- runs: `~/.velaria/runs/<run_id>/`
+- index: `~/.velaria/index/artifacts.sqlite`
+
+You can override the root with:
+
+```bash
+export VELARIA_HOME=/tmp/velaria-home
+```
+
+Tracked run commands:
+
+```bash
+uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
+  --csv /path/to/input.csv \
+  --query "SELECT * FROM input_table LIMIT 5"
+
+./dist/velaria-cli run start -- csv-sql \
+  --csv /path/to/input.csv \
+  --query "SELECT * FROM input_table LIMIT 5"
+
+uv run --project python_api python python_api/velaria_cli.py run show --run-id <run_id>
+uv run --project python_api python python_api/velaria_cli.py run status --run-id <run_id>
+uv run --project python_api python python_api/velaria_cli.py artifacts list --run-id <run_id>
+uv run --project python_api python python_api/velaria_cli.py artifacts preview --artifact-id <artifact_id>
+uv run --project python_api python python_api/velaria_cli.py run cleanup --keep-last 10
+```
+
+The tracked workspace contract is:
+
+- stdout returns JSON only
+- logs go to `stdout.log` / `stderr.log`
+- stream progress appends native `snapshotJson()` output to `progress.jsonl`
+- stream explain keeps the native `logical` / `physical` / `strategy` structure
+- large results stay in files under `artifacts/`; SQLite stores only index rows and small previews
+- deleting run directories requires the explicit `--delete-files` switch
+
+End-to-end examples:
+
+CSV SQL to parquet plus preview:
+
+```bash
+uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
+  --csv /path/to/input.csv \
+  --query "SELECT name, score FROM input_table WHERE score > 10"
+
+uv run --project python_api python python_api/velaria_cli.py artifacts list --run-id <run_id>
+uv run --project python_api python python_api/velaria_cli.py artifacts preview --artifact-id <artifact_id>
+```
+
+Stream SQL once plus status:
+
+```bash
+uv run --project python_api python python_api/velaria_cli.py run start -- stream-sql-once \
+  --source-csv-dir /path/to/source_dir \
+  --sink-schema "key STRING, value_sum INT" \
+  --query "INSERT INTO output_sink SELECT key, SUM(value) AS value_sum FROM input_stream GROUP BY key"
+
+uv run --project python_api python python_api/velaria_cli.py run status --run-id <run_id>
+```
+
+Vector search plus explain artifact:
+
+```bash
+uv run --project python_api python python_api/velaria_cli.py run start -- vector-search \
+  --csv /path/to/vectors.csv \
+  --vector-column embedding \
+  --query-vector "0.1,0.2,0.3" \
+  --top-k 5
+
+uv run --project python_api python python_api/velaria_cli.py artifacts list --run-id <run_id>
+```
 
 Python ecosystem source groups:
 

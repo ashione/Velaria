@@ -20,10 +20,18 @@ if [[ ! -f "${NATIVE_SO}" ]]; then
   exit 1
 fi
 
-cp "${NATIVE_SO}" "${PY_DIR}/velaria/_velaria.so"
+TARGET_SO="${PY_DIR}/velaria/_velaria.so"
+if [[ -f "${TARGET_SO}" ]]; then
+  chmod u+w "${TARGET_SO}" || true
+  rm -f "${TARGET_SO}"
+fi
+cp "${NATIVE_SO}" "${TARGET_SO}"
 
 cleanup() {
-  rm -f "${PY_DIR}/velaria/_velaria.so"
+  if [[ -f "${TARGET_SO}" ]]; then
+    chmod u+w "${TARGET_SO}" || true
+  fi
+  rm -f "${TARGET_SO}"
 }
 trap cleanup EXIT
 

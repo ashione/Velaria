@@ -20,6 +20,8 @@
 - 单节点示例命令保持可用，不要为了多进程实验破坏 `sql_demo / df_demo / stream_demo`。
 - 所有 Python 相关命令统一显式使用 `uv` 执行，包括测试、脚本、依赖安装；不要直接调用 `python` / `pip`。
 - `README.md` 保持英文，`README-zh.md` 保持中文；后续修改 README 内容时必须同步更新这两份文档。
+- `skills/*.md` 面向最终用户使用说明，不写仓库内部编译、Bazel 构建、源码同步或其他实现侧操作；只保留用户可直接执行的使用方式、参数说明与输入输出约束。
+- 仓库文档若展示 Python CLI 命令，必须使用仓库内真实可见入口：源码脚本 `uv run --project python_api python python_api/velaria_cli.py ...`，或已打包产物 `./dist/velaria-cli ...`；不要默认写成全局可执行的 `velaria-cli ...`，除非文档已明确提供安装该命令的步骤。
 
 ## 命名与术语约束
 

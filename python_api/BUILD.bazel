@@ -5,6 +5,15 @@ load("@rules_python//python:py_test.bzl", "py_test")
 load("@pypi//:requirements.bzl", "requirement")
 load("//python_api:version.bzl", "VELARIA_PY_VERSION")
 
+py_binary(
+    name = "sync_native_extension",
+    srcs = ["sync_native_extension.py"],
+    main = "sync_native_extension.py",
+    args = ["$(location //:velaria_pyext)"],
+    data = ["//:velaria_pyext"],
+    visibility = ["//visibility:public"],
+)
+
 genrule(
     name = "velaria_native_py_pkg",
     srcs = ["//:velaria_pyext"],
@@ -20,6 +29,11 @@ py_library(
         "velaria/excel.py",
         "velaria/custom_stream.py",
         "velaria/bitable.py",
+        "velaria/workspace/__init__.py",
+        "velaria/workspace/artifact_index.py",
+        "velaria/workspace/paths.py",
+        "velaria/workspace/run_store.py",
+        "velaria/workspace/types.py",
     ],
     data = [":velaria_native_py_pkg"],
     imports = ["."],
@@ -251,10 +265,33 @@ py_test(
     ],
 )
 
+py_test(
+    name = "workspace_runs_test",
+    srcs = ["tests/test_workspace_runs.py"],
+    main = "tests/test_workspace_runs.py",
+    imports = ["."],
+    deps = [
+        ":velaria_cli_lib",
+        ":velaria_py_pkg",
+        requirement("pyarrow"),
+    ],
+)
+
+py_test(
+    name = "artifact_index_test",
+    srcs = ["tests/test_artifact_index.py"],
+    main = "tests/test_artifact_index.py",
+    imports = ["."],
+    deps = [
+        ":velaria_py_pkg",
+    ],
+)
+
 test_suite(
     name = "velaria_python_supported_regression",
     tests = [
         ":arrow_stream_ingestion_test",
+        ":artifact_index_test",
         ":bitable_group_by_owner_integration_test",
         ":bitable_stream_source_test",
         ":custom_stream_source_test",
@@ -262,5 +299,6 @@ test_suite(
         ":read_excel_test",
         ":streaming_v05_test",
         ":vector_search_test",
+        ":workspace_runs_test",
     ],
 )

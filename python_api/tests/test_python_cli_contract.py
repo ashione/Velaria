@@ -1,12 +1,22 @@
 import io
 import json
+import importlib
+import os
 import pathlib
+import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
-import velaria_cli
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+try:
+    velaria_cli = importlib.import_module("velaria_cli")
+except ModuleNotFoundError:
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+    velaria_cli = importlib.import_module("velaria_cli")
 
 
 class _FakeArrowResult:
@@ -24,6 +34,77 @@ class _FakeDataFrame:
 
 
 class PythonCliContractTest(unittest.TestCase):
+    def test_workspace_errors_return_json_without_stderr_noise(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-cli-errors-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                cases = [
+                    (["run", "start", "--"], "run start requires an action"),
+                    (["run", "show", "--run-id", "missing-run"], "run not found: missing-run"),
+                    (
+                        ["artifacts", "preview", "--artifact-id", "missing-artifact"],
+                        "artifact not found: missing-artifact",
+                    ),
+                ]
+                for argv, expected_error in cases:
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with self.subTest(argv=argv):
+                        with redirect_stdout(stdout), redirect_stderr(stderr):
+                            exit_code = velaria_cli.main(argv)
+                        self.assertEqual(exit_code, 1)
+                        self.assertEqual(stderr.getvalue(), "")
+                        payload = json.loads(stdout.getvalue())
+                        self.assertFalse(payload["ok"])
+                        self.assertIn(expected_error, payload["error"])
+
+    def test_artifact_preview_cache_miss_reports_full_row_count_for_parquet(self):
+        workspace = importlib.import_module("velaria.workspace")
+        with tempfile.TemporaryDirectory(prefix="velaria-cli-preview-") as tmp:
+            parquet_path = pathlib.Path(tmp) / "artifact.parquet"
+            table = pa.table({"name": ["alice", "bob", "carol"], "score": [1, 2, 3]})
+            pq.write_table(table, parquet_path)
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                index = workspace.ArtifactIndex()
+                run_dir = pathlib.Path(tmp) / "runs" / "run-1"
+                run_dir.mkdir(parents=True)
+                index.upsert_run(
+                    {
+                        "run_id": "run-1",
+                        "created_at": "2026-04-01T10:00:00Z",
+                        "finished_at": "2026-04-01T10:00:01Z",
+                        "status": "succeeded",
+                        "action": "csv-sql",
+                        "cli_args": {},
+                        "velaria_version": "0.0.test",
+                        "run_dir": str(run_dir),
+                    }
+                )
+                index.insert_artifact(
+                    {
+                        "artifact_id": "artifact-1",
+                        "run_id": "run-1",
+                        "created_at": "2026-04-01T10:00:01Z",
+                        "type": "file",
+                        "uri": parquet_path.resolve().as_uri(),
+                        "format": "parquet",
+                        "row_count": 3,
+                        "schema_json": ["name", "score"],
+                        "preview_json": None,
+                        "tags_json": ["result"],
+                    }
+                )
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = velaria_cli.main(
+                        ["artifacts", "preview", "--artifact-id", "artifact-1", "--limit", "2"]
+                    )
+                self.assertEqual(exit_code, 0)
+                payload = json.loads(stdout.getvalue())
+                self.assertTrue(payload["ok"])
+                self.assertEqual(payload["preview"]["row_count"], 3)
+                self.assertTrue(payload["preview"]["truncated"])
+                self.assertEqual(len(payload["preview"]["rows"]), 2)
+
     def test_vector_cli_delegates_to_session_contract(self):
         fake_session = mock.Mock()
         fake_session.read_csv.return_value = mock.Mock(name="df")

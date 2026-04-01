@@ -1,3 +1,4 @@
+import csv
 import json
 import pathlib
 import tempfile
@@ -63,6 +64,57 @@ class StreamingV05Test(unittest.TestCase):
             snapshot_json = json.dumps(progress)
             self.assertIn("execution_mode", snapshot_json)
 
+    def test_start_stream_sql_supports_multi_aggregate_and_having_alias(self):
+        session = velaria.Session()
+        table = pa.table(
+            {
+                "ts": [
+                    "2026-03-29T10:00:00",
+                    "2026-03-29T10:00:10",
+                    "2026-03-29T10:00:20",
+                    "2026-03-29T10:00:30",
+                ],
+                "key": ["u1", "u1", "u1", "u2"],
+                "value": [10, 5, 7, 4],
+            }
+        )
+        stream_df = session.create_stream_from_arrow(table)
+        session.create_temp_view("events_stream_multi", stream_df)
+
+        with tempfile.TemporaryDirectory(prefix="velaria-py-stream-multi-") as tmp:
+            sink_path = str(pathlib.Path(tmp) / "sink.csv")
+            session.sql(
+                "CREATE SINK TABLE sink_multi "
+                "(window_start STRING, key STRING, event_count INT, value_sum INT, "
+                "min_value INT, max_value INT, avg_value DOUBLE) "
+                f"USING csv OPTIONS(path '{sink_path}', delimiter ',')"
+            )
+            query = session.start_stream_sql(
+                "INSERT INTO sink_multi "
+                "SELECT window_start, key, COUNT(*) AS event_count, SUM(value) AS value_sum, "
+                "MIN(value) AS min_value, MAX(value) AS max_value, AVG(value) AS avg_value "
+                "FROM events_stream_multi "
+                "WINDOW BY ts EVERY 60000 AS window_start "
+                "GROUP BY window_start, key HAVING avg_value > 6",
+                trigger_interval_ms=0,
+            )
+            query.start()
+            processed = query.await_termination()
+
+            self.assertEqual(processed, 1)
+
+            with open(sink_path, newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["window_start"], "2026-03-29T10:00:00")
+            self.assertEqual(rows[0]["key"], "u1")
+            self.assertEqual(float(rows[0]["event_count"]), 3.0)
+            self.assertEqual(float(rows[0]["value_sum"]), 22.0)
+            self.assertEqual(float(rows[0]["min_value"]), 5.0)
+            self.assertEqual(float(rows[0]["max_value"]), 10.0)
+            self.assertAlmostEqual(float(rows[0]["avg_value"]), 22.0 / 3.0, places=5)
+
     def test_explain_stream_sql_returns_strategy_sections(self):
         session = velaria.Session()
         table = pa.table(
@@ -89,6 +141,33 @@ class StreamingV05Test(unittest.TestCase):
         self.assertIn("strategy\n", explain)
         self.assertIn("selected_mode", explain)
         self.assertIn("checkpoint_delivery_mode=best-effort", explain)
+
+    def test_explain_stream_sql_reports_having_actor_fallback_reason(self):
+        session = velaria.Session()
+        table = pa.table(
+            {
+                "ts": ["2026-03-29T10:00:00", "2026-03-29T10:00:10"],
+                "key": ["u1", "u1"],
+                "value": [1, 2],
+            }
+        )
+        stream_df = session.create_stream_from_arrow(table)
+        session.create_temp_view("events_stream_having_explain", stream_df)
+
+        explain = session.explain_stream_sql(
+            "SELECT window_start, key, SUM(value) AS value_sum "
+            "FROM events_stream_having_explain "
+            "WINDOW BY ts EVERY 60000 AS window_start "
+            "GROUP BY window_start, key HAVING value_sum > 0",
+            trigger_interval_ms=0,
+        )
+
+        reason = (
+            "actor acceleration requires the aggregate hot path to be the final stream transform"
+        )
+        self.assertIn("actor_eligible=false", explain)
+        self.assertIn(f"actor_eligibility_reason={reason}", explain)
+        self.assertIn(f"reason={reason}", explain)
 
 
 if __name__ == "__main__":

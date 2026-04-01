@@ -169,7 +169,8 @@ examples 与 helper scripts 只用于说明各层，不定义各层。
 - 执行模式：`single-process`、`local-workers`、`actor-credit`、`auto`
 - 文件 source/sink
 - 基础 streaming operators：`select / filter / withColumn / drop / limit / window`
-- stateful `sum` 和 `count`
+- stateful streaming 聚合：`sum / count / min / max / avg`
+- stream SQL grouped aggregate output：`SUM(col)`、`COUNT(*)`、`MIN(col)`、`MAX(col)`、`AVG(col)`
 - 最小 stream SQL 子集
 - 固定维度 float vector 的本地检索
 - Python Arrow 输入/输出
@@ -181,6 +182,7 @@ examples 与 helper scripts 只用于说明各层，不定义各层。
 - 把 Python callback 拉进热路径
 - Python UDF
 - 把 actor 并行化扩成任意 plan 的通用机制
+- 超出当前 `window_start,key + SUM(value)` / `COUNT(*)` 热路径之外的 actor acceleration
 - 宽泛 SQL 扩展，例如完整 `JOIN / CTE / subquery / UNION`
 - ANN / 独立 vector DB / 分布式 vector 执行
 

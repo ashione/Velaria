@@ -59,18 +59,21 @@ This document describes runtime internals and current implementation shape. For 
 
 ## Current Actor Pushdown Boundary
 
-当前只有一类 query 会被 `ActorCredit` / `Auto` 接住：
+当前只有两类 query 会被 `ActorCredit` / `Auto` 接住：
 
 - 前置变换全部为 `PartitionLocal`
-- 最后一个 barrier 是 `groupBy({"window_start", "key"}).sum("value", ...)`
+- 最后一个 barrier 是以下其一：
+  - `groupBy({"window_start", "key"}).sum("value", ...)`
+  - `groupBy({"window_start", "key"}).count(...)`
 
 也就是说，当前 actor runtime 只服务于：
 
 - `window_start`
 - `key`
-- `value`
+- `value` 的窗口分组求和热路径
+- `COUNT(*)` 的窗口分组计数热路径
 
-这条窗口分组求和热路径。
+`MIN / MAX / AVG` 以及多 aggregate 输出当前仍走本地执行链；`Auto` 会明确写出 fallback reason。
 
 如果 query 不满足这个形状，`StreamingQuery` 会回退到普通执行链，并把原因写入：
 
@@ -188,7 +191,7 @@ actor-stream payload 当前使用 typed binary batch：
 
 ## Recommended Next Steps
 
-1. 扩展 actor pushdown 到 `count` 和更多 group aggregate。
+1. 扩展 actor pushdown 到更多 group aggregate 与多 aggregate 输出。
 2. 调整 query 级 `Auto` 阈值，使其更贴近真实 `StreamingQuery` workload。
 3. 给 query 级 progress 增加更细粒度的 actor 指标拆分。
 4. 继续把 source 到执行内核的中间 `Table/Row/Value` 转换收紧到更早的列式表示。

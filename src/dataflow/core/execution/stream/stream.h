@@ -11,10 +11,15 @@
 #include <unordered_map>
 #include <vector>
 
+#include "src/dataflow/core/logical/planner/plan.h"
 #include "src/dataflow/core/execution/table.h"
 #include "src/dataflow/core/contract/source_sink_abi.h"
 
 namespace dataflow {
+
+namespace sql {
+class SqlPlanner;
+}
 
 using StreamId = std::uint64_t;
 
@@ -390,12 +395,20 @@ class MemoryStreamSink : public StreamSink {
 
 enum class StreamTransformMode { PartitionLocal, GlobalBarrier };
 
-enum class StreamAcceleratorKind { None, WindowKeySum };
+enum class StreamAcceleratorKind { None, WindowKeySum, WindowKeyCount };
+
+struct StreamAggregateSpec {
+  AggregateFunction function = AggregateFunction::Sum;
+  std::string value_column;
+  std::string output_column;
+  bool is_count_star = false;
+  std::string state_label;
+};
 
 struct StreamAcceleratorSpec {
   StreamAcceleratorKind kind = StreamAcceleratorKind::None;
   bool stateful = false;
-  std::string output_column;
+  StreamAggregateSpec aggregate;
 };
 
 class RuntimeSourceAdapter : public StreamSource {
@@ -508,8 +521,18 @@ class GroupedStreamingDataFrame {
                          const std::string& outputColumn = "sum") const;
   StreamingDataFrame count(bool stateful = false,
                            const std::string& outputColumn = "count") const;
+  StreamingDataFrame min(const std::string& valueColumn, bool stateful = false,
+                         const std::string& outputColumn = "min") const;
+  StreamingDataFrame max(const std::string& valueColumn, bool stateful = false,
+                         const std::string& outputColumn = "max") const;
+  StreamingDataFrame avg(const std::string& valueColumn, bool stateful = false,
+                         const std::string& outputColumn = "avg") const;
 
  private:
+  friend class sql::SqlPlanner;
+  StreamingDataFrame aggregate(const std::vector<StreamAggregateSpec>& specs,
+                               bool stateful) const;
+
   std::shared_ptr<StreamSource> source_;
   std::vector<StreamTransform> transforms_;
   std::vector<std::string> keys_;

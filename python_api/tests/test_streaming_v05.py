@@ -1,5 +1,4 @@
 import csv
-import json
 import pathlib
 import tempfile
 import unittest
@@ -61,8 +60,9 @@ class StreamingV05Test(unittest.TestCase):
             self.assertIn("backpressure_high_watermark", progress)
             self.assertIn("backpressure_low_watermark", progress)
 
-            snapshot_json = json.dumps(progress)
+            snapshot_json = query.snapshot_json()
             self.assertIn("execution_mode", snapshot_json)
+            self.assertIn("checkpoint_delivery_mode", snapshot_json)
 
     def test_start_stream_sql_supports_multi_aggregate_and_having_alias(self):
         session = velaria.Session()

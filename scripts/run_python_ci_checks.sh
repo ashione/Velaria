@@ -17,6 +17,7 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 bazel build //:velaria_pyext
+bazel run //python_api:sync_native_extension
 
 uv sync --project python_api --python "${VELARIA_PYTHON_BIN}"
 bazel test //:python_ecosystem_regression

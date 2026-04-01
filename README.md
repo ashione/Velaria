@@ -2,22 +2,94 @@
 
 `README.md` is the English source of truth. The Chinese mirror lives in [README-zh.md](./README-zh.md). Keep both files aligned.
 
-Velaria is a local-first C++17 dataflow engine research project. The repository is now organized around one kernel plus two explicit non-kernel layers:
+Velaria is a local-first C++17 dataflow engine research project. The current goal is narrow and explicit:
 
-- `Core Kernel`
-  - local execution semantics
-  - batch + stream in one model
-  - stable explain / progress / checkpoint contract
-- `Python Ecosystem`
-  - supported Arrow / wheel / CLI / `uv` / Excel / Bitable / custom stream adapters
-  - projects the kernel outward without becoming the hot path
-- `Experimental Runtime`
-  - same-host `actor/rpc/jobmaster`
-  - execution and observability research lane, not a second kernel
+- keep one native kernel as the execution source of truth
+- keep the single-node path stable
+- expose that kernel through a supported Python ecosystem layer
+- use the same-host actor/rpc path as an experiment lane, not as a second kernel
+
+## Layer Model
+
+### Core Kernel
+
+Owns:
+
+- local batch and streaming execution
+- logical planning and minimal SQL mapping
+- source/sink ABI
+- explain / progress / checkpoint contract
+- local vector search
+
+Repository entrypoints:
+
+- docs:
+  - [docs/core-boundary.md](./docs/core-boundary.md)
+  - [docs/runtime-contract.md](./docs/runtime-contract.md)
+  - [docs/streaming_runtime_design.md](./docs/streaming_runtime_design.md)
+- source groups:
+  - `//:velaria_core_logical_sources`
+  - `//:velaria_core_execution_sources`
+  - `//:velaria_core_contract_sources`
+- regression:
+  - `//:core_regression`
+
+### Python Ecosystem
+
+Owns:
+
+- native binding in `python_api`
+- Arrow ingress and output
+- `uv` workflow
+- wheel / native wheel / CLI packaging
+- Excel / Bitable / custom stream adapters
+- local workspace tracking for runs and artifacts
+
+Does not own:
+
+- execution hot-path semantics
+- independent explain / progress / checkpoint semantics
+- replacement checkpoint storage
+- SQLite as a large-result engine
+
+Repository entrypoints:
+
+- docs:
+  - [python_api/README.md](./python_api/README.md)
+- source groups:
+  - `//:velaria_python_ecosystem_sources`
+  - `//python_api:velaria_python_supported_sources`
+  - `//python_api:velaria_python_example_sources`
+  - `//python_api:velaria_python_experimental_sources`
+- regression:
+  - `//:python_ecosystem_regression`
+  - `//python_api:velaria_python_supported_regression`
+  - `./scripts/run_python_ecosystem_regression.sh`
+
+### Experimental Runtime
+
+Owns:
+
+- same-host `actor/rpc/jobmaster` experiments
+- transport / codec / scheduler observation
+- same-host smoke and benchmark tooling
+
+Does not imply:
+
+- distributed scheduling
+- distributed fault recovery
+- cluster resource governance
+- production distributed execution
+
+Repository entrypoints:
+
+- source group:
+  - `//:velaria_experimental_sources`
+- regression:
+  - `//:experimental_regression`
+  - `./scripts/run_experimental_regression.sh`
 
 ## Golden Path
-
-The only golden path is:
 
 ```text
 Arrow / CSV / Python ingress
@@ -37,101 +109,7 @@ Core user-facing objects:
 - `StreamingDataFrame`
 - `StreamingQuery`
 
-The same-host actor/rpc path stays in the repo, but it is not the main product story.
-
-## Repository Layers
-
-### Core Kernel
-
-Core owns:
-
-- logical planning and minimal SQL mapping
-- table/value execution model
-- local batch and streaming runtime
-- source/sink ABI
-- runtime contract surfaces
-- local vector search capability
-
-Repository entrypoints:
-
-- docs:
-  - [docs/core-boundary.md](./docs/core-boundary.md)
-  - [docs/runtime-contract.md](./docs/runtime-contract.md)
-  - [docs/streaming_runtime_design.md](./docs/streaming_runtime_design.md)
-- Bazel source groups:
-  - `//:velaria_core_logical_sources`
-  - `//:velaria_core_execution_sources`
-  - `//:velaria_core_contract_sources`
-- regression suite:
-  - `//:core_regression`
-
-### Python Ecosystem
-
-Python is a supported ecosystem layer, not a convenience-only wrapper.
-
-It includes:
-
-- native binding in `python_api`
-- Arrow ingestion and output
-- `uv` workflow
-- wheel / native wheel / CLI packaging
-- Excel and Bitable adapters
-- custom source / custom sink adapters
-- supported CLI tooling in `python_api/velaria_cli.py`
-- Python ecosystem demos in `python_api/examples`
-- Python benchmarks in `python_api/benchmarks`
-
-It does not define:
-
-- execution hot-path behavior
-- independent progress/checkpoint semantics
-- independent vector-search semantics
-
-Repository entrypoints:
-
-- docs:
-  - [python_api/README.md](./python_api/README.md)
-- Bazel source group:
-  - `//:velaria_python_ecosystem_sources`
-- Python-layer source groups:
-  - `//python_api:velaria_python_supported_sources`
-  - `//python_api:velaria_python_example_sources`
-  - `//python_api:velaria_python_experimental_sources`
-- regression suite:
-  - `//:python_ecosystem_regression`
-- Python-layer regression suite:
-  - `//python_api:velaria_python_supported_regression`
-- shell entrypoint:
-  - `./scripts/run_python_ecosystem_regression.sh`
-
-### Experimental Runtime
-
-Experimental runtime includes:
-
-- actor runtime
-- rpc codec / transport experiments
-- scheduler / worker / client flow
-- same-host smoke and benchmark tools
-
-Repository entrypoints:
-
-- Bazel source group:
-  - `//:velaria_experimental_sources`
-- regression suite:
-  - `//:experimental_regression`
-- shell entrypoint:
-  - `./scripts/run_experimental_regression.sh`
-
-### Examples
-
-Examples and helper scripts illustrate layers; they do not define them.
-
-- Bazel source group:
-  - `//:velaria_examples_sources`
-
-## Runtime Contract
-
-The stable runtime-facing contract is documented in [docs/runtime-contract.md](./docs/runtime-contract.md).
+## Stable Runtime Contract
 
 Main stream entry points:
 
@@ -142,7 +120,7 @@ Main stream entry points:
 - `session.startStreamSql(sql, options)`
 - `StreamingDataFrame.writeStream(sink, options)`
 
-Stable stream contract surfaces:
+Stable contract surfaces:
 
 - `StreamingQueryProgress`
 - `snapshotJson()`
@@ -157,38 +135,39 @@ Stable stream contract surfaces:
 - `physical`
 - `strategy`
 
-`strategy` is the single explanation outlet for mode selection, fallback reason, transport, backpressure thresholds, and checkpoint delivery mode.
+`strategy` is the single outlet for mode selection, fallback reason, transport, backpressure, and checkpoint delivery mode.
 
-## Current Capability Boundary
+Workspace persistence keeps the kernel contract unchanged:
+
+- `explain.json` stores `logical / physical / strategy`
+- `progress.jsonl` appends native `snapshotJson()` output line by line
+- large results stay in files; SQLite stores only index rows and small previews
+
+## Current Scope
 
 Available today:
 
-- local batch + streaming execution through one kernel
+- one native kernel for batch + streaming
 - `read_csv`, `readStream(...)`, `readStreamCsvDir(...)`
 - query-local backpressure, bounded backlog, progress snapshots, checkpoint path
 - execution modes: `single-process`, `local-workers`
 - file source/sink support
 - basic stream operators: `select / filter / withColumn / drop / limit / window`
 - stateful stream aggregates: `sum / count / min / max / avg`
-- stream SQL grouped aggregate outputs with `SUM(col)`, `COUNT(*)`, `MIN(col)`, `MAX(col)`, `AVG(col)`
 - minimal stream SQL subset
 - local vector search on fixed-dimension float vectors
-- Python Arrow ingestion and output
+- Python Arrow ingress/output
+- tracked local runs with run directory persistence and artifact indexing
 - same-host actor/rpc/jobmaster smoke path
 
-Out of scope in the current repo state:
+Out of scope:
 
 - completed distributed runtime claims
-- Python callback execution in the hot path
-- Python UDFs
-- generic actor parallelization for arbitrary plans
-- actor acceleration beyond the current `window_start,key + SUM(value)` / `COUNT(*)` hot paths
+- Python callbacks or Python UDFs in the hot path
 - broad SQL expansion such as full `JOIN / CTE / subquery / UNION`
 - ANN / standalone vector DB / distributed vector execution
 
 ## Python Ecosystem
-
-Python remains a supported ingress and packaging layer. It does not become the execution core.
 
 Main supported Python surfaces:
 
@@ -206,39 +185,71 @@ Main supported Python surfaces:
 - `read_excel(...)`
 - custom source / custom sink adapters
 
-Python ecosystem commands in this repo use `uv`:
+### Workspace Model
+
+- `Workspace`
+  - root under `VELARIA_HOME` or `~/.velaria`
+- `RunStore`
+  - one run directory per execution
+  - persists `run.json`, `inputs.json`, `explain.json`, `progress.jsonl`, logs, and `artifacts/`
+- `ArtifactIndex`
+  - SQLite-first metadata index
+  - JSONL fallback when SQLite is unavailable
+  - preview cache for small result slices only
+
+This layer is for agent/skill invocation, local traceability, and machine-readable CLI integration. It is not a second execution engine.
+
+### CLI Entry Points
+
+Repo-visible CLI entrypoints are:
+
+- source checkout:
+  - `uv run --project python_api python python_api/velaria_cli.py ...`
+- packaged binary:
+  - `./dist/velaria-cli ...`
+
+Do not assume a global `velaria-cli` command exists unless you have installed one separately.
+
+### Python Workflow
+
+Bootstrap:
 
 ```bash
 bazel build //:velaria_pyext
+bazel run //python_api:sync_native_extension
 uv sync --project python_api --python python3.12
+```
+
+Run examples:
+
+```bash
 uv run --project python_api python python_api/examples/demo_batch_sql_arrow.py
 uv run --project python_api python python_api/examples/demo_stream_sql.py
 uv run --project python_api python python_api/examples/demo_vector_search.py
 ```
 
-Python ecosystem build/test prerequisites:
-
-- `uv`
-- a local CPython interpreter with `Python.h`
-- `VELARIA_PYTHON_BIN` when Bazel cannot auto-discover a usable interpreter
-
-Recommended regression entrypoint:
+Tracked run examples:
 
 ```bash
-./scripts/run_python_ecosystem_regression.sh
+uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
+  --csv /path/to/input.csv \
+  --query "SELECT * FROM input_table LIMIT 5"
+
+uv run --project python_api python python_api/velaria_cli.py run show --run-id <run_id>
+uv run --project python_api python python_api/velaria_cli.py artifacts list --run-id <run_id>
+uv run --project python_api python python_api/velaria_cli.py artifacts preview --artifact-id <artifact_id>
 ```
 
 ## Local Vector Search
 
-Vector search is a local kernel capability, not a new subsystem.
+Vector search is a local kernel capability, not a separate subsystem.
 
-Scope in `v0.1`:
+Current scope:
 
 - fixed-dimension `float32`
 - metrics: `cosine`, `dot`, `l2`
 - `top-k`
 - exact scan only
-- `DataFrame` / `DataflowSession`
 - Python `Session.vector_search(...)`
 - Arrow `FixedSizeList<float32>`
 - explain output
@@ -255,8 +266,7 @@ Design doc:
 CLI examples:
 
 ```bash
-bazel build //:velaria_cli
-./bazel-bin/velaria_cli \
+uv run --project python_api python python_api/velaria_cli.py csv-sql \
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
 
@@ -268,7 +278,7 @@ bazel build //:velaria_cli
   --top-k 5
 ```
 
-Vector explain is part of the stable contract. Current required fields include:
+Vector explain is part of the stable contract. Current fields include:
 
 - `mode=exact-scan`
 - `metric=<cosine|dot|l2>`
@@ -284,28 +294,13 @@ Benchmark baseline:
 ./scripts/run_vector_search_benchmark.sh
 ```
 
-The script runs a quick exact-scan baseline. Use `bazel run //:vector_search_benchmark` for the full sweep.
-
 ## Experimental Runtime
 
-The same-host path stays intentionally narrow:
+Same-host flow:
 
 ```text
 client -> scheduler(jobmaster) -> worker -> in-proc operator chain -> result
 ```
-
-It exists for:
-
-- same-host execution experiments
-- transport and codec observation
-- benchmark and observability development
-
-It does not imply:
-
-- distributed scheduling
-- distributed fault recovery
-- cluster resource governance
-- production distributed vector execution
 
 Build:
 
@@ -343,6 +338,7 @@ Layered regression entrypoints:
 ./scripts/run_core_regression.sh
 ./scripts/run_python_ecosystem_regression.sh
 ./scripts/run_experimental_regression.sh
+./scripts/run_stream_observability_regression.sh
 ```
 
 Direct Bazel suites:
@@ -351,12 +347,6 @@ Direct Bazel suites:
 bazel test //:core_regression
 bazel test //:python_ecosystem_regression
 bazel test //:experimental_regression
-```
-
-Same-host observability regression:
-
-```bash
-./scripts/run_stream_observability_regression.sh
 ```
 
 ## Repository Rules

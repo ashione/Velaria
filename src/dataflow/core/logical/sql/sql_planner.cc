@@ -359,14 +359,22 @@ bool streamPlanIsPartitionLocal(const StreamPlanNode& node) {
 }
 
 bool isActorHotPathAggregate(const StreamPlanNode& node) {
-  if (node.kind != StreamPlanNodeKind::Aggregate || !node.stateful ||
-      node.group_keys != std::vector<std::string>{"window_start", "key"} ||
-      node.aggregates.size() != 1) {
+  if (node.kind != StreamPlanNodeKind::Aggregate || !node.stateful || node.group_keys.empty() ||
+      node.aggregates.empty()) {
     return false;
   }
-  const auto& aggregate = node.aggregates.front();
-  return (aggregate.function == AggregateFunction::Sum && aggregate.value_column == "value") ||
-         (aggregate.function == AggregateFunction::Count && aggregate.is_count_star);
+  return std::all_of(
+      node.aggregates.begin(), node.aggregates.end(), [](const StreamAggregateSpec& aggregate) {
+        switch (aggregate.function) {
+          case AggregateFunction::Sum:
+          case AggregateFunction::Count:
+          case AggregateFunction::Avg:
+          case AggregateFunction::Min:
+          case AggregateFunction::Max:
+            return true;
+        }
+        return false;
+      });
 }
 
 }  // namespace
@@ -967,12 +975,9 @@ StreamPhysicalPlan SqlPlanner::buildStreamPhysicalPlan(const StreamLogicalPlan& 
           "actor acceleration requires the aggregate hot path to be the final stream transform";
       return physical;
     }
-    const auto& aggregate = node.aggregates.front();
     physical.actor_eligible = true;
     physical.actor_eligibility_reason =
-        aggregate.function == AggregateFunction::Sum
-            ? "window_start/key SUM(value) shape is eligible for actor acceleration"
-            : "window_start/key COUNT(*) shape is eligible for actor acceleration";
+        "final stateful grouped aggregate with supported SUM/COUNT/MIN/MAX/AVG outputs is eligible for actor acceleration";
     return physical;
   }
 

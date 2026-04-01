@@ -137,19 +137,10 @@ std::shared_ptr<StateStore> makeStateStore(
     const std::string& backend,
     const std::unordered_map<std::string, std::string>& options = {});
 
-enum class StreamingExecutionMode { SingleProcess, LocalWorkers, ActorCredit, Auto };
+enum class StreamingExecutionMode { SingleProcess, LocalWorkers };
 enum class StreamingTransportMode { InProcess, RpcCopy, SharedMemory, Auto };
 
 enum class CheckpointDeliveryMode { AtLeastOnce, BestEffort };
-
-struct StreamingAutoExecutionOptions {
-  size_t sample_batches = 2;
-  size_t min_rows_per_batch = 64 * 1024;
-  size_t min_projected_payload_bytes = 256 * 1024;
-  double min_compute_to_overhead_ratio = 1.5;
-  double min_actor_speedup = 1.05;
-  double strong_actor_speedup = 1.25;
-};
 
 struct StreamingQueryOptions {
   uint64_t trigger_interval_ms = 1000;
@@ -160,11 +151,9 @@ struct StreamingQueryOptions {
   std::string checkpoint_path;
   StreamingExecutionMode execution_mode = StreamingExecutionMode::SingleProcess;
   size_t local_workers = 1;
-  size_t actor_workers = 0;
-  size_t actor_max_inflight_partitions = 0;
-  bool actor_shared_memory_transport = true;
-  size_t actor_shared_memory_min_payload_bytes = 64 * 1024;
-  StreamingAutoExecutionOptions actor_auto_options;
+  size_t max_inflight_partitions = 0;
+  bool shared_memory_transport = true;
+  size_t shared_memory_min_payload_bytes = 64 * 1024;
   uint64_t idle_wait_ms = 100;
   size_t max_retained_windows = 0;
   CheckpointDeliveryMode checkpoint_delivery_mode = CheckpointDeliveryMode::AtLeastOnce;
@@ -174,8 +163,6 @@ struct StreamingQueryOptions {
                ? local_workers
                : 1;
   }
-
-  size_t effectiveActorWorkers() const { return actor_workers > 0 ? actor_workers : local_workers; }
 };
 
 struct StreamPullContext {
@@ -395,7 +382,7 @@ class MemoryStreamSink : public StreamSink {
 
 enum class StreamTransformMode { PartitionLocal, GlobalBarrier };
 
-enum class StreamAcceleratorKind { None, WindowKeySum, WindowKeyCount };
+enum class StreamAcceleratorKind { None, GroupedAggregate };
 
 struct StreamAggregateSpec {
   AggregateFunction function = AggregateFunction::Sum;
@@ -408,7 +395,8 @@ struct StreamAggregateSpec {
 struct StreamAcceleratorSpec {
   StreamAcceleratorKind kind = StreamAcceleratorKind::None;
   bool stateful = false;
-  StreamAggregateSpec aggregate;
+  std::vector<std::string> group_keys;
+  std::vector<StreamAggregateSpec> aggregates;
 };
 
 class RuntimeSourceAdapter : public StreamSource {

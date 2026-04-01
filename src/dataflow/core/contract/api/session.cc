@@ -45,24 +45,16 @@ std::string formatStreamStrategyExplain(const StreamingStrategyDecision& strateg
   out << "backpressure_high_watermark=" << strategy.backpressure_high_watermark << "\n";
   out << "backpressure_low_watermark=" << strategy.backpressure_low_watermark << "\n";
   out << "checkpoint_delivery_mode=" << strategy.checkpoint_delivery_mode << "\n";
-  out << "actor_workers=" << std::max<size_t>(2, options.effectiveActorWorkers()) << "\n";
-  out << "actor_max_inflight_partitions="
-      << std::max<size_t>(1, options.actor_max_inflight_partitions > 0
-                                 ? options.actor_max_inflight_partitions
-                                 : options.effectiveActorWorkers())
+  out << "local_worker_count=" << std::max<size_t>(1, options.effectiveLocalWorkers()) << "\n";
+  out << "max_inflight_partitions="
+      << std::max<size_t>(1, options.max_inflight_partitions > 0
+                                 ? options.max_inflight_partitions
+                                 : options.effectiveLocalWorkers())
       << "\n";
-  out << "actor_shared_memory_transport="
-      << (options.actor_shared_memory_transport ? "true" : "false") << "\n";
-  out << "actor_shared_memory_min_payload_bytes="
-      << options.actor_shared_memory_min_payload_bytes << "\n";
-  out << "auto_sample_batches=" << options.actor_auto_options.sample_batches << "\n";
-  out << "auto_min_rows_per_batch=" << options.actor_auto_options.min_rows_per_batch << "\n";
-  out << "auto_min_projected_payload_bytes="
-      << options.actor_auto_options.min_projected_payload_bytes << "\n";
-  out << "auto_min_compute_to_overhead_ratio="
-      << options.actor_auto_options.min_compute_to_overhead_ratio << "\n";
-  out << "auto_min_actor_speedup=" << options.actor_auto_options.min_actor_speedup << "\n";
-  out << "auto_strong_actor_speedup=" << options.actor_auto_options.strong_actor_speedup << "\n";
+  out << "shared_memory_transport="
+      << (options.shared_memory_transport ? "true" : "false") << "\n";
+  out << "shared_memory_min_payload_bytes="
+      << options.shared_memory_min_payload_bytes << "\n";
   return out.str();
 }
 

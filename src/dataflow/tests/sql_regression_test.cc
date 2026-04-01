@@ -362,9 +362,36 @@ void runStreamSqlRegression() {
       "(key STRING, value_sum INT, event_count INT, min_value INT, max_value INT, avg_value DOUBLE) "
       "USING csv OPTIONS(path '" +
       multi_sink_path + "', delimiter ',')");
+  const std::string multi_hot_sink_path = "/tmp/velaria-stream-sql-multi-aggregate-hot-output.csv";
+  fs::remove(multi_hot_sink_path);
+  s.sql(
+      "CREATE SINK TABLE stream_multi_hot_summary_v1 "
+      "(key STRING, value_sum INT, event_count INT, min_value INT, max_value INT, avg_value DOUBLE) "
+      "USING csv OPTIONS(path '" +
+      multi_hot_sink_path + "', delimiter ',')");
 
   dataflow::StreamingQueryOptions multi_options;
   multi_options.trigger_interval_ms = 0;
+  multi_options.execution_mode = dataflow::StreamingExecutionMode::LocalWorkers;
+  multi_options.local_workers = 2;
+  multi_options.max_inflight_partitions = 2;
+
+  auto multi_hot_query = s.startStreamSql(
+      "INSERT INTO stream_multi_hot_summary_v1 "
+      "SELECT key, SUM(value) AS value_sum, COUNT(*) AS event_count, "
+      "MIN(value) AS min_value, MAX(value) AS max_value, AVG(value) AS avg_value "
+      "FROM stream_multi_events_v1 "
+      "GROUP BY key",
+      multi_options);
+  expect(multi_hot_query.awaitTermination(1) == 1,
+         "stream_sql_multi_aggregate_hot_processed_batches");
+  expect(multi_hot_query.progress().execution_mode == "local-workers",
+         "stream_sql_multi_aggregate_hot_local_workers_mode");
+  expect(multi_hot_query.progress().used_actor_runtime,
+         "stream_sql_multi_aggregate_hot_credit_accelerator_used");
+
+  const auto multi_hot_sink_table = s.read_csv(multi_hot_sink_path).toTable();
+  expect(multi_hot_sink_table.rows.size() == 2, "stream_sql_multi_aggregate_hot_rows");
 
   auto multi_query = s.startStreamSql(
       "INSERT INTO stream_multi_summary_v1 "
@@ -431,9 +458,9 @@ void runStreamSqlRegression() {
 
   dataflow::StreamingQueryOptions window_options;
   window_options.trigger_interval_ms = 0;
-  window_options.execution_mode = dataflow::StreamingExecutionMode::ActorCredit;
-  window_options.actor_workers = 2;
-  window_options.actor_max_inflight_partitions = 2;
+  window_options.execution_mode = dataflow::StreamingExecutionMode::LocalWorkers;
+  window_options.local_workers = 2;
+  window_options.max_inflight_partitions = 2;
 
   auto window_query = s.startStreamSql(
       "INSERT INTO stream_window_summary_v1 "
@@ -443,8 +470,10 @@ void runStreamSqlRegression() {
       "GROUP BY window_start, key",
       window_options);
   expect(window_query.awaitTermination() == 1, "stream_sql_window_processed_batches");
-  expect(window_query.progress().execution_mode == "actor-credit",
-         "stream_sql_window_actor_hot_path");
+  expect(window_query.progress().execution_mode == "local-workers",
+         "stream_sql_window_local_workers_mode");
+  expect(window_query.progress().used_actor_runtime,
+         "stream_sql_window_credit_accelerator_used");
 
   const auto window_sink_table = s.read_csv(window_sink_path).toTable();
   expect(window_sink_table.rows.size() == 2, "stream_sql_window_sink_rows");
@@ -484,8 +513,10 @@ void runStreamSqlRegression() {
       "GROUP BY window_start, key",
       window_options);
   expect(window_count_query.awaitTermination() == 1, "stream_sql_window_count_processed_batches");
-  expect(window_count_query.progress().execution_mode == "actor-credit",
-         "stream_sql_window_count_actor_hot_path");
+  expect(window_count_query.progress().execution_mode == "local-workers",
+         "stream_sql_window_count_local_workers_mode");
+  expect(window_count_query.progress().used_actor_runtime,
+         "stream_sql_window_count_credit_accelerator_used");
 
   const auto window_count_sink_table = s.read_csv(window_count_sink_path).toTable();
   expect(window_count_sink_table.rows.size() == 2, "stream_sql_window_count_sink_rows");

@@ -19,15 +19,11 @@ This document describes runtime internals and current implementation shape. For 
 
 - `SingleProcess`
 - `LocalWorkers`
-- `ActorCredit`
-- `Auto`
 
 语义：
 
 - `SingleProcess`：所有 batch 在本进程内执行。
-- `LocalWorkers`：partition-local 阶段使用本进程线程并行，barrier 阶段仍在本地汇总。
-- `ActorCredit`：仅对明确支持的热路径下推到本地 actor-stream runtime。
-- `Auto`：先采样，再在 `SingleProcess` 和 `ActorCredit` 之间做一次 query-local 选择。
+- `LocalWorkers`：普通路径下使用本进程线程并行；对明确支持的热路径，可在同一 mode 下启用 credit-based 本地加速。
 
 ## Strategy Decision and Explain
 
@@ -59,21 +55,24 @@ This document describes runtime internals and current implementation shape. For 
 
 ## Current Actor Pushdown Boundary
 
-当前只有两类 query 会被 `ActorCredit` / `Auto` 接住：
+当前只有满足 grouped-aggregate hot path 条件的 query 会被 `LocalWorkers` 内部的 credit-based 路径接住：
 
 - 前置变换全部为 `PartitionLocal`
-- 最后一个 barrier 是以下其一：
-  - `groupBy({"window_start", "key"}).sum("value", ...)`
-  - `groupBy({"window_start", "key"}).count(...)`
+- 最后一个 barrier 是 stateful grouped aggregate
+- aggregate 函数当前支持：
+  - `SUM`
+  - `COUNT(*)`
+  - `MIN`
+  - `MAX`
+  - `AVG`
 
-也就是说，当前 actor runtime 只服务于：
+也就是说，当前 actor runtime 现在服务于：
 
-- `window_start`
-- `key`
-- `value` 的窗口分组求和热路径
-- `COUNT(*)` 的窗口分组计数热路径
+- 任意 group key 列组合
+- 单聚合与多聚合输出
+- `AVG` 通过内部 `sum + count` helper state 收敛
 
-`MIN / MAX / AVG` 以及多 aggregate 输出当前仍走本地执行链；`Auto` 会明确写出 fallback reason。
+如果 query 不满足“最终 transform + stateful grouped aggregate + 支持函数集合”这条边界，`LocalWorkers` 会明确写出 fallback reason。
 
 如果 query 不满足这个形状，`StreamingQuery` 会回退到普通执行链，并把原因写入：
 
@@ -84,37 +83,6 @@ This document describes runtime internals and current implementation shape. For 
 
 - `SingleProcess`
 - `LocalWorkers`
-- `ActorCredit`
-- `Auto`
-
-其中 `Auto` 若未命中热路径，必须稳定回退到 `SingleProcess` 并给出明确 reason。
-
-## Auto Selection Rule
-
-`Auto` 当前采用“前若干批采样”的启发式规则。
-
-采样输出：
-
-- `rows_per_batch`
-- `average_projected_payload_bytes`
-- `single_rows_per_s`
-- `actor_rows_per_s`
-- `actor_speedup`
-- `compute_to_overhead_ratio`
-
-默认阈值：
-
-- `sample_batches = 2`
-- `min_rows_per_batch = 64K`
-- `min_projected_payload_bytes = 256KB`
-- `min_compute_to_overhead_ratio = 1.5`
-- `min_actor_speedup = 1.05`
-- `strong_actor_speedup = 1.25`
-
-选择规则：
-
-- 常规情况下，要求 `rows`、`payload`、`speedup`、`compute/overhead` 都满足阈值。
-- 若 `actor_speedup` 已经足够强，则允许越过 `compute/overhead` 的软阈值。
 
 ## Shared Memory Transport
 
@@ -182,19 +150,17 @@ actor-stream payload 当前使用 typed binary batch：
 
 ## Known Limits
 
-- `ActorCredit` 还不是通用执行器，只是定向热路径。
+- credit-based local acceleration 还不是通用执行器，只是定向热路径。
 - 最终状态回并仍在 coordinator 本地完成。
-- query 级 `Auto` 当前阈值更接近“保守正确”，还不是最终调优状态。
 - `split_ms / merge_ms` 仍是毫秒级指标，对极短阶段不够敏感。
 - SQL 路径仍未自动下推到 actor runtime；当前优化主要落在 streaming 执行内核。
 - 同机 observability 仍是 experiment profile，不是完整 distributed telemetry 体系。
 
 ## Recommended Next Steps
 
-1. 扩展 actor pushdown 到更多 group aggregate 与多 aggregate 输出。
-2. 调整 query 级 `Auto` 阈值，使其更贴近真实 `StreamingQuery` workload。
-3. 给 query 级 progress 增加更细粒度的 actor 指标拆分。
-4. 继续把 source 到执行内核的中间 `Table/Row/Value` 转换收紧到更早的列式表示。
+1. 给 query 级 progress 增加更细粒度的 accelerator 指标拆分。
+2. 继续把 source 到执行内核的中间 `Table/Row/Value` 转换收紧到更早的列式表示。
+3. 评估是否要给 grouped-aggregate hot path 增加更细的 payload/schema 预编译缓存。
 
 
 ## Source/Sink ABI Bridge (v0.4)

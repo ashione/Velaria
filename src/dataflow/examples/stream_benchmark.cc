@@ -42,8 +42,7 @@ void runCase(const std::string& name, dataflow::StreamingExecutionMode mode, siz
   options.trigger_interval_ms = 0;
   options.execution_mode = mode;
   options.local_workers = workers;
-  options.actor_workers = workers;
-  options.actor_max_inflight_partitions = workers;
+  options.max_inflight_partitions = workers;
   options.max_inflight_batches = 4;
   options.max_queued_partitions = 16;
   options.max_retained_windows = 4;
@@ -116,9 +115,5 @@ int main(int argc, char** argv) {
           rows_per_batch);
   runCase("stateful-local-workers", dataflow::StreamingExecutionMode::LocalWorkers, worker_count, true,
           batch_count, rows_per_batch);
-  runCase("stateful-actor-credit", dataflow::StreamingExecutionMode::ActorCredit, worker_count, true,
-          batch_count, rows_per_batch);
-  runCase("stateful-auto", dataflow::StreamingExecutionMode::Auto, worker_count, true, batch_count,
-          rows_per_batch);
   return 0;
 }

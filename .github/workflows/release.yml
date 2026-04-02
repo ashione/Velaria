@@ -70,6 +70,10 @@ jobs:
   wheel-manylinux:
     runs-on: ubuntu-22.04
     needs: validate-version
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -82,7 +86,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Configure Python for Bazel
         run: |
@@ -110,12 +114,16 @@ jobs:
       - name: Upload manylinux artifact
         uses: actions/upload-artifact@v4
         with:
-          name: velaria-manylinux-wheel
+          name: velaria-manylinux-wheel-py${{ matrix.python-version }}
           path: dist/linux/*.whl
 
   wheel-macos:
     runs-on: macos-14
     needs: validate-version
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -128,27 +136,40 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Configure Python for Bazel
         run: |
           echo "VELARIA_PYTHON_BIN=$(which python)" >> "$GITHUB_ENV"
+          echo "VELARIA_PLATFORM_TAG=macosx_10_13_universal2" >> "$GITHUB_ENV"
 
       - name: Build macOS native wheel
         run: |
-          bazel build //python_api:velaria_native_whl
+          bazel build \
+            --copt=-arch \
+            --copt=arm64 \
+            --copt=-arch \
+            --copt=x86_64 \
+            --linkopt=-arch \
+            --linkopt=arm64 \
+            --linkopt=-arch \
+            --linkopt=x86_64 \
+            //python_api:velaria_native_whl
           mkdir -p dist/macos
           cp bazel-bin/python_api/velaria-*-native.whl dist/macos/
           python3 ./scripts/normalize_wheel_filename.py dist/macos/velaria-*-native.whl
 
       - name: Validate macOS wheel contents
         run: |
-          python3 ./scripts/validate_native_wheel.py dist/macos/velaria-*.whl python_api/velaria
+          python3 ./scripts/validate_native_wheel.py \
+            dist/macos/velaria-*.whl \
+            python_api/velaria \
+            arm64,x86_64
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: velaria-macos-arm64-wheel
+          name: velaria-macos-universal2-wheel-py${{ matrix.python-version }}
           path: dist/macos/*.whl
 
   publish-release:
@@ -161,14 +182,16 @@ jobs:
       - name: Download manylinux artifact
         uses: actions/download-artifact@v4
         with:
-          name: velaria-manylinux-wheel
-          path: dist/linux
+          pattern: velaria-manylinux-wheel-py*
+          path: dist/release
+          merge-multiple: true
 
       - name: Download macOS artifact
         uses: actions/download-artifact@v4
         with:
-          name: velaria-macos-arm64-wheel
-          path: dist/macos
+          pattern: velaria-macos-universal2-wheel-py*
+          path: dist/release
+          merge-multiple: true
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -176,5 +199,4 @@ jobs:
           tag_name: ${{ needs.validate-version.outputs.tag }}
           generate_release_notes: true
           files: |
-            dist/linux/*.whl
-            dist/macos/*.whl
+            dist/release/*.whl

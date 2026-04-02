@@ -217,7 +217,7 @@ Bootstrap:
 ```bash
 bazel build //:velaria_pyext
 bazel run //python_api:sync_native_extension
-uv sync --project python_api --python python3.12
+uv sync --project python_api --python python3.13
 ```
 
 Run examples:

@@ -100,14 +100,14 @@ Repository Python commands use `uv`.
 
 Recommended local baseline:
 
-- CPython `3.12`
+- CPython `3.12` or `3.13`
 - `uv`
 - local CPython headers (`Python.h`)
 
 Bazel Python detection currently probes local CPython interpreters in the `3.9` to `3.13` range. If auto-discovery fails, set:
 
 ```bash
-export VELARIA_PYTHON_BIN=/path/to/python3.12
+export VELARIA_PYTHON_BIN=/path/to/python3.13
 ```
 
 That interpreter must expose `Python.h`; otherwise Bazel cannot build the native extension.
@@ -119,7 +119,7 @@ Bootstrap:
 ```bash
 bazel build //:velaria_pyext
 bazel run //python_api:sync_native_extension
-uv sync --project python_api --python python3.12
+uv sync --project python_api --python python3.13
 ```
 
 If you run `python_api/velaria_cli.py` or other source-checkout Python entrypoints directly,

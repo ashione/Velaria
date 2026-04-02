@@ -217,7 +217,7 @@ workspace 落盘会保留内核 contract，不会重定义它们：
 ```bash
 bazel build //:velaria_pyext
 bazel run //python_api:sync_native_extension
-uv sync --project python_api --python python3.12
+uv sync --project python_api --python python3.13
 ```
 
 运行示例：

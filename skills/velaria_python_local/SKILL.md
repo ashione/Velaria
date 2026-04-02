@@ -10,11 +10,21 @@ description: How to use a locally installed Velaria Python package for local ana
 
 本 Skill 默认只使用 `uv` 执行：假设你已通过其他渠道安装好 `velaria`，并在命令行里可复用 `uv` 运行环境。
 
+安装 `velaria` wheel 或 package 后，默认 CLI 命令是：
+
+- `velaria-cli`
+- `velaria_cli`
+
+下文统一用 `velaria-cli` 举例；如果你的环境只暴露了 `velaria_cli`，可直接等价替换。
+
 ## 1. 环境准备
 
 ```bash
 uv run --with velaria --with "pyarrow==23.0.1" --with pandas --with openpyxl \\
   python -c "import velaria; print(velaria.__version__)"
+
+uv run --with velaria --with "pyarrow==23.0.1" --with pandas --with openpyxl \\
+  velaria-cli --help
 ```
 
 > 若外部 whl 已包含原生扩展，则可直接使用 `Session`；若是纯 Python 子集或兼容层缺失，会在首次创建 `Session` 时报错。  
@@ -42,16 +52,15 @@ result = session.sql("SELECT region, SUM(amount) AS amount_sum FROM sales GROUP 
 print(result.to_pylist())
 ```
 
-如果你更适合用 CLI 而不是临时 Python 片段，现在也可以直接使用 workspace/run store。  
-下文统一用 `<velaria-cli>` 表示你环境里实际可用的 Velaria CLI 入口；它可能是安装后提供的命令，也可能是分发包里的同名可执行文件。
+如果你更适合用 CLI 而不是临时 Python 片段，现在也可以直接使用 workspace/run store。
 
 ```bash
-<velaria-cli> run start -- csv-sql \
+velaria-cli run start -- csv-sql \
   --csv path/to/file.csv \
   --query "SELECT region, COUNT(*) AS cnt FROM input_table GROUP BY region"
 
-<velaria-cli> run show --run-id <run_id>
-<velaria-cli> artifacts list --run-id <run_id>
+velaria-cli run show --run-id <run_id>
+velaria-cli artifacts list --run-id <run_id>
 ```
 
 ## 4. 新增功能与参数说明
@@ -68,7 +77,7 @@ print(result.to_pylist())
 基础语法：
 
 ```bash
-<velaria-cli> run start -- <action> ...
+velaria-cli run start -- <action> ...
 ```
 
 公共参数：
@@ -290,4 +299,4 @@ uv run --with velaria --with "pyarrow==23.0.1" \\
 1. 确认 `uv` 环境可运行并已解析 `velaria`
 2. 选一个脚本加载数据，确保 `session.create_temp_view(...)` 成功
 3. 用 `session.sql(...)`/脚本 `--query` 将你的业务分析逻辑落到 SQL
-4. 若需可追踪执行、状态查看和 artifact 预览，优先使用 `velaria-cli run ...` 与 `artifacts ...`
+4. 若需可追踪执行、状态查看和 artifact 预览，优先使用 `velaria-cli run ...` 与 `velaria-cli artifacts ...`

@@ -24,8 +24,20 @@ class ArtifactIndexTest(unittest.TestCase):
                         "cli_args": {"query": "SELECT 1"},
                         "velaria_version": "0.0.test",
                         "run_dir": str(run_dir),
+                        "run_name": "cn slow query",
+                        "description": "top PSM and OQL for CN cache snapshot",
+                        "error": None,
+                        "details": {"source": "cn-cache"},
                     }
                 )
+                run_meta = index.get_run("run-1")
+                self.assertIsNotNone(run_meta)
+                self.assertEqual(run_meta["run_name"], "cn slow query")
+                self.assertEqual(
+                    run_meta["description"],
+                    "top PSM and OQL for CN cache snapshot",
+                )
+                self.assertEqual(run_meta["details"]["source"], "cn-cache")
                 index.insert_artifact(
                     {
                         "artifact_id": "artifact-1",

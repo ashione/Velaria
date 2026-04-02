@@ -21,6 +21,7 @@ class RunRecord:
     status: str = "running"
     finished_at: str | None = None
     run_name: str | None = None
+    description: str | None = None
     error: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
 

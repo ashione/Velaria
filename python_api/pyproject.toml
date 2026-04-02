@@ -10,6 +10,10 @@ dependencies = [
   "openpyxl>=3.1,<4",
 ]
 
+[project.scripts]
+velaria-cli = "velaria.cli:main"
+velaria_cli = "velaria.cli:main"
+
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"

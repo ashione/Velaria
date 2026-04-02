@@ -65,6 +65,10 @@ class WorkspaceRunsTest(unittest.TestCase):
                         [
                             "run",
                             "start",
+                            "--run-name",
+                            "score-summary",
+                            "--description",
+                            "filter rows with score > 20",
                             "--",
                             "csv-sql",
                             "--csv",
@@ -89,6 +93,8 @@ class WorkspaceRunsTest(unittest.TestCase):
                 run_meta = read_run(run_id)
                 self.assertEqual(run_meta["status"], "succeeded")
                 self.assertEqual(run_meta["action"], "csv-sql")
+                self.assertEqual(run_meta["run_name"], "score-summary")
+                self.assertEqual(run_meta["description"], "filter rows with score > 20")
 
                 index = ArtifactIndex()
                 artifacts = index.list_artifacts(run_id=run_id)

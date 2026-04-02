@@ -14,9 +14,11 @@ import pyarrow.parquet as pq
 
 try:
     velaria_cli = importlib.import_module("velaria_cli")
+    velaria_cli_impl = importlib.import_module("velaria.cli")
 except ModuleNotFoundError:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
     velaria_cli = importlib.import_module("velaria_cli")
+    velaria_cli_impl = importlib.import_module("velaria.cli")
 
 
 class _FakeArrowResult:
@@ -34,6 +36,51 @@ class _FakeDataFrame:
 
 
 class PythonCliContractTest(unittest.TestCase):
+    def test_run_start_persists_description_metadata(self):
+        workspace = importlib.import_module("velaria.workspace")
+        with tempfile.TemporaryDirectory(prefix="velaria-cli-run-meta-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                with mock.patch.object(
+                    velaria_cli_impl,
+                    "_run_action_with_timeout",
+                    return_value={"payload": {"rows": []}, "artifacts": []},
+                ):
+                    stdout = io.StringIO()
+                    with redirect_stdout(stdout):
+                        exit_code = velaria_cli.main(
+                            [
+                                "run",
+                                "start",
+                                "--run-name",
+                                "cn-slow-query",
+                                "--description",
+                                "CN slow query snapshot for cache replay triage",
+                                "--",
+                                "csv-sql",
+                                "--csv",
+                                "/tmp/input.csv",
+                                "--query",
+                                "SELECT 1",
+                            ]
+                        )
+                self.assertEqual(exit_code, 0)
+                payload = json.loads(stdout.getvalue())
+                self.assertTrue(payload["ok"])
+                run_meta = workspace.read_run(payload["run_id"])
+                self.assertEqual(run_meta["run_name"], "cn-slow-query")
+                self.assertEqual(
+                    run_meta["description"],
+                    "CN slow query snapshot for cache replay triage",
+                )
+                inputs = json.loads(
+                    (pathlib.Path(run_meta["run_dir"]) / "inputs.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(inputs["run_name"], "cn-slow-query")
+                self.assertEqual(
+                    inputs["description"],
+                    "CN slow query snapshot for cache replay triage",
+                )
+
     def test_workspace_errors_return_json_without_stderr_noise(self):
         with tempfile.TemporaryDirectory(prefix="velaria-cli-errors-") as tmp:
             with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):

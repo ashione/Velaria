@@ -205,10 +205,13 @@ Repo-visible CLI entrypoints are:
 
 - source checkout:
   - `uv run --project python_api python python_api/velaria_cli.py ...`
+- installed wheel or local package install:
+  - `velaria-cli ...`
+  - `velaria_cli ...`
 - packaged binary:
   - `./dist/velaria-cli ...`
 
-Do not assume a global `velaria-cli` command exists unless you have installed one separately.
+The global commands are expected only after installing the wheel or package.
 
 ### Python Workflow
 
@@ -217,7 +220,7 @@ Bootstrap:
 ```bash
 bazel build //:velaria_pyext
 bazel run //python_api:sync_native_extension
-uv sync --project python_api --python python3.12
+uv sync --project python_api --python python3.13
 ```
 
 Run examples:
@@ -232,6 +235,7 @@ Tracked run examples:
 
 ```bash
 uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
+  --description "score filter result for demo input" \
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
 

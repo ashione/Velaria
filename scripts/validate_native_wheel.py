@@ -2,7 +2,10 @@
 
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import zipfile
 
 def _find_dist_info_prefix(names: set[str]) -> str:
@@ -30,12 +33,47 @@ def _expected_members(source_dir: pathlib.Path) -> set[str]:
     return members
 
 
+def _validate_macos_arches(
+    zf: zipfile.ZipFile,
+    member: str,
+    expected_arches: list[str],
+) -> None:
+    if not expected_arches:
+        return
+    if shutil.which("lipo") is None:
+        raise SystemExit("lipo is required to validate macOS universal2 wheel contents")
+
+    with tempfile.TemporaryDirectory(prefix="velaria-wheel-check-") as tmp:
+        extracted = pathlib.Path(tmp) / pathlib.Path(member).name
+        extracted.write_bytes(zf.read(member))
+        result = subprocess.run(
+            ["lipo", "-info", str(extracted)],
+            check = True,
+            capture_output = True,
+            text = True,
+        )
+
+    output = result.stdout.strip() or result.stderr.strip()
+    missing = [arch for arch in expected_arches if arch not in output]
+    if missing:
+        raise SystemExit(
+            "wheel native extension is missing expected architectures: "
+            + ", ".join(missing)
+            + f" (lipo output: {output})"
+        )
+
+
 def main() -> int:
-    if len(sys.argv) != 3:
-        raise SystemExit("usage: validate_native_wheel.py <wheel> <package_source_dir>")
+    if len(sys.argv) not in (3, 4):
+        raise SystemExit(
+            "usage: validate_native_wheel.py <wheel> <package_source_dir> [expected_arches_csv]"
+        )
 
     wheel_path = pathlib.Path(sys.argv[1]).resolve()
     source_dir = pathlib.Path(sys.argv[2]).resolve()
+    expected_arches = []
+    if len(sys.argv) == 4 and sys.argv[3].strip():
+        expected_arches = [part.strip() for part in sys.argv[3].split(",") if part.strip()]
     if not wheel_path.exists():
         raise SystemExit(f"wheel not found: {wheel_path}")
 
@@ -57,6 +95,7 @@ def main() -> int:
         native_info = zf.getinfo("velaria/_velaria.so")
         if native_info.file_size <= 0:
             raise SystemExit("velaria/_velaria.so is empty")
+        _validate_macos_arches(zf, "velaria/_velaria.so", expected_arches)
 
     print(f"[wheel-check] ok {wheel_path}")
     return 0

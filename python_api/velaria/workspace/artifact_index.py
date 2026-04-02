@@ -18,7 +18,11 @@ CREATE TABLE IF NOT EXISTS runs (
     action TEXT NOT NULL,
     args_json TEXT NOT NULL,
     velaria_version TEXT,
-    run_dir TEXT NOT NULL
+    run_dir TEXT NOT NULL,
+    run_name TEXT,
+    description TEXT,
+    error TEXT,
+    details_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -40,6 +44,12 @@ CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at);
 """
 
 TERMINAL_RUN_STATUSES = frozenset({"succeeded", "failed", "timed_out"})
+RUN_OPTIONAL_COLUMNS = {
+    "run_name": "TEXT",
+    "description": "TEXT",
+    "error": "TEXT",
+    "details_json": "TEXT",
+}
 
 
 def _json_dumps(payload: Any) -> str:
@@ -73,11 +83,24 @@ class ArtifactIndex:
             self._conn = sqlite3.connect(self.sqlite_path)
             self._conn.row_factory = sqlite3.Row
             self._conn.executescript(SQLITE_SCHEMA)
+            self._ensure_sqlite_columns()
             self._conn.commit()
         except sqlite3.Error:
             self.backend = "jsonl"
             self._conn = None
             self.fallback_path.touch(exist_ok=True)
+
+    def _ensure_sqlite_columns(self) -> None:
+        assert self._conn is not None
+        columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(runs)").fetchall()
+        }
+        for column, column_type in RUN_OPTIONAL_COLUMNS.items():
+            if column not in columns:
+                self._conn.execute(
+                    f"ALTER TABLE runs ADD COLUMN {column} {column_type}"
+                )
 
     def _append_event(self, payload: dict[str, Any]) -> None:
         with self.fallback_path.open("a", encoding="utf-8") as handle:
@@ -127,14 +150,19 @@ class ArtifactIndex:
             "args_json": _json_dumps(run_meta.get("cli_args", {})),
             "velaria_version": run_meta.get("velaria_version"),
             "run_dir": run_meta["run_dir"],
+            "run_name": run_meta.get("run_name"),
+            "description": run_meta.get("description"),
+            "error": run_meta.get("error"),
+            "details_json": _json_dumps(run_meta.get("details", {})),
         }
         if self.backend == "sqlite":
             assert self._conn is not None
             self._conn.execute(
                 """
                 INSERT INTO runs (
-                    run_id, created_at, finished_at, status, action, args_json, velaria_version, run_dir
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    run_id, created_at, finished_at, status, action, args_json, velaria_version, run_dir,
+                    run_name, description, error, details_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET
                     created_at=excluded.created_at,
                     finished_at=excluded.finished_at,
@@ -142,7 +170,11 @@ class ArtifactIndex:
                     action=excluded.action,
                     args_json=excluded.args_json,
                     velaria_version=excluded.velaria_version,
-                    run_dir=excluded.run_dir
+                    run_dir=excluded.run_dir,
+                    run_name=excluded.run_name,
+                    description=excluded.description,
+                    error=excluded.error,
+                    details_json=excluded.details_json
                 """,
                 (
                     payload["run_id"],
@@ -153,6 +185,10 @@ class ArtifactIndex:
                     payload["args_json"],
                     payload["velaria_version"],
                     payload["run_dir"],
+                    payload["run_name"],
+                    payload["description"],
+                    payload["error"],
+                    payload["details_json"],
                 ),
             )
             self._conn.commit()
@@ -177,6 +213,10 @@ class ArtifactIndex:
                 "cli_args": _json_loads(row["args_json"]) or {},
                 "velaria_version": row["velaria_version"],
                 "run_dir": row["run_dir"],
+                "run_name": row["run_name"],
+                "description": row["description"],
+                "error": row["error"],
+                "details": _json_loads(row["details_json"]) or {},
             }
         runs, _ = self._load_fallback_state()
         row = runs.get(run_id)
@@ -191,6 +231,10 @@ class ArtifactIndex:
             "cli_args": _json_loads(row.get("args_json")) or {},
             "velaria_version": row.get("velaria_version"),
             "run_dir": row["run_dir"],
+            "run_name": row.get("run_name"),
+            "description": row.get("description"),
+            "error": row.get("error"),
+            "details": _json_loads(row.get("details_json")) or {},
         }
 
     def insert_artifact(self, artifact_meta: dict[str, Any]) -> None:

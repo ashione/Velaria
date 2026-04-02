@@ -100,14 +100,14 @@ Repository Python commands use `uv`.
 
 Recommended local baseline:
 
-- CPython `3.12`
+- CPython `3.12` or `3.13`
 - `uv`
 - local CPython headers (`Python.h`)
 
 Bazel Python detection currently probes local CPython interpreters in the `3.9` to `3.13` range. If auto-discovery fails, set:
 
 ```bash
-export VELARIA_PYTHON_BIN=/path/to/python3.12
+export VELARIA_PYTHON_BIN=/path/to/python3.13
 ```
 
 That interpreter must expose `Python.h`; otherwise Bazel cannot build the native extension.
@@ -119,7 +119,7 @@ Bootstrap:
 ```bash
 bazel build //:velaria_pyext
 bazel run //python_api:sync_native_extension
-uv sync --project python_api --python python3.12
+uv sync --project python_api --python python3.13
 ```
 
 If you run `python_api/velaria_cli.py` or other source-checkout Python entrypoints directly,
@@ -181,10 +181,13 @@ Repo-visible CLI entrypoints are:
 
 - source checkout:
   - `uv run --project python_api python python_api/velaria_cli.py ...`
+- installed wheel or local package install:
+  - `velaria-cli ...`
+  - `velaria_cli ...`
 - packaged binary:
   - `./dist/velaria-cli ...`
 
-Do not assume a global `velaria-cli` command exists unless you have separately installed and exposed one in your environment.
+The global commands are expected only after installing the wheel or package into your environment.
 
 ### Workspace + Artifacts
 
@@ -205,10 +208,12 @@ Tracked run commands:
 
 ```bash
 uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
+  --description "score filter result for demo input" \
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
 
 ./dist/velaria-cli run start -- csv-sql \
+  --description "score filter result for demo input" \
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
 
@@ -223,6 +228,7 @@ The tracked workspace contract is:
 
 - stdout returns JSON only
 - logs go to `stdout.log` / `stderr.log`
+- `run.json` can carry `run_name` and `description` for human-readable context
 - stream progress appends native `snapshotJson()` output to `progress.jsonl`
 - stream explain keeps the native `logical` / `physical` / `strategy` structure
 - large results stay in files under `artifacts/`; SQLite stores only index rows and small previews
@@ -234,6 +240,7 @@ CSV SQL to parquet plus preview:
 
 ```bash
 uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
+  --description "high score rows for local inspection" \
   --csv /path/to/input.csv \
   --query "SELECT name, score FROM input_table WHERE score > 10"
 

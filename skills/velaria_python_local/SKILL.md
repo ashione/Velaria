@@ -8,17 +8,35 @@ description: How to use a locally installed Velaria Python package for local ana
 这个 Skill 用于说明如何把 `velaria` 的 Python 包作为本地分析工具使用，不涉及仓库实现代码或编译/构建逻辑。  
 核心思路：**把数据先加载为临时视图，再用 `session.sql(...)` 写 SQL 处理。**
 
-本 Skill 默认只使用 `uv` 执行：假设你已通过其他渠道安装好 `velaria`，并在命令行里可复用 `uv` 运行环境。
+本 Skill 默认只使用 `uv` 执行。推荐路径是：先在本地环境中安装 `velaria`，再执行 CLI 或 Python 脚本。
+
+安装 `velaria` wheel 或 package 后，默认 CLI 命令是：
+
+- `velaria-cli`
+- `velaria_cli`
+
+下文统一用 `velaria-cli` 举例；如果你的环境只暴露了 `velaria_cli`，可直接等价替换。
 
 ## 1. 环境准备
 
+推荐先创建一个本地环境并安装 `velaria`：
+
 ```bash
-uv run --with velaria --with "pyarrow==23.0.1" --with pandas --with openpyxl \\
-  python -c "import velaria; print(velaria.__version__)"
+uv venv .venv
+source .venv/bin/activate
+
+# 二选一：
+uv pip install velaria
+# 或
+uv pip install /path/to/velaria-<version>-<python_tag>-<abi_tag>-<platform_tag>.whl
+
+velaria-cli --help
+python -c "import velaria; print(velaria.__version__)"
 ```
 
 > 若外部 whl 已包含原生扩展，则可直接使用 `Session`；若是纯 Python 子集或兼容层缺失，会在首次创建 `Session` 时报错。  
-> `uv run --with` 需要可解析的包（index 名称或本地 wheel），本 Skill 不包含仓库构建步骤。  
+> 本 Skill 不包含仓库构建步骤，只描述“已安装包后如何使用”。
+> 若你只想做一次性验证，也可以用 `uv run --with velaria ...` 临时拉起环境，但不作为本 Skill 的默认路径。
 
 ## 2. Skill 脚本
 
@@ -42,16 +60,16 @@ result = session.sql("SELECT region, SUM(amount) AS amount_sum FROM sales GROUP 
 print(result.to_pylist())
 ```
 
-如果你更适合用 CLI 而不是临时 Python 片段，现在也可以直接使用 workspace/run store。  
-下文统一用 `<velaria-cli>` 表示你环境里实际可用的 Velaria CLI 入口；它可能是安装后提供的命令，也可能是分发包里的同名可执行文件。
+如果你更适合用 CLI 而不是临时 Python 片段，在已安装 `velaria` 的环境里也可以直接使用 workspace/run store。
 
 ```bash
-<velaria-cli> run start -- csv-sql \
+velaria-cli run start -- csv-sql \
+  --description "regional row count for the current CSV snapshot" \
   --csv path/to/file.csv \
   --query "SELECT region, COUNT(*) AS cnt FROM input_table GROUP BY region"
 
-<velaria-cli> run show --run-id <run_id>
-<velaria-cli> artifacts list --run-id <run_id>
+velaria-cli run show --run-id <run_id>
+velaria-cli artifacts list --run-id <run_id>
 ```
 
 ## 4. 新增功能与参数说明
@@ -68,12 +86,13 @@ print(result.to_pylist())
 基础语法：
 
 ```bash
-<velaria-cli> run start -- <action> ...
+velaria-cli run start -- <action> ...
 ```
 
 公共参数：
 
 - `--run-name`：给本次执行起一个更易读的名字，便于人工检索
+- `--description`：给本次 run 追加一段备注/描述，便于后续 `run show`、索引检索和人工回看
 - `--timeout-ms`：超时毫秒数；超时后 run 会标记为 `timed_out`
 
 当前支持的 action：
@@ -287,7 +306,7 @@ uv run --with velaria --with "pyarrow==23.0.1" \\
 
 ## 7. 最小执行清单
 
-1. 确认 `uv` 环境可运行并已解析 `velaria`
+1. 先创建或激活一个本地环境，并安装 `velaria`
 2. 选一个脚本加载数据，确保 `session.create_temp_view(...)` 成功
 3. 用 `session.sql(...)`/脚本 `--query` 将你的业务分析逻辑落到 SQL
-4. 若需可追踪执行、状态查看和 artifact 预览，优先使用 `velaria-cli run ...` 与 `artifacts ...`
+4. 若需可追踪执行、状态查看和 artifact 预览，优先使用 `velaria-cli run ...` 与 `velaria-cli artifacts ...`

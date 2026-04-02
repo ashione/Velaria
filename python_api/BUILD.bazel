@@ -25,6 +25,7 @@ py_library(
     name = "velaria_py_pkg",
     srcs = [
         "velaria/__init__.py",
+        "velaria/cli.py",
         "velaria/_version.py",
         "velaria/excel.py",
         "velaria/custom_stream.py",
@@ -138,6 +139,12 @@ py_wheel(
     python_tag = "py3",
     version = VELARIA_PY_VERSION,
     deps = [":velaria_pkg"],
+    entry_points = {
+        "console_scripts": [
+            "velaria-cli = velaria.cli:main",
+            "velaria_cli = velaria.cli:main",
+        ],
+    },
     requires = [
         "pyarrow",
         "pandas",

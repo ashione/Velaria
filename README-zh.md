@@ -205,10 +205,13 @@ workspace 落盘会保留内核 contract，不会重定义它们：
 
 - 源码目录：
   - `uv run --project python_api python python_api/velaria_cli.py ...`
+- 安装 wheel 或本地 package 后：
+  - `velaria-cli ...`
+  - `velaria_cli ...`
 - 打包产物：
   - `./dist/velaria-cli ...`
 
-不要默认存在全局 `velaria-cli` 命令，除非你另外安装并暴露了这个入口。
+全局命令只应在你已经安装 wheel 或 package 之后使用。
 
 ### Python 工作流
 
@@ -217,7 +220,7 @@ workspace 落盘会保留内核 contract，不会重定义它们：
 ```bash
 bazel build //:velaria_pyext
 bazel run //python_api:sync_native_extension
-uv sync --project python_api --python python3.12
+uv sync --project python_api --python python3.13
 ```
 
 运行示例：
@@ -232,6 +235,7 @@ tracked run 示例：
 
 ```bash
 uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
+  --description "score filter result for demo input" \
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
 

@@ -205,10 +205,13 @@ Repo-visible CLI entrypoints are:
 
 - source checkout:
   - `uv run --project python_api python python_api/velaria_cli.py ...`
+- installed wheel or local package install:
+  - `velaria-cli ...`
+  - `velaria_cli ...`
 - packaged binary:
   - `./dist/velaria-cli ...`
 
-Do not assume a global `velaria-cli` command exists unless you have installed one separately.
+The global commands are expected only after installing the wheel or package.
 
 ### Python Workflow
 

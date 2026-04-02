@@ -9,6 +9,32 @@ namespace dataflow {
 
 namespace {
 
+std::vector<std::string> splitCsvRow(const std::string& line, char delimiter) {
+  std::vector<std::string> out;
+  std::string cell;
+  bool in_quotes = false;
+  for (std::size_t i = 0; i < line.size(); ++i) {
+    const char ch = line[i];
+    if (ch == '"') {
+      if (in_quotes && i + 1 < line.size() && line[i + 1] == '"') {
+        cell.push_back('"');
+        ++i;
+      } else {
+        in_quotes = !in_quotes;
+      }
+      continue;
+    }
+    if (ch == delimiter && !in_quotes) {
+      out.push_back(cell);
+      cell.clear();
+      continue;
+    }
+    cell.push_back(ch);
+  }
+  out.push_back(cell);
+  return out;
+}
+
 bool isInt(const std::string& s) {
   if (s.empty()) return false;
   std::size_t pos = 0;
@@ -36,10 +62,18 @@ Value parseCell(const std::string& cell) {
     }
   }
   if (isInt(cell)) {
-    return Value(static_cast<int64_t>(std::stoll(cell)));
+    try {
+      return Value(static_cast<int64_t>(std::stoll(cell)));
+    } catch (const std::exception&) {
+      return Value(cell);
+    }
   }
   if (isDouble(cell)) {
-    return Value(std::stod(cell));
+    try {
+      return Value(std::stod(cell));
+    } catch (const std::exception&) {
+      return Value(cell);
+    }
   }
   return Value(cell);
 }
@@ -58,22 +92,14 @@ Table load_csv(const std::string& path, char delimiter) {
   }
 
   std::vector<std::string> header;
-  {
-    std::stringstream ss(line);
-    std::string token;
-    while (std::getline(ss, token, delimiter)) {
-      header.push_back(token);
-    }
-  }
+  header = splitCsvRow(line, delimiter);
 
   Table table;
   table.schema = Schema(header);
 
   while (std::getline(input, line)) {
-    std::stringstream ss(line);
-    std::string cell;
     Row row;
-    while (std::getline(ss, cell, delimiter)) {
+    for (const auto& cell : splitCsvRow(line, delimiter)) {
       row.push_back(parseCell(cell));
     }
     if (!row.empty() && row.size() == table.schema.fields.size()) {

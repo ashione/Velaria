@@ -235,6 +235,22 @@ int main() {
     expect(nanoarrow_first_cache_mtime == nanoarrow_second_cache_mtime,
            "nanoarrow cache hit should not rewrite materialization file");
 
+    const auto quoted_csv_path = make_temp_file("velaria-quoted-largeint-source");
+    write_csv(
+        quoted_csv_path,
+        "record_id,extra,score\n"
+        "2026040222134901020610814336213,\"{\"\"cluster\"\":\"\"query\"\",\"\"data_count\"\":200}\",7\n"
+        "42,\"{\"\"cluster\"\":\"\"query\"\",\"\"data_count\"\":201}\",8\n");
+    const auto quoted = session.read_csv(quoted_csv_path).toTable();
+    expect(quoted.rows.size() == 2, "quoted csv row count mismatch");
+    expect_table_value(quoted, 0, 0, dataflow::Value("2026040222134901020610814336213"),
+                       "large integer csv cell should remain string");
+    expect_table_value(quoted, 0, 1,
+                       dataflow::Value("{\"cluster\":\"query\",\"data_count\":200}"),
+                       "quoted json csv cell mismatch");
+    expect_table_value(quoted, 1, 2, dataflow::Value(int64_t(8)),
+                       "quoted csv numeric tail mismatch");
+
     std::cout << "[test] source materialization binary+nanoarrow cache ok" << std::endl;
     return 0;
   } catch (const std::exception& ex) {

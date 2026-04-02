@@ -23,6 +23,37 @@ read_run = workspace.read_run
 
 
 class WorkspaceRunsTest(unittest.TestCase):
+    def test_csv_sql_handles_quoted_json_and_oversized_integer_strings(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-csv-quoted-") as tmp:
+            csv_path = pathlib.Path(tmp) / "quoted.csv"
+            csv_path.write_text(
+                (
+                    "record_id,extra,score\n"
+                    '2026040222134901020610814336213,"{""cluster"":""query"",""data_count"":200}",7\n'
+                    '42,"{""cluster"":""query"",""data_count"":201}",8\n'
+                ),
+                encoding="utf-8",
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = velaria_cli.main(
+                    [
+                        "csv-sql",
+                        "--csv",
+                        str(csv_path),
+                        "--table",
+                        "slow",
+                        "--query",
+                        "SELECT COUNT(*) AS cnt FROM slow",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["schema"], ["cnt"])
+            self.assertEqual(payload["rows"], [{"cnt": 2}])
+
     def test_run_start_csv_sql_writes_run_dir_and_preview(self):
         with tempfile.TemporaryDirectory(prefix="velaria-workspace-run-") as tmp:
             csv_path = pathlib.Path(tmp) / "scores.csv"

@@ -208,10 +208,12 @@ Tracked run commands:
 
 ```bash
 uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
+  --description "score filter result for demo input" \
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
 
 ./dist/velaria-cli run start -- csv-sql \
+  --description "score filter result for demo input" \
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
 
@@ -226,6 +228,7 @@ The tracked workspace contract is:
 
 - stdout returns JSON only
 - logs go to `stdout.log` / `stderr.log`
+- `run.json` can carry `run_name` and `description` for human-readable context
 - stream progress appends native `snapshotJson()` output to `progress.jsonl`
 - stream explain keeps the native `logical` / `physical` / `strategy` structure
 - large results stay in files under `artifacts/`; SQLite stores only index rows and small previews
@@ -237,6 +240,7 @@ CSV SQL to parquet plus preview:
 
 ```bash
 uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
+  --description "high score rows for local inspection" \
   --csv /path/to/input.csv \
   --query "SELECT name, score FROM input_table WHERE score > 10"
 

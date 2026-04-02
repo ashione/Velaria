@@ -235,6 +235,7 @@ Tracked run examples:
 
 ```bash
 uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
+  --description "score filter result for demo input" \
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
 

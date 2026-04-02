@@ -677,12 +677,20 @@ def _read_run_or_raise(run_id: str) -> dict[str, Any]:
 
 def _run_start(args: argparse.Namespace) -> int:
     action, action_args = _parse_passthrough(args.command_args)
-    run_id, run_dir = create_run(action, action_args, __version__, run_name=args.run_name)
+    run_id, run_dir = create_run(
+        action,
+        action_args,
+        __version__,
+        run_name=args.run_name,
+        description=args.description,
+    )
     write_inputs(
         run_id,
         {
             "action": action,
             "action_args": action_args,
+            "run_name": args.run_name,
+            "description": args.description,
             "timeout_ms": args.timeout_ms,
         },
     )
@@ -839,6 +847,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     run_start = run_subparsers.add_parser("start", help="Start a tracked run.")
     run_start.add_argument("--run-name")
+    run_start.add_argument("--description", "--run-description", dest="description")
     run_start.add_argument("--timeout-ms", type=int)
     run_start.add_argument("command_args", nargs=argparse.REMAINDER)
 

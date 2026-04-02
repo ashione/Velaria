@@ -64,6 +64,7 @@ print(result.to_pylist())
 
 ```bash
 velaria-cli run start -- csv-sql \
+  --description "regional row count for the current CSV snapshot" \
   --csv path/to/file.csv \
   --query "SELECT region, COUNT(*) AS cnt FROM input_table GROUP BY region"
 
@@ -91,6 +92,7 @@ velaria-cli run start -- <action> ...
 公共参数：
 
 - `--run-name`：给本次执行起一个更易读的名字，便于人工检索
+- `--description`：给本次 run 追加一段备注/描述，便于后续 `run show`、索引检索和人工回看
 - `--timeout-ms`：超时毫秒数；超时后 run 会标记为 `timed_out`
 
 当前支持的 action：

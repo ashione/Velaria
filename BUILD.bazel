@@ -18,6 +18,8 @@ filegroup(
 filegroup(
     name = "velaria_core_execution_sources",
     srcs = [
+        "src/dataflow/core/execution/columnar_batch.cc",
+        "src/dataflow/core/execution/columnar_batch.h",
         "src/dataflow/core/execution/csv.cc",
         "src/dataflow/core/execution/csv.h",
         "src/dataflow/core/execution/nanoarrow_ipc_codec.cc",
@@ -107,6 +109,7 @@ filegroup(
 cc_library(
     name = "dataflow_core",
     srcs = [
+        "src/dataflow/core/execution/columnar_batch.cc",
         "src/dataflow/core/execution/value.cc",
         "src/dataflow/core/execution/table.cc",
         "src/dataflow/core/execution/csv.cc",
@@ -132,6 +135,7 @@ cc_library(
         "src/dataflow/core/execution/stream/stream.cc",
     ],
     hdrs = [
+        "src/dataflow/core/execution/columnar_batch.h",
         "src/dataflow/core/execution/value.h",
         "src/dataflow/core/execution/table.h",
         "src/dataflow/core/execution/csv.h",
@@ -168,6 +172,7 @@ cc_library(
 test_suite(
     name = "core_regression",
     tests = [
+        ":columnar_batch_test",
         ":planner_v03_test",
         ":source_sink_abi_test",
         ":sql_regression_test",
@@ -365,12 +370,24 @@ cc_binary(
 )
 
 cc_binary(
+    name = "string_builtin_benchmark",
+    srcs = ["src/dataflow/examples/string_builtin_benchmark.cc"],
+    deps = [":dataflow_core"],
+)
+
+cc_binary(
     name = "vector_search_benchmark",
     srcs = ["src/dataflow/examples/vector_search_benchmark.cc"],
     deps = [
         ":dataflow_actor_rpc_codec",
         ":dataflow_core",
     ],
+)
+
+cc_test(
+    name = "columnar_batch_test",
+    srcs = ["src/dataflow/tests/columnar_batch_test.cc"],
+    deps = [":dataflow_core"],
 )
 
 cc_test(

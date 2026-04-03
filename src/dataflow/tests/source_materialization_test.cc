@@ -75,6 +75,12 @@ void expect_roundtrip_sample_table(const dataflow::Table& table, const std::stri
   expect_table_value(table, 0, 3, dataflow::Value(std::vector<float>{1.0f, 0.5f}),
                      label + ": vector mismatch");
   expect_table_value(table, 0, 4, dataflow::Value(), label + ": null mismatch");
+  expect_table_value(table, 1, 0, dataflow::Value(int64_t(2)), label + ": second int mismatch");
+  expect_table_value(table, 1, 1, dataflow::Value(), label + ": second null mismatch");
+  expect_table_value(table, 1, 2, dataflow::Value("bob"), label + ": second string mismatch");
+  expect_table_value(table, 1, 3, dataflow::Value(std::vector<float>{0.0f, 2.0f}),
+                     label + ": second vector mismatch");
+  expect_table_value(table, 1, 4, dataflow::Value("kept"), label + ": second note mismatch");
 }
 
 }  // namespace

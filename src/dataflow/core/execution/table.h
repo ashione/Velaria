@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -8,6 +10,7 @@
 
 namespace dataflow {
 
+struct ColumnarTable;
 using Row = std::vector<Value>;
 
 struct Schema {
@@ -24,9 +27,15 @@ struct Schema {
 struct Table {
   Schema schema;
   std::vector<Row> rows;
+  mutable std::shared_ptr<ColumnarTable> columnar_cache;
+  mutable std::mutex columnar_cache_mu;
 
   Table() = default;
   Table(Schema s, std::vector<Row> r) : schema(std::move(s)), rows(std::move(r)) {}
+  Table(const Table& other);
+  Table& operator=(const Table& other);
+  Table(Table&& other) noexcept;
+  Table& operator=(Table&& other) noexcept;
 
   size_t rowCount() const { return rows.size(); }
 };

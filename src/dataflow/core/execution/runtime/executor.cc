@@ -2,7 +2,6 @@
 
 #include <memory>
 #include <algorithm>
-#include <cctype>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -10,6 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/experimental/runtime/rpc_runner.h"
 
 namespace dataflow {
@@ -18,250 +18,131 @@ namespace {
 
 constexpr char kGroupDelim = '\x1f';
 
-std::string makeKey(const Table& table, const Row& row, const std::vector<std::size_t>& keys) {
-  std::string key;
-  for (std::size_t i = 0; i < keys.size(); ++i) {
-    if (i > 0) key.push_back(kGroupDelim);
-    key += row[keys[i]].toString();
-  }
-  return key;
-}
+struct BoundComputedArg {
+  bool is_literal = false;
+  size_t source_column_index = 0;
+  bool literal_is_null = false;
+  bool literal_has_int64 = false;
+  int64_t literal_int64 = 0;
+  std::string literal_string;
+};
 
-std::string argumentAsString(const Value& value) {
-  if (value.type() == DataType::Nil) {
-    return std::string();
-  }
-  if (value.isNumber()) return value.toString();
-  if (value.type() == DataType::String) return value.asString();
-  return value.toString();
-}
-
-int64_t argumentAsInt64(const Value& value) {
-  if (value.type() == DataType::Nil) {
-    throw std::runtime_error("string function argument cannot be null");
-  }
-  if (!value.isNumber()) {
-    throw std::runtime_error("string function argument must be numeric");
-  }
-  return value.asInt64();
-}
-
-bool hasNullArgument(const std::vector<Value>& values) {
-  for (const auto& value : values) {
-    if (value.type() == DataType::Nil) {
-      return true;
-    }
-  }
-  return false;
-}
-
-std::string trimString(std::string input) {
-  auto isSpace = [](char ch) { return std::isspace(static_cast<unsigned char>(ch)) != 0; };
-  auto start = input.begin();
-  while (start != input.end() && isSpace(*start)) ++start;
-  auto end = input.end();
-  while (end != start && isSpace(*(end - 1))) --end;
-  return std::string(start, end);
-}
-
-std::string ltrimString(std::string input) {
-  auto isSpace = [](char ch) { return std::isspace(static_cast<unsigned char>(ch)) != 0; };
-  auto start = input.begin();
-  while (start != input.end() && isSpace(*start)) ++start;
-  return std::string(start, input.end());
-}
-
-std::string rtrimString(std::string input) {
-  auto isSpace = [](char ch) { return std::isspace(static_cast<unsigned char>(ch)) != 0; };
-  auto end = input.end();
-  while (end != input.begin() && isSpace(*(end - 1))) --end;
-  return std::string(input.begin(), end);
-}
-
-std::string replaceString(std::string source, const std::string& from, const std::string& to) {
-  if (from.empty()) {
-    return source;
-  }
-  std::string out = std::move(source);
-  std::size_t pos = 0;
-  while ((pos = out.find(from, pos)) != std::string::npos) {
-    out.replace(pos, from.size(), to);
-    pos += to.size();
-  }
-  return out;
-}
-
-std::string lowerString(std::string input) {
-  for (char& ch : input) {
-    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-  }
-  return input;
-}
-
-std::string upperString(std::string input) {
-  for (char& ch : input) {
-    ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
-  }
-  return input;
-}
-
-std::string reverseString(std::string input) {
-  std::reverse(input.begin(), input.end());
-  return input;
-}
-
-Value evalStringFunction(ComputedColumnKind function, const std::vector<ComputedColumnArg>& args,
-                        const Row& row) {
-  std::vector<Value> values;
-  values.reserve(args.size());
+std::vector<BoundComputedArg> bindComputedArgs(const std::vector<ComputedColumnArg>& args) {
+  std::vector<BoundComputedArg> bound;
+  bound.reserve(args.size());
   for (const auto& arg : args) {
+    BoundComputedArg item;
+    item.is_literal = arg.is_literal;
+    item.source_column_index = arg.source_column_index;
     if (arg.is_literal) {
-      values.push_back(arg.literal);
-    } else {
-      if (arg.source_column_index >= row.size()) {
-        throw std::runtime_error("computed column source index out of range");
+      item.literal_is_null = arg.literal.isNull();
+      if (!item.literal_is_null) {
+        item.literal_string =
+            arg.literal.type() == DataType::String ? arg.literal.asString() : arg.literal.toString();
+        if (arg.literal.isNumber()) {
+          item.literal_has_int64 = true;
+          item.literal_int64 = arg.literal.asInt64();
+        }
       }
-      values.push_back(row[arg.source_column_index]);
     }
+    bound.push_back(std::move(item));
   }
-  if (hasNullArgument(values)) {
-    return Value();
+  return bound;
+}
+
+StringColumnBuffer materializeStringArgColumn(const Table& table, const BoundComputedArg& arg) {
+  const auto row_count = table.rows.size();
+  if (arg.is_literal) {
+    if (arg.literal_is_null) {
+      return makeNullStringColumn(row_count);
+    }
+    return makeConstantStringColumn(row_count, arg.literal_string);
   }
-  if (function == ComputedColumnKind::StringLength) {
-    if (values.size() != 1) {
-      throw std::runtime_error("LENGTH expects 1 argument");
+  return dataflow::materializeStringColumn(table, arg.source_column_index);
+}
+
+Int64ColumnBuffer materializeInt64ArgColumn(const Table& table, const BoundComputedArg& arg) {
+  const auto row_count = table.rows.size();
+  if (arg.is_literal) {
+    if (arg.literal_is_null) {
+      return makeNullInt64Column(row_count);
     }
-    return Value(static_cast<int64_t>(argumentAsString(values[0]).size()));
+    if (!arg.literal_has_int64) {
+      throw std::runtime_error("string function argument must be numeric");
+    }
+    return makeConstantInt64Column(row_count, arg.literal_int64);
   }
-  if (function == ComputedColumnKind::StringReverse) {
-    if (values.size() != 1) {
-      throw std::runtime_error("REVERSE expects 1 argument");
+  return dataflow::materializeInt64Column(table, arg.source_column_index);
+}
+
+std::vector<Value> computeStringColumnValues(Table* table, ComputedColumnKind function,
+                                             const std::vector<ComputedColumnArg>& args) {
+  const auto bound_args = bindComputedArgs(args);
+  auto materialize_string_args = [&]() {
+    std::vector<StringColumnBuffer> columns;
+    columns.reserve(bound_args.size());
+    for (const auto& arg : bound_args) {
+      columns.push_back(materializeStringArgColumn(*table, arg));
     }
-    return Value(reverseString(argumentAsString(values[0])));
-  }
-  if (function == ComputedColumnKind::StringLower) {
-    if (values.size() != 1) {
-      throw std::runtime_error("LOWER expects 1 argument");
-    }
-    return Value(lowerString(argumentAsString(values[0])));
-  }
-  if (function == ComputedColumnKind::StringUpper) {
-    if (values.size() != 1) {
-      throw std::runtime_error("UPPER expects 1 argument");
-    }
-    return Value(upperString(argumentAsString(values[0])));
-  }
-  if (function == ComputedColumnKind::StringTrim) {
-    if (values.size() != 1) {
-      throw std::runtime_error("TRIM expects 1 argument");
-    }
-    return Value(trimString(argumentAsString(values[0])));
-  }
-  if (function == ComputedColumnKind::StringLtrim) {
-    if (values.size() != 1) {
-      throw std::runtime_error("LTRIM requires 1 argument");
-    }
-    return Value(ltrimString(argumentAsString(values[0])));
-  }
-  if (function == ComputedColumnKind::StringRtrim) {
-    if (values.size() != 1) {
-      throw std::runtime_error("RTRIM requires 1 argument");
-    }
-    return Value(rtrimString(argumentAsString(values[0])));
-  }
-  if (function == ComputedColumnKind::StringConcat) {
-    if (values.empty()) {
-      throw std::runtime_error("CONCAT expects at least 1 argument");
-    }
-    std::string out;
-    for (const auto& value : values) {
-      out += argumentAsString(value);
-    }
-    return Value(out);
-  }
-  if (function == ComputedColumnKind::StringConcatWs) {
-    if (values.size() < 2) {
-      throw std::runtime_error("CONCAT_WS expects at least 2 arguments");
-    }
-    const auto delim = argumentAsString(values[0]);
-    std::string out;
-    for (std::size_t i = 1; i < values.size(); ++i) {
-      if (i > 1) {
-        out += delim;
+    return columns;
+  };
+  switch (function) {
+    case ComputedColumnKind::StringLength:
+      if (bound_args.size() != 1) throw std::runtime_error("LENGTH expects 1 argument");
+      return vectorizedStringLength(materializeStringArgColumn(*table, bound_args[0]));
+    case ComputedColumnKind::StringLower:
+      if (bound_args.size() != 1) throw std::runtime_error("LOWER expects 1 argument");
+      return vectorizedStringLower(materializeStringArgColumn(*table, bound_args[0]));
+    case ComputedColumnKind::StringUpper:
+      if (bound_args.size() != 1) throw std::runtime_error("UPPER expects 1 argument");
+      return vectorizedStringUpper(materializeStringArgColumn(*table, bound_args[0]));
+    case ComputedColumnKind::StringTrim:
+      if (bound_args.size() != 1) throw std::runtime_error("TRIM expects 1 argument");
+      return vectorizedStringTrim(materializeStringArgColumn(*table, bound_args[0]));
+    case ComputedColumnKind::StringConcat:
+      return vectorizedStringConcat(materialize_string_args());
+    case ComputedColumnKind::StringReverse:
+      if (bound_args.size() != 1) throw std::runtime_error("REVERSE expects 1 argument");
+      return vectorizedStringReverse(materializeStringArgColumn(*table, bound_args[0]));
+    case ComputedColumnKind::StringConcatWs:
+      return vectorizedStringConcatWs(materialize_string_args());
+    case ComputedColumnKind::StringLeft:
+      if (bound_args.size() != 2) throw std::runtime_error("LEFT requires 2 arguments");
+      return vectorizedStringLeft(materializeStringArgColumn(*table, bound_args[0]),
+                                  materializeInt64ArgColumn(*table, bound_args[1]));
+    case ComputedColumnKind::StringRight:
+      if (bound_args.size() != 2) throw std::runtime_error("RIGHT requires 2 arguments");
+      return vectorizedStringRight(materializeStringArgColumn(*table, bound_args[0]),
+                                   materializeInt64ArgColumn(*table, bound_args[1]));
+    case ComputedColumnKind::StringPosition:
+      if (bound_args.size() != 2) throw std::runtime_error("POSITION requires 2 arguments");
+      return vectorizedStringPosition(materializeStringArgColumn(*table, bound_args[0]),
+                                      materializeStringArgColumn(*table, bound_args[1]));
+    case ComputedColumnKind::StringSubstr:
+      if (bound_args.size() < 2 || bound_args.size() > 3) {
+        throw std::runtime_error("SUBSTR expects 2 or 3 arguments");
       }
-      out += argumentAsString(values[i]);
-    }
-    return Value(out);
-  }
-  if (function == ComputedColumnKind::StringLeft) {
-    if (values.size() != 2) {
-      throw std::runtime_error("LEFT requires 2 arguments");
-    }
-    const auto source = argumentAsString(values[0]);
-    const auto length = argumentAsInt64(values[1]);
-    if (length <= 0) {
-      return Value(std::string());
-    }
-    auto byte_length = static_cast<size_t>(std::max<int64_t>(0, length));
-    if (byte_length >= source.size()) {
-      return Value(source);
-    }
-    return Value(source.substr(0, byte_length));
-  }
-  if (function == ComputedColumnKind::StringRight) {
-    if (values.size() != 2) {
-      throw std::runtime_error("RIGHT requires 2 arguments");
-    }
-    const auto source = argumentAsString(values[0]);
-    const auto length = argumentAsInt64(values[1]);
-    if (length <= 0) {
-      return Value(std::string());
-    }
-    auto byte_length = static_cast<size_t>(std::max<int64_t>(0, length));
-    if (byte_length >= source.size()) {
-      return Value(source);
-    }
-    return Value(source.substr(source.size() - byte_length));
-  }
-  if (function == ComputedColumnKind::StringSubstr) {
-    if (values.size() < 2 || values.size() > 3) {
-      throw std::runtime_error("SUBSTR expects 2 or 3 arguments");
-    }
-    const auto source = argumentAsString(values[0]);
-    const auto start_one_based = argumentAsInt64(values[1]);
-    const auto start = std::max<int64_t>(1, start_one_based);
-    if (start > static_cast<int64_t>(source.size())) {
-      return Value(std::string());
-    }
-    auto byte_start = static_cast<size_t>(start - 1);
-    if (values.size() == 2) {
-      return Value(source.substr(byte_start));
-    }
-    auto length = argumentAsInt64(values[2]);
-    if (length <= 0) {
-      return Value(std::string());
-    }
-    auto end = std::min<size_t>(source.size(), byte_start + static_cast<size_t>(length));
-    return Value(source.substr(byte_start, end - byte_start));
-  }
-  if (function == ComputedColumnKind::StringReplace) {
-    if (values.size() != 3) {
-      throw std::runtime_error("REPLACE requires 3 arguments");
-    }
-    return Value(replaceString(argumentAsString(values[0]), argumentAsString(values[1]),
-                              argumentAsString(values[2])));
-  }
-  if (function == ComputedColumnKind::StringPosition) {
-    if (values.size() != 2) {
-      throw std::runtime_error("POSITION requires 2 arguments");
-    }
-    const auto needle = argumentAsString(values[0]);
-    const auto source = argumentAsString(values[1]);
-    const auto position = source.find(needle);
-    if (position == std::string::npos) {
-      return Value(static_cast<int64_t>(0));
-    }
-    return Value(static_cast<int64_t>(position + 1));
+      if (bound_args.size() == 2) {
+        return vectorizedStringSubstr(materializeStringArgColumn(*table, bound_args[0]),
+                                      materializeInt64ArgColumn(*table, bound_args[1]), nullptr);
+      } else {
+        const auto length = materializeInt64ArgColumn(*table, bound_args[2]);
+        return vectorizedStringSubstr(materializeStringArgColumn(*table, bound_args[0]),
+                                      materializeInt64ArgColumn(*table, bound_args[1]), &length);
+      }
+    case ComputedColumnKind::StringLtrim:
+      if (bound_args.size() != 1) throw std::runtime_error("LTRIM requires 1 argument");
+      return vectorizedStringLtrim(materializeStringArgColumn(*table, bound_args[0]));
+    case ComputedColumnKind::StringRtrim:
+      if (bound_args.size() != 1) throw std::runtime_error("RTRIM requires 1 argument");
+      return vectorizedStringRtrim(materializeStringArgColumn(*table, bound_args[0]));
+    case ComputedColumnKind::StringReplace:
+      if (bound_args.size() != 3) throw std::runtime_error("REPLACE requires 3 arguments");
+      return vectorizedStringReplace(materializeStringArgColumn(*table, bound_args[0]),
+                                     materializeStringArgColumn(*table, bound_args[1]),
+                                     materializeStringArgColumn(*table, bound_args[2]));
+    case ComputedColumnKind::Copy:
+      break;
   }
   throw std::runtime_error("unsupported computed column function");
 }
@@ -281,13 +162,6 @@ std::vector<std::string> splitKey(const std::string& key) {
   return out;
 }
 
-int64_t parseEpochMillis(const Value& value) {
-  if (value.isNumber()) {
-    return value.asInt64();
-  }
-  return static_cast<int64_t>(std::stoll(value.toString()));
-}
-
 struct AggregateAccumulator {
   std::vector<double> sum;
   std::vector<std::size_t> count;
@@ -297,7 +171,141 @@ struct AggregateAccumulator {
   std::vector<bool> hasMax;
 };
 
+std::vector<std::size_t> allColumnIndices(const Schema& schema) {
+  std::vector<std::size_t> indices;
+  indices.reserve(schema.fields.size());
+  for (std::size_t i = 0; i < schema.fields.size(); ++i) {
+    indices.push_back(i);
+  }
+  return indices;
+}
+
 }  // namespace
+
+Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_indices,
+                            const std::vector<AggregateSpec>& aggs) {
+  std::unordered_map<std::string, AggregateAccumulator> states;
+  std::vector<std::string> ordered_keys;
+  const auto serialized_keys = materializeSerializedKeys(input, key_indices);
+
+  std::vector<std::size_t> aggregate_value_indices;
+  aggregate_value_indices.reserve(aggs.size());
+  for (const auto& agg : aggs) {
+    if (agg.function != AggregateFunction::Count) {
+      aggregate_value_indices.push_back(agg.value_index);
+    }
+  }
+  const auto aggregate_inputs = viewValueColumns(input, aggregate_value_indices);
+  std::vector<const ValueColumnView*> aggregate_columns;
+  aggregate_columns.reserve(aggs.size());
+  std::size_t aggregate_input_index = 0;
+  for (const auto& agg : aggs) {
+    if (agg.function == AggregateFunction::Count) {
+      aggregate_columns.push_back(nullptr);
+    } else {
+      aggregate_columns.push_back(&aggregate_inputs[aggregate_input_index++]);
+    }
+  }
+
+  for (std::size_t row_index = 0; row_index < input.rows.size(); ++row_index) {
+    const std::string& key = serialized_keys[row_index];
+    auto it = states.find(key);
+    if (it == states.end()) {
+      AggregateAccumulator acc;
+      acc.sum.assign(aggs.size(), 0.0);
+      acc.count.assign(aggs.size(), 0);
+      acc.minVal.resize(aggs.size());
+      acc.hasMin.assign(aggs.size(), false);
+      acc.maxVal.resize(aggs.size());
+      acc.hasMax.assign(aggs.size(), false);
+      ordered_keys.push_back(key);
+      it = states.emplace(key, std::move(acc)).first;
+    }
+    auto& acc = it->second;
+
+    for (std::size_t i = 0; i < aggs.size(); ++i) {
+      const auto& agg = aggs[i];
+      if (agg.function == AggregateFunction::Count) {
+        acc.count[i] += 1;
+        continue;
+      }
+      const auto& v = aggregate_columns[i]->values()[row_index];
+      if (agg.function == AggregateFunction::Sum || agg.function == AggregateFunction::Avg) {
+        acc.sum[i] += v.asDouble();
+        acc.count[i] += 1;
+      } else if (agg.function == AggregateFunction::Min) {
+        if (!acc.hasMin[i] || v < acc.minVal[i]) {
+          acc.minVal[i] = v;
+          acc.hasMin[i] = true;
+        }
+      } else if (agg.function == AggregateFunction::Max) {
+        if (!acc.hasMax[i] || v > acc.maxVal[i]) {
+          acc.maxVal[i] = v;
+          acc.hasMax[i] = true;
+        }
+      }
+    }
+  }
+
+  Table out;
+  for (const auto idx : key_indices) {
+    out.schema.fields.push_back(input.schema.fields[idx]);
+  }
+  for (const auto& agg : aggs) {
+    out.schema.fields.push_back(agg.output_name);
+  }
+  for (std::size_t i = 0; i < out.schema.fields.size(); ++i) {
+    out.schema.index[out.schema.fields[i]] = i;
+  }
+  out.rows.reserve(ordered_keys.size());
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = out.schema;
+  cache->columns.resize(out.schema.fields.size());
+  for (auto& column : cache->columns) {
+    column.values.reserve(ordered_keys.size());
+  }
+
+  for (const auto& key : ordered_keys) {
+    const auto& acc = states.at(key);
+    Row row;
+    row.reserve(out.schema.fields.size());
+    std::size_t out_column_index = 0;
+    if (!key_indices.empty()) {
+      for (const auto& k : splitKey(key)) {
+        Value value(k);
+        row.push_back(value);
+        cache->columns[out_column_index++].values.push_back(std::move(value));
+      }
+    }
+    for (std::size_t i = 0; i < aggs.size(); ++i) {
+      const auto& agg = aggs[i];
+      Value value;
+      switch (agg.function) {
+        case AggregateFunction::Sum:
+          value = Value(acc.sum[i]);
+          break;
+        case AggregateFunction::Count:
+          value = Value(static_cast<int64_t>(acc.count[i]));
+          break;
+        case AggregateFunction::Avg:
+          value = Value(acc.count[i] == 0 ? 0.0
+                                          : acc.sum[i] / static_cast<double>(acc.count[i]));
+          break;
+        case AggregateFunction::Min:
+          value = acc.minVal[i];
+          break;
+        case AggregateFunction::Max:
+          value = acc.maxVal[i];
+          break;
+      }
+      row.push_back(value);
+      cache->columns[out_column_index++].values.push_back(std::move(value));
+    }
+    out.rows.push_back(std::move(row));
+  }
+  out.columnar_cache = std::move(cache);
+  return out;
+}
 
 RunnerExecutor::RunnerExecutor(std::shared_ptr<RpcRunner> runner,
                              std::shared_ptr<Executor> fallback,
@@ -338,106 +346,46 @@ Table LocalExecutor::execute(const PlanNodePtr& plan) const {
     case PlanKind::Select: {
       const auto* node = static_cast<SelectPlan*>(plan.get());
       Table in = execute(node->child);
-      Table out;
-      for (size_t idx : node->indices) {
-        out.schema.fields.push_back(idx < in.schema.fields.size() ? in.schema.fields[idx] : std::string());
-      }
-      if (!node->aliases.empty() && node->aliases.size() == node->indices.size()) {
-        for (size_t i = 0; i < node->aliases.size(); ++i) {
-          out.schema.fields[i] = node->aliases[i];
-        }
-      }
-      for (const auto& row : in.rows) {
-        Row projected;
-        projected.reserve(node->indices.size());
-        for (size_t idx : node->indices) {
-          if (idx >= row.size()) {
-            throw std::runtime_error("select index out of range");
-          }
-          projected.push_back(row[idx]);
-        }
-        out.rows.push_back(std::move(projected));
-      }
-      for (size_t i = 0; i < out.schema.fields.size(); ++i) {
-        out.schema.index[out.schema.fields[i]] = i;
-      }
-      return out;
+      return projectTable(in, node->indices, node->aliases);
     }
     case PlanKind::Filter: {
       const auto* node = static_cast<FilterPlan*>(plan.get());
       Table in = execute(node->child);
-      Table out(in.schema, {});
-      for (const auto& row : in.rows) {
-        if (node->column_index < row.size() && node->pred(row[node->column_index], node->value)) {
-          out.rows.push_back(row);
-        }
-      }
-      return out;
+      const auto input = viewValueColumn(in, node->column_index);
+      const auto selection = vectorizedFilterSelection(input, node->value, node->pred);
+      return filterTable(in, selection);
     }
     case PlanKind::WithColumn: {
       const auto* node = static_cast<WithColumnPlan*>(plan.get());
       Table in = execute(node->child);
-      Table out = in;
-      out.schema.fields.push_back(node->added_column);
-      out.schema.index[node->added_column] = out.schema.fields.size() - 1;
+      Table out = std::move(in);
       if (node->function == ComputedColumnKind::Copy) {
-        for (auto& row : out.rows) {
-          row.push_back(row[node->source_column_index]);
-        }
+        appendNamedColumn(&out, node->added_column,
+                          materializeValueColumn(out, node->source_column_index).values);
       } else {
-        for (auto& row : out.rows) {
-          row.push_back(evalStringFunction(node->function, node->args, row));
-        }
+        // Batch-resolve arguments once per node so string builtins keep the same bulk path.
+        appendNamedColumn(&out, node->added_column,
+                          computeStringColumnValues(&out, node->function, node->args));
       }
       return out;
     }
     case PlanKind::Drop: {
       const auto* node = static_cast<DropPlan*>(plan.get());
       Table in = execute(node->child);
-      Table out;
-      for (size_t idx : node->keep_indices) {
-        out.schema.fields.push_back(in.schema.fields[idx]);
-      }
-      for (const auto& row : in.rows) {
-        Row projected;
-        projected.reserve(node->keep_indices.size());
-        for (size_t idx : node->keep_indices) {
-          projected.push_back(row[idx]);
-        }
-        out.rows.push_back(std::move(projected));
-      }
-      for (size_t i = 0; i < out.schema.fields.size(); ++i) {
-        out.schema.index[out.schema.fields[i]] = i;
-      }
-      return out;
+      return projectTable(in, node->keep_indices);
     }
     case PlanKind::Limit: {
       const auto* node = static_cast<LimitPlan*>(plan.get());
       Table in = execute(node->child);
-      Table out = in;
-      if (out.rows.size() > node->n) {
-        out.rows.resize(node->n);
-      }
-      return out;
+      return limitTable(in, node->n);
     }
     case PlanKind::WindowAssign: {
       const auto* node = static_cast<WindowAssignPlan*>(plan.get());
       Table in = execute(node->child);
-      if (node->window_ms == 0) {
-        throw std::runtime_error("window size cannot be zero");
-      }
-      Table out = in;
-      out.schema.fields.push_back(node->output_column);
-      out.schema.index[node->output_column] = out.schema.fields.size() - 1;
-      const auto window = static_cast<int64_t>(node->window_ms);
-      for (auto& row : out.rows) {
-        if (node->time_column_index >= row.size()) {
-          throw std::runtime_error("window assign source column out of range");
-        }
-        const int64_t ts_ms = parseEpochMillis(row[node->time_column_index]);
-        const int64_t window_start = (ts_ms / window) * window;
-        row.push_back(Value(window_start));
-      }
+      Table out = std::move(in);
+      const auto input = viewValueColumn(out, node->time_column_index);
+      appendNamedColumn(&out, node->output_column,
+                        vectorizedWindowStart(input, node->window_ms));
       return out;
     }
     case PlanKind::Aggregate:
@@ -461,126 +409,63 @@ Table LocalExecutor::execute(const PlanNodePtr& plan) const {
         aggs.push_back(sumSpec);
         aggregateInput = execute(node->child);
       }
-
-      std::unordered_map<std::string, AggregateAccumulator> states;
-      std::vector<std::string> orderedKeys;
-
-      for (const auto& row : aggregateInput.rows) {
-        std::string key = makeKey(aggregateInput, row, keyIdx);
-        auto it = states.find(key);
-        if (it == states.end()) {
-          AggregateAccumulator acc;
-          acc.sum.assign(aggs.size(), 0.0);
-          acc.count.assign(aggs.size(), 0);
-          acc.minVal.resize(aggs.size());
-          acc.hasMin.assign(aggs.size(), false);
-          acc.maxVal.resize(aggs.size());
-          acc.hasMax.assign(aggs.size(), false);
-          orderedKeys.push_back(key);
-          it = states.emplace(key, std::move(acc)).first;
-        }
-        auto& acc = it->second;
-
-        for (size_t i = 0; i < aggs.size(); ++i) {
-          const auto& agg = aggs[i];
-          if (agg.function == AggregateFunction::Count) {
-            acc.count[i] += 1;
-            continue;
-          }
-          if (agg.value_index >= row.size()) {
-            throw std::runtime_error("aggregate source column out of range");
-          }
-          const auto& v = row[agg.value_index];
-          if (agg.function == AggregateFunction::Sum || agg.function == AggregateFunction::Avg) {
-            acc.sum[i] += v.asDouble();
-            acc.count[i] += 1;
-          } else if (agg.function == AggregateFunction::Min) {
-            if (!acc.hasMin[i] || v < acc.minVal[i]) {
-              acc.minVal[i] = v;
-              acc.hasMin[i] = true;
-            }
-          } else if (agg.function == AggregateFunction::Max) {
-            if (!acc.hasMax[i] || v > acc.maxVal[i]) {
-              acc.maxVal[i] = v;
-              acc.hasMax[i] = true;
-            }
-          }
-        }
-      }
-
-      Table out;
-      for (size_t idx : keyIdx) {
-        out.schema.fields.push_back(aggregateInput.schema.fields[idx]);
-      }
-      for (const auto& agg : aggs) out.schema.fields.push_back(agg.output_name);
-      for (size_t i = 0; i < out.schema.fields.size(); ++i) {
-        out.schema.index[out.schema.fields[i]] = i;
-      }
-
-      for (const auto& key : orderedKeys) {
-        const auto& acc = states.at(key);
-        Row row;
-        if (!keyIdx.empty()) {
-          for (const auto& k : splitKey(key)) {
-            row.push_back(Value(k));
-          }
-        }
-        for (size_t i = 0; i < aggs.size(); ++i) {
-          const auto& agg = aggs[i];
-          switch (agg.function) {
-            case AggregateFunction::Sum:
-              row.push_back(Value(acc.sum[i]));
-              break;
-            case AggregateFunction::Count:
-              row.push_back(Value(static_cast<int64_t>(acc.count[i])));
-              break;
-            case AggregateFunction::Avg:
-              if (acc.count[i] == 0) {
-                row.push_back(Value(static_cast<double>(0.0)));
-              } else {
-                row.push_back(Value(acc.sum[i] / static_cast<double>(acc.count[i])));
-              }
-              break;
-            case AggregateFunction::Min:
-              row.push_back(acc.minVal[i]);
-              break;
-            case AggregateFunction::Max:
-              row.push_back(acc.maxVal[i]);
-              break;
-          }
-        }
-        out.rows.push_back(std::move(row));
-      }
-      return out;
+      return executeAggregateTable(aggregateInput, keyIdx, aggs);
     }
     case PlanKind::Join: {
       const auto* node = static_cast<JoinPlan*>(plan.get());
       Table left = execute(node->left);
       Table right = execute(node->right);
+      const auto left_keys = materializeSerializedKeys(left, {node->left_key});
+      const auto right_keys = materializeSerializedKeys(right, {node->right_key});
+      const auto left_columns = viewValueColumns(left, allColumnIndices(left.schema));
+      const auto right_columns = viewValueColumns(right, allColumnIndices(right.schema));
       Table out;
       out.schema.fields = left.schema.fields;
       out.schema.fields.insert(out.schema.fields.end(), right.schema.fields.begin(), right.schema.fields.end());
       for (size_t i = 0; i < out.schema.fields.size(); ++i) out.schema.index[out.schema.fields[i]] = i;
+      auto cache = std::make_shared<ColumnarTable>();
+      cache->schema = out.schema;
+      cache->columns.resize(out.schema.fields.size());
 
-      std::unordered_map<std::string, std::vector<Row>> rightBuckets;
-      for (const auto& row : right.rows) {
-        rightBuckets[row[node->right_key].toString()].push_back(row);
-      }
+      const auto rightBuckets = buildHashBuckets(right_keys);
 
-      for (const auto& l : left.rows) {
-        auto hit = rightBuckets.find(l[node->left_key].toString());
+      for (std::size_t left_index = 0; left_index < left.rows.size(); ++left_index) {
+        auto hit = rightBuckets.find(left_keys[left_index]);
         if (hit != rightBuckets.end()) {
-          for (const auto& r : hit->second) {
-            Row merged = l;
-            merged.insert(merged.end(), r.begin(), r.end());
+          for (const auto right_index : hit->second) {
+            Row merged;
+            merged.reserve(out.schema.fields.size());
+            std::size_t out_column_index = 0;
+            for (const auto& column : left_columns) {
+              const auto& value = column.values()[left_index];
+              merged.push_back(value);
+              cache->columns[out_column_index++].values.push_back(value);
+            }
+            for (const auto& column : right_columns) {
+              const auto& value = column.values()[right_index];
+              merged.push_back(value);
+              cache->columns[out_column_index++].values.push_back(value);
+            }
             out.rows.push_back(std::move(merged));
           }
         } else if (node->kind == JoinKind::Left) {
-          Row merged = l;
-          for (size_t i = 0; i < right.schema.fields.size(); ++i) merged.push_back(Value());
+          Row merged;
+          merged.reserve(out.schema.fields.size());
+          std::size_t out_column_index = 0;
+          for (const auto& column : left_columns) {
+            const auto& value = column.values()[left_index];
+            merged.push_back(value);
+            cache->columns[out_column_index++].values.push_back(value);
+          }
+          for (size_t i = 0; i < right.schema.fields.size(); ++i) {
+            Value value;
+            merged.push_back(value);
+            cache->columns[out_column_index++].values.push_back(std::move(value));
+          }
           out.rows.push_back(std::move(merged));
         }
       }
+      out.columnar_cache = std::move(cache);
       return out;
     }
     case PlanKind::Sink: {

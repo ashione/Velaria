@@ -189,6 +189,18 @@ workspace 落盘会保留内核 contract，不会重定义它们：
 - `CREATE SINK TABLE` 可写但不能作为查询输入
 - stream SQL 遇到 batch-only 形态时会优先返回明确的 `not supported in SQL v1` 或 table-kind 错误，而不是模糊运行时失败
 
+## Plan
+
+当前有效计划位于：
+
+- [plans/core-runtime-columnar-plan.md](./plans/core-runtime-columnar-plan.md)
+
+这份文档集中维护：
+
+- 已实现项
+- 明确不做项
+- 下一阶段
+
 ## Python Ecosystem
 
 当前支持的 Python surface：
@@ -373,6 +385,8 @@ bazel run //:stream_demo
 ./scripts/run_experimental_regression.sh
 ./scripts/run_stream_observability_regression.sh
 ```
+
+`run_stream_observability_regression.sh` 会校验 stream 执行、actor strategy/explain 输出、actor RPC smoke，以及字符串 builtin benchmark case 的 JSON 基线。
 
 直接使用 Bazel suite：
 

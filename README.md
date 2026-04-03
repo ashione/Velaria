@@ -189,6 +189,18 @@ Current SQL v1 constraints:
 - `CREATE SINK TABLE` accepts writes but cannot be used as query input
 - stream SQL rejects batch-only shapes with explicit `not supported in SQL v1` or table-kind errors instead of falling through to ambiguous runtime failures
 
+## Plan
+
+The current working plan lives in:
+
+- [plans/core-runtime-columnar-plan.md](./plans/core-runtime-columnar-plan.md)
+
+That document is the maintained status board for:
+
+- implemented items
+- intentionally not planned items
+- next phases
+
 ## Python Ecosystem
 
 Main supported Python surfaces:
@@ -373,6 +385,8 @@ Layered regression entrypoints:
 ./scripts/run_experimental_regression.sh
 ./scripts/run_stream_observability_regression.sh
 ```
+
+`run_stream_observability_regression.sh` validates the JSON baseline for stream execution, actor strategy/explain output, actor RPC smoke, and the string builtin benchmark cases.
 
 Direct Bazel suites:
 

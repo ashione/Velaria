@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/stream/stream.h"
 
 namespace {
@@ -341,11 +342,14 @@ void testStatefulWindowCount() {
   const auto& last = collected.back();
   expect(last.schema.has("window_start"), "window output should contain window_start");
   expect(last.schema.has("event_count"), "window output should contain event_count");
+  expect(last.columnar_cache != nullptr, "window output should retain columnar cache");
 
   int64_t user_a = -1;
   int64_t user_b = -1;
   const auto key_idx = last.schema.indexOf("key");
   const auto count_idx = last.schema.indexOf("event_count");
+  const auto cached_counts = dataflow::materializeValueColumn(last, count_idx);
+  expect(cached_counts.values.size() == last.rows.size(), "cached event_count size mismatch");
   for (const auto& row : last.rows) {
     if (row[key_idx].toString() == "userA") user_a = row[count_idx].asInt64();
     if (row[key_idx].toString() == "userB") user_b = row[count_idx].asInt64();
@@ -737,6 +741,58 @@ void testSnapshotJsonContract() {
                  "snapshot should expose checkpoint_delivery_mode");
 }
 
+void testLocalWorkersRetainColumnarCacheAcrossPartitions() {
+  dataflow::DataflowSession& session = dataflow::DataflowSession::builder();
+  auto sink = std::make_shared<CollectSink>();
+
+  const std::vector<dataflow::Table> batches = {
+      makeWindowBatch({{"2026-03-28T14:00:00", "userA", 1},
+                       {"2026-03-28T14:00:05", "userA", 1},
+                       {"2026-03-28T14:00:20", "userB", 1},
+                       {"2026-03-28T14:00:25", "userB", 1}}),
+  };
+
+  dataflow::StreamingQueryOptions options;
+  options.trigger_interval_ms = 0;
+  options.local_workers = 2;
+
+  auto query = session.readStream(std::make_shared<dataflow::MemoryStreamSource>(batches))
+                   .withColumn("key_copy", "key")
+                   .window("ts", 60000, "window_start")
+                   .groupBy({"window_start", "key_copy"})
+                   .count(true, "event_count")
+                   .writeStream(sink, options);
+  query.start();
+  expect(query.awaitTermination() == 1,
+         "local worker cache test should process one batch");
+
+  const auto outputs = sink->batches();
+  expect(outputs.size() == 1, "local worker cache test should emit one batch");
+  const auto& table = outputs.front();
+  expect(table.schema.has("window_start"),
+         "local worker cache test should keep window_start column");
+  expect(table.schema.has("key_copy"),
+         "local worker cache test should keep copied key column");
+  expect(table.schema.has("event_count"),
+         "local worker cache test should produce event_count column");
+  expect(table.columnar_cache != nullptr,
+         "local worker cache test should retain output columnar cache");
+
+  const auto key_idx = table.schema.indexOf("key_copy");
+  const auto count_idx = table.schema.indexOf("event_count");
+  const auto cached_counts = dataflow::materializeValueColumn(table, count_idx);
+  expect(cached_counts.values.size() == table.rows.size(),
+         "local worker cached event_count size mismatch");
+  int64_t user_a = -1;
+  int64_t user_b = -1;
+  for (const auto& row : table.rows) {
+    if (row[key_idx].toString() == "userA") user_a = row[count_idx].asInt64();
+    if (row[key_idx].toString() == "userB") user_b = row[count_idx].asInt64();
+  }
+  expect(user_a == 2, "local worker cache test should keep userA count");
+  expect(user_b == 2, "local worker cache test should keep userB count");
+}
+
 }  // namespace
 
 int main() {
@@ -751,6 +807,7 @@ int main() {
     testWindowEviction();
     testWindowEvictionAggregateVariants();
     testSnapshotJsonContract();
+    testLocalWorkersRetainColumnarCacheAcrossPartitions();
     std::cout << "[test] stream runtime ok" << std::endl;
     return 0;
   } catch (const std::exception& ex) {

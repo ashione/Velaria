@@ -64,10 +64,14 @@ print(result.to_pylist())
 
 ```bash
 velaria-cli run start -- csv-sql \
+  --run-name "regional_row_count" \
   --description "regional row count for the current CSV snapshot" \
+  --tag regional \
+  --tag daily-check \
   --csv path/to/file.csv \
   --query "SELECT region, COUNT(*) AS cnt FROM input_table GROUP BY region"
 
+velaria-cli run list --tag regional --limit 20
 velaria-cli run show --run-id <run_id>
 velaria-cli artifacts list --run-id <run_id>
 ```
@@ -93,6 +97,7 @@ velaria-cli run start -- <action> ...
 
 - `--run-name`：给本次执行起一个更易读的名字，便于人工检索
 - `--description`：给本次 run 追加一段备注/描述，便于后续 `run show`、索引检索和人工回看
+- `--tag`：给 run 打标签，支持重复传入或逗号分隔，便于后续 `run list --tag ...` 过滤
 - `--timeout-ms`：超时毫秒数；超时后 run 会标记为 `timed_out`
 
 当前支持的 action：
@@ -182,7 +187,28 @@ velaria-cli run start -- <action> ...
 - `explain.json` 会保留 native `logical/physical/strategy`
 - `progress.jsonl` 每一行都直接写 native `snapshotJson()`，不改字段名
 
-### 4.5 `run show`
+### 4.5 `run list`
+
+用途：
+
+- 浏览最近的 tracked runs
+- 按 `status`、`action`、`tag` 过滤
+- 快速定位某一类分析任务的历史结果
+
+基础语法：
+
+```bash
+velaria-cli run list [--status succeeded] [--action csv-sql] [--tag slow-query] [--limit 20]
+```
+
+关键参数：
+
+- `--status`：只看指定状态，例如 `running`、`succeeded`、`failed`
+- `--action`：只看指定 action，例如 `csv-sql`
+- `--tag`：只看带指定标签的 run
+- `--limit`：最多返回多少条
+
+### 4.6 `run show`
 
 用途：
 
@@ -194,7 +220,7 @@ velaria-cli run start -- <action> ...
 - `--run-id`：目标 run id
 - `--limit`：返回 artifact 条数上限
 
-### 4.6 `run status`
+### 4.7 `run status`
 
 用途：
 
@@ -207,7 +233,7 @@ velaria-cli run start -- <action> ...
 - `--run-id`：目标 run id
 - `--limit`：返回 artifact 条数上限
 
-### 4.7 `artifacts list`
+### 4.8 `artifacts list`
 
 用途：
 
@@ -218,7 +244,7 @@ velaria-cli run start -- <action> ...
 - `--run-id`：只看某个 run 的 artifacts
 - `--limit`：最多返回多少条
 
-### 4.8 `artifacts preview`
+### 4.9 `artifacts preview`
 
 用途：
 
@@ -241,7 +267,7 @@ velaria-cli run start -- <action> ...
 
 - preview 会限制大小，避免 SQLite / JSONL 索引膨胀
 
-### 4.9 `run cleanup`
+### 4.10 `run cleanup`
 
 用途：
 

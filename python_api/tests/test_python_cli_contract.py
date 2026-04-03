@@ -36,7 +36,7 @@ class _FakeDataFrame:
 
 
 class PythonCliContractTest(unittest.TestCase):
-    def test_run_start_persists_description_metadata(self):
+    def test_run_start_persists_metadata_and_run_list_filters(self):
         workspace = importlib.import_module("velaria.workspace")
         with tempfile.TemporaryDirectory(prefix="velaria-cli-run-meta-") as tmp:
             with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
@@ -55,6 +55,10 @@ class PythonCliContractTest(unittest.TestCase):
                                 "cn-slow-query",
                                 "--description",
                                 "CN slow query snapshot for cache replay triage",
+                                "--tag",
+                                "cn",
+                                "--tag",
+                                "slow-query,cache",
                                 "--",
                                 "csv-sql",
                                 "--csv",
@@ -72,6 +76,7 @@ class PythonCliContractTest(unittest.TestCase):
                     run_meta["description"],
                     "CN slow query snapshot for cache replay triage",
                 )
+                self.assertEqual(run_meta["tags"], ["cn", "slow-query", "cache"])
                 inputs = json.loads(
                     (pathlib.Path(run_meta["run_dir"]) / "inputs.json").read_text(encoding="utf-8")
                 )
@@ -80,6 +85,53 @@ class PythonCliContractTest(unittest.TestCase):
                     inputs["description"],
                     "CN slow query snapshot for cache replay triage",
                 )
+                self.assertEqual(inputs["tags"], ["cn", "slow-query", "cache"])
+
+                list_stdout = io.StringIO()
+                with redirect_stdout(list_stdout):
+                    list_exit_code = velaria_cli.main(
+                        ["run", "list", "--status", "succeeded", "--tag", "slow-query"]
+                    )
+                self.assertEqual(list_exit_code, 0)
+                list_payload = json.loads(list_stdout.getvalue())
+                self.assertEqual(len(list_payload["runs"]), 1)
+                self.assertEqual(list_payload["runs"][0]["run_id"], payload["run_id"])
+                self.assertEqual(list_payload["runs"][0]["tags"], ["cn", "slow-query", "cache"])
+
+    def test_run_start_normalizes_duplicate_and_blank_tags(self):
+        workspace = importlib.import_module("velaria.workspace")
+        with tempfile.TemporaryDirectory(prefix="velaria-cli-run-tags-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                with mock.patch.object(
+                    velaria_cli_impl,
+                    "_run_action_with_timeout",
+                    return_value={"payload": {"rows": []}, "artifacts": []},
+                ):
+                    stdout = io.StringIO()
+                    with redirect_stdout(stdout):
+                        exit_code = velaria_cli.main(
+                            [
+                                "run",
+                                "start",
+                                "--tag",
+                                " cn , slow-query , cn , ",
+                                "--tag",
+                                "analytics",
+                                "--tag",
+                                "slow-query",
+                                "--",
+                                "csv-sql",
+                                "--csv",
+                                "/tmp/input.csv",
+                                "--query",
+                                "SELECT 1",
+                            ]
+                        )
+                self.assertEqual(exit_code, 0)
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(payload["tags"], ["cn", "slow-query", "analytics"])
+                run_meta = workspace.read_run(payload["run_id"])
+                self.assertEqual(run_meta["tags"], ["cn", "slow-query", "analytics"])
 
     def test_workspace_errors_return_json_without_stderr_noise(self):
         with tempfile.TemporaryDirectory(prefix="velaria-cli-errors-") as tmp:

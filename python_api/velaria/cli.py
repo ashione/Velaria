@@ -656,6 +656,16 @@ def _parse_passthrough(command_args: list[str]) -> tuple[str, dict[str, Any]]:
     return command_args[0], _parse_action_args(command_args[0], command_args[1:])
 
 
+def _normalize_tags(tags: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    for raw_tag in tags or []:
+        for piece in raw_tag.split(","):
+            tag = piece.strip()
+            if tag and tag not in normalized:
+                normalized.append(tag)
+    return normalized
+
+
 def _load_latest_progress(run_id: str) -> dict[str, Any] | None:
     progress_path = pathlib.Path(_read_run_or_raise(run_id)["run_dir"]) / "progress.jsonl"
     if not progress_path.exists():
@@ -677,12 +687,14 @@ def _read_run_or_raise(run_id: str) -> dict[str, Any]:
 
 def _run_start(args: argparse.Namespace) -> int:
     action, action_args = _parse_passthrough(args.command_args)
+    tags = _normalize_tags(args.tag)
     run_id, run_dir = create_run(
         action,
         action_args,
         __version__,
         run_name=args.run_name,
         description=args.description,
+        tags=tags,
     )
     write_inputs(
         run_id,
@@ -691,136 +703,174 @@ def _run_start(args: argparse.Namespace) -> int:
             "action_args": action_args,
             "run_name": args.run_name,
             "description": args.description,
+            "tags": tags,
             "timeout_ms": args.timeout_ms,
         },
     )
     index = ArtifactIndex()
-    index.upsert_run(read_run(run_id))
-    spec = {
-        "run_id": run_id,
-        "run_dir": str(run_dir),
-        "action": action,
-        "action_args": action_args,
-    }
-    result = _run_action_with_timeout(spec, args.timeout_ms)
-    if result.get("timed_out"):
-        append_stderr(run_id, f"{result['error']}\n")
-        finalized = finalize_run(run_id, "timed_out", error=result["error"])
-        index.upsert_run(finalized)
-        _emit_json(
-            {
-                "ok": False,
-                "run_id": run_id,
-                "run_dir": str(run_dir),
-                "status": "timed_out",
-                "error": result["error"],
-            }
-        )
-        return 1
-    if "error" in result and "payload" not in result:
-        append_stderr(run_id, f"{result['error']}\n")
-        if result.get("traceback"):
-            append_stderr(run_id, result["traceback"])
-        finalized = finalize_run(run_id, "failed", error=result["error"])
-        index.upsert_run(finalized)
-        _emit_json(
-            {
-                "ok": False,
-                "run_id": run_id,
-                "run_dir": str(run_dir),
-                "status": "failed",
-                "error": result["error"],
-            }
-        )
-        return 1
-    created_artifacts = _register_artifacts(index, run_id, result.get("artifacts", []))
-    details: dict[str, Any] = {}
-    for artifact in created_artifacts:
-        if "explain" in artifact.get("tags_json", []):
-            details["explain_artifact_id"] = artifact["artifact_id"]
-            details["explain_artifact_uri"] = artifact["uri"]
-    if details:
-        update_run(run_id, details=details)
-    finalized = finalize_run(run_id, "succeeded")
-    index.upsert_run(finalized)
-    return _emit_json(
-        {
-            "ok": True,
+    try:
+        index.upsert_run(read_run(run_id))
+        spec = {
             "run_id": run_id,
             "run_dir": str(run_dir),
-            "status": "succeeded",
             "action": action,
-            "result": result["payload"],
-            "artifacts": created_artifacts,
+            "action_args": action_args,
         }
-    )
+        result = _run_action_with_timeout(spec, args.timeout_ms)
+        if result.get("timed_out"):
+            append_stderr(run_id, f"{result['error']}\n")
+            finalized = finalize_run(run_id, "timed_out", error=result["error"])
+            index.upsert_run(finalized)
+            _emit_json(
+                {
+                    "ok": False,
+                    "run_id": run_id,
+                    "run_dir": str(run_dir),
+                    "status": "timed_out",
+                    "error": result["error"],
+                }
+            )
+            return 1
+        if "error" in result and "payload" not in result:
+            append_stderr(run_id, f"{result['error']}\n")
+            if result.get("traceback"):
+                append_stderr(run_id, result["traceback"])
+            finalized = finalize_run(run_id, "failed", error=result["error"])
+            index.upsert_run(finalized)
+            _emit_json(
+                {
+                    "ok": False,
+                    "run_id": run_id,
+                    "run_dir": str(run_dir),
+                    "status": "failed",
+                    "error": result["error"],
+                }
+            )
+            return 1
+        created_artifacts = _register_artifacts(index, run_id, result.get("artifacts", []))
+        details: dict[str, Any] = {}
+        for artifact in created_artifacts:
+            if "explain" in artifact.get("tags_json", []):
+                details["explain_artifact_id"] = artifact["artifact_id"]
+                details["explain_artifact_uri"] = artifact["uri"]
+        if details:
+            update_run(run_id, details=details)
+        finalized = finalize_run(run_id, "succeeded")
+        index.upsert_run(finalized)
+        return _emit_json(
+            {
+                "ok": True,
+                "run_id": run_id,
+                "run_dir": str(run_dir),
+                "status": "succeeded",
+                "action": action,
+                "tags": tags,
+                "result": result["payload"],
+                "artifacts": created_artifacts,
+            }
+        )
+    finally:
+        index.close()
+
+
+def _run_list(args: argparse.Namespace) -> int:
+    index = ArtifactIndex()
+    try:
+        return _emit_json(
+            {
+                "ok": True,
+                "runs": index.list_runs(
+                    limit=args.limit,
+                    status=args.status,
+                    action=args.action,
+                    tag=args.tag,
+                ),
+            }
+        )
+    finally:
+        index.close()
 
 
 def _run_show(args: argparse.Namespace) -> int:
     index = ArtifactIndex()
-    return _emit_json(
-        {
-            "ok": True,
-            "run": _read_run_or_raise(args.run_id),
-            "artifacts": index.list_artifacts(run_id=args.run_id, limit=args.limit),
-        }
-    )
+    try:
+        return _emit_json(
+            {
+                "ok": True,
+                "run": _read_run_or_raise(args.run_id),
+                "artifacts": index.list_artifacts(run_id=args.run_id, limit=args.limit),
+            }
+        )
+    finally:
+        index.close()
 
 
 def _run_status(args: argparse.Namespace) -> int:
     index = ArtifactIndex()
-    run = _read_run_or_raise(args.run_id)
-    payload: dict[str, Any] = {
-        "ok": True,
-        "run_id": args.run_id,
-        "status": run["status"],
-        "action": run["action"],
-        "artifacts": index.list_artifacts(run_id=args.run_id, limit=args.limit),
-    }
-    latest_progress = _load_latest_progress(args.run_id)
-    if latest_progress is not None:
-        payload["latest_progress"] = latest_progress
-    return _emit_json(payload)
+    try:
+        run = _read_run_or_raise(args.run_id)
+        payload: dict[str, Any] = {
+            "ok": True,
+            "run_id": args.run_id,
+            "status": run["status"],
+            "action": run["action"],
+            "artifacts": index.list_artifacts(run_id=args.run_id, limit=args.limit),
+        }
+        latest_progress = _load_latest_progress(args.run_id)
+        if latest_progress is not None:
+            payload["latest_progress"] = latest_progress
+        return _emit_json(payload)
+    finally:
+        index.close()
 
 
 def _artifacts_list(args: argparse.Namespace) -> int:
     index = ArtifactIndex()
-    return _emit_json(
-        {
-            "ok": True,
-            "artifacts": index.list_artifacts(limit=args.limit, run_id=args.run_id),
-        }
-    )
+    try:
+        return _emit_json(
+            {
+                "ok": True,
+                "artifacts": index.list_artifacts(limit=args.limit, run_id=args.run_id),
+            }
+        )
+    finally:
+        index.close()
 
 
 def _artifacts_preview(args: argparse.Namespace) -> int:
     index = ArtifactIndex()
-    artifact = index.get_artifact(args.artifact_id)
-    if artifact is None:
-        raise ValueError(f"artifact not found: {args.artifact_id}")
-    preview = _read_preview_for_artifact(artifact, limit=args.limit)
-    if artifact.get("preview_json") is None:
-        index.update_artifact_preview(args.artifact_id, preview)
-        artifact = index.get_artifact(args.artifact_id) or artifact
-    return _emit_json(
-        {
-            "ok": True,
-            "artifact_id": args.artifact_id,
-            "preview": preview,
-            "artifact": artifact,
-        }
-    )
+    try:
+        artifact = index.get_artifact(args.artifact_id)
+        if artifact is None:
+            raise ValueError(f"artifact not found: {args.artifact_id}")
+        preview = _read_preview_for_artifact(artifact, limit=args.limit)
+        if artifact.get("preview_json") is None:
+            index.update_artifact_preview(args.artifact_id, preview)
+            artifact = index.get_artifact(args.artifact_id) or artifact
+        return _emit_json(
+            {
+                "ok": True,
+                "artifact_id": args.artifact_id,
+                "preview": preview,
+                "artifact": artifact,
+            }
+        )
+    finally:
+        index.close()
 
 
 def _run_cleanup(args: argparse.Namespace) -> int:
     index = ArtifactIndex()
-    payload = index.cleanup_runs(
-        keep_last_n=args.keep_last,
-        ttl_days=args.ttl_days,
-        delete_files=args.delete_files,
-    )
-    payload["ok"] = True
-    return _emit_json(payload)
+    try:
+        payload = index.cleanup_runs(
+            keep_last_n=args.keep_last,
+            ttl_days=args.ttl_days,
+            delete_files=args.delete_files,
+        )
+        payload["ok"] = True
+        return _emit_json(payload)
+    finally:
+        index.close()
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -848,8 +898,19 @@ def _build_parser() -> argparse.ArgumentParser:
     run_start = run_subparsers.add_parser("start", help="Start a tracked run.")
     run_start.add_argument("--run-name")
     run_start.add_argument("--description", "--run-description", dest="description")
+    run_start.add_argument(
+        "--tag",
+        action="append",
+        help="Attach a tag to the run. Repeat or use comma-separated values.",
+    )
     run_start.add_argument("--timeout-ms", type=int)
     run_start.add_argument("command_args", nargs=argparse.REMAINDER)
+
+    run_list = run_subparsers.add_parser("list", help="List tracked runs.")
+    run_list.add_argument("--status")
+    run_list.add_argument("--action")
+    run_list.add_argument("--tag")
+    run_list.add_argument("--limit", type=int, default=50)
 
     run_show = run_subparsers.add_parser("show", help="Show a run and its artifacts.")
     run_show.add_argument("--run-id", required=True)
@@ -896,6 +957,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "run":
             if args.run_command == "start":
                 return _run_start(args)
+            if args.run_command == "list":
+                return _run_list(args)
             if args.run_command == "show":
                 return _run_show(args)
             if args.run_command == "status":

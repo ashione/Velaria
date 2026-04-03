@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS runs (
     run_dir TEXT NOT NULL,
     run_name TEXT,
     description TEXT,
+    tags_json TEXT,
     error TEXT,
     details_json TEXT
 );
@@ -47,6 +48,7 @@ TERMINAL_RUN_STATUSES = frozenset({"succeeded", "failed", "timed_out"})
 RUN_OPTIONAL_COLUMNS = {
     "run_name": "TEXT",
     "description": "TEXT",
+    "tags_json": "TEXT",
     "error": "TEXT",
     "details_json": "TEXT",
 }
@@ -89,6 +91,14 @@ class ArtifactIndex:
             self.backend = "jsonl"
             self._conn = None
             self.fallback_path.touch(exist_ok=True)
+
+    def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    def __del__(self) -> None:
+        self.close()
 
     def _ensure_sqlite_columns(self) -> None:
         assert self._conn is not None
@@ -152,6 +162,7 @@ class ArtifactIndex:
             "run_dir": run_meta["run_dir"],
             "run_name": run_meta.get("run_name"),
             "description": run_meta.get("description"),
+            "tags_json": _json_dumps(run_meta.get("tags") or []),
             "error": run_meta.get("error"),
             "details_json": _json_dumps(run_meta.get("details", {})),
         }
@@ -161,8 +172,8 @@ class ArtifactIndex:
                 """
                 INSERT INTO runs (
                     run_id, created_at, finished_at, status, action, args_json, velaria_version, run_dir,
-                    run_name, description, error, details_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    run_name, description, tags_json, error, details_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET
                     created_at=excluded.created_at,
                     finished_at=excluded.finished_at,
@@ -173,6 +184,7 @@ class ArtifactIndex:
                     run_dir=excluded.run_dir,
                     run_name=excluded.run_name,
                     description=excluded.description,
+                    tags_json=excluded.tags_json,
                     error=excluded.error,
                     details_json=excluded.details_json
                 """,
@@ -187,6 +199,7 @@ class ArtifactIndex:
                     payload["run_dir"],
                     payload["run_name"],
                     payload["description"],
+                    payload["tags_json"],
                     payload["error"],
                     payload["details_json"],
                 ),
@@ -215,6 +228,7 @@ class ArtifactIndex:
                 "run_dir": row["run_dir"],
                 "run_name": row["run_name"],
                 "description": row["description"],
+                "tags": _json_loads(row["tags_json"]) or [],
                 "error": row["error"],
                 "details": _json_loads(row["details_json"]) or {},
             }
@@ -233,9 +247,67 @@ class ArtifactIndex:
             "run_dir": row["run_dir"],
             "run_name": row.get("run_name"),
             "description": row.get("description"),
+            "tags": _json_loads(row.get("tags_json")) or [],
             "error": row.get("error"),
             "details": _json_loads(row.get("details_json")) or {},
         }
+
+    def _run_from_row(self, row: dict[str, Any] | sqlite3.Row) -> dict[str, Any]:
+        return {
+            "run_id": row["run_id"],
+            "created_at": row["created_at"],
+            "finished_at": row["finished_at"],
+            "status": row["status"],
+            "action": row["action"],
+            "cli_args": _json_loads(row["args_json"]) or {},
+            "velaria_version": row["velaria_version"],
+            "run_dir": row["run_dir"],
+            "run_name": row["run_name"],
+            "description": row["description"],
+            "tags": _json_loads(row["tags_json"]) or [],
+            "error": row["error"],
+            "details": _json_loads(row["details_json"]) or {},
+        }
+
+    def list_runs(
+        self,
+        limit: int = 50,
+        status: str | None = None,
+        action: str | None = None,
+        tag: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if self.backend == "sqlite":
+            assert self._conn is not None
+            clauses: list[str] = []
+            params: list[Any] = []
+            if status:
+                clauses.append("status = ?")
+                params.append(status)
+            if action:
+                clauses.append("action = ?")
+                params.append(action)
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM runs
+                {where}
+                ORDER BY created_at DESC
+                """,
+                tuple(params),
+            ).fetchall()
+            runs = [self._run_from_row(row) for row in rows]
+        else:
+            runs_state, _ = self._load_fallback_state()
+            runs = [self.get_run(run_id) for run_id in runs_state]
+            runs = [run for run in runs if run is not None]
+            if status:
+                runs = [run for run in runs if run["status"] == status]
+            if action:
+                runs = [run for run in runs if run["action"] == action]
+            runs.sort(key=lambda item: item["created_at"], reverse=True)
+        if tag:
+            runs = [run for run in runs if tag in run["tags"]]
+        return runs[:limit]
 
     def insert_artifact(self, artifact_meta: dict[str, Any]) -> None:
         payload = dict(artifact_meta)

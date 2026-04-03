@@ -235,10 +235,13 @@ Tracked run examples:
 
 ```bash
 uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
+  --run-name "score_demo" \
   --description "score filter result for demo input" \
+  --tag demo \
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
 
+uv run --project python_api python python_api/velaria_cli.py run list --tag demo
 uv run --project python_api python python_api/velaria_cli.py run show --run-id <run_id>
 uv run --project python_api python python_api/velaria_cli.py artifacts list --run-id <run_id>
 uv run --project python_api python python_api/velaria_cli.py artifacts preview --artifact-id <artifact_id>

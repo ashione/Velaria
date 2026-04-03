@@ -74,6 +74,14 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _duration_ms(created_at: str | None, finished_at: str | None) -> int | None:
+    started = _parse_timestamp(created_at)
+    finished = _parse_timestamp(finished_at)
+    if started is None or finished is None:
+        return None
+    return max(0, int((finished - started).total_seconds() * 1000))
+
+
 class ArtifactIndex:
     def __init__(self) -> None:
         ensure_dirs()
@@ -269,12 +277,60 @@ class ArtifactIndex:
             "details": _json_loads(row["details_json"]) or {},
         }
 
+    def _matches_query(self, run: dict[str, Any], query: str | None) -> bool:
+        if not query:
+            return True
+        needle = query.strip().lower()
+        if not needle:
+            return True
+        haystacks = [
+            run.get("run_id"),
+            run.get("action"),
+            run.get("run_name"),
+            run.get("description"),
+            run.get("error"),
+        ]
+        haystacks.extend(run.get("tags") or [])
+        return any(needle in str(value).lower() for value in haystacks if value)
+
+    def _attach_run_summaries(self, runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not runs:
+            return []
+        run_ids = [run["run_id"] for run in runs]
+        artifact_counts = {run_id: 0 for run_id in run_ids}
+        if self.backend == "sqlite":
+            assert self._conn is not None
+            placeholders = ",".join("?" for _ in run_ids)
+            rows = self._conn.execute(
+                f"""
+                SELECT run_id, COUNT(*) AS artifact_count
+                FROM artifacts
+                WHERE run_id IN ({placeholders})
+                GROUP BY run_id
+                """,
+                tuple(run_ids),
+            ).fetchall()
+            artifact_counts.update(
+                {row["run_id"]: int(row["artifact_count"]) for row in rows}
+            )
+        else:
+            _, artifacts = self._load_fallback_state()
+            for artifact in artifacts.values():
+                run_id = artifact["run_id"]
+                if run_id in artifact_counts:
+                    artifact_counts[run_id] += 1
+        for run in runs:
+            run["artifact_count"] = artifact_counts.get(run["run_id"], 0)
+            run["duration_ms"] = _duration_ms(run.get("created_at"), run.get("finished_at"))
+        return runs
+
     def list_runs(
         self,
         limit: int = 50,
         status: str | None = None,
         action: str | None = None,
         tag: str | None = None,
+        query: str | None = None,
     ) -> list[dict[str, Any]]:
         if self.backend == "sqlite":
             assert self._conn is not None
@@ -307,7 +363,8 @@ class ArtifactIndex:
             runs.sort(key=lambda item: item["created_at"], reverse=True)
         if tag:
             runs = [run for run in runs if tag in run["tags"]]
-        return runs[:limit]
+        runs = [run for run in runs if self._matches_query(run, query)]
+        return self._attach_run_summaries(runs[:limit])
 
     def insert_artifact(self, artifact_meta: dict[str, Any]) -> None:
         payload = dict(artifact_meta)

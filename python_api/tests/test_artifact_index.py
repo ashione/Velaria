@@ -98,13 +98,32 @@ class ArtifactIndexTest(unittest.TestCase):
                             "tags": tags,
                         }
                     )
+                    index.insert_artifact(
+                        {
+                            "artifact_id": f"artifact-{run_id}",
+                            "run_id": run_id,
+                            "created_at": f"2026-04-0{run_id[-1]}T10:00:02Z",
+                            "type": "file",
+                            "uri": f"file:///tmp/{run_id}.json",
+                            "format": "json",
+                            "row_count": 1,
+                            "schema_json": ["value"],
+                            "preview_json": {"rows": [{"value": run_id}]},
+                            "tags_json": ["result"],
+                        }
+                    )
 
                 runs = index.list_runs(limit=10, status="succeeded", tag="cn")
                 self.assertEqual([run["run_id"] for run in runs], ["run-3", "run-1"])
                 self.assertEqual(runs[0]["tags"], ["cn", "embedding"])
+                self.assertEqual(runs[0]["artifact_count"], 1)
+                self.assertEqual(runs[0]["duration_ms"], 1000)
 
                 csv_runs = index.list_runs(limit=10, action="csv-sql")
                 self.assertEqual([run["run_id"] for run in csv_runs], ["run-2", "run-1"])
+
+                searched = index.list_runs(limit=10, query="embedding")
+                self.assertEqual([run["run_id"] for run in searched], ["run-3"])
 
     def test_existing_sqlite_index_without_tags_column_is_migrated(self):
         with tempfile.TemporaryDirectory(prefix="velaria-run-migrate-") as tmp:

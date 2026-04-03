@@ -19,3 +19,4 @@ __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+python_api/velaria/_velaria.so

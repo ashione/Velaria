@@ -1,5 +1,6 @@
 import os
 import pathlib
+import sqlite3
 import tempfile
 import unittest
 from unittest import mock
@@ -70,6 +71,143 @@ class ArtifactIndexTest(unittest.TestCase):
                 self.assertEqual(cleanup["deleted_run_ids"], ["run-1"])
                 self.assertTrue(run_dir.exists())
                 self.assertEqual(index.list_artifacts(), [])
+
+    def test_list_runs_filters_by_status_action_and_tag(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-run-list-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                index = ArtifactIndex()
+                for run_id, status, action, tags in [
+                    ("run-1", "succeeded", "csv-sql", ["cn", "slow-query"]),
+                    ("run-2", "failed", "csv-sql", ["my", "slow-query"]),
+                    ("run-3", "succeeded", "vector-search", ["cn", "embedding"]),
+                ]:
+                    run_dir = pathlib.Path(tmp) / "runs" / run_id
+                    run_dir.mkdir(parents=True)
+                    index.upsert_run(
+                        {
+                            "run_id": run_id,
+                            "created_at": f"2026-04-0{run_id[-1]}T10:00:00Z",
+                            "finished_at": f"2026-04-0{run_id[-1]}T10:00:01Z",
+                            "status": status,
+                            "action": action,
+                            "cli_args": {},
+                            "velaria_version": "0.0.test",
+                            "run_dir": str(run_dir),
+                            "run_name": run_id,
+                            "description": f"description for {run_id}",
+                            "tags": tags,
+                        }
+                    )
+                    index.insert_artifact(
+                        {
+                            "artifact_id": f"artifact-{run_id}",
+                            "run_id": run_id,
+                            "created_at": f"2026-04-0{run_id[-1]}T10:00:02Z",
+                            "type": "file",
+                            "uri": f"file:///tmp/{run_id}.json",
+                            "format": "json",
+                            "row_count": 1,
+                            "schema_json": ["value"],
+                            "preview_json": {"rows": [{"value": run_id}]},
+                            "tags_json": ["result"],
+                        }
+                    )
+
+                runs = index.list_runs(limit=10, status="succeeded", tag="cn")
+                self.assertEqual([run["run_id"] for run in runs], ["run-3", "run-1"])
+                self.assertEqual(runs[0]["tags"], ["cn", "embedding"])
+                self.assertEqual(runs[0]["artifact_count"], 1)
+                self.assertEqual(runs[0]["duration_ms"], 1000)
+
+                csv_runs = index.list_runs(limit=10, action="csv-sql")
+                self.assertEqual([run["run_id"] for run in csv_runs], ["run-2", "run-1"])
+
+                searched = index.list_runs(limit=10, query="embedding")
+                self.assertEqual([run["run_id"] for run in searched], ["run-3"])
+
+    def test_existing_sqlite_index_without_tags_column_is_migrated(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-run-migrate-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                index_dir = pathlib.Path(tmp) / "index"
+                index_dir.mkdir(parents=True, exist_ok=True)
+                sqlite_path = index_dir / "artifacts.sqlite"
+                conn = sqlite3.connect(sqlite_path)
+                conn.executescript(
+                    """
+                    CREATE TABLE runs (
+                        run_id TEXT PRIMARY KEY,
+                        created_at TEXT NOT NULL,
+                        finished_at TEXT,
+                        status TEXT NOT NULL,
+                        action TEXT NOT NULL,
+                        args_json TEXT NOT NULL,
+                        velaria_version TEXT,
+                        run_dir TEXT NOT NULL,
+                        run_name TEXT,
+                        description TEXT,
+                        error TEXT,
+                        details_json TEXT
+                    );
+                    CREATE TABLE artifacts (
+                        artifact_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        uri TEXT NOT NULL,
+                        format TEXT NOT NULL,
+                        row_count INTEGER,
+                        schema_json TEXT,
+                        preview_json TEXT,
+                        tags_json TEXT
+                    );
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO runs (
+                        run_id, created_at, finished_at, status, action, args_json, velaria_version,
+                        run_dir, run_name, description, error, details_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "run-legacy",
+                        "2026-04-01T10:00:00Z",
+                        "2026-04-01T10:00:01Z",
+                        "succeeded",
+                        "csv-sql",
+                        "{}",
+                        "0.0.test",
+                        str(pathlib.Path(tmp) / "runs" / "run-legacy"),
+                        "legacy run",
+                        "legacy description",
+                        None,
+                        "{}",
+                    ),
+                )
+                conn.commit()
+                conn.close()
+
+                index = ArtifactIndex()
+                run_meta = index.get_run("run-legacy")
+                self.assertEqual(run_meta["tags"], [])
+
+                run_dir = pathlib.Path(tmp) / "runs" / "run-new"
+                run_dir.mkdir(parents=True)
+                index.upsert_run(
+                    {
+                        "run_id": "run-new",
+                        "created_at": "2026-04-02T10:00:00Z",
+                        "finished_at": "2026-04-02T10:00:01Z",
+                        "status": "succeeded",
+                        "action": "csv-sql",
+                        "cli_args": {},
+                        "velaria_version": "0.0.test",
+                        "run_dir": str(run_dir),
+                        "tags": ["cn", "slow-query"],
+                    }
+                )
+                migrated = index.get_run("run-new")
+                self.assertEqual(migrated["tags"], ["cn", "slow-query"])
 
     def test_cleanup_skips_running_runs_even_with_delete_files(self):
         with tempfile.TemporaryDirectory(prefix="velaria-artifact-running-") as tmp:

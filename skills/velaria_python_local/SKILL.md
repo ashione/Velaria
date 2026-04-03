@@ -62,12 +62,23 @@ print(result.to_pylist())
 
 如果你更适合用 CLI 而不是临时 Python 片段，在已安装 `velaria` 的环境里也可以直接使用 workspace/run store。
 
+所有 CLI 顶层命令和子命令都支持 `--help`，例如 `velaria-cli run diff --help`。
+`velaria-cli -i` 可以进入交互式模式。
+
 ```bash
+velaria-cli -i
+
 velaria-cli run start -- csv-sql \
+  --run-name "regional_row_count" \
   --description "regional row count for the current CSV snapshot" \
+  --tag regional \
+  --tag daily-check \
   --csv path/to/file.csv \
   --query "SELECT region, COUNT(*) AS cnt FROM input_table GROUP BY region"
 
+velaria-cli run list --tag regional --query "row count" --limit 20
+velaria-cli run result --run-id <run_id>
+velaria-cli run diff --run-id <run_id> --other-run-id <other_run_id>
 velaria-cli run show --run-id <run_id>
 velaria-cli artifacts list --run-id <run_id>
 ```
@@ -93,6 +104,7 @@ velaria-cli run start -- <action> ...
 
 - `--run-name`：给本次执行起一个更易读的名字，便于人工检索
 - `--description`：给本次 run 追加一段备注/描述，便于后续 `run show`、索引检索和人工回看
+- `--tag`：给 run 打标签，支持重复传入或逗号分隔，便于后续 `run list --tag ...` 过滤
 - `--timeout-ms`：超时毫秒数；超时后 run 会标记为 `timed_out`
 
 当前支持的 action：
@@ -182,7 +194,31 @@ velaria-cli run start -- <action> ...
 - `explain.json` 会保留 native `logical/physical/strategy`
 - `progress.jsonl` 每一行都直接写 native `snapshotJson()`，不改字段名
 
-### 4.5 `run show`
+### 4.5 `run list`
+
+用途：
+
+- 浏览最近的 tracked runs
+- 按 `status`、`action`、`tag` 过滤
+- 快速定位某一类分析任务的历史结果
+
+基础语法：
+
+```bash
+velaria-cli run list [--status succeeded] [--action csv-sql] [--tag slow-query] [--query triage] [--limit 20]
+```
+
+关键参数：
+
+- `--status`：只看指定状态，例如 `running`、`succeeded`、`failed`
+- `--action`：只看指定 action，例如 `csv-sql`
+- `--tag`：只看带指定标签的 run
+- `--query`：按 `run_name`、`description`、`tags`、`action` 做关键词过滤
+- `--limit`：最多返回多少条
+
+返回结果会额外带上适合人工浏览的摘要字段，例如 `artifact_count` 和 `duration_ms`。
+
+### 4.6 `run show`
 
 用途：
 
@@ -194,7 +230,34 @@ velaria-cli run start -- <action> ...
 - `--run-id`：目标 run id
 - `--limit`：返回 artifact 条数上限
 
-### 4.6 `run status`
+### 4.7 `run result`
+
+用途：
+
+- 直接返回某个 run 的主结果 artifact
+- 不需要手动先找 `artifact_id`
+- 同时返回 artifact metadata 和 preview
+
+关键参数：
+
+- `--run-id`：目标 run id
+- `--limit`：最多预览多少行，默认 `50`
+
+### 4.8 `run diff`
+
+用途：
+
+- 比较两次 run 的核心 metadata
+- 比较两边主结果 artifact 的 schema、row_count 和 preview
+- 适合快速确认结果是否发生变化
+
+关键参数：
+
+- `--run-id`：左侧 run id
+- `--other-run-id`：右侧 run id
+- `--limit`：两边 preview 最多各返回多少行
+
+### 4.9 `run status`
 
 用途：
 
@@ -207,7 +270,7 @@ velaria-cli run start -- <action> ...
 - `--run-id`：目标 run id
 - `--limit`：返回 artifact 条数上限
 
-### 4.7 `artifacts list`
+### 4.10 `artifacts list`
 
 用途：
 
@@ -218,7 +281,7 @@ velaria-cli run start -- <action> ...
 - `--run-id`：只看某个 run 的 artifacts
 - `--limit`：最多返回多少条
 
-### 4.8 `artifacts preview`
+### 4.11 `artifacts preview`
 
 用途：
 
@@ -241,7 +304,7 @@ velaria-cli run start -- <action> ...
 
 - preview 会限制大小，避免 SQLite / JSONL 索引膨胀
 
-### 4.9 `run cleanup`
+### 4.12 `run cleanup`
 
 用途：
 

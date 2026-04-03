@@ -234,11 +234,18 @@ uv run --project python_api python python_api/examples/demo_vector_search.py
 tracked run 示例：
 
 ```bash
+uv run --project python_api python python_api/velaria_cli.py -i
+
 uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
+  --run-name "score_demo" \
   --description "score filter result for demo input" \
+  --tag demo \
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
 
+uv run --project python_api python python_api/velaria_cli.py run list --tag demo --query "score"
+uv run --project python_api python python_api/velaria_cli.py run result --run-id <run_id>
+uv run --project python_api python python_api/velaria_cli.py run diff --run-id <run_id> --other-run-id <other_run_id>
 uv run --project python_api python python_api/velaria_cli.py run show --run-id <run_id>
 uv run --project python_api python python_api/velaria_cli.py artifacts list --run-id <run_id>
 uv run --project python_api python python_api/velaria_cli.py artifacts preview --artifact-id <artifact_id>

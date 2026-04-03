@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS runs (
     run_dir TEXT NOT NULL,
     run_name TEXT,
     description TEXT,
+    tags_json TEXT,
     error TEXT,
     details_json TEXT
 );
@@ -47,6 +48,7 @@ TERMINAL_RUN_STATUSES = frozenset({"succeeded", "failed", "timed_out"})
 RUN_OPTIONAL_COLUMNS = {
     "run_name": "TEXT",
     "description": "TEXT",
+    "tags_json": "TEXT",
     "error": "TEXT",
     "details_json": "TEXT",
 }
@@ -72,6 +74,14 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _duration_ms(created_at: str | None, finished_at: str | None) -> int | None:
+    started = _parse_timestamp(created_at)
+    finished = _parse_timestamp(finished_at)
+    if started is None or finished is None:
+        return None
+    return max(0, int((finished - started).total_seconds() * 1000))
+
+
 class ArtifactIndex:
     def __init__(self) -> None:
         ensure_dirs()
@@ -89,6 +99,14 @@ class ArtifactIndex:
             self.backend = "jsonl"
             self._conn = None
             self.fallback_path.touch(exist_ok=True)
+
+    def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    def __del__(self) -> None:
+        self.close()
 
     def _ensure_sqlite_columns(self) -> None:
         assert self._conn is not None
@@ -152,6 +170,7 @@ class ArtifactIndex:
             "run_dir": run_meta["run_dir"],
             "run_name": run_meta.get("run_name"),
             "description": run_meta.get("description"),
+            "tags_json": _json_dumps(run_meta.get("tags") or []),
             "error": run_meta.get("error"),
             "details_json": _json_dumps(run_meta.get("details", {})),
         }
@@ -161,8 +180,8 @@ class ArtifactIndex:
                 """
                 INSERT INTO runs (
                     run_id, created_at, finished_at, status, action, args_json, velaria_version, run_dir,
-                    run_name, description, error, details_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    run_name, description, tags_json, error, details_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET
                     created_at=excluded.created_at,
                     finished_at=excluded.finished_at,
@@ -173,6 +192,7 @@ class ArtifactIndex:
                     run_dir=excluded.run_dir,
                     run_name=excluded.run_name,
                     description=excluded.description,
+                    tags_json=excluded.tags_json,
                     error=excluded.error,
                     details_json=excluded.details_json
                 """,
@@ -187,6 +207,7 @@ class ArtifactIndex:
                     payload["run_dir"],
                     payload["run_name"],
                     payload["description"],
+                    payload["tags_json"],
                     payload["error"],
                     payload["details_json"],
                 ),
@@ -215,6 +236,7 @@ class ArtifactIndex:
                 "run_dir": row["run_dir"],
                 "run_name": row["run_name"],
                 "description": row["description"],
+                "tags": _json_loads(row["tags_json"]) or [],
                 "error": row["error"],
                 "details": _json_loads(row["details_json"]) or {},
             }
@@ -233,9 +255,116 @@ class ArtifactIndex:
             "run_dir": row["run_dir"],
             "run_name": row.get("run_name"),
             "description": row.get("description"),
+            "tags": _json_loads(row.get("tags_json")) or [],
             "error": row.get("error"),
             "details": _json_loads(row.get("details_json")) or {},
         }
+
+    def _run_from_row(self, row: dict[str, Any] | sqlite3.Row) -> dict[str, Any]:
+        return {
+            "run_id": row["run_id"],
+            "created_at": row["created_at"],
+            "finished_at": row["finished_at"],
+            "status": row["status"],
+            "action": row["action"],
+            "cli_args": _json_loads(row["args_json"]) or {},
+            "velaria_version": row["velaria_version"],
+            "run_dir": row["run_dir"],
+            "run_name": row["run_name"],
+            "description": row["description"],
+            "tags": _json_loads(row["tags_json"]) or [],
+            "error": row["error"],
+            "details": _json_loads(row["details_json"]) or {},
+        }
+
+    def _matches_query(self, run: dict[str, Any], query: str | None) -> bool:
+        if not query:
+            return True
+        needle = query.strip().lower()
+        if not needle:
+            return True
+        haystacks = [
+            run.get("run_id"),
+            run.get("action"),
+            run.get("run_name"),
+            run.get("description"),
+            run.get("error"),
+        ]
+        haystacks.extend(run.get("tags") or [])
+        return any(needle in str(value).lower() for value in haystacks if value)
+
+    def _attach_run_summaries(self, runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not runs:
+            return []
+        run_ids = [run["run_id"] for run in runs]
+        artifact_counts = {run_id: 0 for run_id in run_ids}
+        if self.backend == "sqlite":
+            assert self._conn is not None
+            placeholders = ",".join("?" for _ in run_ids)
+            rows = self._conn.execute(
+                f"""
+                SELECT run_id, COUNT(*) AS artifact_count
+                FROM artifacts
+                WHERE run_id IN ({placeholders})
+                GROUP BY run_id
+                """,
+                tuple(run_ids),
+            ).fetchall()
+            artifact_counts.update(
+                {row["run_id"]: int(row["artifact_count"]) for row in rows}
+            )
+        else:
+            _, artifacts = self._load_fallback_state()
+            for artifact in artifacts.values():
+                run_id = artifact["run_id"]
+                if run_id in artifact_counts:
+                    artifact_counts[run_id] += 1
+        for run in runs:
+            run["artifact_count"] = artifact_counts.get(run["run_id"], 0)
+            run["duration_ms"] = _duration_ms(run.get("created_at"), run.get("finished_at"))
+        return runs
+
+    def list_runs(
+        self,
+        limit: int = 50,
+        status: str | None = None,
+        action: str | None = None,
+        tag: str | None = None,
+        query: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if self.backend == "sqlite":
+            assert self._conn is not None
+            clauses: list[str] = []
+            params: list[Any] = []
+            if status:
+                clauses.append("status = ?")
+                params.append(status)
+            if action:
+                clauses.append("action = ?")
+                params.append(action)
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM runs
+                {where}
+                ORDER BY created_at DESC
+                """,
+                tuple(params),
+            ).fetchall()
+            runs = [self._run_from_row(row) for row in rows]
+        else:
+            runs_state, _ = self._load_fallback_state()
+            runs = [self.get_run(run_id) for run_id in runs_state]
+            runs = [run for run in runs if run is not None]
+            if status:
+                runs = [run for run in runs if run["status"] == status]
+            if action:
+                runs = [run for run in runs if run["action"] == action]
+            runs.sort(key=lambda item: item["created_at"], reverse=True)
+        if tag:
+            runs = [run for run in runs if tag in run["tags"]]
+        runs = [run for run in runs if self._matches_query(run, query)]
+        return self._attach_run_summaries(runs[:limit])
 
     def insert_artifact(self, artifact_meta: dict[str, Any]) -> None:
         payload = dict(artifact_meta)

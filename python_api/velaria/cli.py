@@ -8,6 +8,7 @@ import json
 import multiprocessing
 import pathlib
 import secrets
+import shlex
 import sys
 import traceback
 from datetime import datetime, timezone
@@ -34,8 +35,39 @@ from velaria.workspace import (
 from velaria.workspace.types import PREVIEW_LIMIT_BYTES, PREVIEW_LIMIT_ROWS
 
 
-class CliUsageError(ValueError):
-    pass
+class CliStructuredError(ValueError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_type: str = "value_error",
+        phase: str | None = None,
+        details: dict[str, Any] | None = None,
+        run_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_type = error_type
+        self.phase = phase
+        self.details = details or {}
+        self.run_id = run_id
+
+
+class CliUsageError(CliStructuredError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        phase: str = "argument_parse",
+        details: dict[str, Any] | None = None,
+        run_id: str | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            error_type="usage_error",
+            phase=phase,
+            details=details,
+            run_id=run_id,
+        )
 
 
 class JsonArgumentParser(argparse.ArgumentParser):
@@ -57,17 +89,100 @@ def _emit_json(payload: Any) -> int:
     return 0
 
 
-def _emit_error_json(error: str, *, error_type: str = "cli_error") -> int:
+def _error_payload(
+    error: str,
+    *,
+    error_type: str = "cli_error",
+    phase: str | None = None,
+    details: dict[str, Any] | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "ok": False,
+        "error": error,
+        "error_type": error_type,
+    }
+    if phase is not None:
+        payload["phase"] = phase
+    if details:
+        payload["details"] = details
+    if run_id is not None:
+        payload["run_id"] = run_id
+    return payload
+
+
+def _error_payload_from_exception(
+    exc: BaseException,
+    *,
+    error_type: str | None = None,
+    phase: str | None = None,
+    details: dict[str, Any] | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    payload_details = dict(details or {})
+    payload_run_id = run_id
+    if isinstance(exc, CliStructuredError):
+        payload_details = {**exc.details, **payload_details}
+        payload_run_id = payload_run_id or exc.run_id
+        return _error_payload(
+            str(exc),
+            error_type=error_type or exc.error_type,
+            phase=phase or exc.phase,
+            details=payload_details,
+            run_id=payload_run_id,
+        )
+    if isinstance(exc, FileNotFoundError):
+        if getattr(exc, "filename", None):
+            payload_details.setdefault("path", exc.filename)
+        return _error_payload(
+            str(exc),
+            error_type=error_type or "file_not_found",
+            phase=phase or "filesystem",
+            details=payload_details,
+            run_id=payload_run_id,
+        )
+    if isinstance(exc, ValueError):
+        return _error_payload(
+            str(exc),
+            error_type=error_type or "value_error",
+            phase=phase,
+            details=payload_details,
+            run_id=payload_run_id,
+        )
+    return _error_payload(
+        str(exc),
+        error_type=error_type or "internal_error",
+        phase=phase,
+        details=payload_details,
+        run_id=payload_run_id,
+    )
+
+
+def _emit_error_json(
+    error: str,
+    *,
+    error_type: str = "cli_error",
+    phase: str | None = None,
+    details: dict[str, Any] | None = None,
+    run_id: str | None = None,
+) -> int:
     print(
         _json_dumps(
-            {
-                "ok": False,
-                "error": error,
-                "error_type": error_type,
-            }
+            _error_payload(
+                error,
+                error_type=error_type,
+                phase=phase,
+                details=details,
+                run_id=run_id,
+            )
         )
     )
     return 1
+
+
+def _interactive_banner() -> int:
+    print("Velaria interactive mode. Type 'help' for usage, 'exit' to quit.")
+    return 0
 
 
 def _utc_now() -> str:
@@ -94,7 +209,11 @@ def _path_from_uri(uri: str) -> pathlib.Path:
     parsed = urlparse(uri)
     if parsed.scheme == "file":
         return pathlib.Path(parsed.path)
-    raise ValueError(f"unsupported artifact uri: {uri}")
+    raise CliStructuredError(
+        f"unsupported artifact uri: {uri}",
+        phase="artifact_preview",
+        details={"uri": uri},
+    )
 
 
 def _parse_vector_text(text: str) -> list[float]:
@@ -107,7 +226,14 @@ def _parse_vector_text(text: str) -> list[float]:
         parts = [part.strip() for part in value.split(",")]
     else:
         parts = value.split()
-    return [float(part) for part in parts if part]
+    try:
+        return [float(part) for part in parts if part]
+    except ValueError as exc:
+        raise CliStructuredError(
+            "--query-vector contains invalid numeric value",
+            phase="argument_parse",
+            details={"query_vector": text},
+        ) from exc
 
 
 def _parse_explain_sections(explain: str) -> dict[str, str]:
@@ -215,6 +341,23 @@ def _finalize_preview_payload(
     return preview
 
 
+def _limit_preview_payload(preview: dict[str, Any], limit: int) -> dict[str, Any]:
+    rows = list(preview.get("rows", []))
+    limited = dict(preview)
+    limited["rows"] = rows[:limit]
+    row_count = preview.get("row_count")
+    limited["truncated"] = (
+        preview.get("truncated", False)
+        or len(rows) > limit
+        or (
+            row_count is not None
+            and isinstance(row_count, int)
+            and row_count > len(limited["rows"])
+        )
+    )
+    return limited
+
+
 def _infer_format(path: pathlib.Path) -> str:
     suffix = path.suffix.lower()
     if suffix == ".csv":
@@ -223,7 +366,11 @@ def _infer_format(path: pathlib.Path) -> str:
         return "parquet"
     if suffix in (".arrow", ".feather"):
         return "arrow"
-    raise ValueError(f"unsupported output format for path: {path}")
+    raise CliStructuredError(
+        f"unsupported output format for path: {path}",
+        phase="artifact_materialize",
+        details={"path": str(path)},
+    )
 
 
 def _write_table(path: pathlib.Path, table: pa.Table) -> str:
@@ -273,7 +420,7 @@ def _read_preview_for_artifact(
     limit: int = PREVIEW_LIMIT_ROWS,
 ) -> dict[str, Any]:
     if artifact.get("preview_json") is not None:
-        return artifact["preview_json"]
+        return _limit_preview_payload(artifact["preview_json"], limit)
     path = _path_from_uri(artifact["uri"])
     fmt = artifact["format"]
     if fmt == "csv":
@@ -297,7 +444,14 @@ def _read_preview_for_artifact(
             _preview_payload_from_table(table, limit=limit),
             artifact.get("row_count"),
         )
-    raise ValueError(f"preview unsupported for format: {fmt}")
+    raise CliStructuredError(
+        f"preview unsupported for format: {fmt}",
+        phase="artifact_preview",
+        details={
+            "artifact_uri": artifact["uri"],
+            "format": fmt,
+        },
+    )
 
 
 def _execute_csv_sql(
@@ -308,11 +462,43 @@ def _execute_csv_sql(
     run_id: str | None = None,
 ) -> dict[str, Any]:
     session = Session()
-    df = session.read_csv(str(csv_path))
-    session.create_temp_view(table, df)
-    result_df = session.sql(query)
+    try:
+        df = session.read_csv(str(csv_path))
+    except Exception as exc:
+        raise CliStructuredError(
+            "failed to read csv input",
+            phase="csv_read",
+            details={"csv": str(csv_path), "table": table},
+            run_id=run_id,
+        ) from exc
+    try:
+        session.create_temp_view(table, df)
+    except Exception as exc:
+        raise CliStructuredError(
+            "failed to register temp view",
+            phase="csv_register_view",
+            details={"csv": str(csv_path), "table": table},
+            run_id=run_id,
+        ) from exc
+    try:
+        result_df = session.sql(query)
+    except Exception as exc:
+        raise CliStructuredError(
+            "failed to execute sql query",
+            phase="sql_execute",
+            details={"csv": str(csv_path), "table": table, "query": query},
+            run_id=run_id,
+        ) from exc
     logical = result_df.explain() if hasattr(result_df, "explain") else ""
-    result = result_df.to_arrow()
+    try:
+        result = result_df.to_arrow()
+    except Exception as exc:
+        raise CliStructuredError(
+            "failed to materialize sql result",
+            phase="result_materialize",
+            details={"csv": str(csv_path), "table": table, "query": query},
+            run_id=run_id,
+        ) from exc
     artifacts: list[dict[str, Any]] = []
     if output_path is not None:
         artifacts.append(_table_artifact(output_path, result, ["result", "csv-sql"]))
@@ -339,26 +525,68 @@ def _execute_vector_search(
     explain_path: pathlib.Path | None = None,
 ) -> dict[str, Any]:
     session = Session()
-    df = session.read_csv(str(csv_path))
-    session.create_temp_view("input_table", df)
+    try:
+        df = session.read_csv(str(csv_path))
+    except Exception as exc:
+        raise CliStructuredError(
+            "failed to read csv input",
+            phase="csv_read",
+            details={"csv": str(csv_path), "vector_column": vector_column},
+        ) from exc
+    try:
+        session.create_temp_view("input_table", df)
+    except Exception as exc:
+        raise CliStructuredError(
+            "failed to register temp view",
+            phase="vector_register_view",
+            details={"csv": str(csv_path), "table": "input_table"},
+        ) from exc
     needle = _parse_vector_text(query_vector)
     if not needle:
-        raise ValueError("--query-vector must not be empty")
+        raise CliStructuredError(
+            "--query-vector must not be empty",
+            phase="argument_parse",
+            details={"query_vector": query_vector},
+        )
 
-    result = session.vector_search(
-        table="input_table",
-        vector_column=vector_column,
-        query_vector=needle,
-        top_k=top_k,
-        metric=metric,
-    ).to_arrow()
-    explain = session.explain_vector_search(
-        table="input_table",
-        vector_column=vector_column,
-        query_vector=needle,
-        top_k=top_k,
-        metric=metric,
-    )
+    try:
+        result = session.vector_search(
+            table="input_table",
+            vector_column=vector_column,
+            query_vector=needle,
+            top_k=top_k,
+            metric=metric,
+        ).to_arrow()
+    except Exception as exc:
+        raise CliStructuredError(
+            "failed to execute vector search",
+            phase="vector_search",
+            details={
+                "csv": str(csv_path),
+                "vector_column": vector_column,
+                "metric": _normalize_metric(metric),
+                "top_k": top_k,
+            },
+        ) from exc
+    try:
+        explain = session.explain_vector_search(
+            table="input_table",
+            vector_column=vector_column,
+            query_vector=needle,
+            top_k=top_k,
+            metric=metric,
+        )
+    except Exception as exc:
+        raise CliStructuredError(
+            "failed to explain vector search",
+            phase="vector_explain",
+            details={
+                "csv": str(csv_path),
+                "vector_column": vector_column,
+                "metric": _normalize_metric(metric),
+                "top_k": top_k,
+            },
+        ) from exc
     artifacts: list[dict[str, Any]] = []
     if output_path is not None:
         artifacts.append(_table_artifact(output_path, result, ["result", "vector-search"]))
@@ -394,37 +622,114 @@ def _execute_stream_sql_once(
     run_id: str,
 ) -> dict[str, Any]:
     if not query.lstrip().upper().startswith("INSERT INTO"):
-        raise ValueError("--query for stream-sql-once must start with INSERT INTO")
+        raise CliStructuredError(
+            "--query for stream-sql-once must start with INSERT INTO",
+            phase="argument_parse",
+            details={"query": query},
+            run_id=run_id,
+        )
     effective_max_batches = max_batches if max_batches > 0 else 1
     session = Session()
-    stream_df = session.read_stream_csv_dir(str(source_csv_dir), delimiter=source_delimiter)
-    session.create_temp_view(source_table, stream_df)
-    session.sql(
-        f"CREATE SINK TABLE {sink_table} ({sink_schema}) "
-        f"USING csv OPTIONS(path '{_normalize_path(sink_path)}', delimiter '{sink_delimiter}')"
-    )
-    explain = session.explain_stream_sql(
-        query,
-        trigger_interval_ms=trigger_interval_ms,
-        checkpoint_delivery_mode=checkpoint_delivery_mode,
-        execution_mode=execution_mode,
-        local_workers=local_workers,
-        max_inflight_partitions=max_inflight_partitions,
-    )
+    try:
+        stream_df = session.read_stream_csv_dir(str(source_csv_dir), delimiter=source_delimiter)
+    except Exception as exc:
+        raise CliStructuredError(
+            "failed to read stream csv directory",
+            phase="stream_source_read",
+            details={"source_csv_dir": str(source_csv_dir), "delimiter": source_delimiter},
+            run_id=run_id,
+        ) from exc
+    try:
+        session.create_temp_view(source_table, stream_df)
+    except Exception as exc:
+        raise CliStructuredError(
+            "failed to register stream temp view",
+            phase="stream_register_view",
+            details={"source_table": source_table, "source_csv_dir": str(source_csv_dir)},
+            run_id=run_id,
+        ) from exc
+    try:
+        session.sql(
+            f"CREATE SINK TABLE {sink_table} ({sink_schema}) "
+            f"USING csv OPTIONS(path '{_normalize_path(sink_path)}', delimiter '{sink_delimiter}')"
+        )
+    except Exception as exc:
+        raise CliStructuredError(
+            "failed to create sink table",
+            phase="stream_setup",
+            details={
+                "sink_table": sink_table,
+                "sink_schema": sink_schema,
+                "sink_path": str(sink_path),
+            },
+            run_id=run_id,
+        ) from exc
+    try:
+        explain = session.explain_stream_sql(
+            query,
+            trigger_interval_ms=trigger_interval_ms,
+            checkpoint_delivery_mode=checkpoint_delivery_mode,
+            execution_mode=execution_mode,
+            local_workers=local_workers,
+            max_inflight_partitions=max_inflight_partitions,
+        )
+    except Exception as exc:
+        raise CliStructuredError(
+            "failed to explain stream sql",
+            phase="stream_explain",
+            details={"query": query, "execution_mode": execution_mode},
+            run_id=run_id,
+        ) from exc
     write_explain(run_id, _parse_explain_sections(explain))
-    streaming_query = session.start_stream_sql(
-        query,
-        trigger_interval_ms=trigger_interval_ms,
-        checkpoint_delivery_mode=checkpoint_delivery_mode,
-        execution_mode=execution_mode,
-        local_workers=local_workers,
-        max_inflight_partitions=max_inflight_partitions,
-    )
-    streaming_query.start()
+    try:
+        streaming_query = session.start_stream_sql(
+            query,
+            trigger_interval_ms=trigger_interval_ms,
+            checkpoint_delivery_mode=checkpoint_delivery_mode,
+            execution_mode=execution_mode,
+            local_workers=local_workers,
+            max_inflight_partitions=max_inflight_partitions,
+        )
+    except Exception as exc:
+        raise CliStructuredError(
+            "failed to start stream sql",
+            phase="stream_execute",
+            details={"query": query, "execution_mode": execution_mode},
+            run_id=run_id,
+        ) from exc
+    try:
+        streaming_query.start()
+    except Exception as exc:
+        raise CliStructuredError(
+            "failed to start stream execution",
+            phase="stream_start",
+            details={"query": query, "execution_mode": execution_mode},
+            run_id=run_id,
+        ) from exc
     append_progress_snapshot(run_id, streaming_query.snapshot_json())
-    processed = streaming_query.await_termination(max_batches=effective_max_batches)
+    try:
+        processed = streaming_query.await_termination(max_batches=effective_max_batches)
+    except Exception as exc:
+        raise CliStructuredError(
+            "failed while waiting for stream execution",
+            phase="stream_wait",
+            details={
+                "query": query,
+                "execution_mode": execution_mode,
+                "max_batches": effective_max_batches,
+            },
+            run_id=run_id,
+        ) from exc
     append_progress_snapshot(run_id, streaming_query.snapshot_json())
-    result = session.read_csv(str(sink_path)).to_arrow()
+    try:
+        result = session.read_csv(str(sink_path)).to_arrow()
+    except Exception as exc:
+        raise CliStructuredError(
+            "failed to read stream sink result",
+            phase="result_materialize",
+            details={"sink_path": str(sink_path), "sink_table": sink_table},
+            run_id=run_id,
+        ) from exc
     artifacts = [_table_artifact(sink_path, result, ["result", "stream-sql-once"])]
     return {
         "payload": {
@@ -517,7 +822,12 @@ def _execute_action_for_run(spec: dict[str, Any]) -> dict[str, Any]:
             max_batches=args["max_batches"],
             run_id=run_id,
         )
-    raise ValueError(f"unsupported run action: {action}")
+    raise CliStructuredError(
+        f"unsupported run action: {action}",
+        phase="run_action_dispatch",
+        details={"action": action},
+        run_id=run_id,
+    )
 
 
 def _run_action_subprocess_target(
@@ -536,10 +846,8 @@ def _run_action_subprocess_target(
             pathlib.Path(result_path).write_text(_json_dumps(result), encoding="utf-8")
         except Exception as exc:  # pragma: no cover - exercised via parent behavior
             traceback.print_exc(file=stderr_handle)
-            failure = {
-                "error": str(exc),
-                "traceback": traceback.format_exc(),
-            }
+            failure = _error_payload_from_exception(exc, run_id=spec.get("run_id"))
+            failure["traceback"] = traceback.format_exc()
             pathlib.Path(result_path).write_text(_json_dumps(failure), encoding="utf-8")
             raise
 
@@ -561,15 +869,27 @@ def _run_action_with_timeout(spec: dict[str, Any], timeout_ms: int | None) -> di
         return {
             "timed_out": True,
             "error": f"run timed out after {timeout_ms} ms",
+            "error_type": "timeout",
+            "phase": "run_timeout",
+            "details": {"timeout_ms": timeout_ms},
+            "run_id": spec.get("run_id"),
         }
     if not result_path.exists():
         return {
             "timed_out": False,
             "error": f"action process exited with code {process.exitcode}",
+            "error_type": "internal_error",
+            "phase": "run_subprocess",
+            "details": {"exit_code": process.exitcode},
+            "run_id": spec.get("run_id"),
         }
     payload = json.loads(result_path.read_text(encoding="utf-8"))
     if process.exitcode not in (0, None):
         payload.setdefault("error", f"action process exited with code {process.exitcode}")
+        payload.setdefault("error_type", "internal_error")
+        payload.setdefault("phase", "run_subprocess")
+        payload.setdefault("details", {"exit_code": process.exitcode})
+        payload.setdefault("run_id", spec.get("run_id"))
     return payload
 
 
@@ -644,7 +964,11 @@ def _parse_action_args(action: str, argv: list[str]) -> dict[str, Any]:
     elif action == "stream-sql-once":
         _add_stream_sql_once_arguments(parser)
     else:
-        raise ValueError(f"unsupported run action: {action}")
+        raise CliStructuredError(
+            f"unsupported run action: {action}",
+            phase="run_action_parse",
+            details={"action": action},
+        )
     return vars(parser.parse_args(argv))
 
 
@@ -652,8 +976,18 @@ def _parse_passthrough(command_args: list[str]) -> tuple[str, dict[str, Any]]:
     if command_args and command_args[0] == "--":
         command_args = command_args[1:]
     if not command_args:
-        raise ValueError("run start requires an action after '--'")
+        raise CliUsageError("run start requires an action after '--'")
     return command_args[0], _parse_action_args(command_args[0], command_args[1:])
+
+
+def _normalize_tags(tags: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    for raw_tag in tags or []:
+        for piece in raw_tag.split(","):
+            tag = piece.strip()
+            if tag and tag not in normalized:
+                normalized.append(tag)
+    return normalized
 
 
 def _load_latest_progress(run_id: str) -> dict[str, Any] | None:
@@ -672,17 +1006,120 @@ def _read_run_or_raise(run_id: str) -> dict[str, Any]:
     try:
         return read_run(run_id)
     except FileNotFoundError as exc:
-        raise ValueError(f"run not found: {run_id}") from exc
+        raise CliStructuredError(
+            f"run not found: {run_id}",
+            error_type="file_not_found",
+            phase="run_lookup",
+            details={"run_id": run_id},
+            run_id=run_id,
+        ) from exc
+
+
+def _run_duration_ms(run: dict[str, Any]) -> int | None:
+    created_at = run.get("created_at")
+    finished_at = run.get("finished_at")
+    if not created_at or not finished_at:
+        return None
+    started = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    finished = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
+    return max(0, int((finished - started).total_seconds() * 1000))
+
+
+def _enrich_run_summary(index: ArtifactIndex, run: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(run)
+    enriched["artifact_count"] = len(index.list_artifacts(run_id=run["run_id"], limit=1000000))
+    enriched["duration_ms"] = _run_duration_ms(run)
+    return enriched
+
+
+def _find_run_result_artifact(index: ArtifactIndex, run_id: str) -> dict[str, Any]:
+    artifacts = index.list_artifacts(run_id=run_id, limit=1000000, tag="result")
+    if not artifacts:
+        raise CliStructuredError(
+            f"result artifact not found for run: {run_id}",
+            error_type="file_not_found",
+            phase="run_result",
+            details={"run_id": run_id},
+            run_id=run_id,
+        )
+    return artifacts[0]
+
+
+def _diff_values(left: Any, right: Any) -> dict[str, Any] | None:
+    if left == right:
+        return None
+    return {
+        "left": left,
+        "right": right,
+    }
+
+
+def _build_run_metadata_diff(left_run: dict[str, Any], right_run: dict[str, Any]) -> dict[str, Any]:
+    diffs: dict[str, Any] = {}
+    for field in (
+        "status",
+        "action",
+        "run_name",
+        "description",
+        "tags",
+        "artifact_count",
+        "duration_ms",
+        "error",
+    ):
+        diff = _diff_values(left_run.get(field), right_run.get(field))
+        if diff is not None:
+            diffs[field] = diff
+    return diffs
+
+
+def _build_result_diff(
+    index: ArtifactIndex,
+    left_run_id: str,
+    right_run_id: str,
+    limit: int,
+) -> dict[str, Any]:
+    left_artifact = _find_run_result_artifact(index, left_run_id)
+    right_artifact = _find_run_result_artifact(index, right_run_id)
+    left_preview = _read_preview_for_artifact(left_artifact, limit=limit)
+    right_preview = _read_preview_for_artifact(right_artifact, limit=limit)
+    return {
+        "left_artifact": left_artifact,
+        "right_artifact": right_artifact,
+        "comparison": {
+            "format": _diff_values(left_artifact.get("format"), right_artifact.get("format")),
+            "row_count": {
+                "left": left_artifact.get("row_count"),
+                "right": right_artifact.get("row_count"),
+                "delta": (
+                    (right_artifact.get("row_count") or 0) - (left_artifact.get("row_count") or 0)
+                    if left_artifact.get("row_count") is not None
+                    and right_artifact.get("row_count") is not None
+                    else None
+                ),
+            },
+            "schema": {
+                "left": left_artifact.get("schema_json"),
+                "right": right_artifact.get("schema_json"),
+                "equal": left_artifact.get("schema_json") == right_artifact.get("schema_json"),
+            },
+            "preview": {
+                "left": left_preview,
+                "right": right_preview,
+            },
+        },
+    }
 
 
 def _run_start(args: argparse.Namespace) -> int:
     action, action_args = _parse_passthrough(args.command_args)
+    tags = _normalize_tags(args.tag)
     run_id, run_dir = create_run(
         action,
         action_args,
         __version__,
         run_name=args.run_name,
         description=args.description,
+        tags=tags,
     )
     write_inputs(
         run_id,
@@ -691,142 +1128,265 @@ def _run_start(args: argparse.Namespace) -> int:
             "action_args": action_args,
             "run_name": args.run_name,
             "description": args.description,
+            "tags": tags,
             "timeout_ms": args.timeout_ms,
         },
     )
     index = ArtifactIndex()
-    index.upsert_run(read_run(run_id))
-    spec = {
-        "run_id": run_id,
-        "run_dir": str(run_dir),
-        "action": action,
-        "action_args": action_args,
-    }
-    result = _run_action_with_timeout(spec, args.timeout_ms)
-    if result.get("timed_out"):
-        append_stderr(run_id, f"{result['error']}\n")
-        finalized = finalize_run(run_id, "timed_out", error=result["error"])
-        index.upsert_run(finalized)
-        _emit_json(
-            {
-                "ok": False,
-                "run_id": run_id,
-                "run_dir": str(run_dir),
-                "status": "timed_out",
-                "error": result["error"],
-            }
-        )
-        return 1
-    if "error" in result and "payload" not in result:
-        append_stderr(run_id, f"{result['error']}\n")
-        if result.get("traceback"):
-            append_stderr(run_id, result["traceback"])
-        finalized = finalize_run(run_id, "failed", error=result["error"])
-        index.upsert_run(finalized)
-        _emit_json(
-            {
-                "ok": False,
-                "run_id": run_id,
-                "run_dir": str(run_dir),
-                "status": "failed",
-                "error": result["error"],
-            }
-        )
-        return 1
-    created_artifacts = _register_artifacts(index, run_id, result.get("artifacts", []))
-    details: dict[str, Any] = {}
-    for artifact in created_artifacts:
-        if "explain" in artifact.get("tags_json", []):
-            details["explain_artifact_id"] = artifact["artifact_id"]
-            details["explain_artifact_uri"] = artifact["uri"]
-    if details:
-        update_run(run_id, details=details)
-    finalized = finalize_run(run_id, "succeeded")
-    index.upsert_run(finalized)
-    return _emit_json(
-        {
-            "ok": True,
+    try:
+        index.upsert_run(read_run(run_id))
+        spec = {
             "run_id": run_id,
             "run_dir": str(run_dir),
-            "status": "succeeded",
             "action": action,
-            "result": result["payload"],
-            "artifacts": created_artifacts,
+            "action_args": action_args,
         }
-    )
+        result = _run_action_with_timeout(spec, args.timeout_ms)
+        if result.get("timed_out"):
+            append_stderr(run_id, f"{result['error']}\n")
+            finalized = finalize_run(
+                run_id,
+                "timed_out",
+                error=result["error"],
+                details={
+                    "error_type": result.get("error_type"),
+                    "phase": result.get("phase"),
+                    "error_details": result.get("details", {}),
+                },
+            )
+            index.upsert_run(finalized)
+            _emit_json(
+                {
+                    "ok": False,
+                    "run_id": run_id,
+                    "run_dir": str(run_dir),
+                    "status": "timed_out",
+                    "error": result["error"],
+                    "error_type": result.get("error_type", "timeout"),
+                    "phase": result.get("phase"),
+                    "details": result.get("details", {}),
+                }
+            )
+            return 1
+        if "error" in result and "payload" not in result:
+            append_stderr(run_id, f"{result['error']}\n")
+            if result.get("traceback"):
+                append_stderr(run_id, result["traceback"])
+            finalized = finalize_run(
+                run_id,
+                "failed",
+                error=result["error"],
+                details={
+                    "error_type": result.get("error_type"),
+                    "phase": result.get("phase"),
+                    "error_details": result.get("details", {}),
+                },
+            )
+            index.upsert_run(finalized)
+            _emit_json(
+                {
+                    "ok": False,
+                    "run_id": run_id,
+                    "run_dir": str(run_dir),
+                    "status": "failed",
+                    "error": result["error"],
+                    "error_type": result.get("error_type", "value_error"),
+                    "phase": result.get("phase"),
+                    "details": result.get("details", {}),
+                }
+            )
+            return 1
+        created_artifacts = _register_artifacts(index, run_id, result.get("artifacts", []))
+        details: dict[str, Any] = {}
+        for artifact in created_artifacts:
+            if "explain" in artifact.get("tags_json", []):
+                details["explain_artifact_id"] = artifact["artifact_id"]
+                details["explain_artifact_uri"] = artifact["uri"]
+        if details:
+            update_run(run_id, details=details)
+        finalized = finalize_run(run_id, "succeeded")
+        index.upsert_run(finalized)
+        return _emit_json(
+            {
+                "ok": True,
+                "run_id": run_id,
+                "run_dir": str(run_dir),
+                "status": "succeeded",
+                "action": action,
+                "tags": tags,
+                "result": result["payload"],
+                "artifacts": created_artifacts,
+            }
+        )
+    finally:
+        index.close()
+
+
+def _run_list(args: argparse.Namespace) -> int:
+    index = ArtifactIndex()
+    try:
+        return _emit_json(
+            {
+                "ok": True,
+                "runs": index.list_runs(
+                    limit=args.limit,
+                    status=args.status,
+                    action=args.action,
+                    tag=args.tag,
+                    query=args.query,
+                ),
+            }
+        )
+    finally:
+        index.close()
 
 
 def _run_show(args: argparse.Namespace) -> int:
     index = ArtifactIndex()
-    return _emit_json(
-        {
-            "ok": True,
-            "run": _read_run_or_raise(args.run_id),
-            "artifacts": index.list_artifacts(run_id=args.run_id, limit=args.limit),
-        }
-    )
+    try:
+        run = _enrich_run_summary(index, _read_run_or_raise(args.run_id))
+        artifacts = index.list_artifacts(run_id=args.run_id, limit=args.limit)
+        return _emit_json(
+            {
+                "ok": True,
+                "run": run,
+                "artifacts": artifacts,
+            }
+        )
+    finally:
+        index.close()
+
+
+def _run_result(args: argparse.Namespace) -> int:
+    index = ArtifactIndex()
+    try:
+        run = _enrich_run_summary(index, _read_run_or_raise(args.run_id))
+        artifact = _find_run_result_artifact(index, args.run_id)
+        preview = _read_preview_for_artifact(artifact, limit=args.limit)
+        if artifact.get("preview_json") is None:
+            index.update_artifact_preview(artifact["artifact_id"], preview)
+            artifact = index.get_artifact(artifact["artifact_id"]) or artifact
+        return _emit_json(
+            {
+                "ok": True,
+                "run": run,
+                "artifact_id": artifact["artifact_id"],
+                "artifact": artifact,
+                "preview": preview,
+            }
+        )
+    finally:
+        index.close()
+
+
+def _run_diff(args: argparse.Namespace) -> int:
+    index = ArtifactIndex()
+    try:
+        left_run = _enrich_run_summary(index, _read_run_or_raise(args.run_id))
+        right_run = _enrich_run_summary(index, _read_run_or_raise(args.other_run_id))
+        return _emit_json(
+            {
+                "ok": True,
+                "left_run": left_run,
+                "right_run": right_run,
+                "metadata_diff": _build_run_metadata_diff(left_run, right_run),
+                "result_diff": _build_result_diff(
+                    index,
+                    args.run_id,
+                    args.other_run_id,
+                    args.limit,
+                ),
+            }
+        )
+    finally:
+        index.close()
 
 
 def _run_status(args: argparse.Namespace) -> int:
     index = ArtifactIndex()
-    run = _read_run_or_raise(args.run_id)
-    payload: dict[str, Any] = {
-        "ok": True,
-        "run_id": args.run_id,
-        "status": run["status"],
-        "action": run["action"],
-        "artifacts": index.list_artifacts(run_id=args.run_id, limit=args.limit),
-    }
-    latest_progress = _load_latest_progress(args.run_id)
-    if latest_progress is not None:
-        payload["latest_progress"] = latest_progress
-    return _emit_json(payload)
+    try:
+        run = _enrich_run_summary(index, _read_run_or_raise(args.run_id))
+        payload: dict[str, Any] = {
+            "ok": True,
+            "run_id": args.run_id,
+            "status": run["status"],
+            "action": run["action"],
+            "artifacts": index.list_artifacts(run_id=args.run_id, limit=args.limit),
+            "artifact_count": run["artifact_count"],
+            "duration_ms": run["duration_ms"],
+        }
+        latest_progress = _load_latest_progress(args.run_id)
+        if latest_progress is not None:
+            payload["latest_progress"] = latest_progress
+        return _emit_json(payload)
+    finally:
+        index.close()
 
 
 def _artifacts_list(args: argparse.Namespace) -> int:
     index = ArtifactIndex()
-    return _emit_json(
-        {
-            "ok": True,
-            "artifacts": index.list_artifacts(limit=args.limit, run_id=args.run_id),
-        }
-    )
+    try:
+        return _emit_json(
+            {
+                "ok": True,
+                "artifacts": index.list_artifacts(limit=args.limit, run_id=args.run_id),
+            }
+        )
+    finally:
+        index.close()
 
 
 def _artifacts_preview(args: argparse.Namespace) -> int:
     index = ArtifactIndex()
-    artifact = index.get_artifact(args.artifact_id)
-    if artifact is None:
-        raise ValueError(f"artifact not found: {args.artifact_id}")
-    preview = _read_preview_for_artifact(artifact, limit=args.limit)
-    if artifact.get("preview_json") is None:
-        index.update_artifact_preview(args.artifact_id, preview)
-        artifact = index.get_artifact(args.artifact_id) or artifact
-    return _emit_json(
-        {
-            "ok": True,
-            "artifact_id": args.artifact_id,
-            "preview": preview,
-            "artifact": artifact,
-        }
-    )
+    try:
+        artifact = index.get_artifact(args.artifact_id)
+        if artifact is None:
+            raise CliStructuredError(
+                f"artifact not found: {args.artifact_id}",
+                error_type="file_not_found",
+                phase="artifact_lookup",
+                details={"artifact_id": args.artifact_id},
+            )
+        preview = _read_preview_for_artifact(artifact, limit=args.limit)
+        if artifact.get("preview_json") is None:
+            index.update_artifact_preview(args.artifact_id, preview)
+            artifact = index.get_artifact(args.artifact_id) or artifact
+        return _emit_json(
+            {
+                "ok": True,
+                "artifact_id": args.artifact_id,
+                "preview": preview,
+                "artifact": artifact,
+            }
+        )
+    finally:
+        index.close()
 
 
 def _run_cleanup(args: argparse.Namespace) -> int:
     index = ArtifactIndex()
-    payload = index.cleanup_runs(
-        keep_last_n=args.keep_last,
-        ttl_days=args.ttl_days,
-        delete_files=args.delete_files,
-    )
-    payload["ok"] = True
-    return _emit_json(payload)
+    try:
+        payload = index.cleanup_runs(
+            keep_last_n=args.keep_last,
+            ttl_days=args.ttl_days,
+            delete_files=args.delete_files,
+        )
+        payload["ok"] = True
+        return _emit_json(payload)
+    finally:
+        index.close()
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = JsonArgumentParser(
         prog="velaria-cli",
         description="Velaria CLI for SQL query execution and workspace run management.",
+    )
+    parser.add_argument(
+        "-i",
+        "--interactive",
+        action="store_true",
+        help="Enter interactive mode.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -848,8 +1408,35 @@ def _build_parser() -> argparse.ArgumentParser:
     run_start = run_subparsers.add_parser("start", help="Start a tracked run.")
     run_start.add_argument("--run-name")
     run_start.add_argument("--description", "--run-description", dest="description")
+    run_start.add_argument(
+        "--tag",
+        action="append",
+        help="Attach a tag to the run. Repeat or use comma-separated values.",
+    )
     run_start.add_argument("--timeout-ms", type=int)
     run_start.add_argument("command_args", nargs=argparse.REMAINDER)
+
+    run_list = run_subparsers.add_parser("list", help="List tracked runs.")
+    run_list.add_argument("--status")
+    run_list.add_argument("--action")
+    run_list.add_argument("--tag")
+    run_list.add_argument("--query")
+    run_list.add_argument("--limit", type=int, default=50)
+
+    run_result = run_subparsers.add_parser(
+        "result",
+        help="Show the primary result artifact for a run.",
+    )
+    run_result.add_argument("--run-id", required=True)
+    run_result.add_argument("--limit", type=int, default=PREVIEW_LIMIT_ROWS)
+
+    run_diff = run_subparsers.add_parser(
+        "diff",
+        help="Compare two runs and their primary result artifacts.",
+    )
+    run_diff.add_argument("--run-id", required=True)
+    run_diff.add_argument("--other-run-id", required=True)
+    run_diff.add_argument("--limit", type=int, default=PREVIEW_LIMIT_ROWS)
 
     run_show = run_subparsers.add_parser("show", help="Show a run and its artifacts.")
     run_show.add_argument("--run-id", required=True)
@@ -878,7 +1465,47 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _run_interactive_loop() -> int:
+    _interactive_banner()
+    while True:
+        try:
+            line = input("velaria> ")
+        except EOFError:
+            print()
+            return 0
+        except KeyboardInterrupt:
+            print()
+            continue
+        command = line.strip()
+        if not command:
+            continue
+        if command in {"exit", "quit"}:
+            return 0
+        if command == "help":
+            main(["--help"])
+            continue
+        if command.startswith("help "):
+            help_args = shlex.split(command[len("help ") :].strip())
+            main([*help_args, "--help"])
+            continue
+        if command in {"-i", "--interactive"}:
+            _emit_error_json(
+                "interactive mode is already active",
+                error_type="usage_error",
+                phase="interactive",
+            )
+            continue
+        main(shlex.split(command))
+
+
+def _wants_interactive(argv: list[str]) -> bool:
+    return argv in (["-i"], ["--interactive"])
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = list(argv) if argv is not None else sys.argv[1:]
+    if _wants_interactive(argv):
+        return _run_interactive_loop()
     try:
         parser = _build_parser()
         args = parser.parse_args(argv)
@@ -896,6 +1523,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "run":
             if args.run_command == "start":
                 return _run_start(args)
+            if args.run_command == "list":
+                return _run_list(args)
+            if args.run_command == "result":
+                return _run_result(args)
+            if args.run_command == "diff":
+                return _run_diff(args)
             if args.run_command == "show":
                 return _run_show(args)
             if args.run_command == "status":
@@ -908,15 +1541,54 @@ def main(argv: list[str] | None = None) -> int:
             if args.artifacts_command == "preview":
                 return _artifacts_preview(args)
 
-        raise CliUsageError("unsupported command")
+        raise CliUsageError("unsupported command", phase="command_dispatch")
+    except SystemExit as exc:
+        if exc.code in (0, None):
+            return 0
+        raise
     except CliUsageError as exc:
-        return _emit_error_json(str(exc), error_type="usage_error")
+        return _emit_error_json(
+            str(exc),
+            error_type=exc.error_type,
+            phase=exc.phase,
+            details=exc.details,
+            run_id=exc.run_id,
+        )
+    except CliStructuredError as exc:
+        return _emit_error_json(
+            str(exc),
+            error_type=exc.error_type,
+            phase=exc.phase,
+            details=exc.details,
+            run_id=exc.run_id,
+        )
     except ValueError as exc:
-        return _emit_error_json(str(exc), error_type="value_error")
+        payload = _error_payload_from_exception(exc)
+        return _emit_error_json(
+            payload["error"],
+            error_type=payload["error_type"],
+            phase=payload.get("phase"),
+            details=payload.get("details"),
+            run_id=payload.get("run_id"),
+        )
     except FileNotFoundError as exc:
-        return _emit_error_json(str(exc), error_type="file_not_found")
+        payload = _error_payload_from_exception(exc)
+        return _emit_error_json(
+            payload["error"],
+            error_type=payload["error_type"],
+            phase=payload.get("phase"),
+            details=payload.get("details"),
+            run_id=payload.get("run_id"),
+        )
     except Exception as exc:
-        return _emit_error_json(str(exc), error_type="internal_error")
+        payload = _error_payload_from_exception(exc)
+        return _emit_error_json(
+            payload["error"],
+            error_type=payload["error_type"],
+            phase=payload.get("phase"),
+            details=payload.get("details"),
+            run_id=payload.get("run_id"),
+        )
 
 
 if __name__ == "__main__":

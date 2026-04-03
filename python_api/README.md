@@ -189,6 +189,9 @@ Repo-visible CLI entrypoints are:
 
 The global commands are expected only after installing the wheel or package into your environment.
 
+Every top-level command and subcommand supports `--help`.
+Use `velaria-cli -i` to enter interactive mode.
+
 ### Workspace + Artifacts
 
 The CLI also supports a local workspace layout for tracked runs and artifact indexing.
@@ -208,15 +211,24 @@ Tracked run commands:
 
 ```bash
 uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
+  --run-name "cn_slow_query_24h_2026-04-03" \
   --description "score filter result for demo input" \
+  --tag cn \
+  --tag "slow-query,demo" \
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
 
 ./dist/velaria-cli run start -- csv-sql \
+  --run-name "cn_slow_query_24h_2026-04-03" \
   --description "score filter result for demo input" \
+  --tag cn \
+  --tag "slow-query,demo" \
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
 
+uv run --project python_api python python_api/velaria_cli.py run list --tag cn --query "slow query" --limit 20
+uv run --project python_api python python_api/velaria_cli.py run result --run-id <run_id>
+uv run --project python_api python python_api/velaria_cli.py run diff --run-id <run_id> --other-run-id <other_run_id>
 uv run --project python_api python python_api/velaria_cli.py run show --run-id <run_id>
 uv run --project python_api python python_api/velaria_cli.py run status --run-id <run_id>
 uv run --project python_api python python_api/velaria_cli.py artifacts list --run-id <run_id>
@@ -228,7 +240,9 @@ The tracked workspace contract is:
 
 - stdout returns JSON only
 - logs go to `stdout.log` / `stderr.log`
-- `run.json` can carry `run_name` and `description` for human-readable context
+- `run.json` can carry `run_name`, `description`, and `tags` for human-readable context and filtering
+- `run list` returns summary-friendly fields such as `artifact_count` and `duration_ms`
+- failures return structured JSON with `error_type`, `phase`, optional `run_id`, and `details`
 - stream progress appends native `snapshotJson()` output to `progress.jsonl`
 - stream explain keeps the native `logical` / `physical` / `strategy` structure
 - large results stay in files under `artifacts/`; SQLite stores only index rows and small previews
@@ -240,10 +254,16 @@ CSV SQL to parquet plus preview:
 
 ```bash
 uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
+  --run-name "high_score_rows" \
   --description "high score rows for local inspection" \
+  --tag local-demo \
+  --tag scores \
   --csv /path/to/input.csv \
   --query "SELECT name, score FROM input_table WHERE score > 10"
 
+uv run --project python_api python python_api/velaria_cli.py run list --tag scores --query "high score"
+uv run --project python_api python python_api/velaria_cli.py run result --run-id <run_id>
+uv run --project python_api python python_api/velaria_cli.py run diff --run-id <run_id> --other-run-id <other_run_id>
 uv run --project python_api python python_api/velaria_cli.py artifacts list --run-id <run_id>
 uv run --project python_api python python_api/velaria_cli.py artifacts preview --artifact-id <artifact_id>
 ```

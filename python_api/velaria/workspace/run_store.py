@@ -62,6 +62,7 @@ def create_run(
     velaria_version: str | None,
     run_name: str | None = None,
     description: str | None = None,
+    tags: list[str] | None = None,
 ) -> tuple[str, pathlib.Path]:
     ensure_dirs()
     run_id = _make_run_id()
@@ -80,6 +81,7 @@ def create_run(
         run_dir=str(run_dir),
         run_name=run_name,
         description=description,
+        tags=list(tags or []),
     )
     _write_json(run_dir / "run.json", record.to_dict())
     return run_id, run_dir

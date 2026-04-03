@@ -69,6 +69,10 @@ class WorkspaceRunsTest(unittest.TestCase):
                             "score-summary",
                             "--description",
                             "filter rows with score > 20",
+                            "--tag",
+                            "demo",
+                            "--tag",
+                            "scores,csv",
                             "--",
                             "csv-sql",
                             "--csv",
@@ -95,8 +99,12 @@ class WorkspaceRunsTest(unittest.TestCase):
                 self.assertEqual(run_meta["action"], "csv-sql")
                 self.assertEqual(run_meta["run_name"], "score-summary")
                 self.assertEqual(run_meta["description"], "filter rows with score > 20")
+                self.assertEqual(run_meta["tags"], ["demo", "scores", "csv"])
 
                 index = ArtifactIndex()
+                runs = index.list_runs(tag="scores")
+                self.assertEqual(len(runs), 1)
+                self.assertEqual(runs[0]["run_id"], run_id)
                 artifacts = index.list_artifacts(run_id=run_id)
                 self.assertEqual(len(artifacts), 1)
                 artifact_id = artifacts[0]["artifact_id"]
@@ -125,6 +133,123 @@ class WorkspaceRunsTest(unittest.TestCase):
                 status_payload = json.loads(status_stdout.getvalue())
                 self.assertEqual(status_payload["status"], "succeeded")
                 self.assertEqual(len(status_payload["artifacts"]), 1)
+                self.assertEqual(status_payload["artifact_count"], 1)
+                self.assertIsNotNone(status_payload["duration_ms"])
+
+                show_stdout = io.StringIO()
+                with redirect_stdout(show_stdout):
+                    show_exit = velaria_cli.main(["run", "show", "--run-id", run_id])
+                self.assertEqual(show_exit, 0)
+                show_payload = json.loads(show_stdout.getvalue())
+                self.assertEqual(show_payload["run"]["artifact_count"], 1)
+                self.assertIsNotNone(show_payload["run"]["duration_ms"])
+
+                result_stdout = io.StringIO()
+                with redirect_stdout(result_stdout):
+                    result_exit = velaria_cli.main(["run", "result", "--run-id", run_id, "--limit", "1"])
+                self.assertEqual(result_exit, 0)
+                result_payload = json.loads(result_stdout.getvalue())
+                self.assertEqual(result_payload["artifact_id"], artifact_id)
+                self.assertEqual(result_payload["artifact"]["artifact_id"], artifact_id)
+                self.assertEqual(result_payload["preview"]["row_count"], 2)
+                self.assertGreaterEqual(len(result_payload["preview"]["rows"]), 1)
+
+    def test_run_diff_compares_metadata_and_result_preview(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-run-diff-") as tmp:
+            csv_path = pathlib.Path(tmp) / "scores.csv"
+            csv_path.write_text("name,score\nalice,10\nbob,22\ncarol,31\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                first_stdout = io.StringIO()
+                with redirect_stdout(first_stdout):
+                    first_exit = velaria_cli.main(
+                        [
+                            "run",
+                            "start",
+                            "--run-name",
+                            "score-ge-20",
+                            "--description",
+                            "scores greater than or equal to 20",
+                            "--tag",
+                            "scores",
+                            "--",
+                            "csv-sql",
+                            "--csv",
+                            str(csv_path),
+                            "--query",
+                            "SELECT name, score FROM input_table WHERE score >= 20",
+                        ]
+                    )
+                self.assertEqual(first_exit, 0)
+                first_payload = json.loads(first_stdout.getvalue())
+
+                second_stdout = io.StringIO()
+                with redirect_stdout(second_stdout):
+                    second_exit = velaria_cli.main(
+                        [
+                            "run",
+                            "start",
+                            "--run-name",
+                            "score-ge-30",
+                            "--description",
+                            "scores greater than or equal to 30",
+                            "--tag",
+                            "scores",
+                            "--tag",
+                            "strict",
+                            "--",
+                            "csv-sql",
+                            "--csv",
+                            str(csv_path),
+                            "--query",
+                            "SELECT name, score FROM input_table WHERE score >= 30",
+                        ]
+                    )
+                self.assertEqual(second_exit, 0)
+                second_payload = json.loads(second_stdout.getvalue())
+
+                diff_stdout = io.StringIO()
+                with redirect_stdout(diff_stdout):
+                    diff_exit = velaria_cli.main(
+                        [
+                            "run",
+                            "diff",
+                            "--run-id",
+                            first_payload["run_id"],
+                            "--other-run-id",
+                            second_payload["run_id"],
+                            "--limit",
+                            "1",
+                        ]
+                    )
+                self.assertEqual(diff_exit, 0)
+                diff_payload = json.loads(diff_stdout.getvalue())
+                self.assertEqual(diff_payload["left_run"]["run_id"], first_payload["run_id"])
+                self.assertEqual(diff_payload["right_run"]["run_id"], second_payload["run_id"])
+                self.assertIn("description", diff_payload["metadata_diff"])
+                self.assertIn("tags", diff_payload["metadata_diff"])
+                self.assertEqual(
+                    diff_payload["result_diff"]["comparison"]["row_count"]["left"],
+                    2,
+                )
+                self.assertEqual(
+                    diff_payload["result_diff"]["comparison"]["row_count"]["right"],
+                    1,
+                )
+                self.assertEqual(
+                    diff_payload["result_diff"]["comparison"]["row_count"]["delta"],
+                    -1,
+                )
+                self.assertTrue(
+                    diff_payload["result_diff"]["comparison"]["schema"]["equal"]
+                )
+                self.assertEqual(
+                    len(diff_payload["result_diff"]["comparison"]["preview"]["left"]["rows"]),
+                    1,
+                )
+                self.assertEqual(
+                    len(diff_payload["result_diff"]["comparison"]["preview"]["right"]["rows"]),
+                    1,
+                )
 
     def test_stream_sql_once_writes_snapshot_json_progress(self):
         with tempfile.TemporaryDirectory(prefix="velaria-stream-run-") as tmp:

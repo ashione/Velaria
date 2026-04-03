@@ -19,6 +19,14 @@ namespace dataflow {
 
 namespace {
 
+[[noreturn]] void throwUnsupportedSqlV1(const std::string& detail) {
+  throw SQLUnsupportedError("not supported in SQL v1: " + detail);
+}
+
+[[noreturn]] void throwTableKindViolation(const std::string& detail) {
+  throw SQLTableKindError("table-kind constraint violation: " + detail);
+}
+
 std::string nextQueryId() {
   static std::atomic<std::size_t> id{1};
   std::ostringstream oss;
@@ -225,25 +233,29 @@ Table normalizeInsertSelect(const Table& target, const std::vector<std::string>&
     if (source.schema.fields.size() != target.schema.fields.size()) {
       throw SQLSemanticError("INSERT SELECT column count mismatch");
     }
-    for (std::size_t i = 0; i < source.schema.fields.size(); ++i) {
-      if (source.schema.fields[i] != target.schema.fields[i]) {
-        throw SQLSemanticError("INSERT SELECT column mismatch: " + source.schema.fields[i]);
+    for (const auto& row : source.rows) {
+      if (row.size() != source.schema.fields.size()) {
+        throw SQLSemanticError("INSERT SELECT column count mismatch");
       }
+      Row outRow(target.schema.fields.size());
+      for (std::size_t i = 0; i < target.schema.fields.size(); ++i) {
+        outRow[i] = row[i];
+      }
+      out.rows.push_back(std::move(outRow));
     }
-    out.rows = source.rows;
     return out;
   }
 
   std::unordered_set<std::string> targetCols;
-  std::vector<std::size_t> sourceIndices;
   std::vector<std::size_t> targetIndices;
-  sourceIndices.reserve(columns.size());
   targetIndices.reserve(columns.size());
+  if (source.schema.fields.size() != columns.size()) {
+    throw SQLSemanticError("INSERT SELECT column count mismatch");
+  }
   for (const auto& col : columns) {
     if (!targetCols.insert(col).second) {
       throw SQLSemanticError("duplicate insert column: " + col);
     }
-    sourceIndices.push_back(findNameIndex(source.schema, col));
     targetIndices.push_back(findNameIndex(target.schema, col));
   }
   for (const auto& row : source.rows) {
@@ -252,7 +264,7 @@ Table normalizeInsertSelect(const Table& target, const std::vector<std::string>&
     }
     Row outRow(target.schema.fields.size());
     for (std::size_t i = 0; i < columns.size(); ++i) {
-      outRow[targetIndices[i]] = row[sourceIndices[i]];
+      outRow[targetIndices[i]] = row[i];
     }
     out.rows.push_back(std::move(outRow));
   }
@@ -261,7 +273,7 @@ Table normalizeInsertSelect(const Table& target, const std::vector<std::string>&
 
 DataFrame executeInsert(ViewCatalog& catalog, const sql::InsertStmt& stmt) {
   if (catalog.isSourceTable(stmt.table)) {
-    throw SQLSemanticError("INSERT INTO is not allowed on SOURCE TABLE: " + stmt.table);
+    throwTableKindViolation("INSERT INTO is not allowed on SOURCE TABLE: " + stmt.table);
   }
   DataFrame& view = catalog.getViewMutable(stmt.table);
   Table target = view.toTable();
@@ -414,6 +426,49 @@ StreamingDataFrame projectStreamSelect(const StreamingDataFrame& current, const 
   return projected.select(columns);
 }
 
+void validateStreamingSource(const sql::SqlQuery& query, const ViewCatalog& catalog,
+                           const std::unordered_map<std::string, StreamingDataFrame>& stream_views,
+                           const std::unordered_map<std::string, std::shared_ptr<StreamSink>>&
+                               stream_sinks) {
+  if (!query.has_from) {
+    throw SQLSemanticError("stream SQL requires FROM");
+  }
+  const auto& source = query.from.name;
+  if (stream_views.find(source) != stream_views.end()) {
+    return;
+  }
+  if (stream_sinks.find(source) != stream_sinks.end()) {
+    throw SQLTableKindError("table-kind constraint violation: stream SQL source table cannot be SINK TABLE: " +
+                           source);
+  }
+  if (catalog.hasView(source)) {
+    throw SQLTableKindError(
+        "table-kind constraint violation: stream SQL source must be created with CREATE SOURCE TABLE: " +
+        source);
+  }
+  throw CatalogNotFoundError("stream view not found: " + source);
+}
+
+void validateStreamingSink(const std::string& sink_name, const ViewCatalog& catalog,
+                          const std::unordered_map<std::string, StreamingDataFrame>& stream_views,
+                          const std::unordered_map<std::string, std::shared_ptr<StreamSink>>&
+                              stream_sinks) {
+  const auto sink_it = stream_sinks.find(sink_name);
+  if (sink_it != stream_sinks.end()) {
+    return;
+  }
+  if (catalog.hasView(sink_name)) {
+    throw SQLTableKindError(
+        "table-kind constraint violation: stream SQL sink must be created with CREATE SINK TABLE: " +
+        sink_name);
+  }
+  if (stream_views.find(sink_name) != stream_views.end()) {
+    throw SQLTableKindError(
+        "table-kind constraint violation: stream SQL sink cannot be SOURCE TABLE: " + sink_name);
+  }
+  throw CatalogNotFoundError("stream sink not found: " + sink_name);
+}
+
 StreamingDataFrame buildAggregateStream(const StreamingDataFrame& seed, const sql::SqlQuery& query,
                                        const sql::FromItem& from) {
   if (query.select_items.empty()) {
@@ -529,6 +584,52 @@ void setSqlPayloadAfterParse(ai::PluginPayload& payload, const std::string& sql,
   }
 }
 
+enum class StreamSqlStatementMode { SelectOnly, SelectOrInsert, InsertOnly };
+
+struct PreparedStreamSqlStatement {
+  sql::SqlQuery query;
+  std::string sink_name;
+  std::shared_ptr<StreamSink> sink;
+};
+
+PreparedStreamSqlStatement prepareStreamSqlStatement(
+    const std::string& sql_text, StreamSqlStatementMode mode,
+    const ViewCatalog& catalog,
+    const std::unordered_map<std::string, StreamingDataFrame>& stream_views,
+    const std::unordered_map<std::string, std::shared_ptr<StreamSink>>& stream_sinks) {
+  const auto statement = sql::SqlParser::parse(sql_text);
+
+  if (statement.kind == sql::SqlStatementKind::Select) {
+    if (mode == StreamSqlStatementMode::InsertOnly) {
+      throwUnsupportedSqlV1("startStreamSql only supports INSERT INTO ... SELECT");
+    }
+    validateStreamingSource(statement.query, catalog, stream_views, stream_sinks);
+    return PreparedStreamSqlStatement{statement.query, "", nullptr};
+  }
+
+  if (statement.kind == sql::SqlStatementKind::InsertSelect) {
+    if (mode == StreamSqlStatementMode::SelectOnly) {
+      throwUnsupportedSqlV1("streamSql only supports SELECT");
+    }
+    if (!statement.insert.columns.empty()) {
+      throwUnsupportedSqlV1("stream SQL does not support INSERT column list");
+    }
+    validateStreamingSource(statement.insert.query, catalog, stream_views, stream_sinks);
+    validateStreamingSink(statement.insert.table, catalog, stream_views, stream_sinks);
+    auto sink_it = stream_sinks.find(statement.insert.table);
+    return PreparedStreamSqlStatement{statement.insert.query, statement.insert.table,
+                                      sink_it->second};
+  }
+
+  if (mode == StreamSqlStatementMode::InsertOnly) {
+    throwUnsupportedSqlV1("startStreamSql only supports INSERT INTO ... SELECT");
+  }
+  if (mode == StreamSqlStatementMode::SelectOrInsert) {
+    throwUnsupportedSqlV1("explainStreamSql only supports SELECT or INSERT INTO ... SELECT");
+  }
+  throwUnsupportedSqlV1("streamSql only supports SELECT");
+}
+
 }  // namespace
 
 DataflowJobHandle DataflowSession::submitAsync(const DataFrame& df, const ExecutionOptions& options) {
@@ -620,7 +721,7 @@ DataFrame DataflowSession::sql(const std::string& sql) {
     if (!statement.create.provider.empty()) {
       const auto provider = toLower(statement.create.provider);
       if (provider != "csv") {
-        throw SQLSemanticError("stream CREATE TABLE only supports USING csv");
+        throwUnsupportedSqlV1("stream CREATE TABLE only supports USING csv");
       }
       validateCreateColumns(statement.create);
       const auto path = requireCreateOption(statement.create, "path");
@@ -633,7 +734,7 @@ DataFrame DataflowSession::sql(const std::string& sql) {
                            std::make_shared<FileAppendStreamSink>(path, delimiter));
         result = dmlResult("create sink table done", 0);
       } else {
-        throw SQLSemanticError("USING csv requires CREATE SOURCE TABLE or CREATE SINK TABLE");
+        throwUnsupportedSqlV1("USING csv requires CREATE SOURCE TABLE or CREATE SINK TABLE");
       }
     } else {
       result = executeCreateTable(catalog_, statement.create);
@@ -666,7 +767,7 @@ DataFrame DataflowSession::sql(const std::string& sql) {
 
   sql::SqlPlanner planner;
   if (statement.kind != sql::SqlStatementKind::Select) {
-    throw SQLSyntaxError("unsupported statement kind");
+    throwUnsupportedSqlV1("unsupported statement kind");
   }
   DataFrame result = planner.plan(statement.query, catalog_);
   build_payload.plan = result.explain();
@@ -696,37 +797,24 @@ std::string DataflowSession::explainVectorQuery(const std::string& table,
 }
 
 StreamingDataFrame DataflowSession::streamSql(const std::string& sql) {
-  const auto statement = sql::SqlParser::parse(sql);
-  if (statement.kind != sql::SqlStatementKind::Select) {
-    throw SQLSyntaxError("stream SQL only supports SELECT");
-  }
+  const auto prepared =
+      prepareStreamSqlStatement(sql, StreamSqlStatementMode::SelectOnly, catalog_, stream_views_,
+                               stream_sinks_);
   sql::SqlPlanner planner;
-  return planner.planStream(statement.query, stream_views_);
+  return planner.planStream(prepared.query, stream_views_);
 }
 
 std::string DataflowSession::explainStreamSql(const std::string& sql,
                                               const StreamingQueryOptions& options) {
-  const auto statement = sql::SqlParser::parse(sql);
-  const sql::SqlQuery* query = nullptr;
-  std::shared_ptr<StreamSink> sink;
-  if (statement.kind == sql::SqlStatementKind::Select) {
-    query = &statement.query;
-  } else if (statement.kind == sql::SqlStatementKind::InsertSelect) {
-    query = &statement.insert.query;
-    auto sink_it = stream_sinks_.find(statement.insert.table);
-    if (sink_it == stream_sinks_.end()) {
-      throw CatalogNotFoundError("stream sink not found: " + statement.insert.table);
-    }
-    sink = sink_it->second;
-  } else {
-    throw SQLSyntaxError("explainStreamSql only supports SELECT or INSERT INTO ... SELECT");
-  }
+  const auto prepared =
+      prepareStreamSqlStatement(sql, StreamSqlStatementMode::SelectOrInsert, catalog_, stream_views_,
+                               stream_sinks_);
 
   sql::SqlPlanner planner;
-  const auto logical = planner.buildStreamLogicalPlan(*query);
+  const auto logical = planner.buildStreamLogicalPlan(prepared.query, prepared.sink_name);
   const auto physical = planner.buildStreamPhysicalPlan(logical);
   const auto stream = planner.materializeStreamFromPhysical(physical, stream_views_);
-  const auto strategy = describeStreamingStrategy(stream, sink, options);
+  const auto strategy = describeStreamingStrategy(stream, prepared.sink, options);
 
   std::ostringstream out;
   out << "logical\n";
@@ -740,21 +828,13 @@ std::string DataflowSession::explainStreamSql(const std::string& sql,
 
 StreamingQuery DataflowSession::startStreamSql(const std::string& sql,
                                                const StreamingQueryOptions& options) {
-  const auto statement = sql::SqlParser::parse(sql);
-  if (statement.kind != sql::SqlStatementKind::InsertSelect) {
-    throw SQLSyntaxError("startStreamSql only supports INSERT INTO ... SELECT");
-  }
-  auto sink_it = stream_sinks_.find(statement.insert.table);
-  if (sink_it == stream_sinks_.end()) {
-    throw CatalogNotFoundError("stream sink not found: " + statement.insert.table);
-  }
-  if (!statement.insert.columns.empty()) {
-    throw SQLSemanticError("startStreamSql does not support INSERT column list");
-  }
+  const auto prepared =
+      prepareStreamSqlStatement(sql, StreamSqlStatementMode::InsertOnly, catalog_, stream_views_,
+                               stream_sinks_);
 
   sql::SqlPlanner planner;
-  auto query = planner.planStream(statement.insert.query, stream_views_)
-                   .writeStream(sink_it->second, options);
+  auto query = planner.planStream(prepared.query, stream_views_)
+                   .writeStream(prepared.sink, options);
   query.start();
   return query;
 }

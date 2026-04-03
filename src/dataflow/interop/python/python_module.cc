@@ -12,6 +12,7 @@
 
 #include "src/dataflow/core/contract/api/dataframe.h"
 #include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/table.h"
 #include "src/dataflow/core/execution/value.h"
 #include "src/dataflow/core/execution/stream/stream.h"
@@ -334,6 +335,31 @@ df::Value valueFromFastArrowColumn(const FastArrowColumnSpec& spec, const ArrowA
   throw std::runtime_error("unsupported Arrow fast-path column");
 }
 
+std::vector<df::Value> materializeFastArrowColumn(const FastArrowColumnSpec& spec,
+                                                  const ArrowArray* array) {
+  if (array == nullptr) {
+    throw std::runtime_error("missing Arrow child array");
+  }
+  std::vector<df::Value> out(static_cast<size_t>(array->length));
+  for (int64_t row = 0; row < array->length; ++row) {
+    out[static_cast<size_t>(row)] = valueFromFastArrowColumn(spec, array, row);
+  }
+  return out;
+}
+
+std::vector<df::Value> materializePyListColumn(PyObject* pylist, const char* column_name) {
+  if (pylist == nullptr || !PyList_Check(pylist)) {
+    throw std::runtime_error(std::string("failed to decode pyarrow column: ") + column_name);
+  }
+  const auto row_count = PyList_GET_SIZE(pylist);
+  std::vector<df::Value> out;
+  out.reserve(static_cast<size_t>(row_count));
+  for (Py_ssize_t row = 0; row < row_count; ++row) {
+    out.push_back(valueFromPy(PyList_GET_ITEM(pylist, row)));
+  }
+  return out;
+}
+
 bool tryTableFromArrowCapsules(PyObject* obj, df::Table* table) {
   if (table == nullptr || !PyObject_HasAttrString(obj, "__arrow_c_array__")) {
     return false;
@@ -376,22 +402,25 @@ bool tryTableFromArrowCapsules(PyObject* obj, df::Table* table) {
     specs.push_back(spec);
   }
 
-  std::vector<df::Row> rows(static_cast<size_t>(array->length),
-                            df::Row(names.size(), df::Value()));
+  df::Table out(df::Schema(std::move(names)), {});
+  out.rows.resize(static_cast<size_t>(array->length));
+  for (auto& row : out.rows) {
+    row.reserve(static_cast<size_t>(schema->n_children));
+  }
+  out.columnar_cache = std::make_shared<df::ColumnarTable>();
+  out.columnar_cache->schema = out.schema;
+  out.columnar_cache->columns.reserve(static_cast<size_t>(schema->n_children));
   for (int64_t column = 0; column < array->n_children; ++column) {
     const auto* child_array = array->children[column];
     if (child_array == nullptr) {
       Py_DECREF(pair);
       return false;
     }
-    for (int64_t row = 0; row < array->length; ++row) {
-      rows[static_cast<size_t>(row)][static_cast<size_t>(column)] =
-          valueFromFastArrowColumn(specs[static_cast<size_t>(column)], child_array, row);
-    }
+    df::appendColumn(&out, materializeFastArrowColumn(specs[static_cast<size_t>(column)], child_array));
   }
 
   Py_DECREF(pair);
-  *table = df::Table(df::Schema(std::move(names)), std::move(rows));
+  *table = std::move(out);
   return true;
 }
 
@@ -453,8 +482,16 @@ df::Table tableFromArrowSlow(PyObject* obj) {
   const Py_ssize_t row_count = static_cast<Py_ssize_t>(PyLong_AsSsize_t(num_rows_obj));
   Py_DECREF(num_rows_obj);
 
-  std::vector<df::Row> rows(static_cast<size_t>(row_count), df::Row(names.size(), df::Value()));
-  for (size_t column = 0; column < names.size(); ++column) {
+  const auto column_count = names.size();
+  df::Table out(df::Schema(std::move(names)), {});
+  out.rows.resize(static_cast<size_t>(row_count));
+  for (auto& row : out.rows) {
+    row.reserve(out.schema.fields.size());
+  }
+  out.columnar_cache = std::make_shared<df::ColumnarTable>();
+  out.columnar_cache->schema = out.schema;
+  out.columnar_cache->columns.reserve(column_count);
+  for (size_t column = 0; column < column_count; ++column) {
     PyObject* column_obj =
         PyObject_CallMethod(table_obj, "column", "n", static_cast<Py_ssize_t>(column));
     if (column_obj == nullptr) {
@@ -468,14 +505,12 @@ df::Table tableFromArrowSlow(PyObject* obj) {
       Py_DECREF(table_obj);
       throw std::runtime_error("failed to convert pyarrow column to python list");
     }
-    for (Py_ssize_t row = 0; row < row_count; ++row) {
-      rows[static_cast<size_t>(row)][column] = valueFromPy(PyList_GET_ITEM(pylist, row));
-    }
+    df::appendColumn(&out, materializePyListColumn(pylist, out.schema.fields[column].c_str()));
     Py_DECREF(pylist);
   }
 
   Py_DECREF(table_obj);
-  return df::Table(df::Schema(std::move(names)), std::move(rows));
+  return out;
 }
 
 df::Table mergeArrowTables(const std::vector<df::Table>& tables) {
@@ -651,16 +686,17 @@ std::string arrowFormatForValue(const df::Value& value) {
   return "u";
 }
 
-std::string arrowFormatForColumn(const df::Table& table, size_t column) {
-  for (const auto& row : table.rows) {
-    if (column < row.size() && !row[column].isNull()) {
-      return arrowFormatForValue(row[column]);
+std::string arrowFormatForColumn(const df::ValueColumnBuffer& column) {
+  for (const auto& value : column.values) {
+    if (!value.isNull()) {
+      return arrowFormatForValue(value);
     }
   }
   return "u";
 }
 
 OwnedArrowSchema* buildArrowSchema(const df::Table& table) {
+  const auto cache = df::ensureColumnarCache(&table);
   auto* root = new OwnedArrowSchema();
   root->format = "+s";
   root->schema.format = root->format.c_str();
@@ -673,7 +709,7 @@ OwnedArrowSchema* buildArrowSchema(const df::Table& table) {
 
   for (size_t i = 0; i < table.schema.fields.size(); ++i) {
     auto child = std::make_unique<OwnedArrowSchema>();
-    child->format = arrowFormatForColumn(table, i);
+    child->format = arrowFormatForColumn(cache->columns[i]);
     child->name = table.schema.fields[i];
     child->schema.format = child->format.c_str();
     child->schema.name = child->name.c_str();
@@ -695,13 +731,13 @@ OwnedArrowSchema* buildArrowSchema(const df::Table& table) {
   return root;
 }
 
-std::shared_ptr<void> makeNullBitmap(const df::Table& table, size_t column, int64_t* null_count) {
-  const size_t row_count = table.rows.size();
+std::shared_ptr<void> makeNullBitmap(const df::ValueColumnBuffer& column, int64_t* null_count) {
+  const size_t row_count = column.values.size();
   const size_t bytes = row_count == 0 ? 0 : (row_count + 7) / 8;
   auto* raw = static_cast<uint8_t*>(std::calloc(bytes == 0 ? 1 : bytes, 1));
   int64_t local_nulls = 0;
   for (size_t row = 0; row < row_count; ++row) {
-    const bool valid = column < table.rows[row].size() && !table.rows[row][column].isNull();
+    const bool valid = !column.values[row].isNull();
     if (valid) {
       raw[row / 8] |= static_cast<uint8_t>(1U << (row % 8));
     } else {
@@ -712,23 +748,23 @@ std::shared_ptr<void> makeNullBitmap(const df::Table& table, size_t column, int6
   return std::shared_ptr<void>(raw, std::free);
 }
 
-std::shared_ptr<void> makeInt64Buffer(const df::Table& table, size_t column) {
-  const size_t row_count = table.rows.size();
+std::shared_ptr<void> makeInt64Buffer(const df::ValueColumnBuffer& column) {
+  const size_t row_count = column.values.size();
   auto* raw = static_cast<int64_t*>(std::calloc(row_count == 0 ? 1 : row_count, sizeof(int64_t)));
   for (size_t row = 0; row < row_count; ++row) {
-    if (column < table.rows[row].size() && !table.rows[row][column].isNull()) {
-      raw[row] = table.rows[row][column].asInt64();
+    if (!column.values[row].isNull()) {
+      raw[row] = column.values[row].asInt64();
     }
   }
   return std::shared_ptr<void>(raw, std::free);
 }
 
-std::shared_ptr<void> makeDoubleBuffer(const df::Table& table, size_t column) {
-  const size_t row_count = table.rows.size();
+std::shared_ptr<void> makeDoubleBuffer(const df::ValueColumnBuffer& column) {
+  const size_t row_count = column.values.size();
   auto* raw = static_cast<double*>(std::calloc(row_count == 0 ? 1 : row_count, sizeof(double)));
   for (size_t row = 0; row < row_count; ++row) {
-    if (column < table.rows[row].size() && !table.rows[row][column].isNull()) {
-      raw[row] = table.rows[row][column].asDouble();
+    if (!column.values[row].isNull()) {
+      raw[row] = column.values[row].asDouble();
     }
   }
   return std::shared_ptr<void>(raw, std::free);
@@ -739,16 +775,16 @@ struct StringBuffers {
   std::shared_ptr<void> data;
 };
 
-StringBuffers makeStringBuffers(const df::Table& table, size_t column) {
-  const size_t row_count = table.rows.size();
+StringBuffers makeStringBuffers(const df::ValueColumnBuffer& column) {
+  const size_t row_count = column.values.size();
   auto* offsets = static_cast<int32_t*>(
       std::calloc((row_count + 1) == 0 ? 1 : (row_count + 1), sizeof(int32_t)));
   std::ostringstream joined;
   int32_t current = 0;
   for (size_t row = 0; row < row_count; ++row) {
     offsets[row] = current;
-    if (column < table.rows[row].size() && !table.rows[row][column].isNull()) {
-      const std::string& s = table.rows[row][column].asString();
+    if (!column.values[row].isNull()) {
+      const std::string& s = column.values[row].asString();
       joined.write(s.data(), static_cast<std::streamsize>(s.size()));
       current += static_cast<int32_t>(s.size());
     }
@@ -766,6 +802,7 @@ StringBuffers makeStringBuffers(const df::Table& table, size_t column) {
 }
 
 OwnedArrowArray* buildArrowArray(const df::Table& table) {
+  const auto cache = df::ensureColumnarCache(&table);
   auto* root = new OwnedArrowArray();
   root->array.length = static_cast<int64_t>(table.rows.size());
   root->array.null_count = 0;
@@ -788,24 +825,25 @@ OwnedArrowArray* buildArrowArray(const df::Table& table) {
     child->array.private_data = child.get();
 
     int64_t null_count = 0;
-    auto null_bitmap = makeNullBitmap(table, column, &null_count);
+    const auto& values = cache->columns[column];
+    auto null_bitmap = makeNullBitmap(values, &null_count);
     child->array.null_count = null_count;
     child->buffer_holders.push_back(null_bitmap);
     child->buffer_ptrs.push_back(null_bitmap.get());
 
-    const std::string format = arrowFormatForColumn(table, column);
+    const std::string format = arrowFormatForColumn(values);
     if (format == "l") {
-      auto values = makeInt64Buffer(table, column);
+      auto value_buffer = makeInt64Buffer(values);
       child->array.n_buffers = 2;
-      child->buffer_holders.push_back(values);
-      child->buffer_ptrs.push_back(values.get());
+      child->buffer_holders.push_back(value_buffer);
+      child->buffer_ptrs.push_back(value_buffer.get());
     } else if (format == "g") {
-      auto values = makeDoubleBuffer(table, column);
+      auto value_buffer = makeDoubleBuffer(values);
       child->array.n_buffers = 2;
-      child->buffer_holders.push_back(values);
-      child->buffer_ptrs.push_back(values.get());
+      child->buffer_holders.push_back(value_buffer);
+      child->buffer_ptrs.push_back(value_buffer.get());
     } else {
-      auto strings = makeStringBuffers(table, column);
+      auto strings = makeStringBuffers(values);
       child->array.n_buffers = 3;
       child->buffer_holders.push_back(strings.offsets);
       child->buffer_holders.push_back(strings.data);

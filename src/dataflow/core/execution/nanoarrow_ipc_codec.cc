@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "src/dataflow/core/execution/columnar_batch.h"
 #include "nanoarrow/nanoarrow.h"
 #include "nanoarrow/nanoarrow_ipc.h"
 
@@ -291,6 +292,45 @@ void append_row_value(ArrowArray* child, const ColumnLayout& layout, const Value
   }
 }
 
+std::vector<Value> materialize_nanoarrow_column(const ArrowArrayView* child_view,
+                                                const ArrowSchemaView& child_schema_view,
+                                                int64_t row_count) {
+  std::vector<Value> out(static_cast<std::size_t>(row_count));
+  for (int64_t row = 0; row < row_count; ++row) {
+    if (ArrowArrayViewIsNull(child_view, row)) {
+      continue;
+    }
+    switch (child_schema_view.storage_type) {
+      case NANOARROW_TYPE_INT64:
+        out[static_cast<std::size_t>(row)] = Value(ArrowArrayViewGetIntUnsafe(child_view, row));
+        break;
+      case NANOARROW_TYPE_DOUBLE:
+        out[static_cast<std::size_t>(row)] = Value(ArrowArrayViewGetDoubleUnsafe(child_view, row));
+        break;
+      case NANOARROW_TYPE_STRING: {
+        const auto string_view = ArrowArrayViewGetStringUnsafe(child_view, row);
+        out[static_cast<std::size_t>(row)] = Value(
+            std::string(string_view.data, static_cast<std::size_t>(string_view.size_bytes)));
+        break;
+      }
+      case NANOARROW_TYPE_FIXED_SIZE_LIST: {
+        std::vector<float> vec;
+        vec.reserve(static_cast<std::size_t>(child_schema_view.fixed_size));
+        const auto* values_view = child_view->children[0];
+        const int64_t base = row * static_cast<int64_t>(child_schema_view.fixed_size);
+        for (int32_t i = 0; i < child_schema_view.fixed_size; ++i) {
+          vec.push_back(static_cast<float>(ArrowArrayViewGetDoubleUnsafe(values_view, base + i)));
+        }
+        out[static_cast<std::size_t>(row)] = Value(std::move(vec));
+        break;
+      }
+      default:
+        throw std::runtime_error("unsupported nanoarrow column type in materialization");
+    }
+  }
+  return out;
+}
+
 Table table_from_nanoarrow_batch(const ArrowSchema* schema, const ArrowArray* array) {
   ArrowError error;
   std::memset(&error, 0, sizeof(error));
@@ -307,6 +347,9 @@ Table table_from_nanoarrow_batch(const ArrowSchema* schema, const ArrowArray* ar
     table.schema.fields.emplace_back(schema->children[i]->name);
     table.schema.index[table.schema.fields.back()] = static_cast<std::size_t>(i);
   }
+  table.columnar_cache = std::make_shared<ColumnarTable>();
+  table.columnar_cache->schema = table.schema;
+  table.columnar_cache->columns.reserve(static_cast<std::size_t>(schema->n_children));
 
   std::vector<ArrowSchemaView> child_schema_views(static_cast<std::size_t>(schema->n_children));
   for (int64_t i = 0; i < schema->n_children; ++i) {
@@ -316,48 +359,15 @@ Table table_from_nanoarrow_batch(const ArrowSchema* schema, const ArrowArray* ar
         &error, "init child nanoarrow schema view");
   }
 
-  table.rows.reserve(static_cast<std::size_t>(array->length));
-  for (int64_t row = 0; row < array->length; ++row) {
-    Row out_row;
-    out_row.reserve(static_cast<std::size_t>(schema->n_children));
-    for (int64_t col = 0; col < schema->n_children; ++col) {
-      const auto* child_view = root_view.value.children[col];
-      if (ArrowArrayViewIsNull(child_view, row)) {
-        out_row.emplace_back();
-        continue;
-      }
-
-      const auto& child_schema_view = child_schema_views[static_cast<std::size_t>(col)];
-      switch (child_schema_view.storage_type) {
-        case NANOARROW_TYPE_INT64:
-          out_row.emplace_back(ArrowArrayViewGetIntUnsafe(child_view, row));
-          break;
-        case NANOARROW_TYPE_DOUBLE:
-          out_row.emplace_back(ArrowArrayViewGetDoubleUnsafe(child_view, row));
-          break;
-        case NANOARROW_TYPE_STRING: {
-          const auto string_view = ArrowArrayViewGetStringUnsafe(child_view, row);
-          out_row.emplace_back(
-              std::string(string_view.data, static_cast<std::size_t>(string_view.size_bytes)));
-          break;
-        }
-        case NANOARROW_TYPE_FIXED_SIZE_LIST: {
-          std::vector<float> vec;
-          vec.reserve(static_cast<std::size_t>(child_schema_view.fixed_size));
-          const auto* values_view = child_view->children[0];
-          const int64_t base = row * static_cast<int64_t>(child_schema_view.fixed_size);
-          for (int32_t i = 0; i < child_schema_view.fixed_size; ++i) {
-            vec.push_back(
-                static_cast<float>(ArrowArrayViewGetDoubleUnsafe(values_view, base + i)));
-          }
-          out_row.emplace_back(std::move(vec));
-          break;
-        }
-        default:
-          throw std::runtime_error("unsupported nanoarrow column type in materialization");
-      }
-    }
-    table.rows.push_back(std::move(out_row));
+  table.rows.resize(static_cast<std::size_t>(array->length));
+  for (auto& row : table.rows) {
+    row.reserve(static_cast<std::size_t>(schema->n_children));
+  }
+  for (int64_t col = 0; col < schema->n_children; ++col) {
+    appendColumn(&table,
+                 materialize_nanoarrow_column(root_view.value.children[col],
+                                              child_schema_views[static_cast<std::size_t>(col)],
+                                              array->length));
   }
 
   return table;

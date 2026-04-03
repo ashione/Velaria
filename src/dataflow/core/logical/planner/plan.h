@@ -25,6 +25,29 @@ enum class PlanKind {
   Sink
 };
 enum class JoinKind { Inner, Left, Right, Full };
+enum class ComputedColumnKind {
+  Copy,
+  StringLength,
+  StringLower,
+  StringUpper,
+  StringTrim,
+  StringConcat,
+  StringReverse,
+  StringConcatWs,
+  StringLeft,
+  StringRight,
+  StringPosition,
+  StringSubstr,
+  StringLtrim,
+  StringRtrim,
+  StringReplace
+};
+
+struct ComputedColumnArg {
+  bool is_literal = false;
+  Value literal;
+  size_t source_column_index = 0;
+};
 
 struct PlanNode {
   explicit PlanNode(PlanKind k) : kind(k) {}
@@ -68,11 +91,22 @@ struct WithColumnPlan : PlanNode {
   PlanNodePtr child;
   std::string added_column;
   size_t source_column_index;
+  ComputedColumnKind function;
+  std::vector<ComputedColumnArg> args;
   WithColumnPlan(PlanNodePtr p, std::string col, size_t idx)
       : PlanNode(PlanKind::WithColumn),
         child(std::move(p)),
         added_column(std::move(col)),
-        source_column_index(idx) {}
+        source_column_index(idx),
+        function(ComputedColumnKind::Copy) {}
+  WithColumnPlan(PlanNodePtr p, std::string col, ComputedColumnKind fn,
+                std::vector<ComputedColumnArg> args)
+      : PlanNode(PlanKind::WithColumn),
+        child(std::move(p)),
+        added_column(std::move(col)),
+        source_column_index(static_cast<size_t>(-1)),
+        function(fn),
+        args(std::move(args)) {}
 };
 
 struct DropPlan : PlanNode {

@@ -12,6 +12,14 @@ namespace sql {
 
 namespace {
 
+[[noreturn]] void throwUnsupportedSqlV1(const std::string& detail) {
+  throw SQLUnsupportedError("not supported in SQL v1: " + detail);
+}
+
+[[noreturn]] void throwTableKindViolation(const std::string& detail) {
+  throw SQLTableKindError("table-kind constraint violation: " + detail);
+}
+
 std::string opToString(BinaryOperatorKind op) {
   switch (op) {
     case BinaryOperatorKind::Eq:
@@ -42,8 +50,96 @@ AggregateFunction toPlanFunction(AggregateFunctionKind fn) {
       return AggregateFunction::Min;
     case AggregateFunctionKind::Max:
       return AggregateFunction::Max;
+    case AggregateFunctionKind::StdDev:
+      throw SQLUnsupportedError("not supported in SQL v1: aggregate function STDDEV");
   }
-  return AggregateFunction::Sum;
+  throw SQLUnsupportedError("not supported in SQL v1: aggregate function");
+}
+
+ComputedColumnKind toComputedFunctionKind(sql::StringFunctionKind function) {
+  switch (function) {
+    case sql::StringFunctionKind::Length:
+      return ComputedColumnKind::StringLength;
+    case sql::StringFunctionKind::Lower:
+      return ComputedColumnKind::StringLower;
+    case sql::StringFunctionKind::Upper:
+      return ComputedColumnKind::StringUpper;
+    case sql::StringFunctionKind::Trim:
+      return ComputedColumnKind::StringTrim;
+    case sql::StringFunctionKind::Concat:
+      return ComputedColumnKind::StringConcat;
+    case sql::StringFunctionKind::Reverse:
+      return ComputedColumnKind::StringReverse;
+    case sql::StringFunctionKind::ConcatWs:
+      return ComputedColumnKind::StringConcatWs;
+    case sql::StringFunctionKind::Left:
+      return ComputedColumnKind::StringLeft;
+    case sql::StringFunctionKind::Right:
+      return ComputedColumnKind::StringRight;
+    case sql::StringFunctionKind::Substr:
+      return ComputedColumnKind::StringSubstr;
+    case sql::StringFunctionKind::Ltrim:
+      return ComputedColumnKind::StringLtrim;
+    case sql::StringFunctionKind::Rtrim:
+      return ComputedColumnKind::StringRtrim;
+    case sql::StringFunctionKind::Position:
+      return ComputedColumnKind::StringPosition;
+    case sql::StringFunctionKind::Replace:
+      return ComputedColumnKind::StringReplace;
+  }
+  return ComputedColumnKind::StringConcat;
+}
+
+std::string defaultStringAlias(const sql::StringFunctionExpr& expr, std::size_t position) {
+  auto baseAlias = [](sql::StringFunctionKind function) {
+    switch (function) {
+      case sql::StringFunctionKind::Length:
+        return std::string("length");
+      case sql::StringFunctionKind::Reverse:
+        return std::string("reverse");
+      case sql::StringFunctionKind::Lower:
+        return std::string("lower");
+      case sql::StringFunctionKind::Upper:
+        return std::string("upper");
+      case sql::StringFunctionKind::Trim:
+        return std::string("trim");
+      case sql::StringFunctionKind::Concat:
+        return std::string("concat");
+      case sql::StringFunctionKind::ConcatWs:
+        return std::string("concat_ws");
+      case sql::StringFunctionKind::Left:
+        return std::string("left");
+      case sql::StringFunctionKind::Right:
+        return std::string("right");
+      case sql::StringFunctionKind::Substr:
+        return std::string("substr");
+      case sql::StringFunctionKind::Ltrim:
+        return std::string("ltrim");
+      case sql::StringFunctionKind::Rtrim:
+        return std::string("rtrim");
+      case sql::StringFunctionKind::Position:
+        return std::string("position");
+      case sql::StringFunctionKind::Replace:
+        return std::string("replace");
+    }
+    return std::string("string_func");
+  }(expr.function);
+
+  if (expr.args.empty()) {
+    return baseAlias + "_" + std::to_string(position + 1);
+  }
+  const auto& arg = expr.args.front();
+  if (arg.is_column) {
+    std::string key = arg.column.name;
+    if (!arg.column.qualifier.empty()) {
+      key = arg.column.qualifier + "_" + key;
+    }
+    return key.empty() ? baseAlias + "_" + std::to_string(position + 1) : baseAlias + "_" + key;
+  }
+  if (arg.literal.type() == DataType::String) {
+    return baseAlias + "_" + arg.literal.asString();
+  }
+  return baseAlias + "_" + std::to_string(position + 1);
 }
 
 std::string defaultAggregateAlias(AggregateFunctionKind fn, const std::string& arg,
@@ -67,7 +163,8 @@ std::string defaultAggregateAlias(AggregateFunctionKind fn, const std::string& a
 
 bool isUnaryStep(LogicalStepKind kind) {
   return kind == LogicalStepKind::Filter || kind == LogicalStepKind::Project ||
-         kind == LogicalStepKind::Limit || kind == LogicalStepKind::Having;
+         kind == LogicalStepKind::Limit || kind == LogicalStepKind::Having ||
+         kind == LogicalStepKind::WithColumn;
 }
 
 bool isBarrierStep(LogicalStepKind kind) {
@@ -79,6 +176,13 @@ bool isAggregateQuery(const SqlQuery& query) {
   return !query.group_by.empty() ||
          std::any_of(query.select_items.begin(), query.select_items.end(),
                      [](const SelectItem& item) { return item.is_aggregate; });
+}
+
+bool hasMixedSelectStar(const SqlQuery& query) {
+  const auto star_count = std::count_if(
+      query.select_items.begin(), query.select_items.end(),
+      [](const SelectItem& item) { return item.is_all; });
+  return star_count > 0 && query.select_items.size() > 1;
 }
 
 const char* streamNodeKindName(StreamPlanNodeKind kind) {
@@ -117,11 +221,15 @@ void ensureSingleTableStreamQuery(const SqlQuery& query) {
     throw SQLSemanticError("stream SQL requires FROM");
   }
   if (query.join.has_value()) {
-    throw SQLSemanticError("stream SQL does not support JOIN");
+    throwUnsupportedSqlV1("stream SQL does not support JOIN");
   }
   if (std::any_of(query.select_items.begin(), query.select_items.end(),
                   [](const SelectItem& item) { return item.is_literal; })) {
-    throw SQLSemanticError("stream SQL does not support literal projection");
+    throwUnsupportedSqlV1("stream SQL does not support literal projection");
+  }
+  if (std::any_of(query.select_items.begin(), query.select_items.end(),
+                  [](const SelectItem& item) { return item.is_string_function; })) {
+    throwUnsupportedSqlV1("stream SQL does not support string functions");
   }
 }
 
@@ -134,6 +242,59 @@ void ensureQualifierMatches(const ColumnRef& ref, const FromItem& from) {
 std::string resolveStreamColumnName(const ColumnRef& ref, const FromItem& from) {
   ensureQualifierMatches(ref, from);
   return ref.name;
+}
+
+void ensureStringFunctionSupported(const StringFunctionExpr& function) {
+  if ((function.function == StringFunctionKind::Length ||
+       function.function == StringFunctionKind::Lower ||
+       function.function == StringFunctionKind::Upper ||
+       function.function == StringFunctionKind::Trim ||
+       function.function == StringFunctionKind::Reverse) &&
+      function.args.size() != 1) {
+    if (function.function == StringFunctionKind::Length) {
+      throw SQLSemanticError("LENGTH expects 1 argument");
+    }
+    if (function.function == StringFunctionKind::Lower) {
+      throw SQLSemanticError("LOWER expects 1 argument");
+    }
+    if (function.function == StringFunctionKind::Upper) {
+      throw SQLSemanticError("UPPER expects 1 argument");
+    }
+    if (function.function == StringFunctionKind::Trim) {
+      throw SQLSemanticError("TRIM expects 1 argument");
+    }
+    throw SQLSemanticError("REVERSE expects 1 argument");
+  }
+  if (function.function == StringFunctionKind::Concat && function.args.empty()) {
+    throw SQLSemanticError("CONCAT expects at least 1 argument");
+  }
+  if (function.function == StringFunctionKind::Substr &&
+      (function.args.size() < 2 || function.args.size() > 3)) {
+    throw SQLSemanticError("SUBSTR expects 2 or 3 arguments");
+  }
+  if (function.function == StringFunctionKind::Replace && function.args.size() != 3) {
+    throw SQLSemanticError("REPLACE requires exactly 3 arguments");
+  }
+  if (function.function == StringFunctionKind::ConcatWs && function.args.size() < 2) {
+    throw SQLSemanticError("CONCAT_WS requires at least 2 arguments");
+  }
+  if (function.function == StringFunctionKind::Left && function.args.size() != 2) {
+    throw SQLSemanticError("LEFT requires 2 arguments");
+  }
+  if (function.function == StringFunctionKind::Right && function.args.size() != 2) {
+    throw SQLSemanticError("RIGHT requires 2 arguments");
+  }
+  if (function.function == StringFunctionKind::Position && function.args.size() != 2) {
+    throw SQLSemanticError("POSITION requires 2 arguments");
+  }
+  if ((function.function == StringFunctionKind::Ltrim ||
+       function.function == StringFunctionKind::Rtrim) &&
+      function.args.size() != 1) {
+    throw SQLSemanticError("LTRIM/RTRIM requires 1 argument");
+  }
+  if (function.args.empty()) {
+    throw SQLSemanticError("string function requires at least 1 argument");
+  }
 }
 
 std::string aggregateOutputName(const SelectItem& item) {
@@ -151,6 +312,8 @@ void validateStreamAggregate(const AggregateExpr& aggregate) {
     case AggregateFunctionKind::Min:
     case AggregateFunctionKind::Max:
       return;
+    case AggregateFunctionKind::StdDev:
+      break;
   }
   throw SQLSemanticError("unsupported stream SQL aggregate");
 }
@@ -290,6 +453,26 @@ class RelationContext {
   std::unordered_map<std::string, std::size_t> aliases_;
 };
 
+std::vector<ComputedColumnArg> resolveStringFunctionArgs(const StringFunctionExpr& function,
+                                                        const RelationContext& ctx) {
+  ensureStringFunctionSupported(function);
+  std::vector<ComputedColumnArg> args;
+  args.reserve(function.args.size());
+  for (const auto& arg : function.args) {
+    ComputedColumnArg out_arg;
+    out_arg.is_literal = !arg.is_column;
+    if (arg.is_column) {
+      out_arg.source_column_index = ctx.resolveColumn(arg.column, nullptr);
+      out_arg.literal = Value();
+    } else {
+      out_arg.source_column_index = static_cast<size_t>(-1);
+      out_arg.literal = arg.literal;
+    }
+    args.push_back(std::move(out_arg));
+  }
+  return args;
+}
+
 LogicalPlan optimizeLogical(const LogicalPlan& logical) {
   LogicalPlan out;
   out.seed = logical.seed;
@@ -381,7 +564,10 @@ bool isActorHotPathAggregate(const StreamPlanNode& node) {
 
 LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalog& catalog) const {
   if (query.window.has_value()) {
-    throw SQLSemanticError("WINDOW BY ... EVERY ... AS ... is only supported in stream SQL");
+    throwUnsupportedSqlV1("WINDOW BY ... EVERY ... AS ... is only supported in stream SQL");
+  }
+  if (hasMixedSelectStar(query)) {
+    throwUnsupportedSqlV1("SELECT * cannot be mixed with other projections");
   }
   LogicalPlan logical;
 
@@ -389,6 +575,10 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
     if (query.join.has_value() || query.where.has_value() || !query.group_by.empty() ||
         query.having.has_value()) {
       throw SQLSemanticError("SELECT without FROM only supports literal projection");
+    }
+    if (std::any_of(query.select_items.begin(), query.select_items.end(),
+                    [](const SelectItem& item) { return item.is_string_function; })) {
+      throwUnsupportedSqlV1("string function is not supported without FROM");
     }
     std::vector<std::string> fields;
     Row row;
@@ -398,7 +588,7 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
       const auto& item = query.select_items[i];
       if (!item.is_literal || item.is_all || item.is_table_all || item.is_aggregate ||
           !item.column.name.empty()) {
-        throw SQLSemanticError("SELECT without FROM only supports literal projection");
+        throwUnsupportedSqlV1("SELECT without FROM only supports literal projection");
       }
       fields.push_back(item.alias.empty() ? "expr" + std::to_string(i + 1) : item.alias);
       row.push_back(item.literal);
@@ -420,7 +610,7 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
   }
 
   if (catalog.isSinkTable(query.from.name)) {
-    throw SQLSemanticError("SELECT from SINK table is not allowed: " + query.from.name);
+    throwTableKindViolation("SELECT from SINK table is not allowed: " + query.from.name);
   }
 
   DataFrame current = catalog.getView(query.from.name);
@@ -442,7 +632,7 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
     const auto& join = query.join.value();
     const auto& rightView = join.right;
     if (catalog.isSinkTable(rightView.name)) {
-      throw SQLSemanticError("JOIN with SINK table is not allowed: " + rightView.name);
+      throwTableKindViolation("JOIN with SINK table is not allowed: " + rightView.name);
     }
     DataFrame right = catalog.getView(rightView.name);
     const auto rightSchema = right.schema();
@@ -486,17 +676,22 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
   }
 
   const auto whereFilteredSchema = current.schema();
-  const bool isAggregateQuery =
+  const bool hasAggregateQuery =
       !query.group_by.empty() ||
       std::any_of(query.select_items.begin(), query.select_items.end(),
                   [](const SelectItem& item) { return item.is_aggregate; });
 
   if (std::any_of(query.select_items.begin(), query.select_items.end(),
                   [](const SelectItem& item) { return item.is_literal; })) {
-    throw SQLSemanticError("literal projection with FROM is not supported in SQL v1");
+    throwUnsupportedSqlV1("literal projection with FROM is not supported");
+  }
+  if (std::any_of(query.select_items.begin(), query.select_items.end(),
+                  [](const SelectItem& item) { return item.is_string_function; }) &&
+      hasAggregateQuery) {
+    throwUnsupportedSqlV1("string functions are not supported in aggregate queries");
   }
 
-  if (isAggregateQuery) {
+  if (hasAggregateQuery) {
     if (query.having.has_value() && query.group_by.empty()) {
       throw SQLSemanticError("GROUP BY required for HAVING");
     }
@@ -602,10 +797,10 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
     std::vector<std::string> finalAliases;
     for (const auto& item : query.select_items) {
       if (item.is_all) {
-        throw SQLSemanticError("SELECT * is not supported when aggregate is used");
+        throwUnsupportedSqlV1("SELECT * is not supported when aggregate is used");
       }
       if (item.is_table_all) {
-        throw SQLSemanticError("table.* is not supported when aggregate is used");
+        throwUnsupportedSqlV1("table.* is not supported when aggregate is used");
       }
       if (item.is_aggregate) {
         const auto outName =
@@ -648,7 +843,26 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
         indices.push_back(i);
       }
     } else {
+      std::size_t projected_width = current.schema().fields.size();
+      std::size_t expr_index = 0;
       for (const auto& item : query.select_items) {
+      if (item.is_string_function) {
+          auto args = resolveStringFunctionArgs(item.string_function, ctx);
+          const auto function = toComputedFunctionKind(item.string_function.function);
+          const auto outName =
+              item.alias.empty() ? defaultStringAlias(item.string_function, expr_index++) : item.alias;
+          LogicalPlanStep withColumnStep;
+          withColumnStep.kind = LogicalStepKind::WithColumn;
+          withColumnStep.with_column_name = outName;
+          withColumnStep.with_function = function;
+          withColumnStep.with_args = args;
+          logical.steps.push_back(withColumnStep);
+          current = current.withColumn(outName, function, args);
+          indices.push_back(projected_width);
+          ++projected_width;
+          aliases.push_back(item.alias.empty() ? outName : item.alias);
+          continue;
+        }
         if (item.is_table_all) {
           auto cols = ctx.resolveAllFromRelation(item.table_name_or_alias);
           const auto& schema = current.schema();
@@ -726,6 +940,11 @@ DataFrame SqlPlanner::materializeFromPhysical(const PhysicalPlan& physical) cons
         current = current.selectByIndices(step.logical.project_indices,
                                           step.logical.project_aliases);
         break;
+      case LogicalStepKind::WithColumn:
+        current =
+            current.withColumn(step.logical.with_column_name, step.logical.with_function,
+                              step.logical.with_args);
+        break;
       case LogicalStepKind::Limit:
         if (step.logical.limit_set) {
           current = current.limit(step.logical.limit);
@@ -744,11 +963,17 @@ DataFrame SqlPlanner::plan(const SqlQuery& query, const ViewCatalog& catalog) co
   return materializeFromPhysical(physical);
 }
 
-StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query) const {
+StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query,
+                                                     const std::string& sink_name) const {
   ensureSingleTableStreamQuery(query);
+  if (hasMixedSelectStar(query)) {
+    throwUnsupportedSqlV1("stream SQL SELECT * cannot be mixed with other projections");
+  }
 
   StreamLogicalPlan logical;
   logical.source_name = query.from.name;
+  logical.sink_name = sink_name;
+  logical.writes_to_sink = !sink_name.empty();
 
   StreamPlanNode scan;
   scan.kind = StreamPlanNodeKind::Scan;
@@ -791,7 +1016,7 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query) cons
     std::vector<StreamAggregateSpec> aggregates;
     for (const auto& item : query.select_items) {
       if (item.is_all || item.is_table_all) {
-        throw SQLSemanticError("stream SQL aggregate query does not support star projection");
+        throwUnsupportedSqlV1("stream SQL aggregate query does not support star projection");
       }
       if (item.is_aggregate) {
         const auto aggregate = toStreamAggregateSpec(item, query.from);
@@ -871,18 +1096,32 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query) cons
 
     StreamPlanNode project;
     project.kind = StreamPlanNodeKind::Project;
+    std::vector<std::pair<std::string, std::string>> aliases;
     for (const auto& item : query.select_items) {
       if (item.is_aggregate) {
         project.columns.push_back(aggregateOutputName(item));
       } else {
-        project.columns.push_back(resolveStreamColumnName(item.column, query.from));
+        const auto column = resolveStreamColumnName(item.column, query.from);
+        if (!item.alias.empty() && item.alias != column) {
+          aliases.push_back({item.alias, column});
+          project.columns.push_back(item.alias);
+        } else {
+          project.columns.push_back(column);
+        }
       }
     }
     std::vector<std::string> natural_columns = group_keys;
     for (const auto& agg : aggregates) {
       natural_columns.push_back(agg.output_column);
     }
-    if (project.columns != natural_columns) {
+    for (const auto& alias : aliases) {
+      StreamPlanNode with_column;
+      with_column.kind = StreamPlanNodeKind::WithColumn;
+      with_column.output_column = alias.first;
+      with_column.value_column = alias.second;
+      logical.nodes.push_back(with_column);
+    }
+    if (!aliases.empty() || project.columns != natural_columns) {
       logical.nodes.push_back(project);
     }
   } else {
@@ -899,14 +1138,14 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query) cons
     for (const auto& item : query.select_items) {
       if (item.is_all) {
         if (query.select_items.size() != 1) {
-          throw SQLSemanticError("stream SQL SELECT * cannot be mixed with other projections");
+          throwUnsupportedSqlV1("stream SQL SELECT * cannot be mixed with other projections");
         }
         select_all = true;
         break;
       }
       if (item.is_table_all) {
         if (query.select_items.size() != 1) {
-          throw SQLSemanticError("stream SQL table.* cannot be mixed with other projections");
+          throwUnsupportedSqlV1("stream SQL table.* cannot be mixed with other projections");
         }
         if (item.table_name_or_alias != query.from.name &&
             (query.from.alias.empty() || item.table_name_or_alias != query.from.alias)) {
@@ -988,6 +1227,9 @@ StreamPhysicalPlan SqlPlanner::buildStreamPhysicalPlan(const StreamLogicalPlan& 
 std::string SqlPlanner::explainStreamLogicalPlan(const StreamLogicalPlan& logical) const {
   std::ostringstream out;
   out << "source=" << logical.source_name << "\n";
+  if (logical.writes_to_sink) {
+    out << "sink=" << logical.sink_name << "\n";
+  }
   for (std::size_t i = 0; i < logical.nodes.size(); ++i) {
     const auto& node = logical.nodes[i];
     out << i + 1 << ". " << streamNodeKindName(node.kind);
@@ -1023,6 +1265,10 @@ std::string SqlPlanner::explainStreamLogicalPlan(const StreamLogicalPlan& logica
 
 std::string SqlPlanner::explainStreamPhysicalPlan(const StreamPhysicalPlan& physical) const {
   std::ostringstream out;
+  out << "writes_to_sink=" << (physical.logical.writes_to_sink ? "true" : "false") << "\n";
+  if (physical.logical.writes_to_sink) {
+    out << "sink=" << physical.logical.sink_name << "\n";
+  }
   out << "has_window=" << (physical.has_window ? "true" : "false") << "\n";
   out << "has_stateful_ops=" << (physical.has_stateful_ops ? "true" : "false") << "\n";
   out << "partition_local_prefix_nodes=" << physical.partition_local_prefix_nodes << "\n";

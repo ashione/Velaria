@@ -47,6 +47,8 @@ class DataFrame {
   DataFrame filter(const std::string& column, const std::string& op, const Value& value) const;
   DataFrame filterByIndex(size_t columnIndex, const std::string& op, const Value& value) const;
   DataFrame withColumn(const std::string& name, const std::string& sourceColumn) const;
+  DataFrame withColumn(const std::string& name, ComputedColumnKind function,
+                      const std::vector<ComputedColumnArg>& args) const;
   DataFrame drop(const std::string& column) const;
   DataFrame limit(size_t n) const;
   DataFrame repartition(size_t parts) const;

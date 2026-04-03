@@ -13,6 +13,14 @@ struct SQLSemanticError : std::runtime_error {
   explicit SQLSemanticError(const std::string& msg) : std::runtime_error(msg) {}
 };
 
+struct SQLUnsupportedError : std::runtime_error {
+  explicit SQLUnsupportedError(const std::string& msg) : std::runtime_error(msg) {}
+};
+
+struct SQLTableKindError : std::runtime_error {
+  explicit SQLTableKindError(const std::string& msg) : std::runtime_error(msg) {}
+};
+
 struct CatalogNotFoundError : std::runtime_error {
   explicit CatalogNotFoundError(const std::string& msg) : std::runtime_error(msg) {}
 };

@@ -10,6 +10,9 @@ namespace dataflow {
 class DataFrame;  // fwd
 class RpcRunner;
 
+Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_indices,
+                            const std::vector<AggregateSpec>& aggs);
+
 class Executor {
  public:
   virtual ~Executor() = default;

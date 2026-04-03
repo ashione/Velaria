@@ -12,6 +12,7 @@
 namespace dataflow {
 
 namespace {
+constexpr int kPlanFormatVersion = 1001;
 
 void appendToken(std::string* out, const std::string& value) {
   out->append(std::to_string(value.size()));
@@ -182,6 +183,13 @@ void serializeNode(const PlanNodePtr& plan, std::string* out) {
       serializeNode(node->child, out);
       appendToken(out, node->added_column);
       appendSize(out, node->source_column_index);
+      appendInt(out, static_cast<int>(node->function));
+      appendSize(out, node->args.size());
+      for (const auto& arg : node->args) {
+        appendInt(out, arg.is_literal ? 1 : 0);
+        appendSize(out, arg.source_column_index);
+        appendToken(out, serializeValue(arg.literal));
+      }
       return;
     }
     case PlanKind::Drop: {
@@ -279,7 +287,26 @@ PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset) {
       auto child = deserializeNode(payload, offset);
       const auto added_column = readToken(payload, offset);
       const auto source_column_index = readSize(payload, offset);
-      return std::make_shared<WithColumnPlan>(std::move(child), added_column, source_column_index);
+      const auto function = static_cast<ComputedColumnKind>(readInt(payload, offset));
+      const auto arg_count = readSize(payload, offset);
+      std::vector<ComputedColumnArg> args;
+      args.reserve(arg_count);
+      for (std::size_t i = 0; i < arg_count; ++i) {
+        ComputedColumnArg arg;
+        arg.is_literal = (readInt(payload, offset) != 0);
+        arg.source_column_index = readSize(payload, offset);
+        arg.literal = deserializeValue(readToken(payload, offset));
+        args.push_back(std::move(arg));
+      }
+      if (function == ComputedColumnKind::Copy) {
+        auto node = std::make_shared<WithColumnPlan>(std::move(child), added_column, source_column_index);
+        node->function = function;
+        node->args = std::move(args);
+        return node;
+      }
+      auto node =
+          std::make_shared<WithColumnPlan>(std::move(child), added_column, function, std::move(args));
+      return node;
     }
     case PlanKind::Drop: {
       auto child = deserializeNode(payload, offset);
@@ -349,12 +376,23 @@ PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset) {
 
 std::string serializePlan(const PlanNodePtr& plan) {
   std::string payload;
+  appendInt(&payload, kPlanFormatVersion);
   serializeNode(plan, &payload);
   return payload;
 }
 
 PlanNodePtr deserializePlan(const std::string& payload) {
   std::size_t offset = 0;
+  const auto marker = readInt(payload, &offset);
+  if (marker != kPlanFormatVersion) {
+    offset = 0;
+    auto plan = deserializeNode(payload, &offset);
+    if (offset != payload.size()) {
+      throw std::runtime_error("plan decode: trailing bytes detected");
+    }
+    return plan;
+  }
+
   auto plan = deserializeNode(payload, &offset);
   if (offset != payload.size()) {
     throw std::runtime_error("plan decode: trailing bytes detected");

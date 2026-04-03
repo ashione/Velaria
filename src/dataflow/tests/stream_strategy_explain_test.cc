@@ -209,6 +209,10 @@ void testExplainStreamSql() {
   expect(explain.find("logical\n") != std::string::npos, "explain should contain logical section");
   expect(explain.find("physical\n") != std::string::npos, "explain should contain physical section");
   expect(explain.find("strategy\n") != std::string::npos, "explain should contain strategy section");
+  expect(explain.find("sink=strategy_hot_sink") != std::string::npos,
+         "explain should include sink binding");
+  expect(explain.find("writes_to_sink=true") != std::string::npos,
+         "physical explain should expose sink binding");
   expect(explain.find("Aggregate keys=[window_start, key]") != std::string::npos,
          "explain should describe aggregate keys");
   expect(explain.find("actor_eligible=true") != std::string::npos,

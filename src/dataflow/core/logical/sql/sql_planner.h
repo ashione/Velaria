@@ -12,7 +12,7 @@
 namespace dataflow {
 namespace sql {
 
-enum class LogicalStepKind { Scan, Filter, Join, Aggregate, Having, Project, Limit };
+enum class LogicalStepKind { Scan, Filter, Join, Aggregate, Having, WithColumn, Project, Limit };
 enum class PhysicalStepKind { FusedUnary, Join, Aggregate, SourceOnly };
 
 struct LogicalPlanStep {
@@ -33,6 +33,9 @@ struct LogicalPlanStep {
   std::string having_column;
   std::vector<std::size_t> project_indices;
   std::vector<std::string> project_aliases;
+  std::string with_column_name;
+  ComputedColumnKind with_function = ComputedColumnKind::Copy;
+  std::vector<ComputedColumnArg> with_args;
   std::size_t limit = 0;
   bool limit_set = false;
 };
@@ -107,7 +110,8 @@ class SqlPlanner {
   LogicalPlan buildLogicalPlan(const SqlQuery& query, const ViewCatalog& catalog) const;
   PhysicalPlan buildPhysicalPlan(const LogicalPlan& logical) const;
   DataFrame materializeFromPhysical(const PhysicalPlan& physical) const;
-  StreamLogicalPlan buildStreamLogicalPlan(const SqlQuery& query) const;
+  StreamLogicalPlan buildStreamLogicalPlan(const SqlQuery& query,
+                                           const std::string& sink_name = "") const;
   StreamPhysicalPlan buildStreamPhysicalPlan(const StreamLogicalPlan& logical) const;
   std::string explainStreamLogicalPlan(const StreamLogicalPlan& logical) const;
   std::string explainStreamPhysicalPlan(const StreamPhysicalPlan& physical) const;

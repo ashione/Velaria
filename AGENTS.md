@@ -23,6 +23,14 @@
 - `skills/*.md` 面向最终用户使用说明，不写仓库内部编译、Bazel 构建、源码同步或其他实现侧操作；只保留用户可直接执行的使用方式、参数说明与输入输出约束。
 - 仓库文档若展示 Python CLI 命令，必须使用仓库内真实可见入口：源码脚本 `uv run --project python_api python python_api/velaria_cli.py ...`，或已打包产物 `./dist/velaria-cli ...`；不要默认写成全局可执行的 `velaria-cli ...`，除非文档已明确提供安装该命令的步骤。
 
+## 本轮协作沉淀
+
+- 根 `README.md` / `README-zh.md` 只保留项目目标、分层模型、稳定 contract、当前范围、真实入口与最小运行/验证路径；避免写过长的大段说明，细节下沉到 `python_api/README.md`。
+- 新增 Python 生态能力时，根 README 只做高层概念归位：说明它属于 `Python Ecosystem`，负责什么、不负责什么；具体参数、CLI 示例与端到端用法写进 `python_api/README.md`。
+- `skills/*.md` 的示例命令必须直接可执行，优先写源码入口或打包产物入口；不要假设存在额外安装步骤、shell alias 或全局命令。
+- Python 生态层的新能力如果面向 agent/skill 调用，默认要求 stdout 维持机器可读 JSON，日志落文件，失败路径也不能退化成 traceback 噪音。
+- 类似 workspace/run tracking 这类 Python 侧能力，要明确保持 kernel contract 不变：`explain` 继续对齐 `logical/physical/strategy`，`progress` 继续直接使用原生 `snapshotJson()`，不要在生态层发明第二套语义。
+
 ## 命名与术语约束
 
 不要再引入外部框架专名。统一使用仓库内部术语：

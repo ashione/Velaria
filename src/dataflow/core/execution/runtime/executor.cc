@@ -1,6 +1,8 @@
 #include "src/dataflow/core/execution/runtime/executor.h"
 
 #include <memory>
+#include <algorithm>
+#include <cctype>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -23,6 +25,245 @@ std::string makeKey(const Table& table, const Row& row, const std::vector<std::s
     key += row[keys[i]].toString();
   }
   return key;
+}
+
+std::string argumentAsString(const Value& value) {
+  if (value.type() == DataType::Nil) {
+    return std::string();
+  }
+  if (value.isNumber()) return value.toString();
+  if (value.type() == DataType::String) return value.asString();
+  return value.toString();
+}
+
+int64_t argumentAsInt64(const Value& value) {
+  if (value.type() == DataType::Nil) {
+    throw std::runtime_error("string function argument cannot be null");
+  }
+  if (!value.isNumber()) {
+    throw std::runtime_error("string function argument must be numeric");
+  }
+  return value.asInt64();
+}
+
+bool hasNullArgument(const std::vector<Value>& values) {
+  for (const auto& value : values) {
+    if (value.type() == DataType::Nil) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string trimString(std::string input) {
+  auto isSpace = [](char ch) { return std::isspace(static_cast<unsigned char>(ch)) != 0; };
+  auto start = input.begin();
+  while (start != input.end() && isSpace(*start)) ++start;
+  auto end = input.end();
+  while (end != start && isSpace(*(end - 1))) --end;
+  return std::string(start, end);
+}
+
+std::string ltrimString(std::string input) {
+  auto isSpace = [](char ch) { return std::isspace(static_cast<unsigned char>(ch)) != 0; };
+  auto start = input.begin();
+  while (start != input.end() && isSpace(*start)) ++start;
+  return std::string(start, input.end());
+}
+
+std::string rtrimString(std::string input) {
+  auto isSpace = [](char ch) { return std::isspace(static_cast<unsigned char>(ch)) != 0; };
+  auto end = input.end();
+  while (end != input.begin() && isSpace(*(end - 1))) --end;
+  return std::string(input.begin(), end);
+}
+
+std::string replaceString(std::string source, const std::string& from, const std::string& to) {
+  if (from.empty()) {
+    return source;
+  }
+  std::string out = std::move(source);
+  std::size_t pos = 0;
+  while ((pos = out.find(from, pos)) != std::string::npos) {
+    out.replace(pos, from.size(), to);
+    pos += to.size();
+  }
+  return out;
+}
+
+std::string lowerString(std::string input) {
+  for (char& ch : input) {
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  }
+  return input;
+}
+
+std::string upperString(std::string input) {
+  for (char& ch : input) {
+    ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+  }
+  return input;
+}
+
+std::string reverseString(std::string input) {
+  std::reverse(input.begin(), input.end());
+  return input;
+}
+
+Value evalStringFunction(ComputedColumnKind function, const std::vector<ComputedColumnArg>& args,
+                        const Row& row) {
+  std::vector<Value> values;
+  values.reserve(args.size());
+  for (const auto& arg : args) {
+    if (arg.is_literal) {
+      values.push_back(arg.literal);
+    } else {
+      if (arg.source_column_index >= row.size()) {
+        throw std::runtime_error("computed column source index out of range");
+      }
+      values.push_back(row[arg.source_column_index]);
+    }
+  }
+  if (hasNullArgument(values)) {
+    return Value();
+  }
+  if (function == ComputedColumnKind::StringLength) {
+    if (values.size() != 1) {
+      throw std::runtime_error("LENGTH expects 1 argument");
+    }
+    return Value(static_cast<int64_t>(argumentAsString(values[0]).size()));
+  }
+  if (function == ComputedColumnKind::StringReverse) {
+    if (values.size() != 1) {
+      throw std::runtime_error("REVERSE expects 1 argument");
+    }
+    return Value(reverseString(argumentAsString(values[0])));
+  }
+  if (function == ComputedColumnKind::StringLower) {
+    if (values.size() != 1) {
+      throw std::runtime_error("LOWER expects 1 argument");
+    }
+    return Value(lowerString(argumentAsString(values[0])));
+  }
+  if (function == ComputedColumnKind::StringUpper) {
+    if (values.size() != 1) {
+      throw std::runtime_error("UPPER expects 1 argument");
+    }
+    return Value(upperString(argumentAsString(values[0])));
+  }
+  if (function == ComputedColumnKind::StringTrim) {
+    if (values.size() != 1) {
+      throw std::runtime_error("TRIM expects 1 argument");
+    }
+    return Value(trimString(argumentAsString(values[0])));
+  }
+  if (function == ComputedColumnKind::StringLtrim) {
+    if (values.size() != 1) {
+      throw std::runtime_error("LTRIM requires 1 argument");
+    }
+    return Value(ltrimString(argumentAsString(values[0])));
+  }
+  if (function == ComputedColumnKind::StringRtrim) {
+    if (values.size() != 1) {
+      throw std::runtime_error("RTRIM requires 1 argument");
+    }
+    return Value(rtrimString(argumentAsString(values[0])));
+  }
+  if (function == ComputedColumnKind::StringConcat) {
+    if (values.empty()) {
+      throw std::runtime_error("CONCAT expects at least 1 argument");
+    }
+    std::string out;
+    for (const auto& value : values) {
+      out += argumentAsString(value);
+    }
+    return Value(out);
+  }
+  if (function == ComputedColumnKind::StringConcatWs) {
+    if (values.size() < 2) {
+      throw std::runtime_error("CONCAT_WS expects at least 2 arguments");
+    }
+    const auto delim = argumentAsString(values[0]);
+    std::string out;
+    for (std::size_t i = 1; i < values.size(); ++i) {
+      if (i > 1) {
+        out += delim;
+      }
+      out += argumentAsString(values[i]);
+    }
+    return Value(out);
+  }
+  if (function == ComputedColumnKind::StringLeft) {
+    if (values.size() != 2) {
+      throw std::runtime_error("LEFT requires 2 arguments");
+    }
+    const auto source = argumentAsString(values[0]);
+    const auto length = argumentAsInt64(values[1]);
+    if (length <= 0) {
+      return Value(std::string());
+    }
+    auto byte_length = static_cast<size_t>(std::max<int64_t>(0, length));
+    if (byte_length >= source.size()) {
+      return Value(source);
+    }
+    return Value(source.substr(0, byte_length));
+  }
+  if (function == ComputedColumnKind::StringRight) {
+    if (values.size() != 2) {
+      throw std::runtime_error("RIGHT requires 2 arguments");
+    }
+    const auto source = argumentAsString(values[0]);
+    const auto length = argumentAsInt64(values[1]);
+    if (length <= 0) {
+      return Value(std::string());
+    }
+    auto byte_length = static_cast<size_t>(std::max<int64_t>(0, length));
+    if (byte_length >= source.size()) {
+      return Value(source);
+    }
+    return Value(source.substr(source.size() - byte_length));
+  }
+  if (function == ComputedColumnKind::StringSubstr) {
+    if (values.size() < 2 || values.size() > 3) {
+      throw std::runtime_error("SUBSTR expects 2 or 3 arguments");
+    }
+    const auto source = argumentAsString(values[0]);
+    const auto start_one_based = argumentAsInt64(values[1]);
+    const auto start = std::max<int64_t>(1, start_one_based);
+    if (start > static_cast<int64_t>(source.size())) {
+      return Value(std::string());
+    }
+    auto byte_start = static_cast<size_t>(start - 1);
+    if (values.size() == 2) {
+      return Value(source.substr(byte_start));
+    }
+    auto length = argumentAsInt64(values[2]);
+    if (length <= 0) {
+      return Value(std::string());
+    }
+    auto end = std::min<size_t>(source.size(), byte_start + static_cast<size_t>(length));
+    return Value(source.substr(byte_start, end - byte_start));
+  }
+  if (function == ComputedColumnKind::StringReplace) {
+    if (values.size() != 3) {
+      throw std::runtime_error("REPLACE requires 3 arguments");
+    }
+    return Value(replaceString(argumentAsString(values[0]), argumentAsString(values[1]),
+                              argumentAsString(values[2])));
+  }
+  if (function == ComputedColumnKind::StringPosition) {
+    if (values.size() != 2) {
+      throw std::runtime_error("POSITION requires 2 arguments");
+    }
+    const auto needle = argumentAsString(values[0]);
+    const auto source = argumentAsString(values[1]);
+    const auto position = source.find(needle);
+    if (position == std::string::npos) {
+      return Value(static_cast<int64_t>(0));
+    }
+    return Value(static_cast<int64_t>(position + 1));
+  }
+  throw std::runtime_error("unsupported computed column function");
 }
 
 std::vector<std::string> splitKey(const std::string& key) {
@@ -139,8 +380,14 @@ Table LocalExecutor::execute(const PlanNodePtr& plan) const {
       Table out = in;
       out.schema.fields.push_back(node->added_column);
       out.schema.index[node->added_column] = out.schema.fields.size() - 1;
-      for (auto& row : out.rows) {
-        row.push_back(row[node->source_column_index]);
+      if (node->function == ComputedColumnKind::Copy) {
+        for (auto& row : out.rows) {
+          row.push_back(row[node->source_column_index]);
+        }
+      } else {
+        for (auto& row : out.rows) {
+          row.push_back(evalStringFunction(node->function, node->args, row));
+        }
       }
       return out;
     }

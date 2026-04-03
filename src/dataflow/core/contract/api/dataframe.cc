@@ -80,6 +80,10 @@ void explainPlan(const PlanNodePtr& node, std::ostringstream& out, int depth = 0
   if (node->kind == PlanKind::WithColumn) {
     const auto* n = static_cast<WithColumnPlan*>(node.get());
     out << std::string((depth + 1) * 2, ' ') << "added=" << n->added_column << "\n";
+    if (n->function != ComputedColumnKind::Copy) {
+      out << std::string((depth + 1) * 2, ' ') << "function="
+          << static_cast<int>(n->function) << "\n";
+    }
     explainPlan(n->child, out, depth + 1);
     return;
   }
@@ -281,6 +285,17 @@ DataFrame DataFrame::filter(const std::string& column, const std::string& op, co
 DataFrame DataFrame::withColumn(const std::string& name, const std::string& sourceColumn) const {
   const auto source = materialize();
   auto node = std::make_shared<WithColumnPlan>(plan_, name, source.schema.indexOf(sourceColumn));
+  return DataFrame(node, executor_);
+}
+
+DataFrame DataFrame::withColumn(const std::string& name, ComputedColumnKind function,
+                               const std::vector<ComputedColumnArg>& args) const {
+  for (const auto& arg : args) {
+    if (!arg.is_literal && arg.source_column_index == static_cast<size_t>(-1)) {
+      throw std::invalid_argument("withColumn expression argument column index cannot be -1");
+    }
+  }
+  auto node = std::make_shared<WithColumnPlan>(plan_, name, function, args);
   return DataFrame(node, executor_);
 }
 

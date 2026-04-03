@@ -10,6 +10,7 @@
 
 #include "src/dataflow/core/contract/catalog/catalog.h"
 #include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/logical/sql/sql_errors.h"
 #include "src/dataflow/core/logical/sql/sql_planner.h"
 #include "src/dataflow/core/logical/sql/sql_parser.h"
 
@@ -63,6 +64,27 @@ void expectThrows(const std::string& name, const std::function<void()>& fn,
   }
 }
 
+template <typename ErrorT>
+void expectThrowsType(const std::string& name, const std::function<void()>& fn,
+                      const std::string& expected_substr = "") {
+  try {
+    fn();
+    std::cout << "[FAIL] " << name << "\n";
+    ++g_failed;
+  } catch (const ErrorT& e) {
+    if (expected_substr.empty() ||
+        std::string(e.what()).find(expected_substr) != std::string::npos) {
+      std::cout << "[PASS] " << name << "\n";
+      return;
+    }
+    std::cout << "[FAIL] " << name << " got:" << e.what() << "\n";
+    ++g_failed;
+  } catch (const std::exception& e) {
+    std::cout << "[FAIL] " << name << " got wrong type:" << e.what() << "\n";
+    ++g_failed;
+  }
+}
+
 bool hasSummaryRow(const Table& t, const std::string& region, int64_t total_score, int64_t user_count) {
   auto toInt = [](const Value& v) { return static_cast<int64_t>(v.asDouble()); };
   for (const auto& row : t.rows) {
@@ -96,6 +118,81 @@ void runParserRegression() {
         expect(st.query.group_by.size() == 1, "parser_groupby_size");
         expect(st.query.having.has_value(), "parser_having_present");
         expect(st.query.limit.value_or(0) == 10, "parser_limit_present");
+      });
+
+  expectNoThrow(
+      "parser_string_function_projection_parsed",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT LOWER(region) AS region_lower, SUBSTR(region, 1, 3) AS pref, "
+            "CONCAT(region, '-', user_id) AS combined "
+            "FROM users u");
+        expect(st.query.select_items.size() == 3, "parser_string_function_projection_size");
+        expect(st.query.select_items[0].is_string_function, "parser_string_function_first");
+        expect(st.query.select_items[1].is_string_function, "parser_string_function_second");
+        expect(st.query.select_items[2].is_string_function, "parser_string_function_third");
+        expect(st.query.select_items[1].alias == "pref", "parser_string_function_alias");
+      });
+
+  expectNoThrow(
+      "parser_more_string_function_projection_parsed",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT LTRIM(name) AS left_trimmed, RTRIM(name) AS right_trimmed, "
+            "REPLACE(region, 'ap', 'AP') AS replaced "
+            "FROM users u");
+        expect(st.query.select_items.size() == 3, "parser_more_string_function_projection_size");
+        expect(st.query.select_items[0].is_string_function, "parser_ltrim_function");
+        expect(st.query.select_items[1].is_string_function, "parser_rtrim_function");
+        expect(st.query.select_items[2].is_string_function, "parser_replace_function");
+      });
+
+  expectNoThrow(
+      "parser_extended_string_function_projection_parsed",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT CONCAT_WS('-', region, user_id) AS region_id, LEFT(region, 2) AS head, "
+            "RIGHT(region, 2) AS tail, POSITION('a', region) AS first_a "
+            "FROM users u");
+        expect(st.query.select_items.size() == 4, "parser_extended_string_function_projection_size");
+        expect(st.query.select_items[0].is_string_function, "parser_concat_ws_function");
+        expect(st.query.select_items[1].is_string_function, "parser_left_function");
+        expect(st.query.select_items[2].is_string_function, "parser_right_function");
+        expect(st.query.select_items[3].is_string_function, "parser_position_function");
+      });
+
+  expectNoThrow(
+      "parser_substring_alias_string_function_projection_parsed",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT SUBSTRING(region, 2, 2) AS head FROM users u");
+        expect(st.query.select_items.size() == 1, "parser_substring_alias_string_function_projection_size");
+        expect(st.query.select_items[0].is_string_function, "parser_substring_alias_function");
+      });
+
+  expectNoThrow(
+      "parser_string_function_boolean_argument_is_literal",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT LEFT(region, TRUE) AS one FROM users u");
+        expect(st.query.select_items.size() == 1, "parser_string_function_boolean_argument_size");
+        expect(st.query.select_items[0].is_string_function, "parser_string_function_boolean_argument_flag");
+      });
+
+  expectNoThrow(
+      "parser_length_alias_string_function_projection_parsed",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT LENGTH(region) AS region_len, LEN(region) AS region_len_alias, "
+            "CHAR_LENGTH(region) AS char_len, CHARACTER_LENGTH(region) AS char_len2, "
+            "REVERSE(region) AS region_rev "
+            "FROM users u");
+        expect(st.query.select_items.size() == 5, "parser_length_alias_string_function_projection_size");
+        expect(st.query.select_items[0].is_string_function, "parser_length_function");
+        expect(st.query.select_items[1].is_string_function, "parser_len_alias_function");
+        expect(st.query.select_items[2].is_string_function, "parser_char_length_function");
+        expect(st.query.select_items[3].is_string_function, "parser_character_length_function");
+        expect(st.query.select_items[4].is_string_function, "parser_reverse_function");
       });
 
   expectNoThrow(
@@ -150,6 +247,33 @@ void runParserRegression() {
         expect(st.query.window->every_ms == 60000, "parser_window_ms");
         expect(st.query.window->output_column == "window_start", "parser_window_output");
       });
+
+  expectNoThrow(
+      "parser_insert_select_with_target_columns",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "INSERT INTO sink_table (score, region) "
+            "SELECT user_score AS points, user_region AS area FROM source_table LIMIT 1");
+        expect(st.kind == dataflow::sql::SqlStatementKind::InsertSelect,
+               "parser_insert_select_kind");
+        expect(st.insert.columns.size() == 2, "parser_insert_select_column_count");
+        expect(st.insert.columns[0] == "score", "parser_insert_select_first_target_column");
+        expect(st.insert.query.limit.value_or(0) == 1, "parser_insert_select_limit");
+      });
+
+  expectThrowsType<dataflow::SQLSyntaxError>(
+      "parser_syntax_error_category",
+      []() {
+        dataflow::sql::SqlParser::parse("SELECT 'unterminated");
+      },
+      "unterminated string literal");
+
+  expectThrowsType<dataflow::SQLUnsupportedError>(
+      "parser_unsupported_statement_category",
+      []() {
+        dataflow::sql::SqlParser::parse("UPDATE users SET score = 1");
+      },
+      "not supported in SQL v1");
 }
 
 void runSemanticRegression() {
@@ -157,6 +281,27 @@ void runSemanticRegression() {
 
   s.submit("CREATE TABLE t_users_v1 (user_id INT, region STRING, score INT)");
   s.submit("INSERT INTO t_users_v1 VALUES (1, 'apac', 25), (2, 'emea', 18), (3, 'na', 34)");
+
+  expectThrows(
+      "insert_values_duplicate_target_column_rejected",
+      [&]() {
+        s.submit("INSERT INTO t_users_v1 (user_id, user_id) VALUES (11, 12)");
+      },
+      "duplicate insert column");
+
+  expectThrows(
+      "insert_values_unknown_target_column_rejected",
+      [&]() {
+        s.submit("INSERT INTO t_users_v1 (user_id, unknown_col) VALUES (11, 12)");
+      },
+      "column not found");
+
+  expectThrows(
+      "insert_values_column_count_mismatch_rejected",
+      [&]() {
+        s.submit("INSERT INTO t_users_v1 (user_id, region) VALUES (11)");
+      },
+      "INSERT VALUES column count mismatch");
 
   expectThrows(
       "planner_where_aggregate_rejected",
@@ -188,6 +333,233 @@ void runSemanticRegression() {
             "WINDOW BY score EVERY 60000 AS window_start GROUP BY region");
       },
       "only supported in stream SQL");
+  expectThrowsType<dataflow::SQLUnsupportedError>(
+      "planner_batch_window_unsupported_category",
+      [&]() {
+        s.submit(
+            "SELECT region, SUM(score) AS total_score FROM t_users_v1 "
+            "WINDOW BY score EVERY 60000 AS window_start GROUP BY region");
+      },
+      "not supported in SQL v1");
+
+  expectThrows(
+      "planner_select_star_mixed_projection_rejected",
+      [&]() {
+        s.submit("SELECT *, region FROM t_users_v1");
+      },
+      "SELECT * cannot be mixed with other projections");
+
+  s.submit("CREATE SOURCE TABLE t_source_guard_v1 (user_id INT, region STRING)");
+  expectThrows(
+      "source_table_insert_rejected",
+      [&]() {
+        s.submit("INSERT INTO t_source_guard_v1 VALUES (1, 'apac')");
+      },
+      "INSERT INTO is not allowed on SOURCE TABLE");
+  expectThrowsType<dataflow::SQLTableKindError>(
+      "source_table_insert_table_kind_category",
+      [&]() {
+        s.submit("INSERT INTO t_source_guard_v1 VALUES (1, 'apac')");
+      },
+      "table-kind constraint violation");
+
+  expectThrows(
+      "source_table_insert_select_rejected",
+      [&]() {
+        s.submit(
+            "INSERT INTO t_source_guard_v1 SELECT user_id, region FROM t_users_v1 LIMIT 1");
+      },
+      "INSERT INTO is not allowed on SOURCE TABLE");
+
+  s.submit("CREATE SINK TABLE t_sink_guard_v1 (user_id INT, region STRING)");
+  s.submit("INSERT INTO t_sink_guard_v1 VALUES (7, 'latam')");
+  expectNoThrow(
+      "sink_table_insert_select_allowed",
+      [&]() {
+        s.submit(
+            "INSERT INTO t_sink_guard_v1 SELECT user_id, region FROM t_users_v1 LIMIT 1");
+      });
+  expectThrows(
+      "sink_table_select_rejected",
+      [&]() {
+        s.submit("SELECT user_id, region FROM t_sink_guard_v1");
+      },
+      "SELECT from SINK table is not allowed");
+  expectThrowsType<dataflow::SQLTableKindError>(
+      "sink_table_select_table_kind_category",
+      [&]() {
+        s.submit("SELECT user_id, region FROM t_sink_guard_v1");
+      },
+      "table-kind constraint violation");
+
+  s.submit("CREATE TABLE t_insert_select_positional_v1 (region STRING, total_score INT)");
+  expectNoThrow(
+      "insert_select_without_target_columns_uses_positional_mapping",
+      [&]() {
+        s.submit(
+            "INSERT INTO t_insert_select_positional_v1 "
+            "SELECT region AS area, score AS points FROM t_users_v1 LIMIT 2");
+      });
+  Table positional = s.submit(
+      "SELECT region, total_score FROM t_insert_select_positional_v1 WHERE total_score > 0 LIMIT 5");
+  expect(positional.rows.size() == 2, "insert_select_positional_rows");
+  expect(positional.rows[0][0].toString() == "apac", "insert_select_positional_first_region");
+  expect(positional.rows[0][1].asInt64() == 25, "insert_select_positional_first_score");
+
+  s.submit("CREATE TABLE t_null_users (user_id INT, region STRING)");
+  s.submit("INSERT INTO t_null_users VALUES (1, NULL)");
+  Table null_string_function_batch = s.submit(
+      "SELECT LOWER(region) AS region_lower FROM t_null_users LIMIT 1");
+  expect(null_string_function_batch.rows.size() == 1, "null_string_function_batch_rows");
+  expect(null_string_function_batch.rows[0][0].isNull(), "null_string_function_result_is_null");
+
+  s.submit(
+      "CREATE TABLE t_insert_select_explicit_v1 (region STRING, total_score INT, note STRING)");
+  expectNoThrow(
+      "insert_select_with_target_columns_uses_positional_mapping",
+      [&]() {
+        s.submit(
+            "INSERT INTO t_insert_select_explicit_v1 (total_score, region) "
+            "SELECT score AS points, region AS area FROM t_users_v1 LIMIT 1");
+      });
+  Table explicit_target = s.submit(
+      "SELECT region, total_score, note FROM t_insert_select_explicit_v1 LIMIT 1");
+  expect(explicit_target.rows.size() == 1, "insert_select_explicit_rows");
+  expect(explicit_target.rows[0][0].toString() == "apac", "insert_select_explicit_region");
+  expect(explicit_target.rows[0][1].asInt64() == 25, "insert_select_explicit_score");
+  expect(explicit_target.rows[0][2].isNull(), "insert_select_explicit_unspecified_column_is_null");
+
+  Table string_function_batch = s.submit(
+      "SELECT LOWER(region) AS region_lower, UPPER(region) AS region_upper, "
+      "TRIM('  spaced  ') AS trimmed, "
+      "CONCAT(region, '-', user_id) AS region_user, SUBSTR(region, 2, 2) AS region_prefix "
+      "FROM t_users_v1 LIMIT 1");
+  expect(string_function_batch.rows.size() == 1, "string_function_query_returns_row");
+  expect(string_function_batch.rows[0][0].toString() == "apac", "string_function_lower_ok");
+  expect(string_function_batch.rows[0][1].toString() == "APAC", "string_function_upper_ok");
+  expect(string_function_batch.rows[0][2].toString() == "spaced", "string_function_trim_ok");
+  expect(string_function_batch.rows[0][3].toString() == "apac-1", "string_function_concat_ok");
+  expect(string_function_batch.rows[0][4].toString() == "pa", "string_function_substr_ok");
+
+  Table more_string_function_batch = s.submit(
+      "SELECT LTRIM('  abc  ') AS left_trimmed, RTRIM('  abc  ') AS right_trimmed, "
+      "REPLACE(region, 'a', 'A') AS replaced "
+      "FROM t_users_v1 LIMIT 1");
+  expect(more_string_function_batch.rows.size() == 1, "more_string_function_batch_rows");
+  expect(more_string_function_batch.rows[0][0].toString() == "abc  ", "string_function_ltrim_ok");
+  expect(more_string_function_batch.rows[0][1].toString() == "  abc", "string_function_rtrim_ok");
+  expect(more_string_function_batch.rows[0][2].toString() == "ApAc", "string_function_replace_ok");
+
+  Table extended_string_function_batch = s.submit(
+      "SELECT CONCAT_WS('-', region, user_id) AS region_id, "
+      "LEFT(region, 2) AS left_region, RIGHT(region, 2) AS right_region, "
+      "POSITION('a', region) AS a_pos "
+      "FROM t_users_v1 LIMIT 1");
+  expect(extended_string_function_batch.rows.size() == 1, "extended_string_function_batch_rows");
+  expect(extended_string_function_batch.rows[0][0].toString() == "apac-1",
+         "string_function_concat_ws_ok");
+  expect(extended_string_function_batch.rows[0][1].toString() == "ap",
+         "string_function_left_ok");
+  expect(extended_string_function_batch.rows[0][2].toString() == "ac",
+         "string_function_right_ok");
+  expect(extended_string_function_batch.rows[0][3].asInt64() == 1, "string_function_position_ok");
+
+  Table alias_and_extra_string_function_batch = s.submit(
+      "SELECT LEN(region) AS len_region, CHAR_LENGTH(region) AS char_len, "
+      "CHARACTER_LENGTH(region) AS char_len2, REVERSE(region) AS region_rev "
+      "FROM t_users_v1 LIMIT 1");
+  expect(alias_and_extra_string_function_batch.rows.size() == 1,
+         "alias_and_extra_string_function_batch_rows");
+  expect(alias_and_extra_string_function_batch.rows[0][0].asInt64() == 4, "string_function_len_region");
+  expect(alias_and_extra_string_function_batch.rows[0][1].asInt64() == 4,
+         "string_function_char_length_region");
+  expect(alias_and_extra_string_function_batch.rows[0][2].asInt64() == 4,
+         "string_function_character_length_region");
+  expect(alias_and_extra_string_function_batch.rows[0][3].toString() == "capa",
+         "string_function_reverse_region");
+
+  Table substring_alias_string_function_batch = s.submit(
+      "SELECT SUBSTRING(region, 2, 2) AS head FROM t_users_v1 LIMIT 1");
+  expect(substring_alias_string_function_batch.rows.size() == 1, "substring_alias_batch_rows");
+  expect(substring_alias_string_function_batch.rows[0][0].toString() == "pa", "substring_alias_substr_ok");
+
+  expectThrowsType<dataflow::SQLUnsupportedError>(
+      "planner_string_function_unsupported_in_aggregate",
+      [&]() {
+        s.submit("SELECT LOWER(region) AS region_lower, SUM(score) AS total_score FROM t_users_v1 "
+                 "GROUP BY region");
+      },
+      "not supported in SQL v1");
+
+  expectThrows(
+      "planner_concat_arity_zero_rejected",
+      [&]() {
+        s.submit("SELECT CONCAT() FROM t_users_v1");
+      },
+      "CONCAT expects at least 1 argument");
+
+  expectThrows(
+      "planner_length_arity_error",
+      [&]() {
+        s.submit("SELECT LENGTH() FROM t_users_v1");
+      },
+      "LENGTH expects 1 argument");
+
+  expectThrows(
+      "planner_reverse_arity_error",
+      [&]() {
+        s.submit("SELECT REVERSE(region, '-') FROM t_users_v1");
+      },
+      "REVERSE expects 1 argument");
+
+  expectThrows(
+      "planner_string_function_arity_error",
+      [&]() {
+        s.submit("SELECT SUBSTR(region, 2, 3, 1) FROM t_users_v1");
+      },
+      "SUBSTR expects 2 or 3 arguments");
+
+  expectThrows(
+      "planner_ltrim_takes_one_argument",
+      [&]() {
+        s.submit("SELECT LTRIM(region, 1) FROM t_users_v1");
+      },
+      "LTRIM/RTRIM requires 1 argument");
+
+  expectThrows(
+      "planner_replace_requires_three_arguments",
+      [&]() {
+        s.submit("SELECT REPLACE(region, 'a') FROM t_users_v1");
+      },
+      "REPLACE requires exactly 3 arguments");
+
+  expectThrows(
+      "planner_left_requires_two_arguments",
+      [&]() {
+        s.submit("SELECT LEFT(region) FROM t_users_v1");
+      },
+      "LEFT requires 2 arguments");
+
+  expectThrows(
+      "planner_right_requires_two_arguments",
+      [&]() {
+        s.submit("SELECT RIGHT(region, 1, 2) FROM t_users_v1");
+      },
+      "RIGHT requires 2 arguments");
+
+  expectThrows(
+      "planner_concat_ws_requires_at_least_two_arguments",
+      [&]() {
+        s.submit("SELECT CONCAT_WS(',') FROM t_users_v1");
+      },
+      "CONCAT_WS requires at least 2 arguments");
+
+  expectThrows(
+      "planner_position_requires_two_arguments",
+      [&]() {
+        s.submit("SELECT POSITION(region) FROM t_users_v1");
+      },
+      "POSITION requires 2 arguments");
 }
 
 void runComplexDmlRegression() {
@@ -343,6 +715,37 @@ void runStreamSqlRegression() {
             "ON a.key = b.key GROUP BY a.key");
       },
       "does not support JOIN");
+
+  expectThrows(
+      "stream_sql_star_mixed_projection_rejected",
+      [&]() {
+        s.streamSql("SELECT *, key FROM stream_events_csv_v1");
+      },
+      "SELECT * cannot be mixed with other projections");
+
+  expectThrows(
+      "stream_sql_string_function_rejected",
+      [&]() {
+        s.streamSql("SELECT LOWER(key) AS key_lower FROM stream_events_csv_v1");
+      },
+      "stream SQL does not support string functions");
+
+  expectThrows(
+      "stream_sql_explain_insert_column_list_rejected",
+      [&]() {
+        s.explainStreamSql(
+            "INSERT INTO stream_summary_csv_v1 (key, value_sum) "
+            "SELECT key, SUM(value) AS value_sum "
+            "FROM stream_events_csv_v1 GROUP BY key");
+      },
+      "does not support INSERT column list");
+
+  expectThrows(
+      "stream_sql_explain_string_function_rejected",
+      [&]() {
+        s.explainStreamSql("SELECT LOWER(key) AS key_lower FROM stream_events_csv_v1", options);
+      },
+      "stream SQL does not support string functions");
 
   const std::string multi_sink_path = "/tmp/velaria-stream-sql-multi-aggregate-output.csv";
   fs::remove(multi_sink_path);
@@ -539,6 +942,96 @@ void runStreamSqlRegression() {
   }
   expect(has_count_user_a, "stream_sql_window_count_sink_has_user_a");
   expect(has_count_user_b, "stream_sql_window_count_sink_has_user_b");
+
+  const std::string alias_sink_path = "/tmp/velaria-stream-window-alias-sql-regression-output.csv";
+  fs::remove(alias_sink_path);
+  s.sql(
+      "CREATE SINK TABLE stream_window_alias_summary_v1 "
+      "(bucket STRING, entity_key STRING, event_count INT) "
+      "USING csv OPTIONS(path '" +
+      alias_sink_path + "', delimiter ',')");
+
+  auto alias_query = s.startStreamSql(
+      "INSERT INTO stream_window_alias_summary_v1 "
+      "SELECT window_start AS bucket, key AS entity_key, COUNT(*) AS event_count "
+      "FROM stream_window_events_v1 "
+      "WINDOW BY ts EVERY 60000 AS window_start "
+      "GROUP BY window_start, key",
+      window_options);
+  expect(alias_query.awaitTermination() == 1, "stream_sql_window_alias_processed_batches");
+
+  const auto alias_sink_table = s.read_csv(alias_sink_path).toTable();
+  expect(alias_sink_table.schema.has("bucket"), "stream_sql_window_alias_bucket_column");
+  expect(alias_sink_table.schema.has("entity_key"), "stream_sql_window_alias_entity_key_column");
+  expect(alias_sink_table.rows.size() == 2, "stream_sql_window_alias_rows");
+  bool has_alias_user_a = false;
+  bool has_alias_user_b = false;
+  const auto alias_bucket_idx = alias_sink_table.schema.indexOf("bucket");
+  const auto alias_key_idx = alias_sink_table.schema.indexOf("entity_key");
+  const auto alias_count_idx = alias_sink_table.schema.indexOf("event_count");
+  for (const auto& row : alias_sink_table.rows) {
+    if (row[alias_bucket_idx].toString() == "2026-03-29T10:00:00" &&
+        row[alias_key_idx].toString() == "userA" &&
+        row[alias_count_idx].asInt64() == 2) {
+      has_alias_user_a = true;
+    }
+    if (row[alias_bucket_idx].toString() == "2026-03-29T10:01:00" &&
+        row[alias_key_idx].toString() == "userB" &&
+        row[alias_count_idx].asInt64() == 1) {
+      has_alias_user_b = true;
+    }
+  }
+  expect(has_alias_user_a, "stream_sql_window_alias_has_user_a");
+  expect(has_alias_user_b, "stream_sql_window_alias_has_user_b");
+
+  expectThrows(
+      "stream_sql_start_insert_column_list_rejected",
+      [&]() {
+        s.startStreamSql(
+            "INSERT INTO stream_window_count_summary_v1 (window_start, key, event_count) "
+            "SELECT window_start, key, COUNT(*) AS event_count "
+            "FROM stream_window_events_v1 "
+            "WINDOW BY ts EVERY 60000 AS window_start "
+            "GROUP BY window_start, key",
+            window_options);
+      },
+      "does not support INSERT column list");
+
+  expectThrowsType<dataflow::SQLTableKindError>(
+      "stream_sql_select_non_stream_source_rejected",
+      [&]() {
+        s.streamSql("SELECT user_id, region FROM t_region_users");
+      },
+      "table-kind constraint violation");
+
+  s.submit("CREATE TABLE non_stream_batch_sink_v1 (key STRING, value INT)");
+  expectThrowsType<dataflow::SQLTableKindError>(
+      "stream_sql_insert_to_non_sink_table_rejected",
+      [&]() {
+        s.startStreamSql(
+            "INSERT INTO non_stream_batch_sink_v1 SELECT key, value FROM stream_events_csv_v1",
+            options);
+      },
+      "table-kind constraint violation");
+
+  expectThrowsType<dataflow::SQLTableKindError>(
+      "stream_sql_explain_to_non_sink_table_rejected",
+      [&]() {
+        s.explainStreamSql(
+            "INSERT INTO non_stream_batch_sink_v1 "
+            "SELECT key, SUM(value) AS value_sum "
+            "FROM stream_events_csv_v1 "
+            "GROUP BY key",
+            options);
+      },
+      "table-kind constraint violation");
+
+  expectThrowsType<dataflow::CatalogNotFoundError>(
+      "stream_sql_source_not_found_rejected",
+      [&]() {
+        s.streamSql("SELECT key FROM stream_source_missing_v1");
+      },
+      "stream view not found");
 }
 
 }  // namespace

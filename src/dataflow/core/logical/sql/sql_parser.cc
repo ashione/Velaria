@@ -280,6 +280,73 @@ AggregateExpr parseAggregateExpr(ParseState& state, const std::string& function_
   return agg;
 }
 
+std::optional<StringFunctionKind> tryParseStringFunction(const std::string& value) {
+  auto u = toUpper(value);
+  if (u == "LENGTH") return StringFunctionKind::Length;
+  if (u == "LEN" || u == "CHAR_LENGTH" || u == "CHARACTER_LENGTH") {
+    return StringFunctionKind::Length;
+  }
+  if (u == "LOWER") return StringFunctionKind::Lower;
+  if (u == "UPPER") return StringFunctionKind::Upper;
+  if (u == "TRIM") return StringFunctionKind::Trim;
+  if (u == "CONCAT") return StringFunctionKind::Concat;
+  if (u == "REVERSE") return StringFunctionKind::Reverse;
+  if (u == "CONCAT_WS") return StringFunctionKind::ConcatWs;
+  if (u == "LEFT") return StringFunctionKind::Left;
+  if (u == "RIGHT") return StringFunctionKind::Right;
+  if (u == "SUBSTR" || u == "SUBSTRING") return StringFunctionKind::Substr;
+  if (u == "LTRIM") return StringFunctionKind::Ltrim;
+  if (u == "RTRIM") return StringFunctionKind::Rtrim;
+  if (u == "POSITION") return StringFunctionKind::Position;
+  if (u == "REPLACE") return StringFunctionKind::Replace;
+  return std::nullopt;
+}
+
+StringFunctionArg parseFunctionArg(ParseState& state, const Token& first) {
+  StringFunctionArg arg;
+  if (first.is_string || first.is_number || isKeyword(first.text, "NULL") ||
+      isKeyword(first.text, "TRUE") || isKeyword(first.text, "FALSE")) {
+    arg.is_column = false;
+    arg.literal = parseValueToken(first);
+    return arg;
+  }
+  if (first.text == "*") {
+    throw SQLSyntaxError("invalid function argument");
+  }
+  if (state.consumeSymbol(".")) {
+    Token second = state.expectToken();
+    if (second.text == "*" ) {
+      throw SQLSyntaxError("invalid function argument");
+    }
+    arg.is_column = true;
+    arg.column = ColumnRef{first.text, second.text};
+    return arg;
+  }
+  if (!state.isEnd() && state.peek().text == "(") {
+    throw SQLUnsupportedError("not supported in SQL v1: nested function calls");
+  }
+  arg.is_column = true;
+  arg.column = ColumnRef{"", first.text};
+  return arg;
+}
+
+StringFunctionExpr parseStringFunctionExpr(ParseState& state, StringFunctionKind function) {
+  StringFunctionExpr expr;
+  expr.function = function;
+  if (state.consumeSymbol(")")) {
+    return expr;
+  }
+  while (true) {
+    Token token = state.expectToken();
+    expr.args.push_back(parseFunctionArg(state, token));
+    if (state.consumeSymbol(",")) {
+      continue;
+    }
+    state.expectSymbol(")");
+    return expr;
+  }
+}
+
 FromItem parseFrom(ParseState& state) {
   FromItem out;
   out.name = state.expectToken().text;
@@ -356,7 +423,7 @@ AggregateFunctionKind parseAggregateFunction(const std::string& name) {
   if (u == "AVG") return AggregateFunctionKind::Avg;
   if (u == "MIN") return AggregateFunctionKind::Min;
   if (u == "MAX") return AggregateFunctionKind::Max;
-  throw SQLSyntaxError("unsupported aggregate function: " + name);
+  throw SQLUnsupportedError("not supported in SQL v1: aggregate function " + name);
 }
 
 void parseOptionalAlias(ParseState& state, std::string* alias) {
@@ -389,9 +456,19 @@ SelectItem parseSelectItem(ParseState& state) {
     return item;
   }
   if (state.consumeSymbol("(")) {
-    AggregateExpr agg = parseAggregateExpr(state, first.text);
-    item.is_aggregate = true;
-    item.aggregate = agg;
+    if (auto aggregate = tryParseAggregateFunction(first.text)) {
+      AggregateExpr agg = parseAggregateExpr(state, first.text);
+      item.is_aggregate = true;
+      item.aggregate = agg;
+      parseOptionalAlias(state, &item.alias);
+      return item;
+    }
+    auto function = tryParseStringFunction(first.text);
+    if (!function.has_value()) {
+      throw SQLUnsupportedError("not supported in SQL v1: scalar function " + first.text);
+    }
+    item.is_string_function = true;
+    item.string_function = parseStringFunctionExpr(state, *function);
     parseOptionalAlias(state, &item.alias);
     return item;
   }
@@ -629,7 +706,7 @@ SqlStatement SqlParser::parse(const std::string& sql) {
   } else if (state.consumeWord("INSERT")) {
     out = parseInsertStatement(state);
   } else {
-    throw SQLSyntaxError("unsupported statement");
+    throw SQLUnsupportedError("not supported in SQL v1: unsupported statement");
   }
 
   if (!state.isEnd()) {

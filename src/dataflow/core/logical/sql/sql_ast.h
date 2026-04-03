@@ -11,8 +11,24 @@
 namespace dataflow {
 namespace sql {
 
-enum class AggregateFunctionKind { Sum, Count, Avg, Min, Max };
+enum class AggregateFunctionKind { Sum, Count, Avg, Min, Max, StdDev };
 enum class BinaryOperatorKind { Eq, Ne, Lt, Lte, Gt, Gte };
+enum class StringFunctionKind {
+  Length,
+  Lower,
+  Upper,
+  Trim,
+  Concat,
+  Reverse,
+  ConcatWs,
+  Left,
+  Right,
+  Substr,
+  Ltrim,
+  Rtrim,
+  Position,
+  Replace
+};
 
 struct ColumnRef {
   std::string qualifier;
@@ -26,6 +42,17 @@ struct AggregateExpr {
   std::string alias;
 };
 
+struct StringFunctionArg {
+  bool is_column = false;
+  ColumnRef column;
+  Value literal;
+};
+
+struct StringFunctionExpr {
+  StringFunctionKind function = StringFunctionKind::Lower;
+  std::vector<StringFunctionArg> args;
+};
+
 struct SelectItem {
   bool is_all = false;
   bool is_table_all = false;
@@ -35,6 +62,8 @@ struct SelectItem {
   ColumnRef column;
   AggregateExpr aggregate;
   Value literal;
+  bool is_string_function = false;
+  StringFunctionExpr string_function;
   std::string alias;
 };
 

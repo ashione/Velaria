@@ -31,7 +31,7 @@ uv pip install velaria
 uv pip install /path/to/velaria-<version>-<python_tag>-<abi_tag>-<platform_tag>.whl
 
 velaria-cli --help
-python -c "import velaria; print(velaria.__version__)"
+uv run python -c "import velaria; print(velaria.__version__)"
 ```
 
 > 若外部 whl 已包含原生扩展，则可直接使用 `Session`；若是纯 Python 子集或兼容层缺失，会在首次创建 `Session` 时报错。  
@@ -82,6 +82,30 @@ velaria-cli run diff --run-id <run_id> --other-run-id <other_run_id>
 velaria-cli run show --run-id <run_id>
 velaria-cli artifacts list --run-id <run_id>
 ```
+
+## 3.1 当前 SQL v1 边界
+
+批量 SQL 当前适合直接走 `session.sql(...)` 的形态：
+
+- `CREATE TABLE`、`CREATE SOURCE TABLE`、`CREATE SINK TABLE`
+- `INSERT INTO ... VALUES`
+- `INSERT INTO ... SELECT`
+- `SELECT` 的列投影 / 别名、`WHERE`、`GROUP BY`、`LIMIT`、当前最小 `JOIN`
+- 字符串函数：`LOWER`、`UPPER`、`TRIM`、`LTRIM`、`RTRIM`、`LENGTH`、`LEN`、`CHAR_LENGTH`、`CHARACTER_LENGTH`、`REVERSE`、`CONCAT`、`CONCAT_WS`、`LEFT`、`RIGHT`、`SUBSTR` / `SUBSTRING`、`POSITION`、`REPLACE`
+
+约束：
+
+- `CREATE SOURCE TABLE` 是只读表，不允许 `INSERT`
+- `CREATE SINK TABLE` 允许写入，但不能作为查询输入
+- 超出当前范围的 SQL 形态会直接返回明确错误，例如 `not supported in SQL v1`
+
+stream SQL 当前边界：
+
+- `session.stream_sql(...)` 只适合 `SELECT`
+- `session.explain_stream_sql(...)` 适合 `SELECT` 或 `INSERT INTO <sink> SELECT ...`
+- `session.start_stream_sql(...)` 只适合 `INSERT INTO <sink> SELECT ...`
+- stream source 必须是 source table，stream target 必须是 sink table
+- 适合的能力是 filter / projection / window / stateful aggregate；不要假设支持更宽泛的 batch SQL 语法
 
 ## 4. 新增功能与参数说明
 
@@ -323,7 +347,7 @@ velaria-cli run list [--status succeeded] [--action csv-sql] [--tag slow-query] 
 
 ```bash
 uv run --with velaria --with "pyarrow==23.0.1" \\
-  python skills/velaria_python_local/scripts/query_csv_to_sql.py \\
+  python /Users/bytedance/Velaria/skills/velaria_python_local/scripts/query_csv_to_sql.py \\
   "path/to/file.csv" \\
   --query "SELECT region, COUNT(*) AS cnt FROM csv_data GROUP BY region"
 ```
@@ -332,8 +356,8 @@ uv run --with velaria --with "pyarrow==23.0.1" \\
 
 ```bash
 uv run --with velaria --with pandas --with openpyxl \\
-  python skills/velaria_python_local/scripts/query_excel_to_sql.py \\
-  "python_api/tests/fixtures/employee_import_mock.xlsx" \\
+  python /Users/bytedance/Velaria/skills/velaria_python_local/scripts/query_excel_to_sql.py \\
+  "/Users/bytedance/Velaria/python_api/tests/fixtures/employee_import_mock.xlsx" \\
   --sheet "员工" \\
   --query "SELECT name, dept, COUNT(*) AS cnt FROM excel_data GROUP BY name, dept"
 ```
@@ -345,7 +369,7 @@ FEISHU_BITABLE_APP_ID=... \\
 FEISHU_BITABLE_APP_SECRET=... \\
 FEISHU_BITABLE_BASE_URL="https://my.feishu.cn/base/...?...&view=..." \\
 uv run --with velaria --with pandas --with openpyxl \\
-  python skills/velaria_python_local/scripts/query_bitable_to_sql.py \\
+  python /Users/bytedance/Velaria/skills/velaria_python_local/scripts/query_bitable_to_sql.py \\
   --query "SELECT owner, COUNT(*) AS cnt FROM bitable_data GROUP BY owner"
 ```
 
@@ -353,8 +377,8 @@ uv run --with velaria --with pandas --with openpyxl \\
 
 ```bash
 uv run --with velaria --with pandas --with openpyxl \\
-  python skills/velaria_python_local/scripts/read_xlsx.py \\
-  "python_api/tests/fixtures/employee_import_mock.xlsx" --sheet "员工" \\
+  python /Users/bytedance/Velaria/skills/velaria_python_local/scripts/read_xlsx.py \\
+  "/Users/bytedance/Velaria/python_api/tests/fixtures/employee_import_mock.xlsx" --sheet "员工" \\
   --query "SELECT name, COUNT(*) AS cnt FROM sheet_data GROUP BY name"
 ```
 
@@ -362,7 +386,7 @@ uv run --with velaria --with pandas --with openpyxl \\
 
 ```bash
 uv run --with velaria --with "pyarrow==23.0.1" \\
-  python skills/velaria_python_local/scripts/smoke.py
+  python /Users/bytedance/Velaria/skills/velaria_python_local/scripts/smoke.py
 ```
 
 输出 `ok` 代表最小场景（CSV batch + streaming sink）通过。

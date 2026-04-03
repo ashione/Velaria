@@ -137,6 +137,8 @@ Arrow / CSV / Python ingress
 
 `strategy` 统一解释 mode 选择、fallback reason、transport、backpressure 与 checkpoint delivery mode。
 
+当 stream SQL 以 sink 为目标时，`logical` 与 `physical` 也会显式保留 source/sink 绑定信息，保证 explain 输出与真实运行路径一致。
+
 workspace 落盘会保留内核 contract，不会重定义它们：
 
 - `explain.json` 保存 `logical / physical / strategy`
@@ -152,9 +154,23 @@ workspace 落盘会保留内核 contract，不会重定义它们：
 - query-local 反压、有界 backlog、progress snapshot、checkpoint path
 - 执行模式：`single-process`、`local-workers`
 - 文件 source/sink
+- core SQL v1 的 batch 路径：
+  - `CREATE TABLE`、`CREATE SOURCE TABLE`、`CREATE SINK TABLE`
+  - `INSERT INTO ... VALUES`
+  - `INSERT INTO ... SELECT`
+  - 带列投影/别名、`WHERE`、`GROUP BY`、`LIMIT`、当前最小 `JOIN` 的 `SELECT`
+- batch SQL 字符串内建函数：
+  - `LOWER`、`UPPER`、`TRIM`、`LTRIM`、`RTRIM`
+  - `LENGTH`、`LEN`、`CHAR_LENGTH`、`CHARACTER_LENGTH`、`REVERSE`
+  - `CONCAT`、`CONCAT_WS`、`LEFT`、`RIGHT`、`SUBSTR` / `SUBSTRING`、`POSITION`、`REPLACE`
 - 基础 streaming operators：`select / filter / withColumn / drop / limit / window`
 - stateful streaming 聚合：`sum / count / min / max / avg`
-- 最小 stream SQL 子集
+- 与当前内核对齐的 stream SQL 子集：
+  - `session.streamSql(...)` 只接收 `SELECT`
+  - `session.explainStreamSql(...)` 接收 `SELECT` 或 `INSERT INTO <sink> SELECT ...`
+  - `session.startStreamSql(...)` 只接收 `INSERT INTO <sink> SELECT ...`
+  - stream source 必须来自 source table，stream target 必须是 sink table
+  - window / stateful aggregate 的 explain 继续保持 `logical / physical / strategy`
 - 固定维度 float vector 的本地检索
 - Python Arrow 输入/输出
 - 本地 tracked run、run 目录落盘与 artifact 索引
@@ -164,8 +180,14 @@ workspace 落盘会保留内核 contract，不会重定义它们：
 
 - 宣称已完成 distributed runtime
 - 把 Python callback 或 Python UDF 拉进热路径
-- 宽泛 SQL 扩展，例如完整 `JOIN / CTE / subquery / UNION`
+- 更宽泛的 SQL 扩展，例如更复杂的 `JOIN`、`CTE`、`subquery`、`UNION`
 - ANN / 独立 vector DB / 分布式 vector 执行
+
+当前 SQL v1 约束：
+
+- `CREATE SOURCE TABLE` 是只读表，拒绝 `INSERT`
+- `CREATE SINK TABLE` 可写但不能作为查询输入
+- stream SQL 遇到 batch-only 形态时会优先返回明确的 `not supported in SQL v1` 或 table-kind 错误，而不是模糊运行时失败
 
 ## Python Ecosystem
 

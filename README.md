@@ -137,6 +137,8 @@ Stable contract surfaces:
 
 `strategy` is the single outlet for mode selection, fallback reason, transport, backpressure, and checkpoint delivery mode.
 
+When a stream SQL statement writes to a sink, `logical` and `physical` also keep the source/sink binding visible so explain output stays aligned with the runtime path.
+
 Workspace persistence keeps the kernel contract unchanged:
 
 - `explain.json` stores `logical / physical / strategy`
@@ -152,9 +154,23 @@ Available today:
 - query-local backpressure, bounded backlog, progress snapshots, checkpoint path
 - execution modes: `single-process`, `local-workers`
 - file source/sink support
+- core SQL v1 batch path:
+  - `CREATE TABLE`, `CREATE SOURCE TABLE`, `CREATE SINK TABLE`
+  - `INSERT INTO ... VALUES`
+  - `INSERT INTO ... SELECT`
+  - `SELECT` with projection/alias, `WHERE`, `GROUP BY`, `LIMIT`, current minimal `JOIN`
+- batch SQL string builtins:
+  - `LOWER`, `UPPER`, `TRIM`, `LTRIM`, `RTRIM`
+  - `LENGTH`, `LEN`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, `REVERSE`
+  - `CONCAT`, `CONCAT_WS`, `LEFT`, `RIGHT`, `SUBSTR` / `SUBSTRING`, `POSITION`, `REPLACE`
 - basic stream operators: `select / filter / withColumn / drop / limit / window`
 - stateful stream aggregates: `sum / count / min / max / avg`
-- minimal stream SQL subset
+- stream SQL subset aligned to the current kernel:
+  - `session.streamSql(...)` accepts `SELECT`
+  - `session.explainStreamSql(...)` accepts `SELECT` or `INSERT INTO <sink> SELECT ...`
+  - `session.startStreamSql(...)` accepts `INSERT INTO <sink> SELECT ...`
+  - stream sources must come from source tables and stream targets must be sink tables
+  - window and stateful aggregate explain remains `logical / physical / strategy`
 - local vector search on fixed-dimension float vectors
 - Python Arrow ingress/output
 - tracked local runs with run directory persistence and artifact indexing
@@ -164,8 +180,14 @@ Out of scope:
 
 - completed distributed runtime claims
 - Python callbacks or Python UDFs in the hot path
-- broad SQL expansion such as full `JOIN / CTE / subquery / UNION`
+- broader SQL expansion such as richer `JOIN`, `CTE`, `subquery`, or `UNION`
 - ANN / standalone vector DB / distributed vector execution
+
+Current SQL v1 constraints:
+
+- `CREATE SOURCE TABLE` is read-only and rejects `INSERT`
+- `CREATE SINK TABLE` accepts writes but cannot be used as query input
+- stream SQL rejects batch-only shapes with explicit `not supported in SQL v1` or table-kind errors instead of falling through to ambiguous runtime failures
 
 ## Python Ecosystem
 

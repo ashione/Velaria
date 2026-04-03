@@ -77,6 +77,23 @@ Mapping rule:
 - Python names may be ecosystem-friendly
 - behavior must map back to the same native kernel contract exposed by C++
 
+Current SQL mapping carried by Python:
+
+- `Session.sql(...)` maps to core SQL v1 batch semantics:
+  - `CREATE TABLE`, `CREATE SOURCE TABLE`, `CREATE SINK TABLE`
+  - `INSERT INTO ... VALUES`
+  - `INSERT INTO ... SELECT`
+  - `SELECT` with projection/alias, `WHERE`, `GROUP BY`, `LIMIT`, and the current minimal `JOIN`
+- batch string builtins currently exposed through the same core path:
+  - `LOWER`, `UPPER`, `TRIM`, `LTRIM`, `RTRIM`
+  - `LENGTH`, `LEN`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, `REVERSE`
+  - `CONCAT`, `CONCAT_WS`, `LEFT`, `RIGHT`, `SUBSTR` / `SUBSTRING`, `POSITION`, `REPLACE`
+- `Session.stream_sql(...)`, `Session.explain_stream_sql(...)`, and `Session.start_stream_sql(...)` share the same stream SQL front-door checks:
+  - source must be a source table / stream source
+  - sink target must be a sink table
+  - only the current stream-stable projection, filter, window, and stateful aggregate shapes are accepted
+- unsupported SQL shapes are expected to surface as explicit parse / semantic / unsupported SQL v1 / table-kind errors from the core path, not Python-only behavior
+
 ## Repository Layout
 
 Stable Python layout in this repo:
@@ -278,6 +295,13 @@ uv run --project python_api python python_api/velaria_cli.py run start -- stream
 
 uv run --project python_api python python_api/velaria_cli.py run status --run-id <run_id>
 ```
+
+For this action, the query still follows the core stream SQL boundary:
+
+- `--query` must be `INSERT INTO <sink> SELECT ...`
+- the source side must resolve to the stream source table created by the command
+- the sink side must resolve to the sink table created from `--sink-schema`
+- explain output remains `logical / physical / strategy`, and progress stays native `snapshotJson()`
 
 Vector search plus explain artifact:
 

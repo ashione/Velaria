@@ -56,6 +56,9 @@ jobs:
           ./scripts/run_python_ecosystem_regression.sh
 
       - name: Python Stage Benchmark
+        env:
+          VELARIA_STAGE_BENCH_ROWS: "100000"
+          VELARIA_STAGE_BENCH_ROUNDS: "1"
         run: |
           ./scripts/run_python_stage_benchmark.sh
 

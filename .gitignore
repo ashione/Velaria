@@ -20,3 +20,4 @@ __pycache__/
 *.pyo
 *.egg-info/
 python_api/velaria/_velaria.so
+python_api/benchmarks/data/*.csv

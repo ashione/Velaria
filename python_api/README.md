@@ -39,7 +39,6 @@ Examples and helper assets include:
 - `examples/demo_bitable_group_by_owner.py`
 - `examples/demo_vector_search.py`
 - `benchmarks/bench_arrow_ingestion.py`
-- `benchmarks/data/stage_input_100k_anonymized.csv`
 - local ecosystem scripts and skills
 
 ### Experimental
@@ -174,17 +173,18 @@ Recommended regression entrypoint:
 ./scripts/run_python_ecosystem_regression.sh
 ```
 
-Repository benchmark fixture:
+Repository benchmark fixture generation:
 
-- `python_api/benchmarks/data/stage_input_100k_anonymized.csv` is the committed 100k stage-benchmark CSV
-- it is intentionally anonymized and reduced to benchmark-relevant columns only
-- regenerate it from a private raw export with:
+- the stage benchmark can generate synthetic data at runtime
+- if you want a locally realistic benchmark input, generate an anonymized CSV from a private raw export with:
 
 ```bash
 uv run --project python_api python scripts/generate_stage_benchmark_fixture.py \
   --input /path/to/raw_rows_100k.csv \
   --output python_api/benchmarks/data/stage_input_100k_anonymized.csv
 ```
+
+- keep that generated CSV local and untracked; it is ignored by `.gitignore`
 
 That script covers:
 
@@ -200,7 +200,8 @@ Benchmark regression entrypoint:
 ./scripts/run_python_stage_benchmark.sh
 ```
 
-By default that script uses the committed anonymized 100k fixture when it is present.
+By default that script generates benchmark input at runtime.
+To use a local anonymized CSV instead, set `VELARIA_STAGE_BENCH_CSV=/path/to/file.csv`.
 
 ## Packaging
 

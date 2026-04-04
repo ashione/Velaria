@@ -35,18 +35,9 @@ def parse_args():
         help="materialization cache directory; defaults to <outdir>/materialization-cache when format is set",
     )
     return parser.parse_args()
-
-
-def default_fixture_csv() -> pathlib.Path:
-    return pathlib.Path(__file__).resolve().parent / "data" / "stage_input_100k_anonymized.csv"
-
-
 def ensure_csv(csv_path: str | None, outdir: pathlib.Path, rows: int, caller_psm_count: int) -> pathlib.Path:
     if csv_path:
         return pathlib.Path(csv_path)
-    fixture = default_fixture_csv()
-    if fixture.exists():
-        return fixture
     generated = outdir / "generated_stage_input.csv"
     with generated.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.writer(fh)

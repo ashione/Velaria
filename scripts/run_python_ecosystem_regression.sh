@@ -29,8 +29,6 @@ PYTHONPATH="${PYTHONPATH:-${ROOT}/python_api}" \
 PYTHONPATH="${PYTHONPATH:-${ROOT}/python_api}" \
   uv run --project python_api python python_api/examples/demo_stream_sql.py
 
-./scripts/run_python_stage_benchmark.sh
-
 tmp_csv="$(mktemp "${TMPDIR:-/tmp}/velaria-cli-XXXXXX.csv")"
 tmp_vec_csv="$(mktemp "${TMPDIR:-/tmp}/velaria-cli-vector-XXXXXX.csv")"
 trap 'rm -f "$tmp_csv" "$tmp_vec_csv"' EXIT

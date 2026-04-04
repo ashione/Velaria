@@ -22,11 +22,21 @@ fi
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/velaria-stage-bench-XXXXXX")"
 trap 'rm -rf "$tmp_root"' EXIT
 report_dir="$tmp_root/report"
+fixture_csv="${ROOT}/python_api/benchmarks/data/stage_input_100k_anonymized.csv"
+stage_csv="${VELARIA_STAGE_BENCH_CSV:-}"
+if [[ -z "${stage_csv}" && -f "${fixture_csv}" ]]; then
+  stage_csv="${fixture_csv}"
+fi
+default_rounds="3"
+if [[ -n "${stage_csv}" ]]; then
+  default_rounds="1"
+fi
 PYTHONPATH="${PYTHONPATH:-${ROOT}/python_api}" \
   uv run --project python_api python python_api/benchmarks/bench_stage_paths.py \
   --outdir "$report_dir" \
   --rows "${VELARIA_STAGE_BENCH_ROWS:-20000}" \
-  --rounds "${VELARIA_STAGE_BENCH_ROUNDS:-3}"
+  --rounds "${VELARIA_STAGE_BENCH_ROUNDS:-${default_rounds}}" \
+  ${stage_csv:+--csv "$stage_csv"}
 
 uv run --project python_api python - "$report_dir/summary.json" <<'PY'
 import json

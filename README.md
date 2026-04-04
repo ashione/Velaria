@@ -82,6 +82,7 @@ Repository entrypoints:
   - `//:python_ecosystem_regression`
   - `//python_api:velaria_python_supported_regression`
   - `./scripts/run_python_ecosystem_regression.sh`
+  - `./scripts/run_python_stage_benchmark.sh`
 
 ### Experimental Runtime
 

@@ -1,6 +1,7 @@
 exports_files([
     "build_py_cli_executable.sh",
     "build_native_wheel.py",
+    "generate_stage_benchmark_fixture.py",
     "prepare_velaria_release.sh",
     "run_core_regression.sh",
     "run_actor_rpc_e2e.sh",

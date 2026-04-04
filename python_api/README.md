@@ -39,6 +39,7 @@ Examples and helper assets include:
 - `examples/demo_bitable_group_by_owner.py`
 - `examples/demo_vector_search.py`
 - `benchmarks/bench_arrow_ingestion.py`
+- `benchmarks/data/stage_input_100k_anonymized.csv`
 - local ecosystem scripts and skills
 
 ### Experimental
@@ -173,6 +174,18 @@ Recommended regression entrypoint:
 ./scripts/run_python_ecosystem_regression.sh
 ```
 
+Repository benchmark fixture:
+
+- `python_api/benchmarks/data/stage_input_100k_anonymized.csv` is the committed 100k stage-benchmark CSV
+- it is intentionally anonymized and reduced to benchmark-relevant columns only
+- regenerate it from a private raw export with:
+
+```bash
+uv run --project python_api python scripts/generate_stage_benchmark_fixture.py \
+  --input /path/to/raw_rows_100k.csv \
+  --output python_api/benchmarks/data/stage_input_100k_anonymized.csv
+```
+
 That script covers:
 
 - native extension build
@@ -180,6 +193,14 @@ That script covers:
 - Bazel Python regression targets
 - demo smoke
 - CLI smoke
+
+Benchmark regression entrypoint:
+
+```bash
+./scripts/run_python_stage_benchmark.sh
+```
+
+By default that script uses the committed anonymized 100k fixture when it is present.
 
 ## Packaging
 

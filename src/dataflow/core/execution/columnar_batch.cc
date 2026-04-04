@@ -85,6 +85,14 @@ bool matchesCompareOp(int compare_result, const std::string& op) {
   throw std::runtime_error("unsupported filter op: " + op);
 }
 
+bool tryMatchesValueCompare(const Value& lhs, const Value& rhs, const std::string& op) {
+  try {
+    return matchesCompareOp(lhs == rhs ? 0 : (lhs < rhs ? -1 : 1), op);
+  } catch (...) {
+    return false;
+  }
+}
+
 template <typename T>
 int compareScalar(const T& lhs, const T& rhs) {
   return lhs < rhs ? -1 : (lhs > rhs ? 1 : 0);
@@ -733,7 +741,7 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
   if (rhs.isNull() || input.arrow_backing == nullptr) {
     for (std::size_t i = 0; i < row_count; ++i) {
       const auto lhs = valueColumnValueAt(input, i);
-      if (!matchesCompareOp(lhs == rhs ? 0 : (lhs < rhs ? -1 : 1), op)) {
+      if (!tryMatchesValueCompare(lhs, rhs, op)) {
         continue;
       }
       out.selected[i] = 1;
@@ -796,7 +804,7 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
 
   for (std::size_t i = 0; i < row_count; ++i) {
     const auto lhs = valueColumnValueAt(input, i);
-    if (!matchesCompareOp(lhs == rhs ? 0 : (lhs < rhs ? -1 : 1), op)) {
+    if (!tryMatchesValueCompare(lhs, rhs, op)) {
       continue;
     }
     out.selected[i] = 1;
@@ -975,7 +983,8 @@ Table sortTable(const Table& table, const std::vector<std::size_t>& indices,
   if (!ascending.empty() && ascending.size() != indices.size()) {
     throw std::runtime_error("ORDER BY direction count mismatch");
   }
-  if (indices.empty() || table.rows.size() < 2) {
+  const auto row_count = table.rowCount();
+  if (indices.empty() || row_count < 2) {
     return table;
   }
 
@@ -985,7 +994,7 @@ Table sortTable(const Table& table, const std::vector<std::size_t>& indices,
     directions.assign(indices.size(), true);
   }
 
-  std::vector<std::size_t> row_order(table.rows.size());
+  std::vector<std::size_t> row_order(row_count);
   for (std::size_t i = 0; i < row_order.size(); ++i) {
     row_order[i] = i;
   }
@@ -1014,19 +1023,25 @@ Table sortTable(const Table& table, const std::vector<std::size_t>& indices,
       });
 
   Table out(table.schema, {});
-  out.rows.reserve(table.rows.size());
-  for (auto row_index : row_order) {
-    out.rows.push_back(table.rows[row_index]);
+  if (!table.rows.empty()) {
+    out.rows.reserve(row_count);
+    for (auto row_index : row_order) {
+      out.rows.push_back(table.rows[row_index]);
+    }
   }
   if (const auto cache_in = snapshotColumnarCache(&table)) {
     auto cache = std::make_shared<ColumnarTable>();
     cache->schema = out.schema;
+    cache->arrow_formats = cache_in->arrow_formats;
+    cache->batch_row_counts = {row_count};
+    cache->row_count = row_count;
     cache->columns.reserve(cache_in->columns.size());
-    for (const auto& input_column : cache_in->columns) {
+    for (std::size_t column_index = 0; column_index < cache_in->columns.size(); ++column_index) {
+      const auto& input_column = cache_in->columns[column_index];
       ValueColumnBuffer output_column;
       output_column.values.reserve(row_order.size());
       for (auto row_index : row_order) {
-        output_column.values.push_back(input_column.values[row_index]);
+        output_column.values.push_back(valueColumnValueAt(input_column, row_index));
       }
       cache->columns.push_back(std::move(output_column));
     }

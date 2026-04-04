@@ -334,6 +334,67 @@ std::vector<std::size_t> requestedSourceColumns(const SourcePlan& node,
   return it->second;
 }
 
+bool tryExecuteSourcePushdown(const SourcePlan& node, const SourcePushdownSpec& pushdown,
+                              bool materialize_rows, Table* out) {
+  switch (node.storage_kind) {
+    case SourceStorageKind::InMemory:
+      return false;
+    case SourceStorageKind::CsvFile:
+      return execute_csv_source_pushdown(node.csv_path, node.schema, pushdown,
+                                         node.csv_delimiter, materialize_rows, out);
+  }
+  return false;
+}
+
+bool buildSourcePushdownSpec(const PlanNodePtr& plan, const SourceRequirementMap& requirements,
+                             const SourcePlan** source_out, SourcePushdownSpec* pushdown_out) {
+  if (!plan || source_out == nullptr || pushdown_out == nullptr) {
+    return false;
+  }
+  switch (plan->kind) {
+    case PlanKind::Source: {
+      const auto* source = static_cast<const SourcePlan*>(plan.get());
+      if (source->storage_kind != SourceStorageKind::CsvFile) {
+        return false;
+      }
+      SourcePushdownSpec spec;
+      spec.projected_columns = requestedSourceColumns(*source, requirements);
+      *source_out = source;
+      *pushdown_out = std::move(spec);
+      return true;
+    }
+    case PlanKind::Filter: {
+      const auto* node = static_cast<const FilterPlan*>(plan.get());
+      SourcePushdownSpec spec;
+      const SourcePlan* source = nullptr;
+      if (!buildSourcePushdownSpec(node->child, requirements, &source, &spec)) {
+        return false;
+      }
+      spec.filter.enabled = true;
+      spec.filter.column_index = node->column_index;
+      spec.filter.value = node->value;
+      spec.filter.op = node->op;
+      *source_out = source;
+      *pushdown_out = std::move(spec);
+      return true;
+    }
+    case PlanKind::Limit: {
+      const auto* node = static_cast<const LimitPlan*>(plan.get());
+      SourcePushdownSpec spec;
+      const SourcePlan* source = nullptr;
+      if (!buildSourcePushdownSpec(node->child, requirements, &source, &spec)) {
+        return false;
+      }
+      spec.limit = spec.limit == 0 ? node->n : std::min(spec.limit, node->n);
+      *source_out = source;
+      *pushdown_out = std::move(spec);
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
 std::shared_ptr<Table> loadCsvSource(const SourcePlan& node,
                                      const SourceRequirementMap& requirements) {
   const auto required_columns = requestedSourceColumns(node, requirements);
@@ -347,6 +408,8 @@ std::shared_ptr<Table> loadCsvSource(const SourcePlan& node,
 
 Table loaded;
   const bool require_all_columns = required_columns.size() >= node.schema.fields.size();
+  SourcePushdownSpec pushdown;
+  pushdown.projected_columns = required_columns;
   if (node.options.materialization.enabled) {
     std::ostringstream options;
     options << "delimiter=" << node.csv_delimiter;
@@ -372,8 +435,10 @@ Table loaded;
         }
       }
     } else {
-      loaded = load_csv_projected(node.csv_path, node.schema, required_columns, node.csv_delimiter,
-                                  false);
+      if (!tryExecuteSourcePushdown(node, pushdown, false, &loaded)) {
+        loaded = load_csv_projected(node.csv_path, node.schema, required_columns,
+                                    node.csv_delimiter, false);
+      }
       if (!store.lookup(fingerprint).has_value()) {
         try {
           auto full = load_csv(fingerprint.abs_path, node.csv_delimiter, false);
@@ -383,10 +448,12 @@ Table loaded;
       }
     }
   } else {
-    loaded = require_all_columns
-                 ? load_csv(node.csv_path, node.csv_delimiter, false)
-                 : load_csv_projected(node.csv_path, node.schema, required_columns,
-                                      node.csv_delimiter, false);
+    if (!tryExecuteSourcePushdown(node, pushdown, false, &loaded)) {
+      loaded = require_all_columns
+                   ? load_csv(node.csv_path, node.csv_delimiter, false)
+                   : load_csv_projected(node.csv_path, node.schema, required_columns,
+                                        node.csv_delimiter, false);
+    }
   }
 
   auto retained = std::make_shared<Table>(std::move(loaded));
@@ -414,6 +481,16 @@ BorrowedOrOwnedTable borrowOrExecute(const LocalExecutor& executor, const PlanNo
     }
     auto retained = loadCsvSource(*node, requirements);
     return BorrowedOrOwnedTable{retained.get(), std::move(retained)};
+  }
+  const SourcePlan* pushed_source = nullptr;
+  SourcePushdownSpec pushed_spec;
+  if (buildSourcePushdownSpec(plan, requirements, &pushed_source, &pushed_spec) &&
+      !pushed_source->options.materialization.enabled) {
+    Table loaded;
+    if (tryExecuteSourcePushdown(*pushed_source, pushed_spec, false, &loaded)) {
+      auto owned = std::make_shared<Table>(std::move(loaded));
+      return BorrowedOrOwnedTable{owned.get(), std::move(owned)};
+    }
   }
   auto owned = std::make_shared<Table>(executePlanWithRequirements(executor, plan, requirements));
   return BorrowedOrOwnedTable{owned.get(), std::move(owned)};
@@ -694,10 +771,19 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
     }
     case PlanKind::Filter: {
       const auto* node = static_cast<const FilterPlan*>(plan.get());
-      const auto table_input = borrowOrExecute(executor, node->child, requirements);
-      const auto input = viewValueColumn(*table_input.table, node->column_index);
+      const SourcePlan* pushed_source = nullptr;
+      SourcePushdownSpec pushed_spec;
+      if (buildSourcePushdownSpec(plan, requirements, &pushed_source, &pushed_spec) &&
+          !pushed_source->options.materialization.enabled) {
+        Table pushed;
+        if (tryExecuteSourcePushdown(*pushed_source, pushed_spec, false, &pushed)) {
+          return pushed;
+        }
+      }
+      const auto child_input = borrowOrExecute(executor, node->child, requirements);
+      const auto input = viewValueColumn(*child_input.table, node->column_index);
       const auto selection = vectorizedFilterSelection(input, node->value, node->op);
-      return filterTable(*table_input.table, selection, false);
+      return filterTable(*child_input.table, selection, false);
     }
     case PlanKind::WithColumn: {
       const auto* node = static_cast<const WithColumnPlan*>(plan.get());
@@ -719,6 +805,15 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
     }
     case PlanKind::Limit: {
       const auto* node = static_cast<const LimitPlan*>(plan.get());
+      const SourcePlan* pushed_source = nullptr;
+      SourcePushdownSpec pushed_spec;
+      if (buildSourcePushdownSpec(plan, requirements, &pushed_source, &pushed_spec) &&
+          !pushed_source->options.materialization.enabled) {
+        Table pushed;
+        if (tryExecuteSourcePushdown(*pushed_source, pushed_spec, false, &pushed)) {
+          return pushed;
+        }
+      }
       if (node->child && node->child->kind == PlanKind::Filter) {
         const auto* filter = static_cast<const FilterPlan*>(node->child.get());
         const auto table_input = borrowOrExecute(executor, filter->child, requirements);
@@ -754,6 +849,19 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
         const auto* node = static_cast<const AggregatePlan*>(plan.get());
         keyIdx = node->keys;
         aggs = node->aggregates;
+        if (node->child && node->child->kind == PlanKind::Source) {
+          const auto* source = static_cast<const SourcePlan*>(node->child.get());
+          if (!source->options.materialization.enabled) {
+            Table fast_out;
+            SourcePushdownSpec pushdown;
+            pushdown.has_aggregate = true;
+            pushdown.aggregate.keys = keyIdx;
+            pushdown.aggregate.aggregates = aggs;
+            if (tryExecuteSourcePushdown(*source, pushdown, false, &fast_out)) {
+              return fast_out;
+            }
+          }
+        }
         const auto input = borrowOrExecute(executor, node->child, requirements);
         return executeAggregateTable(*input.table, keyIdx, aggs);
       } else {

@@ -29,6 +29,7 @@ enum class PlanKind {
 };
 enum class SourceStorageKind { InMemory, CsvFile };
 enum class JoinKind { Inner, Left, Right, Full };
+enum class AggregateFunction { Sum, Count, Avg, Min, Max };
 enum class ComputedColumnKind {
   Copy,
   StringLength,
@@ -54,6 +55,32 @@ enum class ComputedColumnKind {
   DateDay
 };
 
+struct AggregateSpec {
+  AggregateFunction function;
+  size_t value_index;
+  std::string output_name;
+};
+
+struct SourceAggregatePushdownSpec {
+  std::vector<size_t> keys;
+  std::vector<AggregateSpec> aggregates;
+};
+
+struct SourceFilterPushdownSpec {
+  bool enabled = false;
+  size_t column_index = 0;
+  Value value;
+  std::string op;
+};
+
+struct SourcePushdownSpec {
+  std::vector<std::size_t> projected_columns;
+  SourceFilterPushdownSpec filter;
+  std::size_t limit = 0;
+  bool has_aggregate = false;
+  SourceAggregatePushdownSpec aggregate;
+};
+
 struct ComputedColumnArg {
   bool is_literal = false;
   Value literal;
@@ -75,6 +102,7 @@ struct SourcePlan : PlanNode {
   std::string csv_path;
   char csv_delimiter = ',';
   SourceOptions options;
+  SourcePushdownSpec pushdown;
   mutable std::mutex cached_table_mu;
   mutable std::shared_ptr<Table> cached_table;
   mutable std::vector<std::size_t> cached_projected_indices;
@@ -187,14 +215,6 @@ struct GroupBySumPlan : PlanNode {
   size_t value_index;
   GroupBySumPlan(PlanNodePtr p, std::vector<size_t> ks, size_t vid)
       : PlanNode(PlanKind::GroupBySum), child(std::move(p)), keys(std::move(ks)), value_index(vid) {}
-};
-
-enum class AggregateFunction { Sum, Count, Avg, Min, Max };
-
-struct AggregateSpec {
-  AggregateFunction function;
-  size_t value_index;
-  std::string output_name;
 };
 
 struct AggregatePlan : PlanNode {

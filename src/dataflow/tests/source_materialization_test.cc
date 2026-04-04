@@ -182,6 +182,15 @@ int main() {
     expect(second.rows.size() == 2, "second csv read row count mismatch");
     expect_table_value(second, 0, 1, dataflow::Value(int64_t(10)),
                        "second csv read content mismatch");
+    const auto pushed =
+        session.read_csv(csv_path)
+            .filter("score", ">=", dataflow::Value(int64_t(20)))
+            .limit(1)
+            .select({"name"})
+            .toTable();
+    expect(pushed.rows.size() == 1, "source pushdown filter/limit row count mismatch");
+    expect_table_value(pushed, 0, 0, dataflow::Value("bob"),
+                       "source pushdown filter/limit content mismatch");
     auto async_handle =
         session.submitAsync(session.read_csv(csv_path, binary_options).select({"name"}).limit(1));
     const auto async_wait = async_handle.wait(std::chrono::seconds(5));
@@ -284,6 +293,23 @@ int main() {
                        "quoted json csv cell mismatch");
     expect_table_value(quoted, 1, 2, dataflow::Value(int64_t(8)),
                        "quoted csv numeric tail mismatch");
+
+    const auto multiline_csv_path = make_temp_file("velaria-multiline-quoted-source");
+    write_csv(
+        multiline_csv_path,
+        "id,note,score\n"
+        "1,\"hello\nworld\",10\n"
+        "2,\"escaped \"\"quote\"\"\",20\n");
+    const auto multiline = session.read_csv(multiline_csv_path).toTable();
+    expect(multiline.rows.size() == 2, "multiline csv row count mismatch");
+    expect_table_value(multiline, 0, 0, dataflow::Value(int64_t(1)),
+                       "multiline csv first id mismatch");
+    expect_table_value(multiline, 0, 1, dataflow::Value("hello\nworld"),
+                       "multiline csv embedded newline mismatch");
+    expect_table_value(multiline, 1, 1, dataflow::Value("escaped \"quote\""),
+                       "multiline csv escaped quote mismatch");
+    expect_table_value(multiline, 1, 2, dataflow::Value(int64_t(20)),
+                       "multiline csv numeric tail mismatch");
 
     std::cout << "[test] source materialization binary+nanoarrow cache ok" << std::endl;
     return 0;

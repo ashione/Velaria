@@ -1,10 +1,12 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "src/dataflow/core/execution/table.h"
+#include "src/dataflow/core/execution/source_materialization.h"
 
 namespace dataflow {
 
@@ -25,6 +27,7 @@ enum class PlanKind {
   Sink,
   OrderBy
 };
+enum class SourceStorageKind { InMemory, CsvFile };
 enum class JoinKind { Inner, Left, Right, Full };
 enum class ComputedColumnKind {
   Copy,
@@ -66,9 +69,32 @@ struct PlanNode {
 
 struct SourcePlan : PlanNode {
   std::string source_name;
+  SourceStorageKind storage_kind = SourceStorageKind::InMemory;
+  Schema schema;
   Table table;
+  std::string csv_path;
+  char csv_delimiter = ',';
+  SourceOptions options;
+  mutable std::mutex cached_table_mu;
+  mutable std::shared_ptr<Table> cached_table;
+  mutable std::vector<std::size_t> cached_projected_indices;
+
   explicit SourcePlan(std::string name, Table t)
-      : PlanNode(PlanKind::Source), source_name(std::move(name)), table(std::move(t)) {}
+      : PlanNode(PlanKind::Source),
+        source_name(std::move(name)),
+        storage_kind(SourceStorageKind::InMemory),
+        schema(t.schema),
+        table(std::move(t)) {}
+
+  SourcePlan(std::string name, std::string path, char delimiter, Schema source_schema,
+             SourceOptions source_options = {})
+      : PlanNode(PlanKind::Source),
+        source_name(std::move(name)),
+        storage_kind(SourceStorageKind::CsvFile),
+        schema(std::move(source_schema)),
+        csv_path(std::move(path)),
+        csv_delimiter(delimiter),
+        options(std::move(source_options)) {}
 };
 
 struct SelectPlan : PlanNode {

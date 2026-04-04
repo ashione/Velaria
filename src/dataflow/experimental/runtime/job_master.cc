@@ -49,6 +49,13 @@ struct JobRecord {
 
 namespace {
 
+void materializeResultRowsIfPresent(bool has_result, Table* result) {
+  if (!has_result || result == nullptr) {
+    return;
+  }
+  materializeRows(result);
+}
+
 bool terminal(TaskState state) {
   return state == TaskState::Succeeded || state == TaskState::Failed || state == TaskState::Cancelled;
 }
@@ -972,7 +979,9 @@ bool DataflowJobHandle::cancel() const {
 
 JobStateRecord DataflowJobHandle::queryJob() const {
   if (id_.empty()) return JobStateRecord();
-  return JobMaster::instance().queryJob(id_);
+  auto record = JobMaster::instance().queryJob(id_);
+  materializeResultRowsIfPresent(record.has_result, &record.result);
+  return record;
 }
 
 ChainStateRecord DataflowJobHandle::queryChain(const ChainId& chainId) const {
@@ -1007,6 +1016,7 @@ JobHandleSnapshot DataflowJobHandle::wait(std::chrono::milliseconds timeout) con
     snap.status_code = jobStatusCode(rec.state);
     snap.has_result = rec.has_result;
     snap.result = rec.result;
+    materializeResultRowsIfPresent(snap.has_result, &snap.result);
     if (terminal(rec.state)) {
       return snap;
     }

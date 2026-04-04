@@ -6,7 +6,7 @@
 
 namespace dataflow {
 
-Table load_nanoarrow_ipc_table(const std::string& path);
+Table load_nanoarrow_ipc_table(const std::string& path, bool materialize_rows = true);
 void save_nanoarrow_ipc_table(const Table& table, const std::string& path);
 
 }  // namespace dataflow

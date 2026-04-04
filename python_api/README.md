@@ -4,6 +4,15 @@ This document is the entrypoint for Velaria's supported Python ecosystem layer.
 
 Python is a supported ingress, interop, and packaging surface. It is not the execution core. Core semantics still come from the native kernel and the runtime contract in [docs/runtime-contract.md](../docs/runtime-contract.md).
 
+The Python layer must assume the core kernel is column-first.
+
+Practical implications:
+
+- Python interop should preserve columnar data as deep as possible
+- `rows` are a compatibility/export surface, not the preferred internal execution form
+- Arrow import/export work should reduce copy and rematerialization rather than normalizing row-first behavior
+- performance-sensitive changes should prefer native kernel improvements and lower-copy boundaries over Python-side workarounds
+
 ## Scope
 
 ### Supported
@@ -47,6 +56,7 @@ Python does not define:
 - a separate checkpoint contract
 - a separate vector scoring implementation for supported APIs
 - Python UDFs in the hot path
+- a row-first fallback policy for the native kernel
 
 ## API Surface
 
@@ -76,6 +86,7 @@ Mapping rule:
 
 - Python names may be ecosystem-friendly
 - behavior must map back to the same native kernel contract exposed by C++
+- Python wrappers should not force row materialization earlier than required by the user-facing boundary
 
 Current SQL mapping carried by Python:
 
@@ -328,6 +339,14 @@ Python ecosystem source groups:
 
 ## Arrow Contract
 
+Arrow is the preferred interop form for high-volume results.
+
+Guidance:
+
+- prefer Arrow/native columnar paths over `to_rows()` when benchmarking or integrating large results
+- treat `to_rows()` as a convenience/debugging surface
+- when profiling Python API performance, separate `sql()` cost from `to_arrow()` / `to_rows()` export cost
+
 Supported Arrow ingestion inputs:
 
 - `pyarrow.Table`
@@ -416,5 +435,6 @@ Python may not:
 - redefine progress/checkpoint/explain semantics
 - become the source of truth for runtime decisions
 - introduce a second vector-search implementation for supported interfaces
+- pull the native kernel back toward a row-first design for ecosystem convenience
 
 For core boundaries, see [docs/core-boundary.md](../docs/core-boundary.md). For stable runtime semantics, see [docs/runtime-contract.md](../docs/runtime-contract.md).

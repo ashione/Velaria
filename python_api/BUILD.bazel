@@ -82,6 +82,13 @@ py_binary(
 )
 
 py_binary(
+    name = "bench_stage_paths",
+    srcs = ["benchmarks/bench_stage_paths.py"],
+    main = "benchmarks/bench_stage_paths.py",
+    deps = [":velaria_py_pkg"],
+)
+
+py_binary(
     name = "velaria_cli",
     srcs = ["velaria_cli.py"],
     main = "velaria_cli.py",

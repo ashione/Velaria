@@ -12,11 +12,15 @@ It is intended to complement older design notes in `plans/` by separating:
 Keep the existing core kernel contract stable while reducing repeated `Arrow -> row -> column`
 and `row -> column` conversions inside the runtime.
 
+Column-first is not only an optimization technique in this plan; it is the intended direction of the core runtime.
+Rows remain a compatibility representation for selected boundaries, but they should not be treated as the desired steady-state internal form.
+
 The practical direction is:
 
 - preserve a reusable columnar representation deeper into the core runtime
 - let existing operators consume and produce that representation more consistently
 - avoid accepting SQL or runtime shapes that do not have a stable executor mapping
+- make performance, copy reduction, and late materialization the default decision criteria for hot-path changes
 
 This plan does not introduce a second execution engine and does not redefine the public
 `DataflowSession` / `session.sql(...)` / streaming contract.
@@ -74,7 +78,8 @@ The following pieces are already in place in the current repository state.
 - cache hydration is lazy when a table enters a column-oriented helper path
 - table copy semantics deep-copy the cache instead of aliasing it unsafely
 - common table transforms keep or rebuild the cache intentionally rather than dropping it silently
-- the runtime primary representation is still `Table -> Row -> Value`; the retained cache reduces rematerialization work, but it is not yet a first-class columnar IR
+- the repository is in transition away from `Table -> Row -> Value` as the dominant hot-path form
+- the retained cache is still an intermediate step, not the final architecture target
 
 ### Operators already moved off result-tail full-table rematerialization
 
@@ -161,6 +166,7 @@ The next phases should stay narrow and measurable.
 - keep the public contract unchanged
 - reduce dependence on `Table -> Row -> Value` as the dominant internal form
 - allow more internal operator chaining without repeated row reconstruction
+- make rows a boundary-only compatibility layer wherever practical
 
 ### 2. Extend end-to-end columnar operator coverage
 
@@ -186,6 +192,7 @@ rematerializing the same columns again in the middle of the pipeline.
 
 Required benchmark targets:
 
+- hardcode vs native kernel batch comparison on shared inputs
 - string builtin execution
 - stream local-workers execution
 - Arrow import/export

@@ -37,7 +37,9 @@ struct Table {
   Table(Table&& other) noexcept;
   Table& operator=(Table&& other) noexcept;
 
-  size_t rowCount() const { return rows.size(); }
+  size_t rowCount() const;
 };
+
+void materializeRows(Table* table);
 
 }  // namespace dataflow

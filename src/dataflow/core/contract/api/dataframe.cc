@@ -7,6 +7,7 @@
 #include <sstream>
 
 #include "src/dataflow/ai/plugin_runtime.h"
+#include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/runtime/vector_index.h"
 #include "src/dataflow/core/execution/columnar_batch.h"
 
@@ -22,6 +23,10 @@ bool ltePred(const Value& lhs, const Value& rhs) { return lhs < rhs || lhs == rh
 bool gtePred(const Value& lhs, const Value& rhs) { return lhs > rhs || lhs == rhs; }
 
 std::shared_ptr<Executor> defaultExecutor() { return std::make_shared<LocalExecutor>(); }
+
+std::shared_ptr<const Schema> makeSchemaHint(const Schema& schema) {
+  return std::make_shared<Schema>(schema);
+}
 
 VectorSearchMetric toRuntimeMetric(VectorDistanceMetric metric) {
   return metric == VectorDistanceMetric::L2
@@ -58,6 +63,48 @@ std::string planKindName(PlanKind kind) {
       return "Sink";
     default:
       return "Unknown";
+  }
+}
+
+PlanNodePtr pushLimitThroughPassthrough(const PlanNodePtr& node, size_t limit) {
+  if (!node) {
+    return std::make_shared<LimitPlan>(node, limit);
+  }
+  switch (node->kind) {
+    case PlanKind::Limit: {
+      const auto* n = static_cast<const LimitPlan*>(node.get());
+      return pushLimitThroughPassthrough(n->child, std::min(limit, n->n));
+    }
+    case PlanKind::Select: {
+      const auto* n = static_cast<const SelectPlan*>(node.get());
+      return std::make_shared<SelectPlan>(pushLimitThroughPassthrough(n->child, limit), n->indices,
+                                          n->aliases);
+    }
+    case PlanKind::WithColumn: {
+      const auto* n = static_cast<const WithColumnPlan*>(node.get());
+      if (n->function == ComputedColumnKind::Copy) {
+        auto rewritten = std::make_shared<WithColumnPlan>(
+            pushLimitThroughPassthrough(n->child, limit), n->added_column, n->source_column_index);
+        rewritten->function = n->function;
+        rewritten->args = n->args;
+        return rewritten;
+      }
+      return std::make_shared<WithColumnPlan>(pushLimitThroughPassthrough(n->child, limit),
+                                              n->added_column, n->function, n->args);
+    }
+    case PlanKind::Drop: {
+      const auto* n = static_cast<const DropPlan*>(node.get());
+      return std::make_shared<DropPlan>(pushLimitThroughPassthrough(n->child, limit),
+                                        n->keep_indices);
+    }
+    case PlanKind::WindowAssign: {
+      const auto* n = static_cast<const WindowAssignPlan*>(node.get());
+      return std::make_shared<WindowAssignPlan>(pushLimitThroughPassthrough(n->child, limit),
+                                                n->time_column_index, n->window_ms,
+                                                n->output_column);
+    }
+    default:
+      return std::make_shared<LimitPlan>(node, limit);
   }
 }
 
@@ -154,11 +201,19 @@ void explainPlan(const PlanNodePtr& node, std::ostringstream& out, int depth = 0
 
 DataFrame::DataFrame(Table table)
     : plan_(std::make_shared<SourcePlan>("memory", std::move(table))),
-      executor_(defaultExecutor()) {}
+      executor_(defaultExecutor()) {
+  const auto* source = static_cast<const SourcePlan*>(plan_.get());
+  schema_hint_ = makeSchemaHint(source->schema);
+}
 
-DataFrame::DataFrame(PlanNodePtr plan, std::shared_ptr<Executor> exec)
-    : plan_(std::move(plan)), executor_(std::move(exec)) {
+DataFrame::DataFrame(PlanNodePtr plan, std::shared_ptr<Executor> exec,
+                     std::shared_ptr<const Schema> schema_hint)
+    : plan_(std::move(plan)), executor_(std::move(exec)), schema_hint_(std::move(schema_hint)) {
   if (!executor_) executor_ = defaultExecutor();
+  if (!schema_hint_ && plan_ && plan_->kind == PlanKind::Source) {
+    const auto* source = static_cast<const SourcePlan*>(plan_.get());
+    schema_hint_ = makeSchemaHint(source->schema);
+  }
 }
 
 DataflowJobHandle DataFrame::submitAsync(const ExecutionOptions& options) const {
@@ -184,6 +239,9 @@ const Table& DataFrame::materialize() const {
     }
 
     cached_table_ = executor_->execute(plan_);
+    if (!schema_hint_) {
+      schema_hint_ = makeSchemaHint(cached_table_.schema);
+    }
 
     payload.row_count = cached_table_.rowCount();
     payload.summary = "DataFrame execute end";
@@ -208,15 +266,15 @@ const CachedVectorColumn& DataFrame::vectorColumnCache(const std::string& vector
   }
 
   CachedVectorColumn cache;
-  cache.row_ids.reserve(source.rows.size());
+  const auto vector_column = viewValueColumn(source, vector_index);
+  cache.row_ids.reserve(vector_column.values().size());
   std::vector<std::vector<float>> vectors;
-  vectors.reserve(source.rows.size());
+  vectors.reserve(vector_column.values().size());
 
   std::size_t expected_dim = 0;
   bool has_dimension = false;
-  for (size_t row_id = 0; row_id < source.rows.size(); ++row_id) {
-    if (vector_index >= source.rows[row_id].size()) continue;
-    const auto& cell = source.rows[row_id][vector_index];
+  for (size_t row_id = 0; row_id < vector_column.values().size(); ++row_id) {
+    const auto& cell = vector_column.values()[row_id];
     if (cell.isNull()) continue;
 
     std::vector<float> vec = cell.type() == DataType::FixedVector
@@ -244,25 +302,33 @@ std::string DataFrame::explain() const {
 }
 
 DataFrame DataFrame::select(const std::vector<std::string>& columns) const {
-  const auto source = materialize();
+  const auto& source = schema();
   std::vector<size_t> idxs;
   idxs.reserve(columns.size());
-  for (const auto& c : columns) idxs.push_back(source.schema.indexOf(c));
+  for (const auto& c : columns) idxs.push_back(source.indexOf(c));
   return selectByIndices(idxs);
 }
 
 DataFrame DataFrame::selectByIndices(const std::vector<size_t>& columns,
                                     const std::vector<std::string>& aliases) const {
+  const auto& source = schema();
   if (!columns.empty()) {
-    const auto source = materialize();
     for (size_t idx : columns) {
-      if (idx >= source.schema.fields.size()) {
+      if (idx >= source.fields.size()) {
         throw std::out_of_range("select index out of range: " + std::to_string(idx));
       }
     }
   }
+  Schema output_schema;
+  output_schema.fields.reserve(columns.size());
+  for (std::size_t i = 0; i < columns.size(); ++i) {
+    output_schema.fields.push_back(i < aliases.size() && !aliases[i].empty()
+                                       ? aliases[i]
+                                       : source.fields[columns[i]]);
+    output_schema.index[output_schema.fields.back()] = i;
+  }
   auto node = std::make_shared<SelectPlan>(plan_, columns, aliases);
-  return DataFrame(node, executor_);
+  return DataFrame(node, executor_, makeSchemaHint(output_schema));
 }
 
 DataFrame DataFrame::filterByIndex(size_t columnIndex, const std::string& op, const Value& value) const {
@@ -283,18 +349,20 @@ DataFrame DataFrame::filterByIndex(size_t columnIndex, const std::string& op, co
     throw std::invalid_argument("unsupported filter op: " + op);
   }
   auto node = std::make_shared<FilterPlan>(plan_, columnIndex, value, op, pred);
-  return DataFrame(node, executor_);
+  return DataFrame(node, executor_, schema_hint_);
 }
 
 DataFrame DataFrame::filter(const std::string& column, const std::string& op, const Value& value) const {
-  const auto source = materialize();
-  return filterByIndex(source.schema.indexOf(column), op, value);
+  return filterByIndex(schema().indexOf(column), op, value);
 }
 
 DataFrame DataFrame::withColumn(const std::string& name, const std::string& sourceColumn) const {
-  const auto source = materialize();
-  auto node = std::make_shared<WithColumnPlan>(plan_, name, source.schema.indexOf(sourceColumn));
-  return DataFrame(node, executor_);
+  const auto& source = schema();
+  Schema output_schema = source;
+  output_schema.fields.push_back(name);
+  output_schema.index[name] = output_schema.fields.size() - 1;
+  auto node = std::make_shared<WithColumnPlan>(plan_, name, source.indexOf(sourceColumn));
+  return DataFrame(node, executor_, makeSchemaHint(output_schema));
 }
 
 DataFrame DataFrame::withColumn(const std::string& name, ComputedColumnKind function,
@@ -304,18 +372,26 @@ DataFrame DataFrame::withColumn(const std::string& name, ComputedColumnKind func
       throw std::invalid_argument("withColumn expression argument column index cannot be -1");
     }
   }
+  Schema output_schema = schema();
+  output_schema.fields.push_back(name);
+  output_schema.index[name] = output_schema.fields.size() - 1;
   auto node = std::make_shared<WithColumnPlan>(plan_, name, function, args);
-  return DataFrame(node, executor_);
+  return DataFrame(node, executor_, makeSchemaHint(output_schema));
 }
 
 DataFrame DataFrame::drop(const std::string& column) const {
-  const auto source = materialize();
+  const auto& source = schema();
   std::vector<size_t> keep;
-  for (size_t i = 0; i < source.schema.fields.size(); ++i) {
-    if (source.schema.fields[i] != column) keep.push_back(i);
+  Schema output_schema;
+  for (size_t i = 0; i < source.fields.size(); ++i) {
+    if (source.fields[i] != column) {
+      keep.push_back(i);
+      output_schema.index[source.fields[i]] = output_schema.fields.size();
+      output_schema.fields.push_back(source.fields[i]);
+    }
   }
   auto node = std::make_shared<DropPlan>(plan_, keep);
-  return DataFrame(node, executor_);
+  return DataFrame(node, executor_, makeSchemaHint(output_schema));
 }
 
 DataFrame DataFrame::orderBy(const std::vector<std::string>& columns,
@@ -323,23 +399,23 @@ DataFrame DataFrame::orderBy(const std::vector<std::string>& columns,
   if (!ascending.empty() && ascending.size() != columns.size()) {
     throw std::invalid_argument("ORDER BY direction count mismatch");
   }
-  const auto source = materialize();
+  const auto& source = schema();
   std::vector<size_t> indices;
   indices.reserve(columns.size());
   for (const auto& column : columns) {
-    indices.push_back(source.schema.indexOf(column));
+    indices.push_back(source.indexOf(column));
   }
   std::vector<bool> directions = ascending;
   if (directions.empty()) {
     directions.assign(columns.size(), true);
   }
   auto node = std::make_shared<OrderByPlan>(plan_, std::move(indices), std::move(directions));
-  return DataFrame(node, executor_);
+  return DataFrame(node, executor_, schema_hint_);
 }
 
 DataFrame DataFrame::limit(size_t n) const {
-  auto node = std::make_shared<LimitPlan>(plan_, n);
-  return DataFrame(node, executor_);
+  auto node = pushLimitThroughPassthrough(plan_, n);
+  return DataFrame(node, executor_, schema_hint_);
 }
 
 DataFrame DataFrame::repartition(size_t parts) const {
@@ -355,8 +431,22 @@ DataFrame DataFrame::cache() const {
 
 DataFrame DataFrame::aggregate(const std::vector<size_t>& keys,
                               const std::vector<AggregateSpec>& aggs) const {
+  const auto& source = schema();
+  Schema output_schema;
+  output_schema.fields.reserve(keys.size() + aggs.size());
+  for (std::size_t i = 0; i < keys.size(); ++i) {
+    if (keys[i] >= source.fields.size()) {
+      throw std::out_of_range("aggregate key index out of range: " + std::to_string(keys[i]));
+    }
+    output_schema.index[source.fields[keys[i]]] = output_schema.fields.size();
+    output_schema.fields.push_back(source.fields[keys[i]]);
+  }
+  for (const auto& agg : aggs) {
+    output_schema.index[agg.output_name] = output_schema.fields.size();
+    output_schema.fields.push_back(agg.output_name);
+  }
   auto node = std::make_shared<AggregatePlan>(plan_, keys, aggs);
-  return DataFrame(node, executor_);
+  return DataFrame(node, executor_, makeSchemaHint(output_schema));
 }
 
 DataFrame DataFrame::vectorQuery(const std::string& vectorColumn,
@@ -402,20 +492,27 @@ std::string DataFrame::explainVectorQuery(const std::string& vectorColumn,
 }
 
 GroupedDataFrame DataFrame::groupBy(const std::vector<std::string>& keys) const {
-  const auto source = materialize();
+  const auto& source = schema();
   std::vector<size_t> idxs;
   idxs.reserve(keys.size());
-  for (const auto& k : keys) idxs.push_back(source.schema.indexOf(k));
-  return GroupedDataFrame(plan_, idxs, executor_);
+  for (const auto& k : keys) idxs.push_back(source.indexOf(k));
+  return GroupedDataFrame(plan_, idxs, executor_, schema_hint_);
 }
 
 DataFrame DataFrame::join(const DataFrame& right, const std::string& leftOn, const std::string& rightOn,
                          JoinKind kind) const {
-  const auto leftSchema = materialize().schema;
-  const auto rightSchema = right.materialize().schema;
+  const auto& leftSchema = schema();
+  const auto& rightSchema = right.schema();
+  Schema output_schema;
+  output_schema.fields = leftSchema.fields;
+  output_schema.fields.insert(output_schema.fields.end(), rightSchema.fields.begin(),
+                              rightSchema.fields.end());
+  for (std::size_t i = 0; i < output_schema.fields.size(); ++i) {
+    output_schema.index[output_schema.fields[i]] = i;
+  }
   auto node = std::make_shared<JoinPlan>(plan_, right.plan_, leftSchema.indexOf(leftOn),
                                          rightSchema.indexOf(rightOn), kind);
-  return DataFrame(node, executor_);
+  return DataFrame(node, executor_, makeSchemaHint(output_schema));
 }
 
 size_t DataFrame::count() const {
@@ -423,7 +520,8 @@ size_t DataFrame::count() const {
 }
 
 std::vector<Row> DataFrame::collect() const {
-  return materialize().rows;
+  auto table = toTable();
+  return std::move(table.rows);
 }
 
 std::string DataFrame::serializePlan() const {
@@ -431,7 +529,7 @@ std::string DataFrame::serializePlan() const {
 }
 
 void DataFrame::show(size_t max_rows) const {
-  const auto t = materialize();
+  const auto t = toTable();
   for (size_t i = 0; i < t.schema.fields.size(); ++i) {
     if (i) std::cout << "\t";
     std::cout << t.schema.fields[i];
@@ -447,18 +545,40 @@ void DataFrame::show(size_t max_rows) const {
 }
 
 Table DataFrame::toTable() const {
+  Table out = materialize();
+  materializeRows(&out);
+  return out;
+}
+
+const Table& DataFrame::materializedTable() const {
   return materialize();
 }
 
 const Schema& DataFrame::schema() const {
+  if (schema_hint_) {
+    return *schema_hint_;
+  }
   return materialize().schema;
 }
 
 DataFrame GroupedDataFrame::sum(const std::string& valueColumn, const std::string& outColumn) const {
-  const auto source = executor_->execute(plan_);
-  AggregateSpec spec{AggregateFunction::Sum, source.schema.indexOf(valueColumn), outColumn};
+  const Schema* source_schema = schema_hint_.get();
+  Schema materialized_schema;
+  if (source_schema == nullptr) {
+    materialized_schema = executor_->execute(plan_).schema;
+    source_schema = &materialized_schema;
+  }
+  AggregateSpec spec{AggregateFunction::Sum, source_schema->indexOf(valueColumn), outColumn};
   auto node = std::make_shared<AggregatePlan>(plan_, keys_, std::vector<AggregateSpec>{spec});
-  return DataFrame(node, executor_);
+  Schema output_schema;
+  output_schema.fields.reserve(keys_.size() + 1);
+  for (std::size_t key_index : keys_) {
+    output_schema.index[source_schema->fields[key_index]] = output_schema.fields.size();
+    output_schema.fields.push_back(source_schema->fields[key_index]);
+  }
+  output_schema.index[outColumn] = output_schema.fields.size();
+  output_schema.fields.push_back(outColumn);
+  return DataFrame(node, executor_, makeSchemaHint(output_schema));
 }
 
 }  // namespace dataflow

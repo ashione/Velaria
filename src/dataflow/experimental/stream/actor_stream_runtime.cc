@@ -670,9 +670,9 @@ std::vector<std::pair<size_t, size_t>> splitTableRanges(const Table& table, size
   return out;
 }
 
-void mergePartialTable(const Table& partial,
-                       std::unordered_map<std::string, double>* sums,
-                       std::vector<std::string>* ordered_keys) {
+[[maybe_unused]] void mergePartialTable(const Table& partial,
+                                        std::unordered_map<std::string, double>* sums,
+                                        std::vector<std::string>* ordered_keys) {
   if (sums == nullptr || ordered_keys == nullptr) return;
   if (!partial.schema.has("window_start") || !partial.schema.has("key") ||
       !partial.schema.has("partial_sum")) {
@@ -692,8 +692,9 @@ void mergePartialTable(const Table& partial,
   }
 }
 
-Table materializeStateTable(const std::unordered_map<std::string, double>& sums,
-                            const std::vector<std::string>& ordered_keys) {
+[[maybe_unused]] Table materializeStateTable(
+    const std::unordered_map<std::string, double>& sums,
+    const std::vector<std::string>& ordered_keys) {
   Table out(Schema({"window_start", "key", "value_sum"}), {});
   for (const auto& state_key : ordered_keys) {
     const auto split = state_key.find(kKeySep);
@@ -853,7 +854,7 @@ WindowKeyValueColumnarBatch buildColumnarFromTable(const Table& input) {
   return batch;
 }
 
-Table aggregatePartitionWithWork(const Table& input, size_t cpu_spin_per_row) {
+[[maybe_unused]] Table aggregatePartitionWithWork(const Table& input, size_t cpu_spin_per_row) {
   return aggregateVectorizedBatch(buildColumnarFromTable(input), cpu_spin_per_row);
 }
 

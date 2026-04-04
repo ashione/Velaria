@@ -1,12 +1,17 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "src/dataflow/core/execution/table.h"
 
 namespace dataflow {
 
-Table load_csv(const std::string& path, char delimiter = ',');
+Schema read_csv_schema(const std::string& path, char delimiter = ',');
+Table load_csv(const std::string& path, char delimiter = ',', bool materialize_rows = true);
+Table load_csv_projected(const std::string& path, const Schema& schema,
+                         const std::vector<std::size_t>& projected_columns,
+                         char delimiter = ',', bool materialize_rows = false);
 void save_csv(const Table& table, const std::string& path);
 
 }  // namespace dataflow

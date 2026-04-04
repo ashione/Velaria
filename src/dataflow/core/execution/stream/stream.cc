@@ -34,25 +34,6 @@ namespace dataflow {
 
 namespace {
 
-bool eqPred(const Value& lhs, const Value& rhs) { return lhs == rhs; }
-bool nePred(const Value& lhs, const Value& rhs) { return lhs != rhs; }
-bool ltPred(const Value& lhs, const Value& rhs) { return lhs < rhs; }
-bool gtPred(const Value& lhs, const Value& rhs) { return lhs > rhs; }
-bool ltePred(const Value& lhs, const Value& rhs) { return lhs < rhs || lhs == rhs; }
-bool gtePred(const Value& lhs, const Value& rhs) { return lhs > rhs || lhs == rhs; }
-
-using Pred = bool (*)(const Value&, const Value&);
-
-Pred resolvePred(const std::string& op) {
-  if (op == "==" || op == "=") return &eqPred;
-  if (op == "!=") return &nePred;
-  if (op == "<") return &ltPred;
-  if (op == ">") return &gtPred;
-  if (op == "<=") return &ltePred;
-  if (op == ">=") return &gtePred;
-  throw std::invalid_argument("unsupported filter op: " + op);
-}
-
 std::string makeStateKey(const Row& row, const std::vector<size_t>& keyIdx,
                          const std::string& prefix) {
   std::string key = prefix;
@@ -127,6 +108,7 @@ std::shared_ptr<ColumnarTable> makeReservedColumnarCache(const Schema& schema,
   auto cache = std::make_shared<ColumnarTable>();
   cache->schema = schema;
   cache->columns.resize(schema.fields.size());
+  cache->arrow_formats.resize(schema.fields.size());
   for (auto& column : cache->columns) {
     column.values.reserve(row_capacity);
   }
@@ -621,6 +603,7 @@ Table applyStatefulGroupedAggregates(const Table& input, const std::vector<std::
   std::vector<StreamAggregateRuntimeSpec> runtime_specs;
   const auto batch_specs = buildBatchAggregateSpecs(input, specs, &runtime_specs);
   Table batch_out = executeAggregateTable(input, key_indices, batch_specs);
+  materializeRows(&batch_out);
 
   Table out;
   out.schema.fields = keys;
@@ -752,7 +735,7 @@ Table buildActorAggregateInput(const Table& table, const StreamAcceleratorSpec& 
   return projectTable(table, indices);
 }
 
-void renameColumn(Table* table, const std::string& from, const std::string& to) {
+[[maybe_unused]] void renameColumn(Table* table, const std::string& from, const std::string& to) {
   if (table == nullptr || from == to || !table->schema.has(from)) return;
   const auto idx = table->schema.indexOf(from);
   table->schema.fields[idx] = to;
@@ -765,6 +748,7 @@ Table finalizeActorGroupedAggregateOutput(Table aggregated, const StreamAccelera
                                           const StreamingQueryOptions& options,
                                           uint64_t* state_ms) {
   auto started = std::chrono::steady_clock::now();
+  materializeRows(&aggregated);
   Table out;
   out.schema.fields = accelerator.group_keys;
   for (const auto& aggregate : accelerator.aggregates) {
@@ -1454,13 +1438,15 @@ std::string DirectoryCsvStreamSource::describe() const {
 }
 
 void ConsoleStreamSink::write(const Table& table) {
+  Table materialized = table;
+  materializeRows(&materialized);
   std::cout << "[console:" << name_ << "] batch" << std::endl;
-  for (size_t i = 0; i < table.schema.fields.size(); ++i) {
+  for (size_t i = 0; i < materialized.schema.fields.size(); ++i) {
     if (i > 0) std::cout << "\t";
-    std::cout << table.schema.fields[i];
+    std::cout << materialized.schema.fields[i];
   }
-  if (!table.schema.fields.empty()) std::cout << "\n";
-  for (const auto& row : table.rows) {
+  if (!materialized.schema.fields.empty()) std::cout << "\n";
+  for (const auto& row : materialized.rows) {
     for (size_t i = 0; i < row.size(); ++i) {
       if (i > 0) std::cout << "\t";
       std::cout << row[i].toString();
@@ -1478,6 +1464,8 @@ void FileAppendStreamSink::open(const StreamSinkContext&) {
 }
 
 void FileAppendStreamSink::write(const Table& table) {
+  Table materialized = table;
+  materializeRows(&materialized);
   namespace fs = std::filesystem;
   fs::path path(path_);
   if (path.has_parent_path()) {
@@ -1488,15 +1476,15 @@ void FileAppendStreamSink::write(const Table& table) {
   if (!out) {
     throw std::runtime_error("cannot open stream sink file: " + path_);
   }
-  if (!wrote_schema_ && !table.schema.fields.empty()) {
-    for (size_t i = 0; i < table.schema.fields.size(); ++i) {
+  if (!wrote_schema_ && !materialized.schema.fields.empty()) {
+    for (size_t i = 0; i < materialized.schema.fields.size(); ++i) {
       if (i > 0) out << delimiter_;
-      out << table.schema.fields[i];
+      out << materialized.schema.fields[i];
     }
     out << "\n";
     wrote_schema_ = true;
   }
-  for (const auto& row : table.rows) {
+  for (const auto& row : materialized.rows) {
     for (size_t i = 0; i < row.size(); ++i) {
       if (i > 0) out << delimiter_;
       out << row[i].toString();
@@ -1509,6 +1497,7 @@ void FileAppendStreamSink::flush() {}
 
 void MemoryStreamSink::write(const Table& table) {
   last_table_ = table;
+  materializeRows(&last_table_);
   ++batches_written_;
   rows_written_ += table.rowCount();
 }
@@ -1653,13 +1642,11 @@ StreamingDataFrame StreamingDataFrame::select(const std::vector<std::string>& co
 
 StreamingDataFrame StreamingDataFrame::filter(const std::string& column, const std::string& op,
                                               const Value& value) const {
-  (void)resolvePred(op);
   auto t = transforms_;
   t.emplace_back(
       [column, op, value](const Table& input, const StreamingQueryOptions&) {
         const auto input_column = viewValueColumn(input, input.schema.indexOf(column));
-        const auto selection =
-            vectorizedFilterSelection(input_column, value, resolvePred(op));
+        const auto selection = vectorizedFilterSelection(input_column, value, op);
         return filterTable(input, selection);
       },
       StreamTransformMode::PartitionLocal, false, "filter");
@@ -1673,8 +1660,7 @@ StreamingDataFrame StreamingDataFrame::withColumn(const std::string& name,
       [name, sourceColumn](const Table& input, const StreamingQueryOptions&) {
         Table out = input;
         const auto source_index = out.schema.indexOf(sourceColumn);
-        auto values = materializeValueColumn(out, source_index);
-        appendNamedColumn(&out, name, std::move(values.values));
+        appendNamedColumn(&out, name, materializeValueColumn(out, source_index));
         return out;
       },
                  StreamTransformMode::PartitionLocal, false, "withColumn");

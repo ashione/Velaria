@@ -152,6 +152,21 @@ char parseDelimiter(const char* text) {
   return text[0];
 }
 
+df::MaterializationDataFormat parseMaterializationDataFormat(const char* text) {
+  if (text == nullptr || text[0] == '\0') {
+    return df::default_source_materialization_data_format();
+  }
+  const std::string value(text);
+  if (value == "binary" || value == "binary_row_batch") {
+    return df::MaterializationDataFormat::BinaryRowBatch;
+  }
+  if (value == "nanoarrow" || value == "nanoarrow_ipc") {
+    return df::MaterializationDataFormat::NanoArrowIpc;
+  }
+  throw std::runtime_error(
+      "materialization_format must be one of: binary_row_batch, nanoarrow_ipc");
+}
+
 std::vector<std::string> parseStringList(PyObject* obj, const char* arg_name) {
   if (!PySequence_Check(obj)) {
     throw std::runtime_error(std::string(arg_name) + " must be a sequence of strings");
@@ -403,19 +418,20 @@ bool tryTableFromArrowCapsules(PyObject* obj, df::Table* table) {
   }
 
   df::Table out(df::Schema(std::move(names)), {});
-  out.rows.resize(static_cast<size_t>(array->length));
-  for (auto& row : out.rows) {
-    row.reserve(static_cast<size_t>(schema->n_children));
-  }
   out.columnar_cache = std::make_shared<df::ColumnarTable>();
   out.columnar_cache->schema = out.schema;
   out.columnar_cache->columns.reserve(static_cast<size_t>(schema->n_children));
+  out.columnar_cache->arrow_formats.reserve(static_cast<size_t>(schema->n_children));
+  out.columnar_cache->batch_row_counts.push_back(static_cast<std::size_t>(array->length));
   for (int64_t column = 0; column < array->n_children; ++column) {
     const auto* child_array = array->children[column];
     if (child_array == nullptr) {
       Py_DECREF(pair);
       return false;
     }
+    out.columnar_cache->arrow_formats.emplace_back(schema->children[column]->format != nullptr
+                                                       ? schema->children[column]->format
+                                                       : "");
     df::appendColumn(&out, materializeFastArrowColumn(specs[static_cast<size_t>(column)], child_array));
   }
 
@@ -484,13 +500,11 @@ df::Table tableFromArrowSlow(PyObject* obj) {
 
   const auto column_count = names.size();
   df::Table out(df::Schema(std::move(names)), {});
-  out.rows.resize(static_cast<size_t>(row_count));
-  for (auto& row : out.rows) {
-    row.reserve(out.schema.fields.size());
-  }
   out.columnar_cache = std::make_shared<df::ColumnarTable>();
   out.columnar_cache->schema = out.schema;
   out.columnar_cache->columns.reserve(column_count);
+  out.columnar_cache->arrow_formats.resize(column_count);
+  out.columnar_cache->batch_row_counts.push_back(static_cast<std::size_t>(row_count));
   for (size_t column = 0; column < column_count; ++column) {
     PyObject* column_obj =
         PyObject_CallMethod(table_obj, "column", "n", static_cast<Py_ssize_t>(column));
@@ -517,12 +531,60 @@ df::Table mergeArrowTables(const std::vector<df::Table>& tables) {
   if (tables.empty()) {
     return df::Table();
   }
-  df::Table merged = tables.front();
-  for (size_t i = 1; i < tables.size(); ++i) {
-    if (tables[i].schema.fields != merged.schema.fields) {
+  df::Table merged;
+  merged.schema = tables.front().schema;
+  merged.columnar_cache = std::make_shared<df::ColumnarTable>();
+  merged.columnar_cache->schema = merged.schema;
+  const auto first_cache = df::ensureColumnarCache(&tables.front());
+  merged.columnar_cache->columns.resize(first_cache->columns.size());
+  merged.columnar_cache->arrow_formats = first_cache->arrow_formats;
+
+  for (const auto& table : tables) {
+    if (table.schema.fields != merged.schema.fields) {
       throw std::runtime_error("Arrow stream batches must share the same schema");
     }
-    merged.rows.insert(merged.rows.end(), tables[i].rows.begin(), tables[i].rows.end());
+    const auto cache = df::ensureColumnarCache(&table);
+    if (cache->columns.size() != merged.columnar_cache->columns.size()) {
+      throw std::runtime_error("Arrow stream batches must share the same schema width");
+    }
+    if (!cache->arrow_formats.empty()) {
+      if (merged.columnar_cache->arrow_formats.empty()) {
+        merged.columnar_cache->arrow_formats = cache->arrow_formats;
+      } else if (cache->arrow_formats != merged.columnar_cache->arrow_formats) {
+        merged.columnar_cache->arrow_formats.assign(merged.columnar_cache->columns.size(), "");
+      }
+    }
+    for (std::size_t column = 0; column < cache->columns.size(); ++column) {
+      auto& out_values = merged.columnar_cache->columns[column].values;
+      const auto& in_values = cache->columns[column].values;
+      out_values.insert(out_values.end(), in_values.begin(), in_values.end());
+    }
+    if (!cache->batch_row_counts.empty()) {
+      merged.columnar_cache->batch_row_counts.insert(merged.columnar_cache->batch_row_counts.end(),
+                                                     cache->batch_row_counts.begin(),
+                                                     cache->batch_row_counts.end());
+    } else if (!cache->columns.empty()) {
+      merged.columnar_cache->batch_row_counts.push_back(cache->columns.front().values.size());
+    }
+    if (!table.rows.empty()) {
+      merged.rows.insert(merged.rows.end(), table.rows.begin(), table.rows.end());
+    }
+  }
+  if (merged.rows.empty() && !merged.columnar_cache->columns.empty()) {
+    const auto row_count = merged.columnar_cache->columns.front().values.size();
+    if (row_count > 0 && merged.columnar_cache->batch_row_counts.empty()) {
+      merged.columnar_cache->batch_row_counts.push_back(row_count);
+    }
+  }
+  if (!merged.rows.empty()) {
+    for (std::size_t column = 0; column < merged.columnar_cache->columns.size(); ++column) {
+      if (merged.columnar_cache->columns[column].values.size() != merged.rows.size()) {
+        throw std::runtime_error("Arrow stream merged column row count mismatch");
+      }
+    }
+  }
+  if (merged.columnar_cache->arrow_formats.size() != merged.columnar_cache->columns.size()) {
+    merged.columnar_cache->arrow_formats.assign(merged.columnar_cache->columns.size(), "");
   }
   return merged;
 }
@@ -648,15 +710,17 @@ PyObject* pyFromValue(const df::Value& value) {
 }
 
 PyObject* pyRowsFromTable(const df::Table& table) {
+  df::Table materialized = table;
+  df::materializeRows(&materialized);
   PyObject* out = PyDict_New();
-  PyObject* schema = PyList_New(static_cast<Py_ssize_t>(table.schema.fields.size()));
-  for (size_t i = 0; i < table.schema.fields.size(); ++i) {
-    PyObject* item = PyUnicode_FromString(table.schema.fields[i].c_str());
+  PyObject* schema = PyList_New(static_cast<Py_ssize_t>(materialized.schema.fields.size()));
+  for (size_t i = 0; i < materialized.schema.fields.size(); ++i) {
+    PyObject* item = PyUnicode_FromString(materialized.schema.fields[i].c_str());
     PyList_SET_ITEM(schema, static_cast<Py_ssize_t>(i), item);
   }
-  PyObject* rows = PyList_New(static_cast<Py_ssize_t>(table.rows.size()));
-  for (size_t r = 0; r < table.rows.size(); ++r) {
-    const auto& row = table.rows[r];
+  PyObject* rows = PyList_New(static_cast<Py_ssize_t>(materialized.rows.size()));
+  for (size_t r = 0; r < materialized.rows.size(); ++r) {
+    const auto& row = materialized.rows[r];
     PyObject* py_row = PyList_New(static_cast<Py_ssize_t>(row.size()));
     for (size_t c = 0; c < row.size(); ++c) {
       PyObject* cell = pyFromValue(row[c]);
@@ -680,13 +744,29 @@ std::string arrowFormatForValue(const df::Value& value) {
       return "l";
     case df::DataType::Double:
       return "g";
-    case df::DataType::FixedVector:
-      return "u";
+    case df::DataType::FixedVector: {
+      return "+w:" + std::to_string(value.asFixedVector().size());
+    }
   }
   return "u";
 }
 
-std::string arrowFormatForColumn(const df::ValueColumnBuffer& column) {
+bool supportsArrowExportFormat(const std::string& format) {
+  return format == "b" || format == "i" || format == "I" || format == "l" || format == "L" ||
+         format == "f" || format == "g" || format == "u" || format == "U" ||
+         format.rfind("+w:", 0) == 0;
+}
+
+std::string arrowFormatForColumn(const df::ValueColumnBuffer& column,
+                                 const std::string* preferred_format = nullptr) {
+  if (column.arrow_backing != nullptr && !column.arrow_backing->format.empty() &&
+      supportsArrowExportFormat(column.arrow_backing->format)) {
+    return column.arrow_backing->format;
+  }
+  if (preferred_format != nullptr && !preferred_format->empty() &&
+      supportsArrowExportFormat(*preferred_format)) {
+    return *preferred_format;
+  }
   for (const auto& value : column.values) {
     if (!value.isNull()) {
       return arrowFormatForValue(value);
@@ -695,8 +775,257 @@ std::string arrowFormatForColumn(const df::ValueColumnBuffer& column) {
   return "u";
 }
 
-OwnedArrowSchema* buildArrowSchema(const df::Table& table) {
-  const auto cache = df::ensureColumnarCache(&table);
+template <typename T, typename ConvertFn>
+std::pair<std::shared_ptr<void>, std::shared_ptr<void>> makeNumericBuffers(
+    const df::ValueColumnBuffer& column, ConvertFn&& convert, int64_t* null_count) {
+  const size_t row_count = column.values.size();
+  const size_t bitmap_bytes = row_count == 0 ? 0 : (row_count + 7) / 8;
+  auto* validity = static_cast<uint8_t*>(std::calloc(bitmap_bytes == 0 ? 1 : bitmap_bytes, 1));
+  auto* raw = static_cast<T*>(std::calloc(row_count == 0 ? 1 : row_count, sizeof(T)));
+  int64_t local_nulls = 0;
+  for (size_t row = 0; row < row_count; ++row) {
+    const auto& value = column.values[row];
+    if (value.isNull()) {
+      ++local_nulls;
+      continue;
+    }
+    validity[row / 8] |= static_cast<uint8_t>(1U << (row % 8));
+    raw[row] = convert(value);
+  }
+  *null_count = local_nulls;
+  return {
+      std::shared_ptr<void>(validity, std::free),
+      std::shared_ptr<void>(raw, std::free),
+  };
+}
+
+std::pair<std::shared_ptr<void>, std::shared_ptr<void>> makeBooleanBuffers(
+    const df::ValueColumnBuffer& column, int64_t* null_count) {
+  const size_t row_count = column.values.size();
+  const size_t bitmap_bytes = row_count == 0 ? 0 : (row_count + 7) / 8;
+  auto* validity = static_cast<uint8_t*>(std::calloc(bitmap_bytes == 0 ? 1 : bitmap_bytes, 1));
+  auto* bits = static_cast<uint8_t*>(std::calloc(bitmap_bytes == 0 ? 1 : bitmap_bytes, 1));
+  int64_t local_nulls = 0;
+  for (size_t row = 0; row < row_count; ++row) {
+    const auto& value = column.values[row];
+    if (value.isNull()) {
+      ++local_nulls;
+      continue;
+    }
+    validity[row / 8] |= static_cast<uint8_t>(1U << (row % 8));
+    if (value.asInt64() != 0) {
+      bits[row / 8] |= static_cast<uint8_t>(1U << (row % 8));
+    }
+  }
+  *null_count = local_nulls;
+  return {
+      std::shared_ptr<void>(validity, std::free),
+      std::shared_ptr<void>(bits, std::free),
+  };
+}
+
+struct StringBuffers {
+  std::shared_ptr<void> offsets;
+  std::shared_ptr<void> data;
+};
+
+template <typename OffsetT>
+StringBuffers makeStringBuffers(const df::ValueColumnBuffer& column,
+                                std::shared_ptr<void> null_bitmap,
+                                int64_t* null_count) {
+  const size_t row_count = column.values.size();
+  auto* offsets = static_cast<OffsetT*>(
+      std::calloc((row_count + 1) == 0 ? 1 : (row_count + 1), sizeof(OffsetT)));
+  auto* validity = static_cast<uint8_t*>(null_bitmap.get());
+  OffsetT current = 0;
+  int64_t local_nulls = 0;
+  std::size_t total_bytes = 0;
+  for (size_t row = 0; row < row_count; ++row) {
+    offsets[row] = current;
+    const auto& value = column.values[row];
+    if (value.isNull()) {
+      ++local_nulls;
+      continue;
+    }
+    validity[row / 8] |= static_cast<uint8_t>(1U << (row % 8));
+    const std::string& s = value.asString();
+    current += static_cast<OffsetT>(s.size());
+    total_bytes += s.size();
+  }
+  offsets[row_count] = current;
+  *null_count = local_nulls;
+  auto* data = static_cast<char*>(std::malloc(total_bytes == 0 ? 1 : total_bytes));
+  std::size_t write_offset = 0;
+  for (size_t row = 0; row < row_count; ++row) {
+    if (column.values[row].isNull()) {
+      continue;
+    }
+    const std::string& s = column.values[row].asString();
+    if (!s.empty()) {
+      std::memcpy(data + write_offset, s.data(), s.size());
+      write_offset += s.size();
+    }
+  }
+  return {
+      std::shared_ptr<void>(offsets, std::free),
+      std::shared_ptr<void>(data, std::free),
+  };
+}
+
+std::shared_ptr<void> makeFixedSizeListFloat32Buffer(const df::ValueColumnBuffer& column,
+                                                     int32_t list_size,
+                                                     std::shared_ptr<void> null_bitmap,
+                                                     int64_t* null_count,
+                                                     int64_t* child_length) {
+  const size_t row_count = column.values.size();
+  auto* validity = static_cast<uint8_t*>(null_bitmap.get());
+  auto* raw = static_cast<float*>(
+      std::calloc(row_count == 0 ? 1 : row_count * static_cast<size_t>(list_size), sizeof(float)));
+  int64_t local_nulls = 0;
+  for (size_t row = 0; row < row_count; ++row) {
+    const auto& value = column.values[row];
+    if (value.isNull()) {
+      ++local_nulls;
+      continue;
+    }
+    const auto& vec = value.asFixedVector();
+    if (static_cast<int32_t>(vec.size()) != list_size) {
+      throw std::runtime_error("fixed-size-list<float32> column dimension mismatch");
+    }
+    validity[row / 8] |= static_cast<uint8_t>(1U << (row % 8));
+    std::memcpy(raw + row * static_cast<size_t>(list_size), vec.data(),
+                sizeof(float) * static_cast<size_t>(list_size));
+  }
+  *null_count = local_nulls;
+  *child_length = static_cast<int64_t>(row_count) * static_cast<int64_t>(list_size);
+  return std::shared_ptr<void>(raw, std::free);
+}
+
+struct PreparedArrowColumn {
+  std::string format;
+  std::string child_format;
+  int32_t fixed_list_size = 0;
+  int64_t null_count = 0;
+  std::shared_ptr<void> null_bitmap;
+  std::shared_ptr<void> value_buffer;
+  std::shared_ptr<void> extra_buffer;
+  std::shared_ptr<void> child_value_buffer;
+  int64_t n_buffers = 0;
+  int64_t child_length = 0;
+};
+
+std::vector<PreparedArrowColumn> prepareArrowColumns(const df::ColumnarTable& cache) {
+  std::vector<PreparedArrowColumn> prepared;
+  prepared.reserve(cache.columns.size());
+  for (std::size_t index = 0; index < cache.columns.size(); ++index) {
+    const auto& column = cache.columns[index];
+    PreparedArrowColumn item;
+    const std::string* preferred_format =
+        index < cache.arrow_formats.size() ? &cache.arrow_formats[index] : nullptr;
+    item.format = arrowFormatForColumn(column, preferred_format);
+    if (column.arrow_backing != nullptr && column.arrow_backing->format == item.format) {
+      item.null_count = column.arrow_backing->null_count;
+      item.null_bitmap = column.arrow_backing->null_bitmap;
+      item.value_buffer = column.arrow_backing->value_buffer;
+      item.extra_buffer = column.arrow_backing->extra_buffer;
+      item.child_value_buffer = column.arrow_backing->child_value_buffer;
+      item.child_format = column.arrow_backing->child_format;
+      item.fixed_list_size = column.arrow_backing->fixed_list_size;
+      item.child_length = static_cast<int64_t>(column.arrow_backing->child_length);
+      item.n_buffers = item.fixed_list_size > 0 ? 1 : (item.extra_buffer ? 3 : 2);
+      if (item.format == "u" || item.format == "U") {
+        item.n_buffers = 3;
+      }
+      if (item.format.rfind("+w:", 0) == 0) {
+        item.n_buffers = 1;
+      }
+      prepared.push_back(std::move(item));
+      continue;
+    }
+    df::ValueColumnBuffer materialized_column;
+    if (column.values.empty()) {
+      materialized_column.values = df::materializeValueBuffer(&column);
+    }
+    const auto& source_column = materialized_column.values.empty() ? column : materialized_column;
+    if (item.format == "b") {
+      auto buffers = makeBooleanBuffers(source_column, &item.null_count);
+      item.null_bitmap = std::move(buffers.first);
+      item.value_buffer = std::move(buffers.second);
+      item.n_buffers = 2;
+    } else if (item.format == "i") {
+      auto buffers = makeNumericBuffers<int32_t>(
+          source_column,
+          [](const df::Value& value) { return static_cast<int32_t>(value.asInt64()); },
+          &item.null_count);
+      item.null_bitmap = std::move(buffers.first);
+      item.value_buffer = std::move(buffers.second);
+      item.n_buffers = 2;
+    } else if (item.format == "I") {
+      auto buffers = makeNumericBuffers<uint32_t>(
+          source_column,
+          [](const df::Value& value) { return static_cast<uint32_t>(value.asInt64()); },
+          &item.null_count);
+      item.null_bitmap = std::move(buffers.first);
+      item.value_buffer = std::move(buffers.second);
+      item.n_buffers = 2;
+    } else if (item.format == "l") {
+      auto buffers = makeNumericBuffers<int64_t>(
+          source_column, [](const df::Value& value) { return value.asInt64(); }, &item.null_count);
+      item.null_bitmap = std::move(buffers.first);
+      item.value_buffer = std::move(buffers.second);
+      item.n_buffers = 2;
+    } else if (item.format == "L") {
+      auto buffers = makeNumericBuffers<uint64_t>(
+          source_column,
+          [](const df::Value& value) { return static_cast<uint64_t>(value.asInt64()); },
+          &item.null_count);
+      item.null_bitmap = std::move(buffers.first);
+      item.value_buffer = std::move(buffers.second);
+      item.n_buffers = 2;
+    } else if (item.format == "f") {
+      auto buffers = makeNumericBuffers<float>(
+          source_column,
+          [](const df::Value& value) { return static_cast<float>(value.asDouble()); },
+          &item.null_count);
+      item.null_bitmap = std::move(buffers.first);
+      item.value_buffer = std::move(buffers.second);
+      item.n_buffers = 2;
+    } else if (item.format == "g") {
+      auto buffers = makeNumericBuffers<double>(
+          source_column, [](const df::Value& value) { return value.asDouble(); }, &item.null_count);
+      item.null_bitmap = std::move(buffers.first);
+      item.value_buffer = std::move(buffers.second);
+      item.n_buffers = 2;
+    } else if (item.format == "U") {
+      item.null_bitmap = std::shared_ptr<void>(
+          std::calloc(source_column.values.empty() ? 1 : (source_column.values.size() + 7) / 8, 1), std::free);
+      auto strings = makeStringBuffers<int64_t>(source_column, item.null_bitmap, &item.null_count);
+      item.value_buffer = std::move(strings.offsets);
+      item.extra_buffer = std::move(strings.data);
+      item.n_buffers = 3;
+    } else if (item.format.rfind("+w:", 0) == 0) {
+      item.fixed_list_size = static_cast<int32_t>(std::stoi(item.format.substr(3)));
+      item.child_format = "f";
+      item.null_bitmap = std::shared_ptr<void>(
+          std::calloc(source_column.values.empty() ? 1 : (source_column.values.size() + 7) / 8, 1), std::free);
+      item.child_value_buffer = makeFixedSizeListFloat32Buffer(
+          source_column, item.fixed_list_size, item.null_bitmap, &item.null_count, &item.child_length);
+      item.n_buffers = 1;
+    } else {
+      item.null_bitmap = std::shared_ptr<void>(
+          std::calloc(source_column.values.empty() ? 1 : (source_column.values.size() + 7) / 8, 1), std::free);
+      auto strings = makeStringBuffers<int32_t>(source_column, item.null_bitmap, &item.null_count);
+      item.value_buffer = std::move(strings.offsets);
+      item.extra_buffer = std::move(strings.data);
+      item.n_buffers = 3;
+    }
+    prepared.push_back(std::move(item));
+  }
+  return prepared;
+}
+
+OwnedArrowSchema* buildArrowSchema(const df::Table& table,
+                                   const std::vector<PreparedArrowColumn>& prepared) {
   auto* root = new OwnedArrowSchema();
   root->format = "+s";
   root->schema.format = root->format.c_str();
@@ -709,14 +1038,33 @@ OwnedArrowSchema* buildArrowSchema(const df::Table& table) {
 
   for (size_t i = 0; i < table.schema.fields.size(); ++i) {
     auto child = std::make_unique<OwnedArrowSchema>();
-    child->format = arrowFormatForColumn(cache->columns[i]);
+    child->format = prepared[i].format;
     child->name = table.schema.fields[i];
     child->schema.format = child->format.c_str();
     child->schema.name = child->name.c_str();
     child->schema.metadata = nullptr;
     child->schema.flags = 2;
-    child->schema.n_children = 0;
-    child->schema.children = nullptr;
+    if (prepared[i].fixed_list_size > 0) {
+      auto grandchild = std::make_unique<OwnedArrowSchema>();
+      grandchild->format = prepared[i].child_format;
+      grandchild->name = "item";
+      grandchild->schema.format = grandchild->format.c_str();
+      grandchild->schema.name = grandchild->name.c_str();
+      grandchild->schema.metadata = nullptr;
+      grandchild->schema.flags = 2;
+      grandchild->schema.n_children = 0;
+      grandchild->schema.children = nullptr;
+      grandchild->schema.dictionary = nullptr;
+      grandchild->schema.release = releaseArrowSchema;
+      grandchild->schema.private_data = grandchild.get();
+      child->child_ptrs.push_back(&grandchild->schema);
+      child->children_owned.push_back(std::move(grandchild));
+      child->schema.n_children = 1;
+      child->schema.children = child->child_ptrs.data();
+    } else {
+      child->schema.n_children = 0;
+      child->schema.children = nullptr;
+    }
     child->schema.dictionary = nullptr;
     child->schema.release = releaseArrowSchema;
     child->schema.private_data = child.get();
@@ -731,80 +1079,11 @@ OwnedArrowSchema* buildArrowSchema(const df::Table& table) {
   return root;
 }
 
-std::shared_ptr<void> makeNullBitmap(const df::ValueColumnBuffer& column, int64_t* null_count) {
-  const size_t row_count = column.values.size();
-  const size_t bytes = row_count == 0 ? 0 : (row_count + 7) / 8;
-  auto* raw = static_cast<uint8_t*>(std::calloc(bytes == 0 ? 1 : bytes, 1));
-  int64_t local_nulls = 0;
-  for (size_t row = 0; row < row_count; ++row) {
-    const bool valid = !column.values[row].isNull();
-    if (valid) {
-      raw[row / 8] |= static_cast<uint8_t>(1U << (row % 8));
-    } else {
-      ++local_nulls;
-    }
-  }
-  *null_count = local_nulls;
-  return std::shared_ptr<void>(raw, std::free);
-}
-
-std::shared_ptr<void> makeInt64Buffer(const df::ValueColumnBuffer& column) {
-  const size_t row_count = column.values.size();
-  auto* raw = static_cast<int64_t*>(std::calloc(row_count == 0 ? 1 : row_count, sizeof(int64_t)));
-  for (size_t row = 0; row < row_count; ++row) {
-    if (!column.values[row].isNull()) {
-      raw[row] = column.values[row].asInt64();
-    }
-  }
-  return std::shared_ptr<void>(raw, std::free);
-}
-
-std::shared_ptr<void> makeDoubleBuffer(const df::ValueColumnBuffer& column) {
-  const size_t row_count = column.values.size();
-  auto* raw = static_cast<double*>(std::calloc(row_count == 0 ? 1 : row_count, sizeof(double)));
-  for (size_t row = 0; row < row_count; ++row) {
-    if (!column.values[row].isNull()) {
-      raw[row] = column.values[row].asDouble();
-    }
-  }
-  return std::shared_ptr<void>(raw, std::free);
-}
-
-struct StringBuffers {
-  std::shared_ptr<void> offsets;
-  std::shared_ptr<void> data;
-};
-
-StringBuffers makeStringBuffers(const df::ValueColumnBuffer& column) {
-  const size_t row_count = column.values.size();
-  auto* offsets = static_cast<int32_t*>(
-      std::calloc((row_count + 1) == 0 ? 1 : (row_count + 1), sizeof(int32_t)));
-  std::ostringstream joined;
-  int32_t current = 0;
-  for (size_t row = 0; row < row_count; ++row) {
-    offsets[row] = current;
-    if (!column.values[row].isNull()) {
-      const std::string& s = column.values[row].asString();
-      joined.write(s.data(), static_cast<std::streamsize>(s.size()));
-      current += static_cast<int32_t>(s.size());
-    }
-  }
-  offsets[row_count] = current;
-  std::string blob = joined.str();
-  auto* data = static_cast<char*>(std::malloc(blob.empty() ? 1 : blob.size()));
-  if (!blob.empty()) {
-    std::memcpy(data, blob.data(), blob.size());
-  }
-  return {
-      std::shared_ptr<void>(offsets, std::free),
-      std::shared_ptr<void>(data, std::free),
-  };
-}
-
-OwnedArrowArray* buildArrowArray(const df::Table& table) {
-  const auto cache = df::ensureColumnarCache(&table);
+OwnedArrowArray* buildArrowArray(const df::Table& table,
+                                 const std::vector<PreparedArrowColumn>& prepared) {
+  const auto row_count = table.rowCount();
   auto* root = new OwnedArrowArray();
-  root->array.length = static_cast<int64_t>(table.rows.size());
+  root->array.length = static_cast<int64_t>(row_count);
   root->array.null_count = 0;
   root->array.offset = 0;
   root->array.n_buffers = 1;
@@ -816,41 +1095,46 @@ OwnedArrowArray* buildArrowArray(const df::Table& table) {
 
   for (size_t column = 0; column < table.schema.fields.size(); ++column) {
     auto child = std::make_unique<OwnedArrowArray>();
-    child->array.length = static_cast<int64_t>(table.rows.size());
+    child->array.length = static_cast<int64_t>(row_count);
     child->array.offset = 0;
     child->array.n_children = 0;
     child->array.children = nullptr;
     child->array.dictionary = nullptr;
     child->array.release = releaseArrowArray;
     child->array.private_data = child.get();
-
-    int64_t null_count = 0;
-    const auto& values = cache->columns[column];
-    auto null_bitmap = makeNullBitmap(values, &null_count);
-    child->array.null_count = null_count;
-    child->buffer_holders.push_back(null_bitmap);
-    child->buffer_ptrs.push_back(null_bitmap.get());
-
-    const std::string format = arrowFormatForColumn(values);
-    if (format == "l") {
-      auto value_buffer = makeInt64Buffer(values);
-      child->array.n_buffers = 2;
-      child->buffer_holders.push_back(value_buffer);
-      child->buffer_ptrs.push_back(value_buffer.get());
-    } else if (format == "g") {
-      auto value_buffer = makeDoubleBuffer(values);
-      child->array.n_buffers = 2;
-      child->buffer_holders.push_back(value_buffer);
-      child->buffer_ptrs.push_back(value_buffer.get());
+    child->array.null_count = prepared[column].null_count;
+    child->array.n_buffers = prepared[column].n_buffers;
+    child->buffer_holders.push_back(prepared[column].null_bitmap);
+    child->buffer_ptrs.push_back(prepared[column].null_bitmap.get());
+    if (prepared[column].fixed_list_size > 0) {
+      auto values = std::make_unique<OwnedArrowArray>();
+      values->array.length = prepared[column].child_length;
+      values->array.offset = 0;
+      values->array.n_children = 0;
+      values->array.children = nullptr;
+      values->array.dictionary = nullptr;
+      values->array.release = releaseArrowArray;
+      values->array.private_data = values.get();
+      values->array.null_count = 0;
+      values->array.n_buffers = 2;
+      values->buffer_ptrs.push_back(nullptr);
+      values->buffer_holders.push_back(prepared[column].child_value_buffer);
+      values->buffer_ptrs.push_back(prepared[column].child_value_buffer.get());
+      values->array.buffers = values->buffer_ptrs.data();
+      child->child_ptrs.push_back(&values->array);
+      child->children_owned.push_back(std::move(values));
+      child->array.n_children = 1;
+      child->array.children = child->child_ptrs.data();
     } else {
-      auto strings = makeStringBuffers(values);
-      child->array.n_buffers = 3;
-      child->buffer_holders.push_back(strings.offsets);
-      child->buffer_holders.push_back(strings.data);
-      child->buffer_ptrs.push_back(strings.offsets.get());
-      child->buffer_ptrs.push_back(strings.data.get());
+      child->buffer_holders.push_back(prepared[column].value_buffer);
+      child->buffer_ptrs.push_back(prepared[column].value_buffer.get());
+      if (prepared[column].n_buffers == 3) {
+        child->buffer_holders.push_back(prepared[column].extra_buffer);
+        child->buffer_ptrs.push_back(prepared[column].extra_buffer.get());
+      }
+      child->array.n_children = 0;
+      child->array.children = nullptr;
     }
-
     child->array.buffers = child->buffer_ptrs.data();
     root->child_ptrs.push_back(&child->array);
     root->children_owned.push_back(std::move(child));
@@ -864,8 +1148,10 @@ OwnedArrowArray* buildArrowArray(const df::Table& table) {
 }
 
 PyObject* exportArrowCapsules(const df::Table& table) {
-  auto* owned_schema = buildArrowSchema(table);
-  auto* owned_array = buildArrowArray(table);
+  const auto cache = df::ensureColumnarCache(&table);
+  const auto prepared = prepareArrowColumns(*cache);
+  auto* owned_schema = buildArrowSchema(table, prepared);
+  auto* owned_array = buildArrowArray(table, prepared);
 
   auto* schema = static_cast<ArrowSchema*>(std::malloc(sizeof(ArrowSchema)));
   auto* array = static_cast<ArrowArray*>(std::malloc(sizeof(ArrowArray)));
@@ -1065,16 +1351,31 @@ PyObject* sessionReadCsv(PyVelariaSession* self, PyObject* args, PyObject* kwarg
   return withExceptionTranslation([&]() -> PyObject* {
     const char* path = nullptr;
     const char* delimiter_text = ",";
-    static const char* kwlist[] = {"path", "delimiter", nullptr};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|s", const_cast<char**>(kwlist), &path,
-                                     &delimiter_text)) {
+    int materialization_enabled = 0;
+    const char* materialization_dir = nullptr;
+    const char* materialization_format = nullptr;
+    static const char* kwlist[] = {"path", "delimiter", "materialization",
+                                   "materialization_dir", "materialization_format", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|spzz", const_cast<char**>(kwlist), &path,
+                                     &delimiter_text, &materialization_enabled,
+                                     &materialization_dir, &materialization_format)) {
       return nullptr;
+    }
+    df::SourceOptions options;
+    const auto delimiter = parseDelimiter(delimiter_text);
+    options.materialization.enabled =
+        materialization_enabled != 0 || materialization_dir != nullptr ||
+        materialization_format != nullptr;
+    if (materialization_dir != nullptr) {
+      options.materialization.root = materialization_dir;
+    }
+    if (materialization_format != nullptr) {
+      options.materialization.data_format = parseMaterializationDataFormat(materialization_format);
     }
     std::unique_ptr<df::DataFrame> out;
     {
       AllowThreads allow;
-      out = std::make_unique<df::DataFrame>(
-          self->session->read_csv(path, parseDelimiter(delimiter_text)));
+      out = std::make_unique<df::DataFrame>(self->session->read_csv(path, delimiter, options));
     }
     return wrapDataFrame(std::move(*out));
   });
@@ -1288,10 +1589,10 @@ PyObject* sessionExplainVectorSearch(PyVelariaSession* self, PyObject* args, PyO
 
 PyObject* dataFrameToRows(PyVelariaDataFrame* self, PyObject*) {
   return withExceptionTranslation([&]() -> PyObject* {
-    std::unique_ptr<df::Table> table;
+    const df::Table* table = nullptr;
     {
       AllowThreads allow;
-      table = std::make_unique<df::Table>(self->df_ptr->toTable());
+      table = &self->df_ptr->materializedTable();
     }
     return pyRowsFromTable(*table);
   });
@@ -1345,10 +1646,10 @@ PyObject* dataFrameArrowCapsules(PyVelariaDataFrame* self, PyObject* args, PyObj
     if (requested_schema != Py_None) {
       throw std::runtime_error("requested_schema is not supported yet");
     }
-    std::unique_ptr<df::Table> table;
+    const df::Table* table = nullptr;
     {
       AllowThreads allow;
-      table = std::make_unique<df::Table>(self->df_ptr->toTable());
+      table = &self->df_ptr->materializedTable();
     }
     return exportArrowCapsules(*table);
   });

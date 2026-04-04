@@ -24,8 +24,12 @@ struct CachedVectorColumn {
 
 class GroupedDataFrame {
  public:
-  GroupedDataFrame(PlanNodePtr plan, std::vector<size_t> keys, std::shared_ptr<Executor> exec)
-      : plan_(std::move(plan)), keys_(std::move(keys)), executor_(std::move(exec)) {}
+  GroupedDataFrame(PlanNodePtr plan, std::vector<size_t> keys, std::shared_ptr<Executor> exec,
+                   std::shared_ptr<const Schema> schema_hint = nullptr)
+      : plan_(std::move(plan)),
+        keys_(std::move(keys)),
+        executor_(std::move(exec)),
+        schema_hint_(std::move(schema_hint)) {}
 
   DataFrame sum(const std::string& valueColumn, const std::string& outColumn = "sum") const;
 
@@ -33,13 +37,15 @@ class GroupedDataFrame {
   PlanNodePtr plan_;
   std::vector<size_t> keys_;
   std::shared_ptr<Executor> executor_;
+  std::shared_ptr<const Schema> schema_hint_;
 };
 
 class DataFrame {
  public:
   DataFrame() = default;
   DataFrame(Table table);
-  explicit DataFrame(PlanNodePtr plan, std::shared_ptr<Executor> exec = nullptr);
+  explicit DataFrame(PlanNodePtr plan, std::shared_ptr<Executor> exec = nullptr,
+                     std::shared_ptr<const Schema> schema_hint = nullptr);
 
   DataFrame select(const std::vector<std::string>& columns) const;
   DataFrame selectByIndices(const std::vector<size_t>& columns,
@@ -79,6 +85,7 @@ class DataFrame {
   std::string explain() const;
 
   Table toTable() const;
+  const Table& materializedTable() const;
   const Schema& schema() const;
 
  private:
@@ -87,6 +94,7 @@ class DataFrame {
 
   PlanNodePtr plan_;
   std::shared_ptr<Executor> executor_;
+  mutable std::shared_ptr<const Schema> schema_hint_;
   mutable bool cached_ = false;
   mutable Table cached_table_;
   mutable std::unordered_map<size_t, CachedVectorColumn> vector_cache_;

@@ -191,6 +191,12 @@ int main() {
     expect(pushed.rows.size() == 1, "source pushdown filter/limit row count mismatch");
     expect_table_value(pushed, 0, 0, dataflow::Value("bob"),
                        "source pushdown filter/limit content mismatch");
+    session.createTempView("csv_group_input", session.read_csv(csv_path));
+    const auto pushed_group_limit =
+        session.sql("SELECT name, COUNT(*) AS cnt FROM csv_group_input GROUP BY name LIMIT 1")
+            .toTable();
+    expect(pushed_group_limit.rows.size() == 1,
+           "source pushdown aggregate/limit row count mismatch");
     auto async_handle =
         session.submitAsync(session.read_csv(csv_path, binary_options).select({"name"}).limit(1));
     const auto async_wait = async_handle.wait(std::chrono::seconds(5));

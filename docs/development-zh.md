@@ -97,3 +97,14 @@ bazel test //:core_regression
 bazel test //:python_ecosystem_regression
 bazel test //:experimental_regression
 ```
+
+Stage benchmark 说明：
+
+- `./scripts/run_python_stage_benchmark.sh` 默认跑 `groupby_count_max` 场景
+- 需要校验 `LOWER(method) + filter + LIMIT` 路径时，设置
+  `VELARIA_STAGE_BENCH_SCENARIO=filter_lower_limit`
+- 只有在做 Velaria-only 实验时才设置 `VELARIA_STAGE_BENCH_QUERY="..."`
+- 当自定义 query 已经不再匹配所选场景时，必须同时设置
+  `VELARIA_STAGE_BENCH_SKIP_HARDCODE=1`
+- benchmark wrapper 会先校验 hardcode 与 Velaria 的结果行数一致，再输出 ratio，
+  避免混入不同语义的基线

@@ -102,7 +102,6 @@ struct SourcePlan : PlanNode {
   std::string csv_path;
   char csv_delimiter = ',';
   SourceOptions options;
-  SourcePushdownSpec pushdown;
   mutable std::mutex cached_table_mu;
   mutable std::shared_ptr<Table> cached_table;
   mutable std::vector<std::size_t> cached_projected_indices;

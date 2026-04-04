@@ -202,6 +202,19 @@ Benchmark regression entrypoint:
 
 By default that script generates benchmark input at runtime.
 To use a local anonymized CSV instead, set `VELARIA_STAGE_BENCH_CSV=/path/to/file.csv`.
+The default scenario is `groupby_count_max`.
+
+Benchmark scenario controls:
+
+- set `VELARIA_STAGE_BENCH_SCENARIO=groupby_count_max` for the `caller_psm / count / max(latency)` path
+- set `VELARIA_STAGE_BENCH_SCENARIO=filter_lower_limit` for the `LOWER(method) + filter + LIMIT` path
+- set `VELARIA_STAGE_BENCH_QUERY="..."` only when you intentionally want a custom Velaria query
+- when `VELARIA_STAGE_BENCH_QUERY` does not match the selected scenario query, also set
+  `VELARIA_STAGE_BENCH_SKIP_HARDCODE=1`; otherwise the benchmark rejects the run
+
+`hardcode` is only reported when it is semantically aligned with the selected scenario.
+The benchmark now enforces row-count parity between the hardcode baseline and Velaria result
+before it prints ratios.
 
 ## Packaging
 

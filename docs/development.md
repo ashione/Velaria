@@ -97,3 +97,12 @@ bazel test //:core_regression
 bazel test //:python_ecosystem_regression
 bazel test //:experimental_regression
 ```
+
+Stage benchmark notes:
+
+- `./scripts/run_python_stage_benchmark.sh` defaults to the `groupby_count_max` scenario
+- set `VELARIA_STAGE_BENCH_SCENARIO=filter_lower_limit` to validate the `LOWER(method) + filter + LIMIT` path
+- set `VELARIA_STAGE_BENCH_QUERY="..."` only for Velaria-only experiments; pair it with
+  `VELARIA_STAGE_BENCH_SKIP_HARDCODE=1` when the query no longer matches the selected scenario
+- the benchmark wrapper rejects mixed semantics by checking row-count parity before printing
+  hardcode-vs-Velaria ratios

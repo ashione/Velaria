@@ -390,6 +390,44 @@ bool buildSourcePushdownSpec(const PlanNodePtr& plan, const SourceRequirementMap
       *pushdown_out = std::move(spec);
       return true;
     }
+    case PlanKind::Aggregate: {
+      const auto* node = static_cast<const AggregatePlan*>(plan.get());
+      SourcePushdownSpec spec;
+      const SourcePlan* source = nullptr;
+      if (!buildSourcePushdownSpec(node->child, requirements, &source, &spec)) {
+        return false;
+      }
+      if (spec.filter.enabled || spec.limit != 0 || spec.has_aggregate) {
+        return false;
+      }
+      spec.has_aggregate = true;
+      spec.aggregate.keys = node->keys;
+      spec.aggregate.aggregates = node->aggregates;
+      *source_out = source;
+      *pushdown_out = std::move(spec);
+      return true;
+    }
+    case PlanKind::GroupBySum: {
+      const auto* node = static_cast<const GroupBySumPlan*>(plan.get());
+      SourcePushdownSpec spec;
+      const SourcePlan* source = nullptr;
+      if (!buildSourcePushdownSpec(node->child, requirements, &source, &spec)) {
+        return false;
+      }
+      if (spec.filter.enabled || spec.limit != 0 || spec.has_aggregate) {
+        return false;
+      }
+      spec.has_aggregate = true;
+      spec.aggregate.keys = node->keys;
+      AggregateSpec sum_spec;
+      sum_spec.function = AggregateFunction::Sum;
+      sum_spec.value_index = node->value_index;
+      sum_spec.output_name = "sum";
+      spec.aggregate.aggregates = {std::move(sum_spec)};
+      *source_out = source;
+      *pushdown_out = std::move(spec);
+      return true;
+    }
     default:
       return false;
   }
@@ -842,39 +880,36 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
     }
     case PlanKind::Aggregate:
     case PlanKind::GroupBySum: {
-      std::vector<size_t> keyIdx;
-      std::vector<AggregateSpec> aggs;
+      const SourcePlan* pushed_source = nullptr;
+      SourcePushdownSpec pushed_spec;
+      if (buildSourcePushdownSpec(plan, requirements, &pushed_source, &pushed_spec) &&
+          !pushed_source->options.materialization.enabled) {
+        Table pushed;
+        if (tryExecuteSourcePushdown(*pushed_source, pushed_spec, false, &pushed)) {
+          return pushed;
+        }
+      }
 
+      std::vector<size_t> key_indices;
+      std::vector<AggregateSpec> aggregates;
+      const PlanNodePtr* child = nullptr;
       if (plan->kind == PlanKind::Aggregate) {
         const auto* node = static_cast<const AggregatePlan*>(plan.get());
-        keyIdx = node->keys;
-        aggs = node->aggregates;
-        if (node->child && node->child->kind == PlanKind::Source) {
-          const auto* source = static_cast<const SourcePlan*>(node->child.get());
-          if (!source->options.materialization.enabled) {
-            Table fast_out;
-            SourcePushdownSpec pushdown;
-            pushdown.has_aggregate = true;
-            pushdown.aggregate.keys = keyIdx;
-            pushdown.aggregate.aggregates = aggs;
-            if (tryExecuteSourcePushdown(*source, pushdown, false, &fast_out)) {
-              return fast_out;
-            }
-          }
-        }
-        const auto input = borrowOrExecute(executor, node->child, requirements);
-        return executeAggregateTable(*input.table, keyIdx, aggs);
+        key_indices = node->keys;
+        aggregates = node->aggregates;
+        child = &node->child;
       } else {
         const auto* node = static_cast<const GroupBySumPlan*>(plan.get());
-        keyIdx = node->keys;
-        AggregateSpec sumSpec;
-        sumSpec.function = AggregateFunction::Sum;
-        sumSpec.value_index = node->value_index;
-        sumSpec.output_name = "sum";
-        aggs.push_back(sumSpec);
-        const auto input = borrowOrExecute(executor, node->child, requirements);
-        return executeAggregateTable(*input.table, keyIdx, aggs);
+        key_indices = node->keys;
+        AggregateSpec sum_spec;
+        sum_spec.function = AggregateFunction::Sum;
+        sum_spec.value_index = node->value_index;
+        sum_spec.output_name = "sum";
+        aggregates.push_back(std::move(sum_spec));
+        child = &node->child;
       }
+      const auto input = borrowOrExecute(executor, *child, requirements);
+      return executeAggregateTable(*input.table, key_indices, aggregates);
     }
     case PlanKind::Join: {
       const auto* node = static_cast<const JoinPlan*>(plan.get());

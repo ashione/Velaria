@@ -473,8 +473,17 @@ bool execute_csv_source_pushdown(const std::string& path, const Schema& schema,
     throw std::invalid_argument("csv source pushdown output is null");
   }
   if (pushdown.has_aggregate) {
-    return try_execute_csv_aggregate(path, schema, pushdown.aggregate.keys,
-                                     pushdown.aggregate.aggregates, delimiter, out);
+    if (pushdown.filter.enabled) {
+      return false;
+    }
+    if (!try_execute_csv_aggregate(path, schema, pushdown.aggregate.keys,
+                                   pushdown.aggregate.aggregates, delimiter, out)) {
+      return false;
+    }
+    if (pushdown.limit != 0 && out->rowCount() > pushdown.limit) {
+      *out = limitTable(*out, pushdown.limit, false);
+    }
+    return true;
   }
   if (!pushdown.filter.enabled && pushdown.limit == 0) {
     const bool require_all_columns =

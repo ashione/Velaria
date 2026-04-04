@@ -18,135 +18,6 @@ namespace {
 
 constexpr char kGroupDelim = '\x1f';
 
-struct BoundComputedArg {
-  bool is_literal = false;
-  size_t source_column_index = 0;
-  bool literal_is_null = false;
-  bool literal_has_int64 = false;
-  int64_t literal_int64 = 0;
-  std::string literal_string;
-};
-
-std::vector<BoundComputedArg> bindComputedArgs(const std::vector<ComputedColumnArg>& args) {
-  std::vector<BoundComputedArg> bound;
-  bound.reserve(args.size());
-  for (const auto& arg : args) {
-    BoundComputedArg item;
-    item.is_literal = arg.is_literal;
-    item.source_column_index = arg.source_column_index;
-    if (arg.is_literal) {
-      item.literal_is_null = arg.literal.isNull();
-      if (!item.literal_is_null) {
-        item.literal_string =
-            arg.literal.type() == DataType::String ? arg.literal.asString() : arg.literal.toString();
-        if (arg.literal.isNumber()) {
-          item.literal_has_int64 = true;
-          item.literal_int64 = arg.literal.asInt64();
-        }
-      }
-    }
-    bound.push_back(std::move(item));
-  }
-  return bound;
-}
-
-StringColumnBuffer materializeStringArgColumn(const Table& table, const BoundComputedArg& arg) {
-  const auto row_count = table.rows.size();
-  if (arg.is_literal) {
-    if (arg.literal_is_null) {
-      return makeNullStringColumn(row_count);
-    }
-    return makeConstantStringColumn(row_count, arg.literal_string);
-  }
-  return dataflow::materializeStringColumn(table, arg.source_column_index);
-}
-
-Int64ColumnBuffer materializeInt64ArgColumn(const Table& table, const BoundComputedArg& arg) {
-  const auto row_count = table.rows.size();
-  if (arg.is_literal) {
-    if (arg.literal_is_null) {
-      return makeNullInt64Column(row_count);
-    }
-    if (!arg.literal_has_int64) {
-      throw std::runtime_error("string function argument must be numeric");
-    }
-    return makeConstantInt64Column(row_count, arg.literal_int64);
-  }
-  return dataflow::materializeInt64Column(table, arg.source_column_index);
-}
-
-std::vector<Value> computeStringColumnValues(Table* table, ComputedColumnKind function,
-                                             const std::vector<ComputedColumnArg>& args) {
-  const auto bound_args = bindComputedArgs(args);
-  auto materialize_string_args = [&]() {
-    std::vector<StringColumnBuffer> columns;
-    columns.reserve(bound_args.size());
-    for (const auto& arg : bound_args) {
-      columns.push_back(materializeStringArgColumn(*table, arg));
-    }
-    return columns;
-  };
-  switch (function) {
-    case ComputedColumnKind::StringLength:
-      if (bound_args.size() != 1) throw std::runtime_error("LENGTH expects 1 argument");
-      return vectorizedStringLength(materializeStringArgColumn(*table, bound_args[0]));
-    case ComputedColumnKind::StringLower:
-      if (bound_args.size() != 1) throw std::runtime_error("LOWER expects 1 argument");
-      return vectorizedStringLower(materializeStringArgColumn(*table, bound_args[0]));
-    case ComputedColumnKind::StringUpper:
-      if (bound_args.size() != 1) throw std::runtime_error("UPPER expects 1 argument");
-      return vectorizedStringUpper(materializeStringArgColumn(*table, bound_args[0]));
-    case ComputedColumnKind::StringTrim:
-      if (bound_args.size() != 1) throw std::runtime_error("TRIM expects 1 argument");
-      return vectorizedStringTrim(materializeStringArgColumn(*table, bound_args[0]));
-    case ComputedColumnKind::StringConcat:
-      return vectorizedStringConcat(materialize_string_args());
-    case ComputedColumnKind::StringReverse:
-      if (bound_args.size() != 1) throw std::runtime_error("REVERSE expects 1 argument");
-      return vectorizedStringReverse(materializeStringArgColumn(*table, bound_args[0]));
-    case ComputedColumnKind::StringConcatWs:
-      return vectorizedStringConcatWs(materialize_string_args());
-    case ComputedColumnKind::StringLeft:
-      if (bound_args.size() != 2) throw std::runtime_error("LEFT requires 2 arguments");
-      return vectorizedStringLeft(materializeStringArgColumn(*table, bound_args[0]),
-                                  materializeInt64ArgColumn(*table, bound_args[1]));
-    case ComputedColumnKind::StringRight:
-      if (bound_args.size() != 2) throw std::runtime_error("RIGHT requires 2 arguments");
-      return vectorizedStringRight(materializeStringArgColumn(*table, bound_args[0]),
-                                   materializeInt64ArgColumn(*table, bound_args[1]));
-    case ComputedColumnKind::StringPosition:
-      if (bound_args.size() != 2) throw std::runtime_error("POSITION requires 2 arguments");
-      return vectorizedStringPosition(materializeStringArgColumn(*table, bound_args[0]),
-                                      materializeStringArgColumn(*table, bound_args[1]));
-    case ComputedColumnKind::StringSubstr:
-      if (bound_args.size() < 2 || bound_args.size() > 3) {
-        throw std::runtime_error("SUBSTR expects 2 or 3 arguments");
-      }
-      if (bound_args.size() == 2) {
-        return vectorizedStringSubstr(materializeStringArgColumn(*table, bound_args[0]),
-                                      materializeInt64ArgColumn(*table, bound_args[1]), nullptr);
-      } else {
-        const auto length = materializeInt64ArgColumn(*table, bound_args[2]);
-        return vectorizedStringSubstr(materializeStringArgColumn(*table, bound_args[0]),
-                                      materializeInt64ArgColumn(*table, bound_args[1]), &length);
-      }
-    case ComputedColumnKind::StringLtrim:
-      if (bound_args.size() != 1) throw std::runtime_error("LTRIM requires 1 argument");
-      return vectorizedStringLtrim(materializeStringArgColumn(*table, bound_args[0]));
-    case ComputedColumnKind::StringRtrim:
-      if (bound_args.size() != 1) throw std::runtime_error("RTRIM requires 1 argument");
-      return vectorizedStringRtrim(materializeStringArgColumn(*table, bound_args[0]));
-    case ComputedColumnKind::StringReplace:
-      if (bound_args.size() != 3) throw std::runtime_error("REPLACE requires 3 arguments");
-      return vectorizedStringReplace(materializeStringArgColumn(*table, bound_args[0]),
-                                     materializeStringArgColumn(*table, bound_args[1]),
-                                     materializeStringArgColumn(*table, bound_args[2]));
-    case ComputedColumnKind::Copy:
-      break;
-  }
-  throw std::runtime_error("unsupported computed column function");
-}
-
 std::vector<std::string> splitKey(const std::string& key) {
   std::vector<std::string> out;
   std::string cur;
@@ -363,9 +234,8 @@ Table LocalExecutor::execute(const PlanNodePtr& plan) const {
         appendNamedColumn(&out, node->added_column,
                           materializeValueColumn(out, node->source_column_index).values);
       } else {
-        // Batch-resolve arguments once per node so string builtins keep the same bulk path.
         appendNamedColumn(&out, node->added_column,
-                          computeStringColumnValues(&out, node->function, node->args));
+                          computeComputedColumnValues(&out, node->function, node->args));
       }
       return out;
     }
@@ -378,6 +248,11 @@ Table LocalExecutor::execute(const PlanNodePtr& plan) const {
       const auto* node = static_cast<LimitPlan*>(plan.get());
       Table in = execute(node->child);
       return limitTable(in, node->n);
+    }
+    case PlanKind::OrderBy: {
+      const auto* node = static_cast<OrderByPlan*>(plan.get());
+      Table in = execute(node->child);
+      return sortTable(in, node->indices, node->ascending);
     }
     case PlanKind::WindowAssign: {
       const auto* node = static_cast<WindowAssignPlan*>(plan.get());

@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "src/dataflow/core/logical/planner/plan.h"
 #include "src/dataflow/core/execution/table.h"
 
 namespace dataflow {
@@ -18,6 +19,11 @@ struct StringColumnBuffer {
 
 struct Int64ColumnBuffer {
   std::vector<int64_t> values;
+  std::vector<uint8_t> is_null;
+};
+
+struct DoubleColumnBuffer {
+  std::vector<double> values;
   std::vector<uint8_t> is_null;
 };
 
@@ -55,6 +61,8 @@ StringColumnBuffer materializeStringColumn(const Table& table, std::size_t colum
 Int64ColumnBuffer makeNullInt64Column(std::size_t row_count);
 Int64ColumnBuffer makeConstantInt64Column(std::size_t row_count, int64_t value);
 Int64ColumnBuffer materializeInt64Column(const Table& table, std::size_t column_index);
+DoubleColumnBuffer makeNullDoubleColumn(std::size_t row_count);
+DoubleColumnBuffer materializeDoubleColumn(const Table& table, std::size_t column_index);
 ValueColumnBuffer materializeValueColumn(const Table& table, std::size_t column_index);
 std::vector<ValueColumnBuffer> materializeValueColumns(const Table& table,
                                                        const std::vector<std::size_t>& indices);
@@ -71,6 +79,8 @@ Table projectTable(const Table& table, const std::vector<std::size_t>& indices,
                    const std::vector<std::string>& aliases = {});
 Table filterTable(const Table& table, const RowSelection& selection);
 Table limitTable(const Table& table, std::size_t limit);
+Table sortTable(const Table& table, const std::vector<std::size_t>& indices,
+                const std::vector<bool>& ascending);
 
 std::vector<Value> vectorizedWindowStart(const ValueColumnBuffer& input, uint64_t window_ms);
 std::vector<Value> vectorizedWindowStart(const ValueColumnView& input, uint64_t window_ms);
@@ -94,7 +104,19 @@ std::vector<Value> vectorizedStringReplace(const StringColumnBuffer& input,
                                            const StringColumnBuffer& from,
                                            const StringColumnBuffer& to);
 std::vector<Value> vectorizedStringPosition(const StringColumnBuffer& needle,
-                                            const StringColumnBuffer& input);
+                                           const StringColumnBuffer& input);
+std::vector<Value> vectorizedAbs(const DoubleColumnBuffer& input);
+std::vector<Value> vectorizedCeil(const DoubleColumnBuffer& input);
+std::vector<Value> vectorizedFloor(const DoubleColumnBuffer& input);
+std::vector<Value> vectorizedRound(const DoubleColumnBuffer& input);
+std::vector<Value> vectorizedDateYear(const ValueColumnView& input);
+std::vector<Value> vectorizedDateMonth(const ValueColumnView& input);
+std::vector<Value> vectorizedDateDay(const ValueColumnView& input);
+
+std::vector<Value> computeComputedColumnValues(
+    Table* table,
+    ComputedColumnKind function,
+    const std::vector<ComputedColumnArg>& args);
 
 void appendNamedColumn(Table* table, const std::string& column_name, std::vector<Value>&& values);
 void appendColumn(Table* table, std::vector<Value>&& values);

@@ -230,6 +230,7 @@ class StreamSink;
 StreamingStrategyDecision describeStreamingStrategy(const StreamingDataFrame& root,
                                                     const std::shared_ptr<StreamSink>& sink,
                                                     const StreamingQueryOptions& options);
+void validateStreamingOrderRequirements(const StreamingDataFrame& root);
 
 struct StreamingQueryProgress {
   std::string query_id;
@@ -471,7 +472,11 @@ class StreamingDataFrame {
   StreamingDataFrame filter(const std::string& column, const std::string& op,
                             const Value& value) const;
   StreamingDataFrame withColumn(const std::string& name, const std::string& sourceColumn) const;
+  StreamingDataFrame withColumn(const std::string& name, ComputedColumnKind function,
+                               const std::vector<ComputedColumnArg>& args) const;
   StreamingDataFrame drop(const std::string& column) const;
+  StreamingDataFrame orderBy(const std::vector<std::string>& columns,
+                             const std::vector<bool>& ascending = {}) const;
   StreamingDataFrame limit(size_t n) const;
   StreamingDataFrame window(const std::string& timeColumn, uint64_t windowMs,
                             const std::string& outputColumn = "window_start") const;
@@ -493,6 +498,7 @@ class StreamingDataFrame {
   friend StreamingStrategyDecision describeStreamingStrategy(
       const StreamingDataFrame& root, const std::shared_ptr<StreamSink>& sink,
       const StreamingQueryOptions& options);
+  friend void validateStreamingOrderRequirements(const StreamingDataFrame& root);
   std::shared_ptr<StreamSource> source_;
   std::vector<StreamTransform> transforms_;
   std::shared_ptr<StateStore> state_;

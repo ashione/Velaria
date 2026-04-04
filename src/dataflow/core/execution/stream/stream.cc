@@ -383,6 +383,12 @@ bool queryHasWindowOps(const std::vector<StreamTransform>& transforms) {
   });
 }
 
+bool queryHasOrderOps(const std::vector<StreamTransform>& transforms) {
+  return std::any_of(transforms.begin(), transforms.end(), [](const StreamTransform& transform) {
+    return transform.label() == "orderBy";
+  });
+}
+
 struct ActorAccelerationAnalysis {
   bool eligible = false;
   size_t transform_index = 0;
@@ -916,6 +922,12 @@ StreamingStrategyDecision describeStreamingStrategy(const StreamingDataFrame& ro
   }
 
   return decision;
+}
+
+void validateStreamingOrderRequirements(const StreamingDataFrame& root) {
+  if (root.source_ != nullptr && !root.source_->bounded() && queryHasOrderOps(root.transforms_)) {
+    throw std::runtime_error("stream ORDER BY requires a bounded source");
+  }
 }
 
 namespace {
@@ -1665,6 +1677,21 @@ StreamingDataFrame StreamingDataFrame::withColumn(const std::string& name,
         appendNamedColumn(&out, name, std::move(values.values));
         return out;
       },
+                 StreamTransformMode::PartitionLocal, false, "withColumn");
+  return StreamingDataFrame(source_, std::move(t), state_);
+}
+
+StreamingDataFrame StreamingDataFrame::withColumn(const std::string& name,
+                                                  ComputedColumnKind function,
+                                                  const std::vector<ComputedColumnArg>& args) const {
+  auto t = transforms_;
+  t.emplace_back(
+      [name, function, args](const Table& input, const StreamingQueryOptions&) {
+        Table out = input;
+        auto values = computeComputedColumnValues(&out, function, args);
+        appendNamedColumn(&out, name, std::move(values));
+        return out;
+      },
       StreamTransformMode::PartitionLocal, false, "withColumn");
   return StreamingDataFrame(source_, std::move(t), state_);
 }
@@ -1682,6 +1709,29 @@ StreamingDataFrame StreamingDataFrame::drop(const std::string& column) const {
                    return projectTable(input, keep);
                  },
                  StreamTransformMode::PartitionLocal, false, "drop");
+  return StreamingDataFrame(source_, std::move(t), state_);
+}
+
+StreamingDataFrame StreamingDataFrame::orderBy(const std::vector<std::string>& columns,
+                                               const std::vector<bool>& ascending) const {
+  if (!ascending.empty() && ascending.size() != columns.size()) {
+    throw std::invalid_argument("ORDER BY direction count mismatch");
+  }
+  auto t = transforms_;
+  t.emplace_back(
+      [columns, ascending](const Table& input, const StreamingQueryOptions&) {
+        std::vector<std::size_t> indices;
+        indices.reserve(columns.size());
+        for (const auto& column : columns) {
+          indices.push_back(input.schema.indexOf(column));
+        }
+        std::vector<bool> directions = ascending;
+        if (directions.empty()) {
+          directions.assign(columns.size(), true);
+        }
+        return sortTable(input, indices, directions);
+      },
+      StreamTransformMode::GlobalBarrier, false, "orderBy");
   return StreamingDataFrame(source_, std::move(t), state_);
 }
 
@@ -1936,6 +1986,7 @@ StreamingQuery& StreamingQuery::trigger(uint64_t triggerIntervalMs) {
 }
 
 StreamingQuery& StreamingQuery::start() {
+  validateStreamingOrderRequirements(root_);
   started_ = true;
   running_ = true;
   StreamSourceContext source_context;

@@ -9,6 +9,29 @@ import velaria  # noqa: E402
 
 
 class StreamingV05Test(unittest.TestCase):
+    def _run_batch_sql(self, session, query):
+        try:
+            return session.sql(query)
+        except RuntimeError as exc:
+            message = str(exc)
+            if "not supported in SQL v1" in message and "scalar function" in message:
+                self.skipTest(message)
+            raise
+
+    def _run_stream_sql(self, session, query, **kwargs):
+        try:
+            return session.start_stream_sql(query, **kwargs)
+        except RuntimeError as exc:
+            message = str(exc)
+            unsupported = (
+                "not supported in SQL v1" in message
+                or "stream SQL does not support string functions" in message
+                or "stream SQL does not support string functions in aggregate query" in message
+            )
+            if unsupported:
+                self.skipTest(message)
+            raise
+
     def test_batch_arrow_roundtrip_and_sql(self):
         session = velaria.Session()
         table = pa.table({"id": [1, 2, 3], "value": [10, 20, 30]})
@@ -19,6 +42,65 @@ class StreamingV05Test(unittest.TestCase):
         rows = out.to_rows()
         self.assertEqual(rows["schema"], ["id", "value"])
         self.assertEqual(rows["rows"], [[2, 20], [3, 30]])
+
+    def test_batch_sql_supports_numeric_date_and_string_functions(self):
+        session = velaria.Session()
+        table = pa.table(
+            {
+                "id": [1, 2, 3],
+                "ts": [
+                    "2026-03-29T10:00:00",
+                    "2026-03-29T10:01:00",
+                    "2026-04-01T08:00:00",
+                ],
+                "value": [-1.5, 2.25, 0.0],
+                "name": ["Alice", "Bob", "cARl"],
+            }
+        )
+        df = session.create_dataframe_from_arrow(table)
+        session.create_temp_view("batch_function_input", df)
+
+        rows = self._run_batch_sql(
+            session,
+            "SELECT id, ABS(value) AS abs_value, YEAR(ts) AS year, MONTH(ts) AS month, DAY(ts) AS day, LOWER(name) AS lower_name "
+            "FROM batch_function_input",
+        ).to_rows()
+
+        self.assertEqual(rows["schema"], ["id", "abs_value", "year", "month", "day", "lower_name"])
+        expected = {
+            1: (1.5, 2026, 3, 29, "alice"),
+            2: (2.25, 2026, 3, 29, "bob"),
+            3: (0.0, 2026, 4, 1, "carl"),
+        }
+        for row in rows["rows"]:
+            row_id = row[0]
+            abs_value, year, month, day, lower_name = row[1], row[2], row[3], row[4], row[5]
+            exp = expected[row_id]
+            self.assertAlmostEqual(float(abs_value), exp[0], places=6)
+            self.assertEqual(int(year), exp[1])
+            self.assertEqual(int(month), exp[2])
+            self.assertEqual(int(day), exp[3])
+            self.assertEqual(lower_name, exp[4])
+
+    def test_batch_sql_supports_order_by(self):
+        session = velaria.Session()
+        table = pa.table(
+            {
+                "id": [1, 2, 3, 4],
+                "value": [-1.5, 2.25, 0.0, 7.4],
+                "name": ["cc", "bb", "dd", "aa"],
+            }
+        )
+        df = session.create_dataframe_from_arrow(table)
+        session.create_temp_view("batch_order_input", df)
+
+        rows = self._run_batch_sql(
+            session,
+            "SELECT id, ABS(value) AS abs_value, LOWER(name) AS lower_name "
+            "FROM batch_order_input ORDER BY abs_value DESC, lower_name ASC",
+        ).to_rows()
+
+        self.assertEqual([row[0] for row in rows["rows"]], [4, 2, 1, 3])
 
     def test_stream_progress_contract_with_start_stream_sql(self):
         session = velaria.Session()
@@ -297,6 +379,113 @@ class StreamingV05Test(unittest.TestCase):
         self.assertIn("actor_eligible=false", explain)
         self.assertIn(f"actor_eligibility_reason={reason}", explain)
         self.assertIn(f"reason={reason}", explain)
+
+    def test_start_stream_sql_supports_numeric_date_and_string_functions(self):
+        session = velaria.Session()
+        table = pa.table(
+            {
+                "id": [1, 2, 3, 4],
+                "ts": [
+                    "2026-03-29T10:00:00",
+                    "2026-03-29T10:01:00",
+                    "2026-03-30T11:15:00",
+                    "2026-04-01T08:00:00",
+                ],
+                "value": [-1.5, 2.25, -0.0, 7.4],
+                "key": ["aa", "bb", "cc", "dd"],
+            }
+        )
+        stream_df = session.create_stream_from_arrow(table)
+        session.create_temp_view("batchless_stream_function_input", stream_df)
+
+        with tempfile.TemporaryDirectory(prefix="velaria-py-stream-function-") as tmp:
+            sink_path = str(pathlib.Path(tmp) / "sink.csv")
+            session.sql(
+                "CREATE SINK TABLE stream_function_out "
+                "(id INT, abs_value DOUBLE, year INT, month INT, day INT, lower_name STRING) "
+                f"USING csv OPTIONS(path '{sink_path}', delimiter ',')"
+            )
+            query = self._run_stream_sql(
+                session,
+                "INSERT INTO stream_function_out "
+                "SELECT id, ABS(value) AS abs_value, YEAR(ts) AS year, MONTH(ts) AS month, DAY(ts) AS day, LOWER(key) AS lower_name "
+                "FROM batchless_stream_function_input",
+                trigger_interval_ms=0,
+                execution_mode="local-workers",
+                local_workers=4,
+                max_inflight_partitions=4,
+                checkpoint_delivery_mode="best-effort",
+            )
+            query.start()
+            processed = query.await_termination()
+            self.assertEqual(processed, 1)
+
+            with open(sink_path, newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+
+            self.assertEqual(len(rows), 4)
+            rows_by_id = {
+                int(float(row["id"])): row for row in rows
+            }
+            self.assertAlmostEqual(float(rows_by_id[1]["abs_value"]), 1.5, places=6)
+            self.assertEqual(int(float(rows_by_id[1]["year"])), 2026)
+            self.assertEqual(int(float(rows_by_id[1]["month"])), 3)
+            self.assertEqual(int(float(rows_by_id[1]["day"])), 29)
+            self.assertAlmostEqual(float(rows_by_id[2]["abs_value"]), 2.25, places=6)
+            self.assertEqual(int(float(rows_by_id[2]["year"])), 2026)
+            self.assertEqual(int(float(rows_by_id[2]["month"])), 3)
+            self.assertEqual(int(float(rows_by_id[2]["day"])), 29)
+            self.assertAlmostEqual(float(rows_by_id[3]["abs_value"]), 0.0, places=6)
+            self.assertEqual(int(float(rows_by_id[3]["year"])), 2026)
+            self.assertEqual(int(float(rows_by_id[3]["month"])), 3)
+            self.assertEqual(int(float(rows_by_id[3]["day"])), 30)
+            self.assertAlmostEqual(float(rows_by_id[4]["abs_value"]), 7.4, places=6)
+            self.assertEqual(int(float(rows_by_id[4]["year"])), 2026)
+            self.assertEqual(int(float(rows_by_id[4]["month"])), 4)
+            self.assertEqual(int(float(rows_by_id[4]["day"])), 1)
+            self.assertEqual(rows_by_id[1]["lower_name"], "aa")
+            self.assertEqual(rows_by_id[2]["lower_name"], "bb")
+            self.assertEqual(rows_by_id[3]["lower_name"], "cc")
+            self.assertEqual(rows_by_id[4]["lower_name"], "dd")
+
+    def test_start_stream_sql_supports_order_by(self):
+        session = velaria.Session()
+        table = pa.table(
+            {
+                "id": [1, 2, 3, 4],
+                "value": [-1.5, 2.25, 0.0, 7.4],
+                "key": ["cc", "bb", "dd", "aa"],
+            }
+        )
+        stream_df = session.create_stream_from_arrow(table)
+        session.create_temp_view("stream_order_input", stream_df)
+
+        with tempfile.TemporaryDirectory(prefix="velaria-py-stream-order-") as tmp:
+            sink_path = str(pathlib.Path(tmp) / "sink.csv")
+            session.sql(
+                "CREATE SINK TABLE stream_order_out "
+                "(id INT, abs_value DOUBLE, lower_name STRING) "
+                f"USING csv OPTIONS(path '{sink_path}', delimiter ',')"
+            )
+            query = self._run_stream_sql(
+                session,
+                "INSERT INTO stream_order_out "
+                "SELECT id, ABS(value) AS abs_value, LOWER(key) AS lower_name "
+                "FROM stream_order_input ORDER BY abs_value DESC, lower_name ASC",
+                trigger_interval_ms=0,
+                execution_mode="local-workers",
+                local_workers=4,
+                max_inflight_partitions=4,
+                checkpoint_delivery_mode="best-effort",
+            )
+            query.start()
+            processed = query.await_termination()
+            self.assertEqual(processed, 1)
+
+            with open(sink_path, newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+
+            self.assertEqual([int(float(row["id"])) for row in rows], [4, 2, 1, 3])
 
 
 if __name__ == "__main__":

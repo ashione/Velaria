@@ -1,4 +1,5 @@
 #include <stdexcept>
+#include <cmath>
 #include <string>
 
 #include "src/dataflow/core/execution/columnar_batch.h"
@@ -83,6 +84,47 @@ int main() {
   expect(window.size() == 2, "window result size mismatch");
   expect(window[0].asInt64() == 10000, "window first row mismatch");
   expect(window[1].asInt64() == 15000, "window second row mismatch");
+
+  dataflow::Table abs_table(
+      dataflow::Schema({"value"}),
+      {
+          {dataflow::Value(-10.5)},
+          {dataflow::Value(2.25)},
+          {dataflow::Value()},
+          {dataflow::Value(-7.2)},
+      });
+  const auto abs_input = dataflow::materializeDoubleColumn(abs_table, 0);
+  const auto abs_output = dataflow::vectorizedAbs(abs_input);
+  expect(abs_output.size() == 4, "abs result size mismatch");
+  expect(std::abs(abs_output[0].asDouble() - 10.5) < 1e-9, "abs first row mismatch");
+  expect(std::abs(abs_output[1].asDouble() - 2.25) < 1e-9, "abs second row mismatch");
+  expect(abs_output[2].isNull(), "abs third row should preserve null");
+  expect(std::abs(abs_output[3].asDouble() - 7.2) < 1e-9, "abs fourth row mismatch");
+
+  const auto ceil_output = dataflow::vectorizedCeil(abs_input);
+  expect(std::abs(ceil_output[0].asDouble() - (-10.0)) < 1e-9, "ceil first row mismatch");
+  expect(std::abs(ceil_output[1].asDouble() - 3.0) < 1e-9, "ceil second row mismatch");
+  const auto floor_output = dataflow::vectorizedFloor(abs_input);
+  expect(std::abs(floor_output[0].asDouble() - (-11.0)) < 1e-9, "floor first row mismatch");
+  expect(std::abs(floor_output[1].asDouble() - 2.0) < 1e-9, "floor second row mismatch");
+  const auto round_output = dataflow::vectorizedRound(abs_input);
+  expect(std::abs(round_output[0].asDouble() - (-11.0)) < 1e-9, "round first row mismatch");
+  expect(std::abs(round_output[1].asDouble() - 2.0) < 1e-9, "round second row mismatch");
+
+  dataflow::Table sort_table(
+      dataflow::Schema({"id", "score", "region"}),
+      {
+          {dataflow::Value(int64_t(1)), dataflow::Value(2.0), dataflow::Value("b")},
+          {dataflow::Value(int64_t(2)), dataflow::Value(), dataflow::Value("a")},
+          {dataflow::Value(int64_t(3)), dataflow::Value(2.0), dataflow::Value("a")},
+          {dataflow::Value(int64_t(4)), dataflow::Value(5.0), dataflow::Value("c")},
+      });
+  const auto sorted = dataflow::sortTable(sort_table, {1, 2}, {false, true});
+  expect(sorted.rows.size() == 4, "sortTable row count mismatch");
+  expect(sorted.rows[0][0].asInt64() == 4, "sortTable first row mismatch");
+  expect(sorted.rows[1][0].asInt64() == 3, "sortTable second row mismatch");
+  expect(sorted.rows[2][0].asInt64() == 1, "sortTable third row mismatch");
+  expect(sorted.rows[3][0].asInt64() == 2, "sortTable null row should sort last");
 
   const auto serialized_keys = dataflow::materializeSerializedKeys(table, {0, 2});
   expect(serialized_keys.size() == 3, "serialized key count mismatch");

@@ -62,6 +62,30 @@ int main() {
   expect(string_out.rows[2][string_idx].toString() == "emea",
          "string withColumn should transform third row");
 
+  dataflow::Schema stream_style_schema({"ts"});
+  dataflow::Table stream_style_source(
+      stream_style_schema,
+      {{dataflow::Value("2026-03-29T10:00:00")}, {dataflow::Value("2026-03-30T08:30:00")}});
+  dataflow::PlanNodePtr stream_style_plan =
+      std::make_shared<dataflow::SourcePlan>("memory", stream_style_source);
+  dataflow::ComputedColumnArg ts_arg;
+  ts_arg.is_literal = false;
+  ts_arg.source_column_index = static_cast<std::size_t>(-1);
+  ts_arg.source_column_name = "ts";
+  stream_style_plan = std::make_shared<dataflow::WithColumnPlan>(
+      stream_style_plan, "event_year", dataflow::ComputedColumnKind::DateYear,
+      std::vector<dataflow::ComputedColumnArg>{ts_arg});
+  const auto encoded_stream_style = dataflow::serializePlan(stream_style_plan);
+  const auto decoded_stream_style = dataflow::deserializePlan(encoded_stream_style);
+  const auto stream_style_out = executor.execute(decoded_stream_style);
+  expect(stream_style_out.schema.has("event_year"),
+         "withColumn plan roundtrip should preserve named source column");
+  const auto year_idx = stream_style_out.schema.indexOf("event_year");
+  expect(stream_style_out.rows[0][year_idx].asInt64() == 2026,
+         "named source column first derived year mismatch");
+  expect(stream_style_out.rows[1][year_idx].asInt64() == 2026,
+         "named source column second derived year mismatch");
+
   dataflow::Schema aggregate_schema({"region", "score"});
   dataflow::Table aggregate_source(
       aggregate_schema,
@@ -70,6 +94,18 @@ int main() {
           {dataflow::Value("emea"), dataflow::Value(int64_t(5))},
           {dataflow::Value("apac"), dataflow::Value(int64_t(7))},
       });
+  dataflow::PlanNodePtr order_plan =
+      std::make_shared<dataflow::SourcePlan>("memory", aggregate_source);
+  order_plan = std::make_shared<dataflow::OrderByPlan>(
+      order_plan, std::vector<std::size_t>{1, 0}, std::vector<bool>{false, true});
+  const auto order_encoded = dataflow::serializePlan(order_plan);
+  const auto order_decoded = dataflow::deserializePlan(order_encoded);
+  const auto order_out = executor.execute(order_decoded);
+  expect(order_out.rows.size() == 3, "order by should preserve row count");
+  expect(order_out.rows[0][1].asInt64() == 7, "order by highest score first");
+  expect(order_out.rows[1][1].asInt64() == 5, "order by second score");
+  expect(order_out.rows[2][1].asInt64() == 3, "order by third score");
+
   dataflow::PlanNodePtr aggregate_plan =
       std::make_shared<dataflow::SourcePlan>("memory", aggregate_source);
   dataflow::AggregateSpec sum_spec{dataflow::AggregateFunction::Sum, 1, "total_score"};

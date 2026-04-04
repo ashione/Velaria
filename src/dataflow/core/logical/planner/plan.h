@@ -22,7 +22,8 @@ enum class PlanKind {
   GroupBySum,
   Aggregate,
   Join,
-  Sink
+  Sink,
+  OrderBy
 };
 enum class JoinKind { Inner, Left, Right, Full };
 enum class ComputedColumnKind {
@@ -40,13 +41,21 @@ enum class ComputedColumnKind {
   StringSubstr,
   StringLtrim,
   StringRtrim,
-  StringReplace
+  StringReplace,
+  NumericAbs,
+  NumericCeil,
+  NumericFloor,
+  NumericRound,
+  DateYear,
+  DateMonth,
+  DateDay
 };
 
 struct ComputedColumnArg {
   bool is_literal = false;
   Value literal;
   size_t source_column_index = 0;
+  std::string source_column_name;
 };
 
 struct PlanNode {
@@ -120,6 +129,17 @@ struct LimitPlan : PlanNode {
   PlanNodePtr child;
   size_t n;
   LimitPlan(PlanNodePtr p, size_t limit) : PlanNode(PlanKind::Limit), child(std::move(p)), n(limit) {}
+};
+
+struct OrderByPlan : PlanNode {
+  PlanNodePtr child;
+  std::vector<size_t> indices;
+  std::vector<bool> ascending;
+  OrderByPlan(PlanNodePtr p, std::vector<size_t> idx, std::vector<bool> asc)
+      : PlanNode(PlanKind::OrderBy),
+        child(std::move(p)),
+        indices(std::move(idx)),
+        ascending(std::move(asc)) {}
 };
 
 struct WindowAssignPlan : PlanNode {

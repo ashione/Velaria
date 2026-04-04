@@ -50,6 +50,8 @@ class DataFrame {
   DataFrame withColumn(const std::string& name, ComputedColumnKind function,
                       const std::vector<ComputedColumnArg>& args) const;
   DataFrame drop(const std::string& column) const;
+  DataFrame orderBy(const std::vector<std::string>& columns,
+                    const std::vector<bool>& ascending = {}) const;
   DataFrame limit(size_t n) const;
   DataFrame repartition(size_t parts) const;
   DataFrame cache() const;

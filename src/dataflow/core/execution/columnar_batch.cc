@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
@@ -12,6 +13,20 @@ namespace dataflow {
 namespace {
 
 constexpr char kGroupDelim = '\x1f';
+
+std::tm toUtcTm(std::time_t seconds) {
+  std::tm tm = {};
+#if defined(_WIN32)
+  if (gmtime_s(&tm, &seconds) != 0) {
+    throw std::runtime_error("failed to convert epoch to UTC");
+  }
+#else
+  if (gmtime_r(&seconds, &tm) == nullptr) {
+    throw std::runtime_error("failed to convert epoch to UTC");
+  }
+#endif
+  return tm;
+}
 
 std::string valueAsString(const Value& value) {
   if (value.type() == DataType::Nil) {
@@ -25,12 +40,22 @@ std::string valueAsString(const Value& value) {
 
 int64_t valueAsInt64(const Value& value) {
   if (value.type() == DataType::Nil) {
-    throw std::runtime_error("string function argument cannot be null");
+    throw std::runtime_error("computed function argument cannot be null");
   }
   if (!value.isNumber()) {
-    throw std::runtime_error("string function argument must be numeric");
+    throw std::runtime_error("computed function argument must be numeric");
   }
   return value.asInt64();
+}
+
+double valueAsDouble(const Value& value) {
+  if (value.type() == DataType::Nil) {
+    throw std::runtime_error("computed function argument cannot be null");
+  }
+  if (!value.isNumber()) {
+    throw std::runtime_error("computed function argument must be numeric");
+  }
+  return value.asDouble();
 }
 
 int64_t valueAsEpochMillis(const Value& value) {
@@ -255,6 +280,34 @@ ValueColumnBuffer materializeValueColumn(const Table& table, std::size_t column_
   return *viewValueColumn(table, column_index).buffer;
 }
 
+DoubleColumnBuffer makeNullDoubleColumn(std::size_t row_count) {
+  DoubleColumnBuffer out;
+  out.values.resize(row_count);
+  out.is_null.assign(row_count, static_cast<uint8_t>(1));
+  return out;
+}
+
+DoubleColumnBuffer materializeDoubleColumn(const Table& table, std::size_t column_index) {
+  const auto value_column = viewValueColumn(table, column_index);
+  DoubleColumnBuffer out;
+  out.values.resize(value_column.values().size());
+  out.is_null.assign(value_column.values().size(), 0);
+  for (std::size_t row_index = 0; row_index < value_column.values().size(); ++row_index) {
+    const auto& value = value_column.values()[row_index];
+    if (value.isNull()) {
+      out.is_null[row_index] = 1;
+      continue;
+    }
+    try {
+      out.values[row_index] = valueAsDouble(value);
+    } catch (...) {
+      out.is_null[row_index] = 1;
+      throw;
+    }
+  }
+  return out;
+}
+
 std::vector<ValueColumnBuffer> materializeValueColumns(const Table& table,
                                                        const std::vector<std::size_t>& indices) {
   const auto columns = viewValueColumns(table, indices);
@@ -406,6 +459,71 @@ Table limitTable(const Table& table, std::size_t limit) {
       ValueColumnBuffer output_column;
       output_column.values.reserve(row_count);
       for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+        output_column.values.push_back(input_column.values[row_index]);
+      }
+      cache->columns.push_back(std::move(output_column));
+    }
+    out.columnar_cache = std::move(cache);
+  }
+  return out;
+}
+
+Table sortTable(const Table& table, const std::vector<std::size_t>& indices,
+                const std::vector<bool>& ascending) {
+  if (!ascending.empty() && ascending.size() != indices.size()) {
+    throw std::runtime_error("ORDER BY direction count mismatch");
+  }
+  if (indices.empty() || table.rows.size() < 2) {
+    return table;
+  }
+
+  const auto columns = viewValueColumns(table, indices);
+  std::vector<bool> directions = ascending;
+  if (directions.empty()) {
+    directions.assign(indices.size(), true);
+  }
+
+  std::vector<std::size_t> row_order(table.rows.size());
+  for (std::size_t i = 0; i < row_order.size(); ++i) {
+    row_order[i] = i;
+  }
+
+  std::stable_sort(
+      row_order.begin(), row_order.end(),
+      [&](std::size_t lhs_index, std::size_t rhs_index) {
+        for (std::size_t column_index = 0; column_index < columns.size(); ++column_index) {
+          const auto& lhs = columns[column_index].values()[lhs_index];
+          const auto& rhs = columns[column_index].values()[rhs_index];
+          if (lhs.isNull() && rhs.isNull()) {
+            continue;
+          }
+          if (lhs.isNull()) {
+            return false;
+          }
+          if (rhs.isNull()) {
+            return true;
+          }
+          if (lhs == rhs) {
+            continue;
+          }
+          return directions[column_index] ? (lhs < rhs) : (lhs > rhs);
+        }
+        return false;
+      });
+
+  Table out(table.schema, {});
+  out.rows.reserve(table.rows.size());
+  for (auto row_index : row_order) {
+    out.rows.push_back(table.rows[row_index]);
+  }
+  if (const auto cache_in = snapshotColumnarCache(&table)) {
+    auto cache = std::make_shared<ColumnarTable>();
+    cache->schema = out.schema;
+    cache->columns.reserve(cache_in->columns.size());
+    for (const auto& input_column : cache_in->columns) {
+      ValueColumnBuffer output_column;
+      output_column.values.reserve(row_order.size());
+      for (auto row_index : row_order) {
         output_column.values.push_back(input_column.values[row_index]);
       }
       cache->columns.push_back(std::move(output_column));
@@ -651,6 +769,315 @@ std::vector<Value> vectorizedStringPosition(const StringColumnBuffer& needle,
                                            : Value(static_cast<int64_t>(position + 1));
   }
   return out;
+}
+
+std::vector<Value> vectorizedAbs(const DoubleColumnBuffer& input) {
+  std::vector<Value> out(input.values.size());
+  for (std::size_t i = 0; i < input.values.size(); ++i) {
+    if (input.is_null[i] != 0) {
+      continue;
+    }
+    const auto abs_value = std::fabs(input.values[i]);
+    out[i] = Value(abs_value);
+  }
+  return out;
+}
+
+std::vector<Value> vectorizedCeil(const DoubleColumnBuffer& input) {
+  std::vector<Value> out(input.values.size());
+  for (std::size_t i = 0; i < input.values.size(); ++i) {
+    if (input.is_null[i] != 0) {
+      continue;
+    }
+    out[i] = Value(std::ceil(input.values[i]));
+  }
+  return out;
+}
+
+std::vector<Value> vectorizedFloor(const DoubleColumnBuffer& input) {
+  std::vector<Value> out(input.values.size());
+  for (std::size_t i = 0; i < input.values.size(); ++i) {
+    if (input.is_null[i] != 0) {
+      continue;
+    }
+    out[i] = Value(std::floor(input.values[i]));
+  }
+  return out;
+}
+
+std::vector<Value> vectorizedRound(const DoubleColumnBuffer& input) {
+  std::vector<Value> out(input.values.size());
+  for (std::size_t i = 0; i < input.values.size(); ++i) {
+    if (input.is_null[i] != 0) {
+      continue;
+    }
+    out[i] = Value(std::round(input.values[i]));
+  }
+  return out;
+}
+
+std::vector<Value> vectorizedDateYear(const ValueColumnView& input) {
+  std::vector<Value> out(input.values().size());
+  for (std::size_t i = 0; i < input.values().size(); ++i) {
+    if (input.values()[i].isNull()) {
+      continue;
+    }
+    const int64_t millis = valueAsEpochMillis(input.values()[i]);
+    std::time_t sec = static_cast<std::time_t>(millis / 1000);
+    const auto tm_utc = toUtcTm(sec);
+    out[i] = Value(static_cast<int64_t>(tm_utc.tm_year + 1900));
+  }
+  return out;
+}
+
+std::vector<Value> vectorizedDateMonth(const ValueColumnView& input) {
+  std::vector<Value> out(input.values().size());
+  for (std::size_t i = 0; i < input.values().size(); ++i) {
+    if (input.values()[i].isNull()) {
+      continue;
+    }
+    const int64_t millis = valueAsEpochMillis(input.values()[i]);
+    std::time_t sec = static_cast<std::time_t>(millis / 1000);
+    const auto tm_utc = toUtcTm(sec);
+    out[i] = Value(static_cast<int64_t>(tm_utc.tm_mon + 1));
+  }
+  return out;
+}
+
+std::vector<Value> vectorizedDateDay(const ValueColumnView& input) {
+  std::vector<Value> out(input.values().size());
+  for (std::size_t i = 0; i < input.values().size(); ++i) {
+    if (input.values()[i].isNull()) {
+      continue;
+    }
+    const int64_t millis = valueAsEpochMillis(input.values()[i]);
+    std::time_t sec = static_cast<std::time_t>(millis / 1000);
+    const auto tm_utc = toUtcTm(sec);
+    out[i] = Value(static_cast<int64_t>(tm_utc.tm_mday));
+  }
+  return out;
+}
+
+std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind function,
+                                              const std::vector<ComputedColumnArg>& args) {
+  if (table == nullptr) {
+    throw std::invalid_argument("computed function table is null");
+  }
+  struct BoundComputedArg {
+    bool is_literal = false;
+    size_t source_column_index = 0;
+    bool literal_is_null = false;
+    bool literal_is_numeric = false;
+    int64_t literal_int64 = 0;
+    double literal_double = 0.0;
+    std::string literal_string;
+    std::string source_column_name;
+  };
+
+  std::vector<BoundComputedArg> bound;
+  bound.reserve(args.size());
+  for (const auto& arg : args) {
+    BoundComputedArg item;
+    item.is_literal = arg.is_literal;
+    item.source_column_index = arg.source_column_index;
+    item.source_column_name = arg.source_column_name;
+    if (arg.is_literal) {
+      item.literal_is_null = arg.literal.isNull();
+      if (!item.literal_is_null) {
+        item.literal_string = arg.literal.type() == DataType::String ? arg.literal.asString()
+                                                                    : arg.literal.toString();
+        if (arg.literal.isNumber()) {
+          item.literal_is_numeric = true;
+          item.literal_int64 = arg.literal.asInt64();
+          item.literal_double = arg.literal.asDouble();
+        }
+      }
+    }
+    bound.push_back(std::move(item));
+  }
+
+  const auto row_count = table->rows.size();
+
+  auto resolve_source_index = [&](const BoundComputedArg& arg) {
+    if (arg.source_column_index != static_cast<size_t>(-1)) {
+      return arg.source_column_index;
+    }
+    if (arg.source_column_name.empty()) {
+      throw std::runtime_error("computed function argument has no source column");
+    }
+    return table->schema.indexOf(arg.source_column_name);
+  };
+
+  auto materialize_string_args = [&]() {
+    std::vector<StringColumnBuffer> columns;
+    columns.reserve(bound.size());
+    for (const auto& arg : bound) {
+      if (arg.is_literal) {
+        if (arg.literal_is_null) {
+          columns.push_back(makeNullStringColumn(row_count));
+          continue;
+        }
+        columns.push_back(makeConstantStringColumn(row_count, arg.literal_string));
+        continue;
+      }
+      columns.push_back(materializeStringColumn(*table, resolve_source_index(arg)));
+    }
+    return columns;
+  };
+
+  auto materialize_int64_arg = [&](const BoundComputedArg& arg) -> Int64ColumnBuffer {
+    if (arg.is_literal) {
+      if (arg.literal_is_null) {
+        return makeNullInt64Column(row_count);
+      }
+      if (!arg.literal_is_numeric) {
+        throw std::runtime_error("computed function argument must be numeric");
+      }
+      return makeConstantInt64Column(row_count, arg.literal_int64);
+    }
+    return materializeInt64Column(*table, resolve_source_index(arg));
+  };
+
+  auto materialize_double_arg = [&](const BoundComputedArg& arg) -> DoubleColumnBuffer {
+    if (arg.is_literal) {
+      if (arg.literal_is_null) {
+        return makeNullDoubleColumn(row_count);
+      }
+      if (!arg.literal_is_numeric) {
+        throw std::runtime_error("computed function argument must be numeric");
+      }
+      DoubleColumnBuffer out;
+      out.values.assign(row_count, arg.literal_double);
+      out.is_null.assign(row_count, 0);
+      return out;
+    }
+    return materializeDoubleColumn(*table, resolve_source_index(arg));
+  };
+
+  auto materialize_date_field = [&](const BoundComputedArg& arg, int which) {
+    std::vector<Value> output(row_count);
+    for (std::size_t i = 0; i < row_count; ++i) {
+      Value value;
+      if (arg.is_literal) {
+        if (arg.literal_is_null) {
+          continue;
+        }
+        value = arg.literal_is_numeric ? Value(arg.literal_double) : Value(arg.literal_string);
+      } else {
+        const auto input = viewValueColumn(*table, resolve_source_index(arg));
+        if (i >= input.values().size()) {
+          throw std::runtime_error("computed function argument index out of range");
+        }
+        value = input.values()[i];
+      }
+      if (value.isNull()) {
+        continue;
+      }
+      const int64_t millis = valueAsEpochMillis(value);
+      std::time_t sec = static_cast<std::time_t>(millis / 1000);
+      const auto tm_utc = toUtcTm(sec);
+      int64_t field = 0;
+      if (which == 0) {
+        field = static_cast<int64_t>(tm_utc.tm_year + 1900);
+      } else if (which == 1) {
+        field = static_cast<int64_t>(tm_utc.tm_mon + 1);
+      } else {
+        field = static_cast<int64_t>(tm_utc.tm_mday);
+      }
+      output[i] = Value(field);
+    }
+    return output;
+  };
+
+  switch (function) {
+    case ComputedColumnKind::Copy:
+      throw std::runtime_error("computed function must not be COPY");
+    case ComputedColumnKind::StringLength:
+      if (bound.size() != 1) throw std::runtime_error("LENGTH expects 1 argument");
+      return vectorizedStringLength(materialize_string_args()[0]);
+    case ComputedColumnKind::StringLower:
+      if (bound.size() != 1) throw std::runtime_error("LOWER expects 1 argument");
+      return vectorizedStringLower(materialize_string_args()[0]);
+    case ComputedColumnKind::StringUpper:
+      if (bound.size() != 1) throw std::runtime_error("UPPER expects 1 argument");
+      return vectorizedStringUpper(materialize_string_args()[0]);
+    case ComputedColumnKind::StringTrim:
+      if (bound.size() != 1) throw std::runtime_error("TRIM expects 1 argument");
+      return vectorizedStringTrim(materialize_string_args()[0]);
+    case ComputedColumnKind::StringConcat:
+      return vectorizedStringConcat(materialize_string_args());
+    case ComputedColumnKind::StringReverse:
+      if (bound.size() != 1) throw std::runtime_error("REVERSE expects 1 argument");
+      return vectorizedStringReverse(materialize_string_args()[0]);
+    case ComputedColumnKind::StringConcatWs:
+      return vectorizedStringConcatWs(materialize_string_args());
+    case ComputedColumnKind::StringLeft:
+      if (bound.size() != 2) throw std::runtime_error("LEFT requires 2 arguments");
+      return vectorizedStringLeft(materialize_string_args()[0], materialize_int64_arg(bound[1]));
+    case ComputedColumnKind::StringRight:
+      if (bound.size() != 2) throw std::runtime_error("RIGHT requires 2 arguments");
+      return vectorizedStringRight(materialize_string_args()[0], materialize_int64_arg(bound[1]));
+    case ComputedColumnKind::StringPosition:
+      if (bound.size() != 2) throw std::runtime_error("POSITION requires 2 arguments");
+      {
+        auto string_args = materialize_string_args();
+        return vectorizedStringPosition(string_args[0], string_args[1]);
+      }
+    case ComputedColumnKind::StringSubstr:
+      if (bound.size() < 2 || bound.size() > 3) throw std::runtime_error("SUBSTR expects 2 or 3 arguments");
+      if (bound.size() == 2) {
+        auto input = materialize_string_args();
+        return vectorizedStringSubstr(input[0], materialize_int64_arg(bound[1]), nullptr);
+      }
+      {
+        auto input = materialize_string_args();
+        auto length = materialize_int64_arg(bound[2]);
+        return vectorizedStringSubstr(input[0], materialize_int64_arg(bound[1]), &length);
+      }
+    case ComputedColumnKind::StringLtrim:
+      if (bound.size() != 1) throw std::runtime_error("LTRIM/RTRIM requires 1 argument");
+      return vectorizedStringLtrim(materialize_string_args()[0]);
+    case ComputedColumnKind::StringRtrim:
+      if (bound.size() != 1) throw std::runtime_error("LTRIM/RTRIM requires 1 argument");
+      return vectorizedStringRtrim(materialize_string_args()[0]);
+    case ComputedColumnKind::StringReplace:
+      if (bound.size() != 3) throw std::runtime_error("REPLACE requires 3 arguments");
+      {
+        auto input = materialize_string_args();
+        return vectorizedStringReplace(input[0], input[1], input[2]);
+      }
+    case ComputedColumnKind::NumericAbs:
+      if (bound.size() != 1) throw std::runtime_error("ABS expects 1 argument");
+      return vectorizedAbs(materialize_double_arg(bound[0]));
+    case ComputedColumnKind::NumericCeil:
+      if (bound.size() != 1) throw std::runtime_error("CEIL expects 1 argument");
+      return vectorizedCeil(materialize_double_arg(bound[0]));
+    case ComputedColumnKind::NumericFloor:
+      if (bound.size() != 1) throw std::runtime_error("FLOOR expects 1 argument");
+      return vectorizedFloor(materialize_double_arg(bound[0]));
+    case ComputedColumnKind::NumericRound:
+      if (bound.size() != 1) throw std::runtime_error("ROUND expects 1 argument");
+      return vectorizedRound(materialize_double_arg(bound[0]));
+    case ComputedColumnKind::DateYear:
+      if (bound.size() != 1) throw std::runtime_error("YEAR expects 1 argument");
+      if (!bound[0].is_literal) {
+        return vectorizedDateYear(viewValueColumn(*table, resolve_source_index(bound[0])));
+      }
+      return materialize_date_field(bound[0], 0);
+    case ComputedColumnKind::DateMonth:
+      if (bound.size() != 1) throw std::runtime_error("MONTH expects 1 argument");
+      if (!bound[0].is_literal) {
+        return vectorizedDateMonth(viewValueColumn(*table, resolve_source_index(bound[0])));
+      }
+      return materialize_date_field(bound[0], 1);
+    case ComputedColumnKind::DateDay:
+      if (bound.size() != 1) throw std::runtime_error("DAY expects 1 argument");
+      if (!bound[0].is_literal) {
+        return vectorizedDateDay(viewValueColumn(*table, resolve_source_index(bound[0])));
+      }
+      return materialize_date_field(bound[0], 2);
+  }
+  throw std::runtime_error("unsupported computed function");
 }
 
 void appendColumn(Table* table, std::vector<Value>&& values) {

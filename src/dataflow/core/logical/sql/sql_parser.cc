@@ -35,7 +35,8 @@ bool isKeyword(const std::string& value, const std::string& expected) {
 bool isClauseKeyword(const std::string& value) {
   const auto u = toUpper(value);
   return u == "FROM" || u == "WHERE" || u == "GROUP" || u == "BY" || u == "HAVING" ||
-         u == "LIMIT" || u == "JOIN" || u == "INNER" || u == "LEFT" || u == "ON" || u == "AS" ||
+         u == "ORDER" || u == "LIMIT" || u == "JOIN" || u == "INNER" || u == "LEFT" ||
+         u == "ON" || u == "AS" ||
          u == "SELECT" || u == "CREATE" || u == "TABLE" || u == "INSERT" || u == "INTO" ||
          u == "VALUES" || u == "USING" || u == "OPTIONS" || u == "SOURCE" || u == "SINK" ||
          u == "WINDOW" || u == "EVERY";
@@ -299,6 +300,13 @@ std::optional<StringFunctionKind> tryParseStringFunction(const std::string& valu
   if (u == "RTRIM") return StringFunctionKind::Rtrim;
   if (u == "POSITION") return StringFunctionKind::Position;
   if (u == "REPLACE") return StringFunctionKind::Replace;
+  if (u == "ABS") return StringFunctionKind::Abs;
+  if (u == "CEIL") return StringFunctionKind::Ceil;
+  if (u == "FLOOR") return StringFunctionKind::Floor;
+  if (u == "ROUND") return StringFunctionKind::Round;
+  if (u == "YEAR") return StringFunctionKind::Year;
+  if (u == "MONTH") return StringFunctionKind::Month;
+  if (u == "DAY") return StringFunctionKind::Day;
   return std::nullopt;
 }
 
@@ -516,6 +524,17 @@ JoinItem parseJoin(ParseState& state) {
   return out;
 }
 
+OrderByItem parseOrderByItem(ParseState& state) {
+  OrderByItem item;
+  item.column = parseColumn(state);
+  if (state.consumeWord("ASC")) {
+    item.ascending = true;
+  } else if (state.consumeWord("DESC")) {
+    item.ascending = false;
+  }
+  return item;
+}
+
 SqlQuery parseSelectQuery(ParseState& state, bool alreadyConsumedSelect) {
   SqlQuery out;
   if (!alreadyConsumedSelect) {
@@ -580,6 +599,14 @@ SqlQuery parseSelectQuery(ParseState& state, bool alreadyConsumedSelect) {
 
   if (state.consumeWord("HAVING")) {
     out.having = parsePredicate(state);
+  }
+
+  if (state.consumeWord("ORDER")) {
+    state.expectWord("BY");
+    out.order_by.push_back(parseOrderByItem(state));
+    while (state.consumeSymbol(",")) {
+      out.order_by.push_back(parseOrderByItem(state));
+    }
   }
 
   if (state.consumeWord("LIMIT")) {

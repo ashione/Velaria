@@ -189,6 +189,7 @@ void serializeNode(const PlanNodePtr& plan, std::string* out) {
         appendInt(out, arg.is_literal ? 1 : 0);
         appendSize(out, arg.source_column_index);
         appendToken(out, serializeValue(arg.literal));
+        appendToken(out, arg.source_column_name);
       }
       return;
     }
@@ -203,6 +204,15 @@ void serializeNode(const PlanNodePtr& plan, std::string* out) {
       const auto* node = static_cast<const LimitPlan*>(plan.get());
       serializeNode(node->child, out);
       appendSize(out, node->n);
+      return;
+    }
+    case PlanKind::OrderBy: {
+      const auto* node = static_cast<const OrderByPlan*>(plan.get());
+      serializeNode(node->child, out);
+      appendSize(out, node->indices.size());
+      for (auto index : node->indices) appendSize(out, index);
+      appendSize(out, node->ascending.size());
+      for (bool asc : node->ascending) appendInt(out, asc ? 1 : 0);
       return;
     }
     case PlanKind::WindowAssign: {
@@ -296,6 +306,7 @@ PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset) {
         arg.is_literal = (readInt(payload, offset) != 0);
         arg.source_column_index = readSize(payload, offset);
         arg.literal = deserializeValue(readToken(payload, offset));
+        arg.source_column_name = readToken(payload, offset);
         args.push_back(std::move(arg));
       }
       if (function == ComputedColumnKind::Copy) {
@@ -319,6 +330,18 @@ PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset) {
     case PlanKind::Limit: {
       auto child = deserializeNode(payload, offset);
       return std::make_shared<LimitPlan>(std::move(child), readSize(payload, offset));
+    }
+    case PlanKind::OrderBy: {
+      auto child = deserializeNode(payload, offset);
+      std::vector<std::size_t> indices;
+      const auto index_count = readSize(payload, offset);
+      indices.reserve(index_count);
+      for (std::size_t i = 0; i < index_count; ++i) indices.push_back(readSize(payload, offset));
+      std::vector<bool> ascending;
+      const auto asc_count = readSize(payload, offset);
+      ascending.reserve(asc_count);
+      for (std::size_t i = 0; i < asc_count; ++i) ascending.push_back(readInt(payload, offset) != 0);
+      return std::make_shared<OrderByPlan>(std::move(child), std::move(indices), std::move(ascending));
     }
     case PlanKind::WindowAssign: {
       auto child = deserializeNode(payload, offset);

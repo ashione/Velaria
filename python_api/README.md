@@ -83,15 +83,17 @@ Current SQL mapping carried by Python:
   - `CREATE TABLE`, `CREATE SOURCE TABLE`, `CREATE SINK TABLE`
   - `INSERT INTO ... VALUES`
   - `INSERT INTO ... SELECT`
-  - `SELECT` with projection/alias, `WHERE`, `GROUP BY`, `LIMIT`, and the current minimal `JOIN`
-- batch string builtins currently exposed through the same core path:
+  - `SELECT` with projection/alias, `WHERE`, `GROUP BY`, `ORDER BY`, `LIMIT`, and the current minimal `JOIN`
+- batch builtins currently exposed through the same core path:
   - `LOWER`, `UPPER`, `TRIM`, `LTRIM`, `RTRIM`
   - `LENGTH`, `LEN`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, `REVERSE`
   - `CONCAT`, `CONCAT_WS`, `LEFT`, `RIGHT`, `SUBSTR` / `SUBSTRING`, `POSITION`, `REPLACE`
+  - `ABS`, `CEIL`, `FLOOR`, `ROUND`, `YEAR`, `MONTH`, `DAY`
 - `Session.stream_sql(...)`, `Session.explain_stream_sql(...)`, and `Session.start_stream_sql(...)` share the same stream SQL front-door checks:
   - source must be a source table / stream source
   - sink target must be a sink table
-  - only the current stream-stable projection, filter, window, and stateful aggregate shapes are accepted
+  - only the current stream-stable projection, filter, window, stateful aggregate, and bounded-source `ORDER BY` shapes are accepted
+- current SQL v1 keeps `ORDER BY` scoped to columns present in the `SELECT` output
 - unsupported SQL shapes are expected to surface as explicit parse / semantic / unsupported SQL v1 / table-kind errors from the core path, not Python-only behavior
 
 ## Repository Layout

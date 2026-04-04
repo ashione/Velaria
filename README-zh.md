@@ -158,18 +158,20 @@ workspace 落盘会保留内核 contract，不会重定义它们：
   - `CREATE TABLE`、`CREATE SOURCE TABLE`、`CREATE SINK TABLE`
   - `INSERT INTO ... VALUES`
   - `INSERT INTO ... SELECT`
-  - 带列投影/别名、`WHERE`、`GROUP BY`、`LIMIT`、当前最小 `JOIN` 的 `SELECT`
-- batch SQL 字符串内建函数：
+  - 带列投影/别名、`WHERE`、`GROUP BY`、`ORDER BY`、`LIMIT`、当前最小 `JOIN` 的 `SELECT`
+- batch SQL 内建函数：
   - `LOWER`、`UPPER`、`TRIM`、`LTRIM`、`RTRIM`
   - `LENGTH`、`LEN`、`CHAR_LENGTH`、`CHARACTER_LENGTH`、`REVERSE`
   - `CONCAT`、`CONCAT_WS`、`LEFT`、`RIGHT`、`SUBSTR` / `SUBSTRING`、`POSITION`、`REPLACE`
-- 基础 streaming operators：`select / filter / withColumn / drop / limit / window`
+  - `ABS`、`CEIL`、`FLOOR`、`ROUND`、`YEAR`、`MONTH`、`DAY`
+- 基础 streaming operators：`select / filter / withColumn / drop / limit / window / orderBy`
 - stateful streaming 聚合：`sum / count / min / max / avg`
 - 与当前内核对齐的 stream SQL 子集：
   - `session.streamSql(...)` 只接收 `SELECT`
   - `session.explainStreamSql(...)` 接收 `SELECT` 或 `INSERT INTO <sink> SELECT ...`
   - `session.startStreamSql(...)` 只接收 `INSERT INTO <sink> SELECT ...`
   - stream source 必须来自 source table，stream target 必须是 sink table
+  - stream `ORDER BY` 当前只接受 bounded source
   - window / stateful aggregate 的 explain 继续保持 `logical / physical / strategy`
 - 固定维度 float vector 的本地检索
 - Python Arrow 输入/输出
@@ -187,6 +189,8 @@ workspace 落盘会保留内核 contract，不会重定义它们：
 
 - `CREATE SOURCE TABLE` 是只读表，拒绝 `INSERT`
 - `CREATE SINK TABLE` 可写但不能作为查询输入
+- `ORDER BY` 当前只会解析 `SELECT` 输出中可见的列
+- unbounded stream 上的 `ORDER BY` 会被显式拒绝；当前 runtime 只对 bounded source 定义全局排序语义
 - stream SQL 遇到 batch-only 形态时会优先返回明确的 `not supported in SQL v1` 或 table-kind 错误，而不是模糊运行时失败
 
 ## Plan

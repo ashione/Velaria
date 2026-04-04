@@ -158,18 +158,20 @@ Available today:
   - `CREATE TABLE`, `CREATE SOURCE TABLE`, `CREATE SINK TABLE`
   - `INSERT INTO ... VALUES`
   - `INSERT INTO ... SELECT`
-  - `SELECT` with projection/alias, `WHERE`, `GROUP BY`, `LIMIT`, current minimal `JOIN`
-- batch SQL string builtins:
+  - `SELECT` with projection/alias, `WHERE`, `GROUP BY`, `ORDER BY`, `LIMIT`, current minimal `JOIN`
+- batch SQL builtins:
   - `LOWER`, `UPPER`, `TRIM`, `LTRIM`, `RTRIM`
   - `LENGTH`, `LEN`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, `REVERSE`
   - `CONCAT`, `CONCAT_WS`, `LEFT`, `RIGHT`, `SUBSTR` / `SUBSTRING`, `POSITION`, `REPLACE`
-- basic stream operators: `select / filter / withColumn / drop / limit / window`
+  - `ABS`, `CEIL`, `FLOOR`, `ROUND`, `YEAR`, `MONTH`, `DAY`
+- basic stream operators: `select / filter / withColumn / drop / limit / window / orderBy`
 - stateful stream aggregates: `sum / count / min / max / avg`
 - stream SQL subset aligned to the current kernel:
   - `session.streamSql(...)` accepts `SELECT`
   - `session.explainStreamSql(...)` accepts `SELECT` or `INSERT INTO <sink> SELECT ...`
   - `session.startStreamSql(...)` accepts `INSERT INTO <sink> SELECT ...`
   - stream sources must come from source tables and stream targets must be sink tables
+  - stream `ORDER BY` is currently accepted only for bounded sources
   - window and stateful aggregate explain remains `logical / physical / strategy`
 - local vector search on fixed-dimension float vectors
 - Python Arrow ingress/output
@@ -187,6 +189,8 @@ Current SQL v1 constraints:
 
 - `CREATE SOURCE TABLE` is read-only and rejects `INSERT`
 - `CREATE SINK TABLE` accepts writes but cannot be used as query input
+- `ORDER BY` currently resolves only against columns present in the `SELECT` output
+- unbounded stream `ORDER BY` is rejected explicitly; the current runtime only defines global ordering for bounded sources
 - stream SQL rejects batch-only shapes with explicit `not supported in SQL v1` or table-kind errors instead of falling through to ambiguous runtime failures
 
 ## Plan

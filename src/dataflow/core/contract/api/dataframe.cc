@@ -266,28 +266,50 @@ const CachedVectorColumn& DataFrame::vectorColumnCache(const std::string& vector
   }
 
   CachedVectorColumn cache;
-  const auto vector_column = viewValueColumn(source, vector_index);
-  cache.row_ids.reserve(vector_column.values().size());
   std::vector<std::vector<float>> vectors;
-  vectors.reserve(vector_column.values().size());
 
   std::size_t expected_dim = 0;
   bool has_dimension = false;
-  for (size_t row_id = 0; row_id < vector_column.values().size(); ++row_id) {
-    const auto& cell = vector_column.values()[row_id];
-    if (cell.isNull()) continue;
+  if (!source.rows.empty()) {
+    cache.row_ids.reserve(source.rows.size());
+    vectors.reserve(source.rows.size());
+    for (size_t row_id = 0; row_id < source.rows.size(); ++row_id) {
+      if (vector_index >= source.rows[row_id].size()) continue;
+      const auto& cell = source.rows[row_id][vector_index];
+      if (cell.isNull()) continue;
 
-    std::vector<float> vec = cell.type() == DataType::FixedVector
-                                 ? cell.asFixedVector()
-                                 : Value::parseFixedVector(cell.toString());
-    if (!has_dimension) {
-      expected_dim = vec.size();
-      has_dimension = true;
-    } else if (vec.size() != expected_dim) {
-      throw std::invalid_argument("fixed vector length mismatch in vector column cache");
+      std::vector<float> vec = cell.type() == DataType::FixedVector
+                                   ? cell.asFixedVector()
+                                   : Value::parseFixedVector(cell.toString());
+      if (!has_dimension) {
+        expected_dim = vec.size();
+        has_dimension = true;
+      } else if (vec.size() != expected_dim) {
+        throw std::invalid_argument("fixed vector length mismatch in vector column cache");
+      }
+      cache.row_ids.push_back(row_id);
+      vectors.push_back(std::move(vec));
     }
-    cache.row_ids.push_back(row_id);
-    vectors.push_back(std::move(vec));
+  } else {
+    const auto vector_column = viewValueColumn(source, vector_index);
+    cache.row_ids.reserve(vector_column.values().size());
+    vectors.reserve(vector_column.values().size());
+    for (size_t row_id = 0; row_id < vector_column.values().size(); ++row_id) {
+      const auto& cell = vector_column.values()[row_id];
+      if (cell.isNull()) continue;
+
+      std::vector<float> vec = cell.type() == DataType::FixedVector
+                                   ? cell.asFixedVector()
+                                   : Value::parseFixedVector(cell.toString());
+      if (!has_dimension) {
+        expected_dim = vec.size();
+        has_dimension = true;
+      } else if (vec.size() != expected_dim) {
+        throw std::invalid_argument("fixed vector length mismatch in vector column cache");
+      }
+      cache.row_ids.push_back(row_id);
+      vectors.push_back(std::move(vec));
+    }
   }
 
   cache.index = std::shared_ptr<VectorIndex>(makeExactScanVectorIndex(std::move(vectors)).release());

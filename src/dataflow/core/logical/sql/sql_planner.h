@@ -12,7 +12,7 @@
 namespace dataflow {
 namespace sql {
 
-enum class LogicalStepKind { Scan, Filter, Join, Aggregate, Having, WithColumn, Project, Limit };
+enum class LogicalStepKind { Scan, Filter, Join, Aggregate, Having, WithColumn, Project, OrderBy, Limit };
 enum class PhysicalStepKind { FusedUnary, Join, Aggregate, SourceOnly };
 
 struct LogicalPlanStep {
@@ -33,6 +33,8 @@ struct LogicalPlanStep {
   std::string having_column;
   std::vector<std::size_t> project_indices;
   std::vector<std::string> project_aliases;
+  std::vector<std::size_t> order_indices;
+  std::vector<bool> order_ascending;
   std::string with_column_name;
   ComputedColumnKind with_function = ComputedColumnKind::Copy;
   std::vector<ComputedColumnArg> with_args;
@@ -65,6 +67,7 @@ enum class StreamPlanNodeKind {
   Project,
   WithColumn,
   Limit,
+  OrderBy,
   WindowAssign,
   Aggregate,
   Sink,
@@ -78,11 +81,15 @@ struct StreamPlanNode {
   std::string op;
   Value value;
   std::vector<std::string> columns;
+  std::vector<std::string> order_columns;
+  std::vector<bool> order_ascending;
   std::vector<std::pair<std::string, std::string>> aliases;
   std::vector<std::string> group_keys;
   std::vector<StreamAggregateSpec> aggregates;
   std::string value_column;
   std::string output_column;
+  ComputedColumnKind with_function = ComputedColumnKind::Copy;
+  std::vector<ComputedColumnArg> with_args;
   bool stateful = false;
   std::size_t limit = 0;
   uint64_t window_ms = 0;

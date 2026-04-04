@@ -207,6 +207,17 @@ void runParserRegression() {
       });
 
   expectNoThrow(
+      "parser_order_by_projection",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT user_id, score FROM users ORDER BY score DESC, user_id ASC LIMIT 2");
+        expect(st.query.order_by.size() == 2, "parser_order_by_size");
+        expect(!st.query.order_by[0].ascending, "parser_order_by_first_desc");
+        expect(st.query.order_by[1].ascending, "parser_order_by_second_asc");
+        expect(st.query.limit.value_or(0) == 2, "parser_order_by_limit_present");
+      });
+
+  expectNoThrow(
       "parser_join_with_parenthesized_on",
       []() {
         const auto st = dataflow::sql::SqlParser::parse(
@@ -478,6 +489,20 @@ void runSemanticRegression() {
   expect(alias_and_extra_string_function_batch.rows[0][3].toString() == "capa",
          "string_function_reverse_region");
 
+  Table ordered_batch = s.submit(
+      "SELECT user_id, region, score FROM t_users_v1 ORDER BY score DESC, user_id ASC LIMIT 3");
+  expect(ordered_batch.rows.size() == 3, "order_by_batch_rows");
+  expect(ordered_batch.rows[0][0].asInt64() == 3, "order_by_batch_first_user");
+  expect(ordered_batch.rows[1][0].asInt64() == 1, "order_by_batch_second_user");
+  expect(ordered_batch.rows[2][0].asInt64() == 2, "order_by_batch_third_user");
+
+  expectThrows(
+      "order_by_hidden_batch_column_rejected",
+      [&]() {
+        s.submit("SELECT region FROM t_users_v1 ORDER BY score DESC");
+      },
+      "ORDER BY column must appear in SELECT output");
+
   Table substring_alias_string_function_batch = s.submit(
       "SELECT SUBSTRING(region, 2, 2) AS head FROM t_users_v1 LIMIT 1");
   expect(substring_alias_string_function_batch.rows.size() == 1, "substring_alias_batch_rows");
@@ -616,6 +641,7 @@ void runPlannerPlanRegression() {
       "WHERE a.score > 5 "
       "GROUP BY u.region "
       "HAVING total_score > 10 "
+      "ORDER BY total_score DESC "
       "LIMIT 5");
   dataflow::sql::SqlPlanner planner;
   const auto logical = planner.buildLogicalPlan(st.query, catalog);
@@ -623,6 +649,11 @@ void runPlannerPlanRegression() {
   const auto df = planner.materializeFromPhysical(physical);
 
   expect(logical.steps.size() >= 5, "planner_logical_has_operators");
+  expect(std::any_of(logical.steps.begin(), logical.steps.end(),
+                     [](const dataflow::sql::LogicalPlanStep& step) {
+                       return step.kind == dataflow::sql::LogicalStepKind::OrderBy;
+                     }),
+         "planner_logical_has_order_by");
   expect(physical.steps.size() == logical.steps.size(), "planner_physical_step_count_match");
   expect(df.toTable().rowCount() > 0, "planner_execution_has_output");
   expect(df.schema().fields.size() == 2, "planner_output_schema_two_columns");
@@ -724,11 +755,136 @@ void runStreamSqlRegression() {
       "SELECT * cannot be mixed with other projections");
 
   expectThrows(
-      "stream_sql_string_function_rejected",
+      "stream_sql_order_by_unbounded_source_rejected",
       [&]() {
-        s.streamSql("SELECT LOWER(key) AS key_lower FROM stream_events_csv_v1");
+        auto rejected_query = s.startStreamSql(
+            "INSERT INTO stream_summary_csv_v1 "
+            "SELECT key, value FROM stream_events_csv_v1 ORDER BY value DESC",
+            options);
+        rejected_query.awaitTermination(1);
       },
-      "stream SQL does not support string functions");
+      "bounded source");
+
+  expectThrows(
+      "stream_sql_explain_order_by_unbounded_source_rejected",
+      [&]() {
+        s.explainStreamSql(
+            "INSERT INTO stream_summary_csv_v1 "
+            "SELECT key, value FROM stream_events_csv_v1 ORDER BY value DESC",
+            options);
+      },
+      "bounded source");
+
+  const std::string function_sink_path = "/tmp/velaria-stream-sql-function-output.csv";
+  const std::string function_checkpoint_path = "/tmp/velaria-stream-sql-function-checkpoint";
+  fs::remove(function_sink_path);
+  fs::remove(function_checkpoint_path);
+  dataflow::StreamingQueryOptions function_options;
+  function_options.trigger_interval_ms = 0;
+  function_options.local_workers = 2;
+  function_options.max_inflight_partitions = 2;
+  function_options.checkpoint_path = function_checkpoint_path;
+
+  dataflow::Table function_batch;
+  function_batch.schema = dataflow::Schema({"ts", "key", "value"});
+  function_batch.rows = {
+      {Value("2026-03-29T10:00:00"), Value("Akey"), Value(int64_t(-10))},
+      {Value("2026-03-29T10:01:00"), Value("Bkey"), Value(int64_t(5))},
+  };
+  s.createTempView("stream_function_events_v1",
+                   s.readStream(std::make_shared<dataflow::MemoryStreamSource>(
+                       std::vector<dataflow::Table>{function_batch})));
+
+  s.sql(
+      "CREATE SINK TABLE stream_function_summary_v1 "
+      "(key_lower STRING, key_upper STRING, key_head STRING, value_abs INT, year INT, month INT, day INT) "
+      "USING csv OPTIONS(path '" +
+      function_sink_path + "', delimiter ',')");
+
+  const auto function_explain = s.explainStreamSql(
+      "INSERT INTO stream_function_summary_v1 "
+      "SELECT LOWER(key) AS key_lower, UPPER(key) AS key_upper, LEFT(key, 2) AS key_head, "
+      "ABS(value) AS value_abs, YEAR(ts) AS year, MONTH(ts) AS month, DAY(ts) AS day "
+      "FROM stream_function_events_v1",
+      function_options);
+  expect(function_explain.find("WithColumn") != std::string::npos,
+         "stream_sql_explain_string_function_enabled");
+  expect(function_explain.find("function=lower") != std::string::npos,
+         "stream_sql_explain_lower_function");
+  expect(function_explain.find("function=abs") != std::string::npos,
+         "stream_sql_explain_abs_function");
+
+  expectNoThrow("stream_sql_string_functions_supported", [&]() {
+    auto function_query = s.startStreamSql(
+        "INSERT INTO stream_function_summary_v1 "
+        "SELECT LOWER(key) AS key_lower, UPPER(key) AS key_upper, LEFT(key, 2) AS key_head, "
+        "ABS(value) AS value_abs, YEAR(ts) AS year, MONTH(ts) AS month, DAY(ts) AS day "
+        "FROM stream_function_events_v1",
+        function_options);
+    expect(function_query.awaitTermination(1) == 1, "stream_sql_function_query_processed_batches");
+  });
+
+  const auto function_sink_table = s.read_csv(function_sink_path).toTable();
+  expect(function_sink_table.rows.size() == 2, "stream_sql_function_output_rows");
+  const auto function_k_lower_idx = function_sink_table.schema.indexOf("key_lower");
+  const auto function_k_upper_idx = function_sink_table.schema.indexOf("key_upper");
+  const auto function_k_head_idx = function_sink_table.schema.indexOf("key_head");
+  const auto function_abs_idx = function_sink_table.schema.indexOf("value_abs");
+  const auto function_year_idx = function_sink_table.schema.indexOf("year");
+  const auto function_month_idx = function_sink_table.schema.indexOf("month");
+  const auto function_day_idx = function_sink_table.schema.indexOf("day");
+
+  bool has_function_a = false;
+  bool has_function_b = false;
+  for (const auto& row : function_sink_table.rows) {
+    if (row[function_k_lower_idx].toString() == "akey" && row[function_k_upper_idx].toString() == "AKEY" &&
+        row[function_k_head_idx].toString() == "Ak" && row[function_abs_idx].asInt64() == 10 &&
+        row[function_year_idx].asInt64() == 2026 && row[function_month_idx].asInt64() == 3 &&
+        row[function_day_idx].asInt64() == 29) {
+      has_function_a = true;
+    }
+    if (row[function_k_lower_idx].toString() == "bkey" && row[function_k_upper_idx].toString() == "BKEY" &&
+        row[function_k_head_idx].toString() == "Bk" && row[function_abs_idx].asInt64() == 5 &&
+        row[function_year_idx].asInt64() == 2026 && row[function_month_idx].asInt64() == 3 &&
+        row[function_day_idx].asInt64() == 29) {
+      has_function_b = true;
+    }
+  }
+  expect(has_function_a, "stream_sql_function_output_has_function_row_a");
+  expect(has_function_b, "stream_sql_function_output_has_function_row_b");
+
+  const std::string order_sink_path = "/tmp/velaria-stream-sql-order-output.csv";
+  fs::remove(order_sink_path);
+  dataflow::Table order_batch;
+  order_batch.schema = dataflow::Schema({"id", "key", "value"});
+  order_batch.rows = {
+      {Value(int64_t(1)), Value("c"), Value(int64_t(5))},
+      {Value(int64_t(2)), Value("a"), Value(int64_t(5))},
+      {Value(int64_t(3)), Value("b"), Value(int64_t(9))},
+  };
+  s.createTempView(
+      "stream_order_events_v1",
+      s.readStream(std::make_shared<dataflow::MemoryStreamSource>(std::vector<Table>{order_batch})));
+  s.sql(
+      "CREATE SINK TABLE stream_order_summary_v1 (id INT, key STRING, value INT) "
+      "USING csv OPTIONS(path '" +
+      order_sink_path + "', delimiter ',')");
+  auto order_query = s.startStreamSql(
+      "INSERT INTO stream_order_summary_v1 "
+      "SELECT id, key, value FROM stream_order_events_v1 ORDER BY value DESC, key ASC",
+      function_options);
+  expect(order_query.awaitTermination(1) == 1, "stream_sql_order_query_processed_batches");
+  expectThrows(
+      "stream_sql_order_by_hidden_column_rejected",
+      [&]() {
+        s.streamSql("SELECT key FROM stream_order_events_v1 ORDER BY value DESC");
+      },
+      "ORDER BY column must appear in SELECT output");
+  const auto order_sink_table = s.read_csv(order_sink_path).toTable();
+  expect(order_sink_table.rows.size() == 3, "stream_sql_order_output_rows");
+  expect(order_sink_table.rows[0][0].asInt64() == 3, "stream_sql_order_first_row");
+  expect(order_sink_table.rows[1][0].asInt64() == 2, "stream_sql_order_second_row");
+  expect(order_sink_table.rows[2][0].asInt64() == 1, "stream_sql_order_third_row");
 
   expectThrows(
       "stream_sql_explain_insert_column_list_rejected",
@@ -740,12 +896,14 @@ void runStreamSqlRegression() {
       },
       "does not support INSERT column list");
 
-  expectThrows(
-      "stream_sql_explain_string_function_rejected",
+  expectNoThrow(
+      "stream_sql_explain_string_function_supported",
       [&]() {
-        s.explainStreamSql("SELECT LOWER(key) AS key_lower FROM stream_events_csv_v1", options);
-      },
-      "stream SQL does not support string functions");
+        const auto explain = s.explainStreamSql("SELECT LOWER(key) AS key_lower FROM stream_events_csv_v1",
+                                              options);
+        expect(explain.find("function=lower") != std::string::npos,
+               "stream_sql_explain_string_function_lower");
+      });
 
   const std::string multi_sink_path = "/tmp/velaria-stream-sql-multi-aggregate-output.csv";
   fs::remove(multi_sink_path);

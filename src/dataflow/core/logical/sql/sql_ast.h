@@ -27,7 +27,14 @@ enum class StringFunctionKind {
   Ltrim,
   Rtrim,
   Position,
-  Replace
+  Replace,
+  Abs,
+  Ceil,
+  Floor,
+  Round,
+  Year,
+  Month,
+  Day
 };
 
 struct ColumnRef {
@@ -65,6 +72,11 @@ struct SelectItem {
   bool is_string_function = false;
   StringFunctionExpr string_function;
   std::string alias;
+};
+
+struct OrderByItem {
+  ColumnRef column;
+  bool ascending = true;
 };
 
 struct FromItem {
@@ -107,6 +119,7 @@ struct SqlQuery {
   std::optional<WindowSpec> window;
   std::vector<ColumnRef> group_by;
   std::optional<Predicate> having;
+  std::vector<OrderByItem> order_by;
   std::optional<std::size_t> limit;
 };
 

@@ -86,6 +86,20 @@ ComputedColumnKind toComputedFunctionKind(sql::StringFunctionKind function) {
       return ComputedColumnKind::StringPosition;
     case sql::StringFunctionKind::Replace:
       return ComputedColumnKind::StringReplace;
+    case sql::StringFunctionKind::Abs:
+      return ComputedColumnKind::NumericAbs;
+    case sql::StringFunctionKind::Ceil:
+      return ComputedColumnKind::NumericCeil;
+    case sql::StringFunctionKind::Floor:
+      return ComputedColumnKind::NumericFloor;
+    case sql::StringFunctionKind::Round:
+      return ComputedColumnKind::NumericRound;
+    case sql::StringFunctionKind::Year:
+      return ComputedColumnKind::DateYear;
+    case sql::StringFunctionKind::Month:
+      return ComputedColumnKind::DateMonth;
+    case sql::StringFunctionKind::Day:
+      return ComputedColumnKind::DateDay;
   }
   return ComputedColumnKind::StringConcat;
 }
@@ -121,6 +135,20 @@ std::string defaultStringAlias(const sql::StringFunctionExpr& expr, std::size_t 
         return std::string("position");
       case sql::StringFunctionKind::Replace:
         return std::string("replace");
+      case sql::StringFunctionKind::Abs:
+        return std::string("abs");
+      case sql::StringFunctionKind::Ceil:
+        return std::string("ceil");
+      case sql::StringFunctionKind::Floor:
+        return std::string("floor");
+      case sql::StringFunctionKind::Round:
+        return std::string("round");
+      case sql::StringFunctionKind::Year:
+        return std::string("year");
+      case sql::StringFunctionKind::Month:
+        return std::string("month");
+      case sql::StringFunctionKind::Day:
+        return std::string("day");
     }
     return std::string("string_func");
   }(expr.function);
@@ -169,7 +197,7 @@ bool isUnaryStep(LogicalStepKind kind) {
 
 bool isBarrierStep(LogicalStepKind kind) {
   return kind == LogicalStepKind::Scan || kind == LogicalStepKind::Join ||
-         kind == LogicalStepKind::Aggregate;
+         kind == LogicalStepKind::Aggregate || kind == LogicalStepKind::OrderBy;
 }
 
 bool isAggregateQuery(const SqlQuery& query) {
@@ -197,6 +225,8 @@ const char* streamNodeKindName(StreamPlanNodeKind kind) {
       return "WithColumn";
     case StreamPlanNodeKind::Limit:
       return "Limit";
+    case StreamPlanNodeKind::OrderBy:
+      return "OrderBy";
     case StreamPlanNodeKind::WindowAssign:
       return "WindowAssign";
     case StreamPlanNodeKind::Aggregate:
@@ -227,10 +257,6 @@ void ensureSingleTableStreamQuery(const SqlQuery& query) {
                   [](const SelectItem& item) { return item.is_literal; })) {
     throwUnsupportedSqlV1("stream SQL does not support literal projection");
   }
-  if (std::any_of(query.select_items.begin(), query.select_items.end(),
-                  [](const SelectItem& item) { return item.is_string_function; })) {
-    throwUnsupportedSqlV1("stream SQL does not support string functions");
-  }
 }
 
 void ensureQualifierMatches(const ColumnRef& ref, const FromItem& from) {
@@ -245,55 +271,100 @@ std::string resolveStreamColumnName(const ColumnRef& ref, const FromItem& from) 
 }
 
 void ensureStringFunctionSupported(const StringFunctionExpr& function) {
-  if ((function.function == StringFunctionKind::Length ||
-       function.function == StringFunctionKind::Lower ||
-       function.function == StringFunctionKind::Upper ||
-       function.function == StringFunctionKind::Trim ||
-       function.function == StringFunctionKind::Reverse) &&
-      function.args.size() != 1) {
-    if (function.function == StringFunctionKind::Length) {
-      throw SQLSemanticError("LENGTH expects 1 argument");
-    }
-    if (function.function == StringFunctionKind::Lower) {
-      throw SQLSemanticError("LOWER expects 1 argument");
-    }
-    if (function.function == StringFunctionKind::Upper) {
-      throw SQLSemanticError("UPPER expects 1 argument");
-    }
-    if (function.function == StringFunctionKind::Trim) {
-      throw SQLSemanticError("TRIM expects 1 argument");
-    }
-    throw SQLSemanticError("REVERSE expects 1 argument");
-  }
-  if (function.function == StringFunctionKind::Concat && function.args.empty()) {
-    throw SQLSemanticError("CONCAT expects at least 1 argument");
-  }
-  if (function.function == StringFunctionKind::Substr &&
-      (function.args.size() < 2 || function.args.size() > 3)) {
-    throw SQLSemanticError("SUBSTR expects 2 or 3 arguments");
-  }
-  if (function.function == StringFunctionKind::Replace && function.args.size() != 3) {
-    throw SQLSemanticError("REPLACE requires exactly 3 arguments");
-  }
-  if (function.function == StringFunctionKind::ConcatWs && function.args.size() < 2) {
-    throw SQLSemanticError("CONCAT_WS requires at least 2 arguments");
-  }
-  if (function.function == StringFunctionKind::Left && function.args.size() != 2) {
-    throw SQLSemanticError("LEFT requires 2 arguments");
-  }
-  if (function.function == StringFunctionKind::Right && function.args.size() != 2) {
-    throw SQLSemanticError("RIGHT requires 2 arguments");
-  }
-  if (function.function == StringFunctionKind::Position && function.args.size() != 2) {
-    throw SQLSemanticError("POSITION requires 2 arguments");
-  }
-  if ((function.function == StringFunctionKind::Ltrim ||
-       function.function == StringFunctionKind::Rtrim) &&
-      function.args.size() != 1) {
-    throw SQLSemanticError("LTRIM/RTRIM requires 1 argument");
-  }
-  if (function.args.empty()) {
-    throw SQLSemanticError("string function requires at least 1 argument");
+  switch (function.function) {
+    case StringFunctionKind::Length:
+      if (function.args.size() != 1) {
+        throw SQLSemanticError("LENGTH expects 1 argument");
+      }
+      break;
+    case StringFunctionKind::Lower:
+      if (function.args.size() != 1) {
+        throw SQLSemanticError("LOWER expects 1 argument");
+      }
+      break;
+    case StringFunctionKind::Upper:
+      if (function.args.size() != 1) {
+        throw SQLSemanticError("UPPER expects 1 argument");
+      }
+      break;
+    case StringFunctionKind::Trim:
+      if (function.args.size() != 1) {
+        throw SQLSemanticError("TRIM expects 1 argument");
+      }
+      break;
+    case StringFunctionKind::Reverse:
+      if (function.args.size() != 1) {
+        throw SQLSemanticError("REVERSE expects 1 argument");
+      }
+      break;
+    case StringFunctionKind::Concat:
+      if (function.args.empty()) {
+        throw SQLSemanticError("CONCAT expects at least 1 argument");
+      }
+      break;
+    case StringFunctionKind::ConcatWs:
+      if (function.args.size() < 2) {
+        throw SQLSemanticError("CONCAT_WS requires at least 2 arguments");
+      }
+      break;
+    case StringFunctionKind::Substr:
+      if (function.args.size() < 2 || function.args.size() > 3) {
+        throw SQLSemanticError("SUBSTR expects 2 or 3 arguments");
+      }
+      break;
+    case StringFunctionKind::Replace:
+      if (function.args.size() != 3) {
+        throw SQLSemanticError("REPLACE requires exactly 3 arguments");
+      }
+      break;
+    case StringFunctionKind::Left:
+      if (function.args.size() != 2) {
+        throw SQLSemanticError("LEFT requires 2 arguments");
+      }
+      break;
+    case StringFunctionKind::Right:
+      if (function.args.size() != 2) {
+        throw SQLSemanticError("RIGHT requires 2 arguments");
+      }
+      break;
+    case StringFunctionKind::Position:
+      if (function.args.size() != 2) {
+        throw SQLSemanticError("POSITION requires 2 arguments");
+      }
+      break;
+    case StringFunctionKind::Ltrim:
+    case StringFunctionKind::Rtrim:
+      if (function.args.size() != 1) {
+        throw SQLSemanticError("LTRIM/RTRIM requires 1 argument");
+      }
+      break;
+    case StringFunctionKind::Abs:
+      if (function.args.size() != 1) {
+        throw SQLSemanticError("ABS expects 1 argument");
+      }
+      break;
+    case StringFunctionKind::Ceil:
+      if (function.args.size() != 1) {
+        throw SQLSemanticError("CEIL expects 1 argument");
+      }
+      break;
+    case StringFunctionKind::Floor:
+      if (function.args.size() != 1) {
+        throw SQLSemanticError("FLOOR expects 1 argument");
+      }
+      break;
+    case StringFunctionKind::Round:
+      if (function.args.size() != 1) {
+        throw SQLSemanticError("ROUND expects 1 argument");
+      }
+      break;
+    case StringFunctionKind::Year:
+    case StringFunctionKind::Month:
+    case StringFunctionKind::Day:
+      if (function.args.size() != 1) {
+        throw SQLSemanticError("YEAR/MONTH/DAY expects 1 argument");
+      }
+      break;
   }
 }
 
@@ -473,6 +544,27 @@ std::vector<ComputedColumnArg> resolveStringFunctionArgs(const StringFunctionExp
   return args;
 }
 
+std::vector<ComputedColumnArg> resolveStreamStringFunctionArgs(const StringFunctionExpr& function,
+                                                              const FromItem& from) {
+  ensureStringFunctionSupported(function);
+  std::vector<ComputedColumnArg> args;
+  args.reserve(function.args.size());
+  for (const auto& arg : function.args) {
+    ComputedColumnArg out_arg;
+    out_arg.is_literal = !arg.is_column;
+    if (arg.is_column) {
+      out_arg.source_column_index = static_cast<size_t>(-1);
+      out_arg.source_column_name = resolveStreamColumnName(arg.column, from);
+      out_arg.literal = Value();
+    } else {
+      out_arg.source_column_index = static_cast<size_t>(-1);
+      out_arg.literal = arg.literal;
+    }
+    args.push_back(std::move(out_arg));
+  }
+  return args;
+}
+
 LogicalPlan optimizeLogical(const LogicalPlan& logical) {
   LogicalPlan out;
   out.seed = logical.seed;
@@ -560,6 +652,131 @@ bool isActorHotPathAggregate(const StreamPlanNode& node) {
       });
 }
 
+std::string computedFunctionName(ComputedColumnKind function) {
+  switch (function) {
+    case ComputedColumnKind::Copy:
+      return "copy";
+    case ComputedColumnKind::StringLength:
+      return "length";
+    case ComputedColumnKind::StringLower:
+      return "lower";
+    case ComputedColumnKind::StringUpper:
+      return "upper";
+    case ComputedColumnKind::StringTrim:
+      return "trim";
+    case ComputedColumnKind::StringConcat:
+      return "concat";
+    case ComputedColumnKind::StringReverse:
+      return "reverse";
+    case ComputedColumnKind::StringConcatWs:
+      return "concat_ws";
+    case ComputedColumnKind::StringLeft:
+      return "left";
+    case ComputedColumnKind::StringRight:
+      return "right";
+    case ComputedColumnKind::StringSubstr:
+      return "substr";
+    case ComputedColumnKind::StringLtrim:
+      return "ltrim";
+    case ComputedColumnKind::StringRtrim:
+      return "rtrim";
+    case ComputedColumnKind::StringPosition:
+      return "position";
+    case ComputedColumnKind::StringReplace:
+      return "replace";
+    case ComputedColumnKind::NumericAbs:
+      return "abs";
+    case ComputedColumnKind::NumericCeil:
+      return "ceil";
+    case ComputedColumnKind::NumericFloor:
+      return "floor";
+    case ComputedColumnKind::NumericRound:
+      return "round";
+    case ComputedColumnKind::DateYear:
+      return "year";
+    case ComputedColumnKind::DateMonth:
+      return "month";
+    case ComputedColumnKind::DateDay:
+      return "day";
+  }
+  return "copy";
+}
+
+std::string computedArgToString(const ComputedColumnArg& arg) {
+  if (arg.is_literal) {
+    return "literal(" + arg.literal.toString() + ")";
+  }
+  if (!arg.source_column_name.empty()) {
+    return "column(" + arg.source_column_name + ")";
+  }
+  return "column(" + std::to_string(arg.source_column_index) + ")";
+}
+
+std::string orderByOutputName(const OrderByItem& item) {
+  if (!item.column.qualifier.empty()) {
+    return item.column.qualifier + "." + item.column.name;
+  }
+  return item.column.name;
+}
+
+std::vector<std::size_t> resolveOrderColumns(const SqlQuery& query, const Schema& schema) {
+  std::vector<std::size_t> indices;
+  indices.reserve(query.order_by.size());
+  for (const auto& item : query.order_by) {
+    const auto qualified = orderByOutputName(item);
+    if (schema.has(qualified)) {
+      indices.push_back(schema.indexOf(qualified));
+      continue;
+    }
+    if (schema.has(item.column.name)) {
+      indices.push_back(schema.indexOf(item.column.name));
+      continue;
+    }
+    throw SQLSemanticError("ORDER BY column must appear in SELECT output in SQL v1: " + qualified);
+  }
+  return indices;
+}
+
+std::vector<std::string> resolveStreamOrderColumns(const SqlQuery& query, const FromItem& from) {
+  std::vector<std::string> columns;
+  columns.reserve(query.order_by.size());
+  for (const auto& item : query.order_by) {
+    (void)from;
+    columns.push_back(orderByOutputName(item));
+  }
+  return columns;
+}
+
+std::vector<std::string> resolveStreamOrderColumns(const SqlQuery& query,
+                                                   const std::vector<std::string>& output_columns) {
+  std::vector<std::string> columns;
+  columns.reserve(query.order_by.size());
+  for (const auto& item : query.order_by) {
+    const auto qualified = orderByOutputName(item);
+    auto exact = std::find(output_columns.begin(), output_columns.end(), qualified);
+    if (exact != output_columns.end()) {
+      columns.push_back(*exact);
+      continue;
+    }
+    auto unqualified = std::find(output_columns.begin(), output_columns.end(), item.column.name);
+    if (unqualified != output_columns.end()) {
+      columns.push_back(*unqualified);
+      continue;
+    }
+    throw SQLSemanticError("ORDER BY column must appear in SELECT output in SQL v1: " + qualified);
+  }
+  return columns;
+}
+
+std::vector<bool> resolveOrderDirections(const SqlQuery& query) {
+  std::vector<bool> ascending;
+  ascending.reserve(query.order_by.size());
+  for (const auto& item : query.order_by) {
+    ascending.push_back(item.ascending);
+  }
+  return ascending;
+}
+
 }  // namespace
 
 LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalog& catalog) const {
@@ -599,6 +816,13 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
     scan.source_name = "__values__";
     scan.source = logical.seed;
     logical.steps.push_back(scan);
+    if (!query.order_by.empty()) {
+      LogicalPlanStep order;
+      order.kind = LogicalStepKind::OrderBy;
+      order.order_indices = resolveOrderColumns(query, logical.seed.schema());
+      order.order_ascending = resolveOrderDirections(query);
+      logical.steps.push_back(order);
+    }
     if (query.limit.has_value()) {
       LogicalPlanStep limit;
       limit.kind = LogicalStepKind::Limit;
@@ -886,6 +1110,20 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
     current = current.selectByIndices(indices, aliases);
   }
 
+  if (!query.order_by.empty()) {
+    LogicalPlanStep order;
+    order.kind = LogicalStepKind::OrderBy;
+    order.order_indices = resolveOrderColumns(query, current.schema());
+    order.order_ascending = resolveOrderDirections(query);
+    logical.steps.push_back(order);
+    std::vector<std::string> order_columns;
+    order_columns.reserve(order.order_indices.size());
+    for (auto index : order.order_indices) {
+      order_columns.push_back(current.schema().fields[index]);
+    }
+    current = current.orderBy(order_columns, order.order_ascending);
+  }
+
   if (query.limit.has_value()) {
     LogicalPlanStep limit;
     limit.kind = LogicalStepKind::Limit;
@@ -940,6 +1178,16 @@ DataFrame SqlPlanner::materializeFromPhysical(const PhysicalPlan& physical) cons
         current = current.selectByIndices(step.logical.project_indices,
                                           step.logical.project_aliases);
         break;
+      case LogicalStepKind::OrderBy:
+        {
+          std::vector<std::string> columns;
+          columns.reserve(step.logical.order_indices.size());
+          for (auto index : step.logical.order_indices) {
+            columns.push_back(current.schema().fields[index]);
+          }
+          current = current.orderBy(columns, step.logical.order_ascending);
+        }
+        break;
       case LogicalStepKind::WithColumn:
         current =
             current.withColumn(step.logical.with_column_name, step.logical.with_function,
@@ -974,6 +1222,8 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query,
   logical.source_name = query.from.name;
   logical.sink_name = sink_name;
   logical.writes_to_sink = !sink_name.empty();
+  std::vector<std::string> final_output_columns;
+  bool has_final_output_columns = false;
 
   StreamPlanNode scan;
   scan.kind = StreamPlanNodeKind::Scan;
@@ -1015,6 +1265,9 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query,
 
     std::vector<StreamAggregateSpec> aggregates;
     for (const auto& item : query.select_items) {
+      if (item.is_string_function) {
+        throwUnsupportedSqlV1("stream SQL does not support string functions in aggregate query");
+      }
       if (item.is_all || item.is_table_all) {
         throwUnsupportedSqlV1("stream SQL aggregate query does not support star projection");
       }
@@ -1124,6 +1377,8 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query,
     if (!aliases.empty() || project.columns != natural_columns) {
       logical.nodes.push_back(project);
     }
+    final_output_columns = project.columns != natural_columns ? project.columns : natural_columns;
+    has_final_output_columns = true;
   } else {
     if (!query.group_by.empty()) {
       throw SQLSemanticError("GROUP BY used without aggregate");
@@ -1135,6 +1390,7 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query,
     bool select_all = false;
     StreamPlanNode project;
     project.kind = StreamPlanNodeKind::Project;
+    std::size_t expr_index = 0;
     for (const auto& item : query.select_items) {
       if (item.is_all) {
         if (query.select_items.size() != 1) {
@@ -1142,6 +1398,20 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query,
         }
         select_all = true;
         break;
+      }
+      if (item.is_string_function) {
+        auto args = resolveStreamStringFunctionArgs(item.string_function, query.from);
+        const auto function = toComputedFunctionKind(item.string_function.function);
+        const auto outName =
+            item.alias.empty() ? defaultStringAlias(item.string_function, expr_index++) : item.alias;
+        StreamPlanNode with_column;
+        with_column.kind = StreamPlanNodeKind::WithColumn;
+        with_column.output_column = outName;
+        with_column.with_function = function;
+        with_column.with_args = std::move(args);
+        logical.nodes.push_back(with_column);
+        project.columns.push_back(outName);
+        continue;
       }
       if (item.is_table_all) {
         if (query.select_items.size() != 1) {
@@ -1172,6 +1442,8 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query,
         logical.nodes.push_back(with_column);
       }
       logical.nodes.push_back(project);
+      final_output_columns = project.columns;
+      has_final_output_columns = true;
     }
   }
 
@@ -1180,6 +1452,23 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query,
     limit.kind = StreamPlanNodeKind::Limit;
     limit.limit = *query.limit;
     logical.nodes.push_back(limit);
+  }
+
+  if (!query.order_by.empty()) {
+    StreamPlanNode order;
+    order.kind = StreamPlanNodeKind::OrderBy;
+    order.order_columns = has_final_output_columns
+                              ? resolveStreamOrderColumns(query, final_output_columns)
+                              : resolveStreamOrderColumns(query, query.from);
+    order.order_ascending = resolveOrderDirections(query);
+    const auto limit_node = query.limit.has_value() ? logical.nodes.back() : StreamPlanNode{};
+    if (query.limit.has_value()) {
+      logical.nodes.pop_back();
+    }
+    logical.nodes.push_back(order);
+    if (query.limit.has_value()) {
+      logical.nodes.push_back(limit_node);
+    }
   }
 
   return logical;
@@ -1240,7 +1529,24 @@ std::string SqlPlanner::explainStreamLogicalPlan(const StreamLogicalPlan& logica
     } else if (node.kind == StreamPlanNodeKind::Project) {
       out << " columns=[" << joinStrings(node.columns, ", ") << "]";
     } else if (node.kind == StreamPlanNodeKind::WithColumn) {
-      out << " output=" << node.output_column << " from=" << node.value_column;
+      out << " output=" << node.output_column;
+      if (node.with_function == ComputedColumnKind::Copy) {
+        out << " from=" << node.value_column;
+      } else {
+        out << " function=" << computedFunctionName(node.with_function) << " args=[";
+        for (std::size_t i = 0; i < node.with_args.size(); ++i) {
+          if (i > 0) out << ", ";
+          out << computedArgToString(node.with_args[i]);
+        }
+        out << "]";
+      }
+    } else if (node.kind == StreamPlanNodeKind::OrderBy) {
+      out << " columns=[";
+      for (std::size_t i = 0; i < node.order_columns.size(); ++i) {
+        if (i > 0) out << ", ";
+        out << node.order_columns[i] << (i < node.order_ascending.size() && !node.order_ascending[i] ? " DESC" : " ASC");
+      }
+      out << "]";
     } else if (node.kind == StreamPlanNodeKind::Limit) {
       out << " limit=" << node.limit;
     } else if (node.kind == StreamPlanNodeKind::WindowAssign) {
@@ -1306,7 +1612,14 @@ StreamingDataFrame SqlPlanner::materializeStreamFromPhysical(
         current = current.select(node.columns);
         break;
       case StreamPlanNodeKind::WithColumn:
-        current = current.withColumn(node.output_column, node.value_column);
+        if (node.with_function == ComputedColumnKind::Copy) {
+          current = current.withColumn(node.output_column, node.value_column);
+        } else {
+          current = current.withColumn(node.output_column, node.with_function, node.with_args);
+        }
+        break;
+      case StreamPlanNodeKind::OrderBy:
+        current = current.orderBy(node.order_columns, node.order_ascending);
         break;
       case StreamPlanNodeKind::Limit:
         current = current.limit(node.limit);

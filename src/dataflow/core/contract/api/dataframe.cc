@@ -8,6 +8,7 @@
 
 #include "src/dataflow/ai/plugin_runtime.h"
 #include "src/dataflow/core/execution/runtime/vector_index.h"
+#include "src/dataflow/core/execution/columnar_batch.h"
 
 namespace dataflow {
 
@@ -43,6 +44,8 @@ std::string planKindName(PlanKind kind) {
       return "Drop";
     case PlanKind::Limit:
       return "Limit";
+    case PlanKind::OrderBy:
+      return "OrderBy";
     case PlanKind::WindowAssign:
       return "WindowAssign";
     case PlanKind::GroupBySum:
@@ -96,6 +99,12 @@ void explainPlan(const PlanNodePtr& node, std::ostringstream& out, int depth = 0
   if (node->kind == PlanKind::Limit) {
     const auto* n = static_cast<LimitPlan*>(node.get());
     out << std::string((depth + 1) * 2, ' ') << "n=" << n->n << "\n";
+    explainPlan(n->child, out, depth + 1);
+    return;
+  }
+  if (node->kind == PlanKind::OrderBy) {
+    const auto* n = static_cast<OrderByPlan*>(node.get());
+    out << std::string((depth + 1) * 2, ' ') << "keys=" << n->indices.size() << "\n";
     explainPlan(n->child, out, depth + 1);
     return;
   }
@@ -306,6 +315,25 @@ DataFrame DataFrame::drop(const std::string& column) const {
     if (source.schema.fields[i] != column) keep.push_back(i);
   }
   auto node = std::make_shared<DropPlan>(plan_, keep);
+  return DataFrame(node, executor_);
+}
+
+DataFrame DataFrame::orderBy(const std::vector<std::string>& columns,
+                             const std::vector<bool>& ascending) const {
+  if (!ascending.empty() && ascending.size() != columns.size()) {
+    throw std::invalid_argument("ORDER BY direction count mismatch");
+  }
+  const auto source = materialize();
+  std::vector<size_t> indices;
+  indices.reserve(columns.size());
+  for (const auto& column : columns) {
+    indices.push_back(source.schema.indexOf(column));
+  }
+  std::vector<bool> directions = ascending;
+  if (directions.empty()) {
+    directions.assign(columns.size(), true);
+  }
+  auto node = std::make_shared<OrderByPlan>(plan_, std::move(indices), std::move(directions));
   return DataFrame(node, executor_);
 }
 

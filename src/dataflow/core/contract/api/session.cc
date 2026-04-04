@@ -814,6 +814,7 @@ std::string DataflowSession::explainStreamSql(const std::string& sql,
   const auto logical = planner.buildStreamLogicalPlan(prepared.query, prepared.sink_name);
   const auto physical = planner.buildStreamPhysicalPlan(logical);
   const auto stream = planner.materializeStreamFromPhysical(physical, stream_views_);
+  validateStreamingOrderRequirements(stream);
   const auto strategy = describeStreamingStrategy(stream, prepared.sink, options);
 
   std::ostringstream out;

@@ -90,13 +90,14 @@ velaria-cli artifacts list --run-id <run_id>
 - `CREATE TABLE`、`CREATE SOURCE TABLE`、`CREATE SINK TABLE`
 - `INSERT INTO ... VALUES`
 - `INSERT INTO ... SELECT`
-- `SELECT` 的列投影 / 别名、`WHERE`、`GROUP BY`、`LIMIT`、当前最小 `JOIN`
-- 字符串函数：`LOWER`、`UPPER`、`TRIM`、`LTRIM`、`RTRIM`、`LENGTH`、`LEN`、`CHAR_LENGTH`、`CHARACTER_LENGTH`、`REVERSE`、`CONCAT`、`CONCAT_WS`、`LEFT`、`RIGHT`、`SUBSTR` / `SUBSTRING`、`POSITION`、`REPLACE`
+- `SELECT` 的列投影 / 别名、`WHERE`、`GROUP BY`、`ORDER BY`、`LIMIT`、当前最小 `JOIN`
+- 当前内建函数：`LOWER`、`UPPER`、`TRIM`、`LTRIM`、`RTRIM`、`LENGTH`、`LEN`、`CHAR_LENGTH`、`CHARACTER_LENGTH`、`REVERSE`、`CONCAT`、`CONCAT_WS`、`LEFT`、`RIGHT`、`SUBSTR` / `SUBSTRING`、`POSITION`、`REPLACE`、`ABS`、`CEIL`、`FLOOR`、`ROUND`、`YEAR`、`MONTH`、`DAY`
 
 约束：
 
 - `CREATE SOURCE TABLE` 是只读表，不允许 `INSERT`
 - `CREATE SINK TABLE` 允许写入，但不能作为查询输入
+- `ORDER BY` 当前只支持对 `SELECT` 输出中可见的列排序
 - 超出当前范围的 SQL 形态会直接返回明确错误，例如 `not supported in SQL v1`
 
 stream SQL 当前边界：
@@ -105,7 +106,8 @@ stream SQL 当前边界：
 - `session.explain_stream_sql(...)` 适合 `SELECT` 或 `INSERT INTO <sink> SELECT ...`
 - `session.start_stream_sql(...)` 只适合 `INSERT INTO <sink> SELECT ...`
 - stream source 必须是 source table，stream target 必须是 sink table
-- 适合的能力是 filter / projection / window / stateful aggregate；不要假设支持更宽泛的 batch SQL 语法
+- 适合的能力是 filter / projection / window / stateful aggregate，以及 bounded source 上的 `ORDER BY`
+- unbounded stream 上的 `ORDER BY` 会被显式拒绝；当前 runtime 不对无界输入承诺全局有序结果
 
 ## 4. 新增功能与参数说明
 

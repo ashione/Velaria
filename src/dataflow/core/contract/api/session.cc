@@ -12,7 +12,6 @@
 #include <vector>
 
 #include "src/dataflow/core/execution/csv.h"
-#include "src/dataflow/core/execution/source_materialization.h"
 #include "src/dataflow/ai/plugin_runtime.h"
 
 namespace dataflow {
@@ -73,27 +72,20 @@ DataflowSession& DataflowSession::builder() {
   return session;
 }
 
-DataFrame DataflowSession::read_csv(const std::string& path, char delimiter) {
-  std::ostringstream options;
-  options << "delimiter=" << delimiter;
-  const auto fingerprint = capture_file_source_fingerprint(path, "csv", options.str());
-  const SourceMaterializationStore store(default_source_materialization_root(),
-                                         default_source_materialization_data_format());
-  if (const auto entry = store.lookup(fingerprint); entry.has_value()) {
-    try {
-      return DataFrame(store.load(*entry));
-    } catch (...) {
-      // Fall through to the CSV source path on cache corruption or decode errors.
-    }
-  }
+DataFrame DataflowSession::read_csv(const std::string& path, const SourceOptions& options) {
+  return read_csv(path, ',', options);
+}
 
-  Table table = load_csv(fingerprint.abs_path, delimiter);
-  try {
-    store.save(fingerprint, table);
-  } catch (...) {
-    // CSV remains the source of truth; cache write failures must not change read semantics.
-  }
-  return DataFrame(std::move(table));
+DataFrame DataflowSession::read_csv(const std::string& path, char delimiter,
+                                    const SourceOptions& options) {
+  const auto schema = read_csv_schema(path, delimiter);
+  auto plan = std::make_shared<SourcePlan>("csv", path, delimiter, schema, options);
+  return DataFrame(plan, nullptr, std::make_shared<Schema>(schema));
+}
+
+DataFrame DataflowSession::read_csv(const std::string& path, char delimiter) {
+  SourceOptions options;
+  return read_csv(path, delimiter, options);
 }
 
 StreamingDataFrame DataflowSession::readStream(std::shared_ptr<StreamSource> source) {
@@ -114,6 +106,7 @@ Table submitAndWait(const DataflowJobHandle& handle) {
   while (true) {
     auto snap = handle.wait(std::chrono::milliseconds(100));
     if (snap.state == JobState::Succeeded) {
+      materializeRows(&snap.result);
       return snap.result;
     }
     if (snap.state == JobState::Failed || snap.state == JobState::Cancelled ||
@@ -358,6 +351,8 @@ std::string aggregateOutputName(const sql::SelectItem& item) {
       return "min";
     case sql::AggregateFunctionKind::Max:
       return "max";
+    case sql::AggregateFunctionKind::StdDev:
+      return "stddev";
   }
   throw SQLSemanticError("unsupported aggregate function");
 }
@@ -374,6 +369,7 @@ void validateStreamAggregate(const sql::AggregateExpr& aggregate) {
     case sql::AggregateFunctionKind::Avg:
     case sql::AggregateFunctionKind::Min:
     case sql::AggregateFunctionKind::Max:
+    case sql::AggregateFunctionKind::StdDev:
       break;
   }
   throw SQLSemanticError("stream SQL aggregate only supports SUM and COUNT(*)");

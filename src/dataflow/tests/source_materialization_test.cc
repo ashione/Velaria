@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/nanoarrow_ipc_codec.h"
 #include "src/dataflow/core/execution/source_materialization.h"
 #include "src/dataflow/core/execution/stream/binary_row_batch.h"
@@ -88,10 +89,11 @@ void expect_roundtrip_sample_table(const dataflow::Table& table, const std::stri
 int main() {
   try {
     const auto cache_root = make_temp_dir("velaria-source-materialization-cache");
-    expect(setenv("VELARIA_MATERIALIZATION_DIR", cache_root.c_str(), 1) == 0,
-           "failed to set materialization dir env");
-    expect(setenv("VELARIA_MATERIALIZATION_FORMAT", "binary_row_batch", 1) == 0,
-           "failed to set materialization format env");
+    dataflow::SourceOptions binary_options;
+    binary_options.materialization.enabled = true;
+    binary_options.materialization.root = cache_root;
+    binary_options.materialization.data_format =
+        dataflow::MaterializationDataFormat::BinaryRowBatch;
 
     expect(dataflow::default_source_materialization_data_format() ==
                dataflow::MaterializationDataFormat::BinaryRowBatch,
@@ -143,20 +145,24 @@ int main() {
     expect(nanoarrow_loaded.schema.fields == roundtrip_source.schema.fields,
            "nanoarrow roundtrip schema mismatch");
     expect_roundtrip_sample_table(nanoarrow_loaded, "nanoarrow roundtrip");
+    const auto nanoarrow_loaded_lazy = dataflow::load_nanoarrow_ipc_table(nanoarrow_path, false);
+    expect(nanoarrow_loaded_lazy.rows.empty(), "lazy nanoarrow load should not materialize rows");
+    expect(nanoarrow_loaded_lazy.rowCount() == 2, "lazy nanoarrow load row count mismatch");
+    expect(dataflow::viewValueColumn(nanoarrow_loaded_lazy, 2).values()[1] == dataflow::Value("bob"),
+           "lazy nanoarrow load cache content mismatch");
 
     const auto csv_path = make_temp_file("velaria-materialized-source");
     write_csv(csv_path, "id,score,name\n1,10,alice\n2,20,bob\n");
 
     auto& session = dataflow::DataflowSession::builder();
-    const auto first = session.read_csv(csv_path).toTable();
+    const auto first = session.read_csv(csv_path, binary_options).toTable();
     expect(first.rows.size() == 2, "first csv read row count mismatch");
     expect_table_value(first, 1, 2, dataflow::Value("bob"), "first csv read content mismatch");
 
     const auto first_fingerprint =
         dataflow::capture_file_source_fingerprint(csv_path, "csv", "delimiter=,");
     dataflow::SourceMaterializationStore store(
-        dataflow::default_source_materialization_root(),
-        dataflow::MaterializationDataFormat::BinaryRowBatch);
+        cache_root, dataflow::MaterializationDataFormat::BinaryRowBatch);
     const auto first_entry = store.lookup(first_fingerprint);
     expect(first_entry.has_value(), "source materialization entry should exist after first read");
     expect(first_entry->data_format == dataflow::MaterializationDataFormat::BinaryRowBatch,
@@ -172,10 +178,41 @@ int main() {
         std::filesystem::last_write_time(first_entry->data_path);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(25));
-    const auto second = session.read_csv(csv_path).toTable();
+    const auto second = session.read_csv(csv_path, binary_options).toTable();
     expect(second.rows.size() == 2, "second csv read row count mismatch");
     expect_table_value(second, 0, 1, dataflow::Value(int64_t(10)),
                        "second csv read content mismatch");
+    const auto pushed =
+        session.read_csv(csv_path)
+            .filter("score", ">=", dataflow::Value(int64_t(20)))
+            .limit(1)
+            .select({"name"})
+            .toTable();
+    expect(pushed.rows.size() == 1, "source pushdown filter/limit row count mismatch");
+    expect_table_value(pushed, 0, 0, dataflow::Value("bob"),
+                       "source pushdown filter/limit content mismatch");
+    session.createTempView("csv_group_input", session.read_csv(csv_path));
+    const auto pushed_group_limit =
+        session.sql("SELECT name, COUNT(*) AS cnt FROM csv_group_input GROUP BY name LIMIT 1")
+            .toTable();
+    expect(pushed_group_limit.rows.size() == 1,
+           "source pushdown aggregate/limit row count mismatch");
+    auto async_handle =
+        session.submitAsync(session.read_csv(csv_path, binary_options).select({"name"}).limit(1));
+    const auto async_wait = async_handle.wait(std::chrono::seconds(5));
+    expect(async_wait.has_result, "async wait should expose result");
+    expect(async_wait.result.rows.size() == 1, "async wait row count mismatch");
+    expect_table_value(async_wait.result, 0, 0, dataflow::Value("alice"),
+                       "async wait content mismatch");
+    const auto async_query = async_handle.queryJob();
+    expect(async_query.has_result, "async query should expose result");
+    expect(async_query.result.rows.size() == 1, "async query row count mismatch");
+    expect_table_value(async_query.result, 0, 0, dataflow::Value("alice"),
+                       "async query content mismatch");
+    const auto async_result = async_handle.result(std::chrono::seconds(5));
+    expect(async_result.rows.size() == 1, "async result row count mismatch");
+    expect_table_value(async_result, 0, 0, dataflow::Value("alice"),
+                       "async result content mismatch");
     const auto second_entry =
         store.lookup(dataflow::capture_file_source_fingerprint(csv_path, "csv", "delimiter=,"));
     expect(second_entry.has_value(), "source materialization entry should still exist");
@@ -186,7 +223,7 @@ int main() {
 
     std::this_thread::sleep_for(std::chrono::seconds(1));
     write_csv(csv_path, "id,score,name\n1,10,alice\n2,99,bob\n3,30,charlie\n");
-    const auto updated = session.read_csv(csv_path).toTable();
+    const auto updated = session.read_csv(csv_path, binary_options).toTable();
     expect(updated.rows.size() == 3, "updated csv read row count mismatch");
     expect_table_value(updated, 1, 1, dataflow::Value(int64_t(99)),
                        "updated csv read should reflect source changes");
@@ -199,21 +236,21 @@ int main() {
            "cache invalidation should rewrite binary materialization file");
 
     const auto nanoarrow_cache_root = make_temp_dir("velaria-source-materialization-nanoarrow");
-    expect(setenv("VELARIA_MATERIALIZATION_DIR", nanoarrow_cache_root.c_str(), 1) == 0,
-           "failed to reset materialization dir env");
-    expect(setenv("VELARIA_MATERIALIZATION_FORMAT", "nanoarrow_ipc", 1) == 0,
-           "failed to switch materialization format env");
+    dataflow::SourceOptions nanoarrow_options;
+    nanoarrow_options.materialization.enabled = true;
+    nanoarrow_options.materialization.root = nanoarrow_cache_root;
+    nanoarrow_options.materialization.data_format =
+        dataflow::MaterializationDataFormat::NanoArrowIpc;
 
     const auto nanoarrow_csv_path = make_temp_file("velaria-nanoarrow-source");
     write_csv(nanoarrow_csv_path, "id,score,name\n1,10,alice\n2,20,bob\n");
-    const auto nanoarrow_first = session.read_csv(nanoarrow_csv_path).toTable();
+    const auto nanoarrow_first = session.read_csv(nanoarrow_csv_path, nanoarrow_options).toTable();
     expect(nanoarrow_first.rows.size() == 2, "nanoarrow csv read row count mismatch");
     expect_table_value(nanoarrow_first, 1, 2, dataflow::Value("bob"),
                        "nanoarrow csv read content mismatch");
 
     dataflow::SourceMaterializationStore nanoarrow_store(
-        dataflow::default_source_materialization_root(),
-        dataflow::MaterializationDataFormat::NanoArrowIpc);
+        nanoarrow_cache_root, dataflow::MaterializationDataFormat::NanoArrowIpc);
     const auto nanoarrow_fingerprint =
         dataflow::capture_file_source_fingerprint(nanoarrow_csv_path, "csv", "delimiter=,");
     const auto nanoarrow_entry = nanoarrow_store.lookup(nanoarrow_fingerprint);
@@ -228,7 +265,8 @@ int main() {
         std::filesystem::last_write_time(nanoarrow_entry->data_path);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(25));
-    const auto nanoarrow_second = session.read_csv(nanoarrow_csv_path).toTable();
+    const auto nanoarrow_second =
+        session.read_csv(nanoarrow_csv_path, nanoarrow_options).toTable();
     expect(nanoarrow_second.rows.size() == 2, "nanoarrow second csv read row count mismatch");
     expect_table_value(nanoarrow_second, 0, 1, dataflow::Value(int64_t(10)),
                        "nanoarrow second csv read content mismatch");
@@ -236,6 +274,11 @@ int main() {
         dataflow::capture_file_source_fingerprint(nanoarrow_csv_path, "csv", "delimiter=,"));
     expect(nanoarrow_second_entry.has_value(),
            "nanoarrow source materialization entry should still exist");
+    const auto nanoarrow_lazy = nanoarrow_store.load(*nanoarrow_second_entry, false);
+    expect(nanoarrow_lazy.rows.empty(), "nanoarrow store lazy load should keep rows empty");
+    expect(nanoarrow_lazy.rowCount() == 2, "nanoarrow store lazy load row count mismatch");
+    expect(dataflow::viewValueColumn(nanoarrow_lazy, 1).values()[0] == dataflow::Value(int64_t(10)),
+           "nanoarrow store lazy load content mismatch");
     const auto nanoarrow_second_cache_mtime =
         std::filesystem::last_write_time(nanoarrow_second_entry->data_path);
     expect(nanoarrow_first_cache_mtime == nanoarrow_second_cache_mtime,
@@ -256,6 +299,23 @@ int main() {
                        "quoted json csv cell mismatch");
     expect_table_value(quoted, 1, 2, dataflow::Value(int64_t(8)),
                        "quoted csv numeric tail mismatch");
+
+    const auto multiline_csv_path = make_temp_file("velaria-multiline-quoted-source");
+    write_csv(
+        multiline_csv_path,
+        "id,note,score\n"
+        "1,\"hello\nworld\",10\n"
+        "2,\"escaped \"\"quote\"\"\",20\n");
+    const auto multiline = session.read_csv(multiline_csv_path).toTable();
+    expect(multiline.rows.size() == 2, "multiline csv row count mismatch");
+    expect_table_value(multiline, 0, 0, dataflow::Value(int64_t(1)),
+                       "multiline csv first id mismatch");
+    expect_table_value(multiline, 0, 1, dataflow::Value("hello\nworld"),
+                       "multiline csv embedded newline mismatch");
+    expect_table_value(multiline, 1, 1, dataflow::Value("escaped \"quote\""),
+                       "multiline csv escaped quote mismatch");
+    expect_table_value(multiline, 1, 2, dataflow::Value(int64_t(20)),
+                       "multiline csv numeric tail mismatch");
 
     std::cout << "[test] source materialization binary+nanoarrow cache ok" << std::endl;
     return 0;

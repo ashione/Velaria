@@ -126,6 +126,24 @@ int main() {
   expect(sorted.rows[2][0].asInt64() == 1, "sortTable third row mismatch");
   expect(sorted.rows[3][0].asInt64() == 2, "sortTable null row should sort last");
 
+  dataflow::Table lazy_sort_table(
+      dataflow::Schema({"id", "score", "region"}),
+      {
+          {dataflow::Value(int64_t(1)), dataflow::Value(2.0), dataflow::Value("b")},
+          {dataflow::Value(int64_t(2)), dataflow::Value(), dataflow::Value("a")},
+          {dataflow::Value(int64_t(3)), dataflow::Value(2.0), dataflow::Value("a")},
+          {dataflow::Value(int64_t(4)), dataflow::Value(5.0), dataflow::Value("c")},
+      });
+  lazy_sort_table.columnar_cache = dataflow::makeColumnarCache(lazy_sort_table);
+  lazy_sort_table.rows.clear();
+  const auto lazy_sorted = dataflow::sortTable(lazy_sort_table, {1, 2}, {false, true});
+  expect(lazy_sorted.rowCount() == 4, "lazy sortTable row count mismatch");
+  const auto lazy_ids = dataflow::materializeValueColumn(lazy_sorted, 0);
+  expect(lazy_ids.values[0].asInt64() == 4, "lazy sortTable first row mismatch");
+  expect(lazy_ids.values[1].asInt64() == 3, "lazy sortTable second row mismatch");
+  expect(lazy_ids.values[2].asInt64() == 1, "lazy sortTable third row mismatch");
+  expect(lazy_ids.values[3].asInt64() == 2, "lazy sortTable null row should sort last");
+
   const auto serialized_keys = dataflow::materializeSerializedKeys(table, {0, 2});
   expect(serialized_keys.size() == 3, "serialized key count mismatch");
   expect(serialized_keys[0] == (std::string(" APAC ") + '\x1f' + "A"),

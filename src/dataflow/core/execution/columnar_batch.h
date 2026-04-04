@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -27,20 +28,37 @@ struct DoubleColumnBuffer {
   std::vector<uint8_t> is_null;
 };
 
+struct ArrowColumnBacking {
+  std::string format;
+  std::string child_format;
+  std::shared_ptr<void> null_bitmap;
+  std::shared_ptr<void> value_buffer;
+  std::shared_ptr<void> extra_buffer;
+  std::shared_ptr<void> child_value_buffer;
+  int32_t fixed_list_size = 0;
+  std::size_t length = 0;
+  std::size_t child_length = 0;
+  int64_t null_count = 0;
+};
+
 struct ValueColumnBuffer {
   std::vector<Value> values;
+  std::shared_ptr<const ArrowColumnBacking> arrow_backing;
 };
 
 struct ColumnarTable {
   Schema schema;
   std::vector<ValueColumnBuffer> columns;
+  std::vector<std::string> arrow_formats;
+  std::vector<std::size_t> batch_row_counts;
+  std::size_t row_count = 0;
 };
 
 struct ValueColumnView {
   std::shared_ptr<const ColumnarTable> owner;
   const ValueColumnBuffer* buffer = nullptr;
 
-  const std::vector<Value>& values() const { return buffer->values; }
+  const std::vector<Value>& values() const;
 };
 
 struct RowSelection {
@@ -50,6 +68,14 @@ struct RowSelection {
 
 std::shared_ptr<ColumnarTable> makeColumnarCache(const Table& table);
 std::shared_ptr<const ColumnarTable> ensureColumnarCache(const Table* table);
+const std::vector<Value>& materializeValueBuffer(const ValueColumnBuffer* buffer);
+std::size_t valueColumnRowCount(const ValueColumnBuffer& buffer);
+bool valueColumnIsNullAt(const ValueColumnBuffer& buffer, std::size_t row_index);
+std::string_view valueColumnStringViewAt(const ValueColumnBuffer& buffer, std::size_t row_index);
+std::string valueColumnStringAt(const ValueColumnBuffer& buffer, std::size_t row_index);
+int64_t valueColumnInt64At(const ValueColumnBuffer& buffer, std::size_t row_index);
+double valueColumnDoubleAt(const ValueColumnBuffer& buffer, std::size_t row_index);
+Value valueColumnValueAt(const ValueColumnBuffer& buffer, std::size_t row_index);
 ValueColumnView viewValueColumn(const Table& table, std::size_t column_index);
 std::vector<ValueColumnView> viewValueColumns(const Table& table,
                                               const std::vector<std::size_t>& indices);
@@ -75,10 +101,20 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
                                        bool (*pred)(const Value& lhs, const Value& rhs));
 RowSelection vectorizedFilterSelection(const ValueColumnView& input, const Value& rhs,
                                        bool (*pred)(const Value& lhs, const Value& rhs));
+RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Value& rhs,
+                                       const std::string& op);
+RowSelection vectorizedFilterSelection(const ValueColumnView& input, const Value& rhs,
+                                       const std::string& op);
+RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Value& rhs,
+                                       const std::string& op, std::size_t max_selected);
+RowSelection vectorizedFilterSelection(const ValueColumnView& input, const Value& rhs,
+                                       const std::string& op, std::size_t max_selected);
 Table projectTable(const Table& table, const std::vector<std::size_t>& indices,
-                   const std::vector<std::string>& aliases = {});
-Table filterTable(const Table& table, const RowSelection& selection);
-Table limitTable(const Table& table, std::size_t limit);
+                   const std::vector<std::string>& aliases = {},
+                   bool materialize_rows = true);
+Table filterTable(const Table& table, const RowSelection& selection,
+                  bool materialize_rows = true);
+Table limitTable(const Table& table, std::size_t limit, bool materialize_rows = true);
 Table sortTable(const Table& table, const std::vector<std::size_t>& indices,
                 const std::vector<bool>& ascending);
 
@@ -118,7 +154,11 @@ std::vector<Value> computeComputedColumnValues(
     ComputedColumnKind function,
     const std::vector<ComputedColumnArg>& args);
 
-void appendNamedColumn(Table* table, const std::string& column_name, std::vector<Value>&& values);
-void appendColumn(Table* table, std::vector<Value>&& values);
+void appendNamedColumn(Table* table, const std::string& column_name, std::vector<Value>&& values,
+                       bool materialize_rows = true);
+void appendNamedColumn(Table* table, const std::string& column_name, ValueColumnBuffer&& column,
+                       bool materialize_rows = true);
+void appendColumn(Table* table, std::vector<Value>&& values, bool materialize_rows = true);
+void appendColumn(Table* table, ValueColumnBuffer&& column, bool materialize_rows = true);
 
 }  // namespace dataflow

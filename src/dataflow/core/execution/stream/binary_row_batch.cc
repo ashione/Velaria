@@ -52,6 +52,15 @@ size_t StringBlobStorage::size() const {
 
 namespace {
 
+const Table& tableWithRows(const Table& table, std::unique_ptr<Table>* materialized) {
+  if (!table.rows.empty() || table.rowCount() == 0) {
+    return table;
+  }
+  materialized->reset(new Table(table));
+  materializeRows(materialized->get());
+  return **materialized;
+}
+
 constexpr uint8_t kMagic[4] = {'B', 'R', 'B', '1'};
 constexpr uint8_t kEncodingPlain = 0;
 constexpr uint8_t kEncodingDictionary = 1;
@@ -458,14 +467,16 @@ PreparedBinaryRowBatch BinaryRowBatchCodec::prepare(const Table& table,
 PreparedBinaryRowBatch BinaryRowBatchCodec::prepareRange(
     const Table& table, size_t row_begin, size_t row_end,
     const BinaryRowBatchOptions& options) const {
-  if (row_begin > row_end || row_end > table.rowCount()) {
+  std::unique_ptr<Table> materialized;
+  const Table& input = tableWithRows(table, &materialized);
+  if (row_begin > row_end || row_end > input.rowCount()) {
     throw std::out_of_range("binary row batch row range out of bounds");
   }
   PreparedBinaryRowBatch prepared;
-  prepared.projected_columns = resolveProjectedColumns(table, options);
+  prepared.projected_columns = resolveProjectedColumns(input, options);
   prepared.encoded_columns =
-      buildEncodedColumns(table, prepared.projected_columns, row_begin, row_end);
-  prepared.estimated_size = estimateSerializedSizeInternal(table, row_begin, row_end,
+      buildEncodedColumns(input, prepared.projected_columns, row_begin, row_end);
+  prepared.estimated_size = estimateSerializedSizeInternal(input, row_begin, row_end,
                                                            prepared.projected_columns,
                                                            prepared.encoded_columns);
   return prepared;
@@ -507,16 +518,18 @@ void BinaryRowBatchCodec::serializePreparedRange(const Table& table, size_t row_
   if (out == nullptr) {
     throw std::invalid_argument("binary row batch serialize output is null");
   }
-  if (row_begin > row_end || row_end > table.rowCount()) {
+  std::unique_ptr<Table> materialized;
+  const Table& input = tableWithRows(table, &materialized);
+  if (row_begin > row_end || row_end > input.rowCount()) {
     throw std::out_of_range("binary row batch row range out of bounds");
   }
   out->clear();
   const size_t row_count = row_end - row_begin;
   const size_t estimated = prepared.estimated_size;
-  out->reserve(std::max(estimated, row_count * 32 + table.schema.fields.size() * 16));
+  out->reserve(std::max(estimated, row_count * 32 + input.schema.fields.size() * 16));
   out->resize(estimated);
   RawWriter writer{out->data(), out->size(), 0};
-  const size_t actual = serializeRangeInternal(table, row_begin, row_end,
+  const size_t actual = serializeRangeInternal(input, row_begin, row_end,
                                                prepared.projected_columns,
                                                prepared.encoded_columns, &writer);
   out->resize(actual);
@@ -536,7 +549,9 @@ size_t BinaryRowBatchCodec::serializePreparedRangeToBuffer(
   if (out == nullptr && capacity != 0) {
     throw std::invalid_argument("binary row batch buffer is null");
   }
-  if (row_begin > row_end || row_end > table.rowCount()) {
+  std::unique_ptr<Table> materialized;
+  const Table& input = tableWithRows(table, &materialized);
+  if (row_begin > row_end || row_end > input.rowCount()) {
     throw std::out_of_range("binary row batch row range out of bounds");
   }
   const size_t estimated = prepared.estimated_size;
@@ -544,7 +559,7 @@ size_t BinaryRowBatchCodec::serializePreparedRangeToBuffer(
     throw std::out_of_range("binary row batch buffer capacity too small");
   }
   RawWriter writer{out, capacity, 0};
-  return serializeRangeInternal(table, row_begin, row_end, prepared.projected_columns,
+  return serializeRangeInternal(input, row_begin, row_end, prepared.projected_columns,
                                 prepared.encoded_columns, &writer);
 }
 

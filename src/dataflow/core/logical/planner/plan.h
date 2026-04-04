@@ -1,10 +1,12 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "src/dataflow/core/execution/table.h"
+#include "src/dataflow/core/execution/source_materialization.h"
 
 namespace dataflow {
 
@@ -25,7 +27,9 @@ enum class PlanKind {
   Sink,
   OrderBy
 };
+enum class SourceStorageKind { InMemory, CsvFile };
 enum class JoinKind { Inner, Left, Right, Full };
+enum class AggregateFunction { Sum, Count, Avg, Min, Max };
 enum class ComputedColumnKind {
   Copy,
   StringLength,
@@ -51,6 +55,32 @@ enum class ComputedColumnKind {
   DateDay
 };
 
+struct AggregateSpec {
+  AggregateFunction function;
+  size_t value_index;
+  std::string output_name;
+};
+
+struct SourceAggregatePushdownSpec {
+  std::vector<size_t> keys;
+  std::vector<AggregateSpec> aggregates;
+};
+
+struct SourceFilterPushdownSpec {
+  bool enabled = false;
+  size_t column_index = 0;
+  Value value;
+  std::string op;
+};
+
+struct SourcePushdownSpec {
+  std::vector<std::size_t> projected_columns;
+  SourceFilterPushdownSpec filter;
+  std::size_t limit = 0;
+  bool has_aggregate = false;
+  SourceAggregatePushdownSpec aggregate;
+};
+
 struct ComputedColumnArg {
   bool is_literal = false;
   Value literal;
@@ -66,9 +96,32 @@ struct PlanNode {
 
 struct SourcePlan : PlanNode {
   std::string source_name;
+  SourceStorageKind storage_kind = SourceStorageKind::InMemory;
+  Schema schema;
   Table table;
+  std::string csv_path;
+  char csv_delimiter = ',';
+  SourceOptions options;
+  mutable std::mutex cached_table_mu;
+  mutable std::shared_ptr<Table> cached_table;
+  mutable std::vector<std::size_t> cached_projected_indices;
+
   explicit SourcePlan(std::string name, Table t)
-      : PlanNode(PlanKind::Source), source_name(std::move(name)), table(std::move(t)) {}
+      : PlanNode(PlanKind::Source),
+        source_name(std::move(name)),
+        storage_kind(SourceStorageKind::InMemory),
+        schema(t.schema),
+        table(std::move(t)) {}
+
+  SourcePlan(std::string name, std::string path, char delimiter, Schema source_schema,
+             SourceOptions source_options = {})
+      : PlanNode(PlanKind::Source),
+        source_name(std::move(name)),
+        storage_kind(SourceStorageKind::CsvFile),
+        schema(std::move(source_schema)),
+        csv_path(std::move(path)),
+        csv_delimiter(delimiter),
+        options(std::move(source_options)) {}
 };
 
 struct SelectPlan : PlanNode {
@@ -161,14 +214,6 @@ struct GroupBySumPlan : PlanNode {
   size_t value_index;
   GroupBySumPlan(PlanNodePtr p, std::vector<size_t> ks, size_t vid)
       : PlanNode(PlanKind::GroupBySum), child(std::move(p)), keys(std::move(ks)), value_index(vid) {}
-};
-
-enum class AggregateFunction { Sum, Count, Avg, Min, Max };
-
-struct AggregateSpec {
-  AggregateFunction function;
-  size_t value_index;
-  std::string output_name;
 };
 
 struct AggregatePlan : PlanNode {

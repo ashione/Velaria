@@ -2,6 +2,7 @@
 
 #include "src/dataflow/core/contract/api/dataframe.h"
 #include "src/dataflow/core/contract/catalog/catalog.h"
+#include "src/dataflow/core/execution/source_materialization.h"
 #include "src/dataflow/core/execution/stream/stream.h"
 #include "src/dataflow/core/logical/sql/sql_parser.h"
 #include "src/dataflow/core/logical/sql/sql_planner.h"
@@ -13,6 +14,8 @@ class DataflowSession {
  public:
   static DataflowSession& builder();
 
+  DataFrame read_csv(const std::string& path, const SourceOptions& options);
+  DataFrame read_csv(const std::string& path, char delimiter, const SourceOptions& options);
   DataFrame read_csv(const std::string& path, char delimiter = ',');
   StreamingDataFrame readStream(std::shared_ptr<StreamSource> source);
   StreamingDataFrame readStreamCsvDir(const std::string& directory, char delimiter = ',');

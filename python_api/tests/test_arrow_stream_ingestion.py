@@ -32,6 +32,22 @@ class ArrowStreamIngestionTest(unittest.TestCase):
         self.assertEqual(rows["schema"], ["id", "value"])
         self.assertEqual(rows["rows"], [[1, 10], [2, 20], [3, 30]])
 
+    def test_create_dataframe_from_record_batch_reader_to_arrow_merges_batches(self):
+        session = velaria.Session()
+        schema = pa.schema([("id", pa.int64()), ("value", pa.int64())])
+        reader = pa.RecordBatchReader.from_batches(
+            schema,
+            [
+                pa.record_batch([[1, 2], [10, 20]], schema=schema),
+                pa.record_batch([[3, 4], [30, 40]], schema=schema),
+            ],
+        )
+
+        arrow_out = session.create_dataframe_from_arrow(reader).to_arrow()
+        self.assertEqual(arrow_out.column_names, ["id", "value"])
+        self.assertEqual(arrow_out.column("id").to_pylist(), [1, 2, 3, 4])
+        self.assertEqual(arrow_out.column("value").to_pylist(), [10, 20, 30, 40])
+
     def test_create_dataframe_from_arrow_c_stream_wrapper(self):
         session = velaria.Session()
         table = pa.table({"id": [1, 2], "name": ["alice", "bob"]})
@@ -130,6 +146,52 @@ class ArrowStreamIngestionTest(unittest.TestCase):
         self.assertEqual(arrow_out.column("id").to_pylist(), [1, 2, 3])
         self.assertEqual(arrow_out.column("name").to_pylist(), ["alice", None, "carol"])
         self.assertEqual(arrow_out.column("score").to_pylist(), [1.5, None, 3.25])
+
+    def test_dataframe_to_arrow_preserves_arrow_native_formats(self):
+        session = velaria.Session()
+        embedding = pa.FixedSizeListArray.from_arrays(
+            pa.array([1.0, 2.0, 3.0, 4.0], type=pa.float32()),
+            2,
+        )
+        source = pa.table(
+            {
+                "flag": pa.array([True, None], type=pa.bool_()),
+                "small_id": pa.array([1, 2], type=pa.int32()),
+                "score32": pa.array([1.25, None], type=pa.float32()),
+                "note": pa.array(["alice", "bob"], type=pa.large_string()),
+                "embedding": embedding,
+            }
+        )
+
+        arrow_out = session.create_dataframe_from_arrow(source).to_arrow()
+        self.assertEqual(arrow_out.schema.field("flag").type, pa.bool_())
+        self.assertEqual(arrow_out.schema.field("small_id").type, pa.int32())
+        self.assertEqual(arrow_out.schema.field("score32").type, pa.float32())
+        self.assertEqual(arrow_out.schema.field("note").type, pa.large_string())
+        self.assertEqual(arrow_out.schema.field("embedding").type, pa.list_(pa.float32(), 2))
+        self.assertEqual(arrow_out.column("flag").to_pylist(), [True, None])
+        self.assertEqual(arrow_out.column("small_id").to_pylist(), [1, 2])
+        self.assertEqual(arrow_out.column("score32").to_pylist(), [1.25, None])
+        self.assertEqual(arrow_out.column("note").to_pylist(), ["alice", "bob"])
+        self.assertEqual(arrow_out.column("embedding").to_pylist(), [[1.0, 2.0], [3.0, 4.0]])
+
+    def test_read_csv_to_arrow_roundtrip_preserves_quoted_and_null_cells(self):
+        session = velaria.Session()
+        with tempfile.TemporaryDirectory(prefix="velaria-read-csv-arrow-") as tmp:
+            csv_path = pathlib.Path(tmp) / "input.csv"
+            csv_path.write_text(
+                'id,name,score\n'
+                '1,alice,1.5\n'
+                '2,,\n'
+                '3,"carol,inc",3.25\n',
+                encoding="utf-8",
+            )
+
+            arrow_out = session.read_csv(str(csv_path)).to_arrow()
+            self.assertEqual(arrow_out.column_names, ["id", "name", "score"])
+            self.assertEqual(arrow_out.column("id").to_pylist(), [1, 2, 3])
+            self.assertEqual(arrow_out.column("name").to_pylist(), ["alice", None, "carol,inc"])
+            self.assertEqual(arrow_out.column("score").to_pylist(), [1.5, None, 3.25])
 
 
 if __name__ == "__main__":

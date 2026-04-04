@@ -62,4 +62,50 @@ Table& Table::operator=(Table&& other) noexcept {
   return *this;
 }
 
+size_t Table::rowCount() const {
+  if (!rows.empty()) {
+    return rows.size();
+  }
+  std::lock_guard<std::mutex> lock(columnar_cache_mu);
+  if (!columnar_cache || columnar_cache->columns.empty()) {
+    return columnar_cache ? columnar_cache->row_count : 0;
+  }
+  if (columnar_cache->row_count > 0) {
+    return columnar_cache->row_count;
+  }
+  return valueColumnRowCount(columnar_cache->columns.front());
+}
+
+void materializeRows(Table* table) {
+  if (table == nullptr) {
+    throw std::invalid_argument("materializeRows table is null");
+  }
+  if (!table->rows.empty()) {
+    return;
+  }
+  std::shared_ptr<ColumnarTable> cache;
+  {
+    std::lock_guard<std::mutex> lock(table->columnar_cache_mu);
+    cache = table->columnar_cache;
+  }
+  if (!cache || cache->columns.empty()) {
+    return;
+  }
+  const std::size_t row_count =
+      cache->row_count > 0 ? cache->row_count : valueColumnRowCount(cache->columns.front());
+  table->rows.resize(row_count);
+  for (auto& row : table->rows) {
+    row.reserve(cache->columns.size());
+  }
+  for (const auto& column : cache->columns) {
+    const auto& values = materializeValueBuffer(&column);
+    if (values.size() != row_count) {
+      throw std::runtime_error("columnar cache row count mismatch");
+    }
+    for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+      table->rows[row_index].push_back(values[row_index]);
+    }
+  }
+}
+
 }  // namespace dataflow

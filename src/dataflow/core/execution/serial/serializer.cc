@@ -10,6 +10,15 @@ namespace dataflow {
 
 namespace {
 
+const Table& tableWithRows(const Table& table, std::unique_ptr<Table>* materialized) {
+  if (!table.rows.empty() || table.rowCount() == 0) {
+    return table;
+  }
+  materialized->reset(new Table(table));
+  materializeRows(materialized->get());
+  return **materialized;
+}
+
 std::string encodeValuePayload(const Value& value) {
   std::ostringstream out;
   switch (value.type()) {
@@ -74,13 +83,15 @@ Value decodeValuePayload(DataType type, const std::string& payload) {
 std::string ProtoLikeSerializer::name() const { return "proto-like"; }
 
 std::string ProtoLikeSerializer::serialize(const Table& table) const {
+  std::unique_ptr<Table> materialized;
+  const Table& input = tableWithRows(table, &materialized);
   std::ostringstream out;
-  out << table.schema.fields.size() << '\n';
-  for (const auto& field : table.schema.fields) {
+  out << input.schema.fields.size() << '\n';
+  for (const auto& field : input.schema.fields) {
     out << field << '\n';
   }
-  out << table.rows.size() << '\n';
-  for (const auto& row : table.rows) {
+  out << input.rows.size() << '\n';
+  for (const auto& row : input.rows) {
     out << row.size();
     for (size_t i = 0; i < row.size(); ++i) {
       const auto& v = row[i];
@@ -147,15 +158,17 @@ Table ProtoLikeSerializer::deserialize(const std::string& payload) const {
 std::string ArrowLikeSerializer::name() const { return "arrow-like"; }
 
 std::string ArrowLikeSerializer::serialize(const Table& table) const {
+  std::unique_ptr<Table> materialized;
+  const Table& input = tableWithRows(table, &materialized);
   // Placeholder for future Arrow IPC. Keep output shape stable and self-describing.
   std::ostringstream out;
   out << "ARROW-LIKE-V0\n";
-  out << table.schema.fields.size() << '\n';
-  for (const auto& field : table.schema.fields) {
+  out << input.schema.fields.size() << '\n';
+  for (const auto& field : input.schema.fields) {
     out << field << '\n';
   }
-  out << table.rows.size() << '\n';
-  for (const auto& row : table.rows) {
+  out << input.rows.size() << '\n';
+  for (const auto& row : input.rows) {
     for (size_t i = 0; i < row.size(); ++i) {
       if (i > 0) out << ',';
       out << row[i].toString();

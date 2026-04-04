@@ -55,6 +55,23 @@ int readInt(const std::string& payload, std::size_t* offset) {
   return std::stoi(readToken(payload, offset));
 }
 
+void appendSchema(std::string* out, const Schema& schema) {
+  appendSize(out, schema.fields.size());
+  for (const auto& field : schema.fields) {
+    appendToken(out, field);
+  }
+}
+
+Schema readSchema(const std::string& payload, std::size_t* offset) {
+  std::vector<std::string> fields;
+  const auto field_count = readSize(payload, offset);
+  fields.reserve(field_count);
+  for (std::size_t i = 0; i < field_count; ++i) {
+    fields.push_back(readToken(payload, offset));
+  }
+  return Schema(std::move(fields));
+}
+
 bool eqPred(const Value& lhs, const Value& rhs) { return lhs == rhs; }
 bool nePred(const Value& lhs, const Value& rhs) { return lhs != rhs; }
 bool ltPred(const Value& lhs, const Value& rhs) { return lhs < rhs; }
@@ -156,9 +173,16 @@ void serializeNode(const PlanNodePtr& plan, std::string* out) {
   switch (plan->kind) {
     case PlanKind::Source: {
       const auto* node = static_cast<const SourcePlan*>(plan.get());
-      const ProtoLikeSerializer serializer;
       appendToken(out, node->source_name);
-      appendToken(out, serializer.serialize(node->table));
+      appendInt(out, static_cast<int>(node->storage_kind));
+      appendSchema(out, node->schema);
+      if (node->storage_kind == SourceStorageKind::InMemory) {
+        const ProtoLikeSerializer serializer;
+        appendToken(out, serializer.serialize(node->table));
+      } else {
+        appendToken(out, node->csv_path);
+        appendInt(out, static_cast<unsigned char>(node->csv_delimiter));
+      }
       return;
     }
     case PlanKind::Select: {
@@ -269,10 +293,17 @@ PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset) {
   const auto kind = static_cast<PlanKind>(raw_kind);
   switch (kind) {
     case PlanKind::Source: {
-      const ProtoLikeSerializer serializer;
       const auto source_name = readToken(payload, offset);
-      const auto table_payload = readToken(payload, offset);
-      return std::make_shared<SourcePlan>(source_name, serializer.deserialize(table_payload));
+      const auto storage_kind = static_cast<SourceStorageKind>(readInt(payload, offset));
+      const auto schema = readSchema(payload, offset);
+      if (storage_kind == SourceStorageKind::InMemory) {
+        const ProtoLikeSerializer serializer;
+        const auto table_payload = readToken(payload, offset);
+        return std::make_shared<SourcePlan>(source_name, serializer.deserialize(table_payload));
+      }
+      const auto csv_path = readToken(payload, offset);
+      const auto csv_delimiter = static_cast<char>(readInt(payload, offset));
+      return std::make_shared<SourcePlan>(source_name, csv_path, csv_delimiter, schema);
     }
     case PlanKind::Select: {
       auto child = deserializeNode(payload, offset);

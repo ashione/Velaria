@@ -9,6 +9,22 @@ Velaria is a local-first C++17 dataflow engine research project. The current goa
 - expose that kernel through a supported Python ecosystem layer
 - use the same-host actor/rpc path as an experiment lane, not as a second kernel
 
+## Execution Direction
+
+The core runtime direction is explicitly column-first.
+
+That means:
+
+- internal execution should prefer column-oriented ownership and operator chaining
+- row materialization is a compatibility surface for sinks, debugging, and legacy boundaries
+- new hot-path work should reduce `row -> column -> row` conversion, not normalize it
+- performance wins take priority over preserving row-heavy internals when the public contract stays stable
+
+Practical rule:
+
+- if a batch path can stay in columns until the final boundary, it should
+- if a row-based fallback remains, it should be explicit, lazy, and isolated to the boundary that still needs it
+
 ## Layer Model
 
 ### Core Kernel
@@ -16,6 +32,7 @@ Velaria is a local-first C++17 dataflow engine research project. The current goa
 Owns:
 
 - local batch and streaming execution
+- column-first execution strategy and internal data layout direction
 - logical planning and minimal SQL mapping
 - source/sink ABI
 - explain / progress / checkpoint contract
@@ -65,6 +82,7 @@ Repository entrypoints:
   - `//:python_ecosystem_regression`
   - `//python_api:velaria_python_supported_regression`
   - `./scripts/run_python_ecosystem_regression.sh`
+  - `./scripts/run_python_stage_benchmark.sh`
 
 ### Experimental Runtime
 
@@ -145,11 +163,15 @@ Workspace persistence keeps the kernel contract unchanged:
 - `progress.jsonl` appends native `snapshotJson()` output line by line
 - large results stay in files; SQLite stores only index rows and small previews
 
+Rows are not the optimization target of the core contract.
+They remain a compatibility form for selected boundaries, while internal execution is expected to stay column-first as deep as possible.
+
 ## Current Scope
 
 Available today:
 
 - one native kernel for batch + streaming
+- a column-first batch direction with lazy row materialization on compatibility boundaries
 - `read_csv`, `readStream(...)`, `readStreamCsvDir(...)`
 - query-local backpressure, bounded backlog, progress snapshots, checkpoint path
 - execution modes: `single-process`, `local-workers`
@@ -205,6 +227,12 @@ That document is the maintained status board for:
 - intentionally not planned items
 - next phases
 
+Performance policy for this repository:
+
+- prefer lower-copy columnar execution over row-heavy convenience
+- treat Python/Arrow/CLI export costs as boundary costs, not as justification to reintroduce row-first internals
+- add benchmarks when changing hot paths so column-first gains stay measurable
+
 ## Python Ecosystem
 
 Main supported Python surfaces:
@@ -253,41 +281,16 @@ The global commands are expected only after installing the wheel or package.
 
 ### Python Workflow
 
-Bootstrap:
+Minimal local bootstrap:
 
 ```bash
-bazel build //:velaria_pyext
-bazel run //python_api:sync_native_extension
 uv sync --project python_api --python python3.13
-```
-
-Run examples:
-
-```bash
 uv run --project python_api python python_api/examples/demo_batch_sql_arrow.py
-uv run --project python_api python python_api/examples/demo_stream_sql.py
-uv run --project python_api python python_api/examples/demo_vector_search.py
 ```
 
-Tracked run examples:
+For full development, build, smoke, and regression commands, see:
 
-```bash
-uv run --project python_api python python_api/velaria_cli.py -i
-
-uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
-  --run-name "score_demo" \
-  --description "score filter result for demo input" \
-  --tag demo \
-  --csv /path/to/input.csv \
-  --query "SELECT * FROM input_table LIMIT 5"
-
-uv run --project python_api python python_api/velaria_cli.py run list --tag demo --query "score"
-uv run --project python_api python python_api/velaria_cli.py run result --run-id <run_id>
-uv run --project python_api python python_api/velaria_cli.py run diff --run-id <run_id> --other-run-id <other_run_id>
-uv run --project python_api python python_api/velaria_cli.py run show --run-id <run_id>
-uv run --project python_api python python_api/velaria_cli.py artifacts list --run-id <run_id>
-uv run --project python_api python python_api/velaria_cli.py artifacts preview --artifact-id <artifact_id>
-```
+- [docs/development.md](./docs/development.md)
 
 ## Local Vector Search
 
@@ -343,62 +346,11 @@ Benchmark baseline:
 ./scripts/run_vector_search_benchmark.sh
 ```
 
-## Experimental Runtime
+## Development Notes
 
-Same-host flow:
+Repository-local build, smoke, and regression entrypoints live in:
 
-```text
-client -> scheduler(jobmaster) -> worker -> in-proc operator chain -> result
-```
-
-Build:
-
-```bash
-bazel build //:actor_rpc_scheduler //:actor_rpc_worker //:actor_rpc_client //:actor_rpc_smoke
-```
-
-Smoke:
-
-```bash
-bazel run //:actor_rpc_smoke
-```
-
-Three-process local run:
-
-```bash
-bazel run //:actor_rpc_scheduler -- --listen 127.0.0.1:61000 --node-id scheduler
-bazel run //:actor_rpc_worker -- --connect 127.0.0.1:61000 --node-id worker-1
-bazel run //:actor_rpc_client -- --connect 127.0.0.1:61000 --payload "demo payload"
-```
-
-## Build and Verification
-
-Single-node baseline:
-
-```bash
-bazel run //:sql_demo
-bazel run //:df_demo
-bazel run //:stream_demo
-```
-
-Layered regression entrypoints:
-
-```bash
-./scripts/run_core_regression.sh
-./scripts/run_python_ecosystem_regression.sh
-./scripts/run_experimental_regression.sh
-./scripts/run_stream_observability_regression.sh
-```
-
-`run_stream_observability_regression.sh` validates the JSON baseline for stream execution, actor strategy/explain output, actor RPC smoke, and the string builtin benchmark cases.
-
-Direct Bazel suites:
-
-```bash
-bazel test //:core_regression
-bazel test //:python_ecosystem_regression
-bazel test //:experimental_regression
-```
+- [docs/development.md](./docs/development.md)
 
 ## Repository Rules
 

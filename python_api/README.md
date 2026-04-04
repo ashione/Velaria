@@ -4,6 +4,15 @@ This document is the entrypoint for Velaria's supported Python ecosystem layer.
 
 Python is a supported ingress, interop, and packaging surface. It is not the execution core. Core semantics still come from the native kernel and the runtime contract in [docs/runtime-contract.md](../docs/runtime-contract.md).
 
+The Python layer must assume the core kernel is column-first.
+
+Practical implications:
+
+- Python interop should preserve columnar data as deep as possible
+- `rows` are a compatibility/export surface, not the preferred internal execution form
+- Arrow import/export work should reduce copy and rematerialization rather than normalizing row-first behavior
+- performance-sensitive changes should prefer native kernel improvements and lower-copy boundaries over Python-side workarounds
+
 ## Scope
 
 ### Supported
@@ -47,6 +56,7 @@ Python does not define:
 - a separate checkpoint contract
 - a separate vector scoring implementation for supported APIs
 - Python UDFs in the hot path
+- a row-first fallback policy for the native kernel
 
 ## API Surface
 
@@ -76,6 +86,7 @@ Mapping rule:
 
 - Python names may be ecosystem-friendly
 - behavior must map back to the same native kernel contract exposed by C++
+- Python wrappers should not force row materialization earlier than required by the user-facing boundary
 
 Current SQL mapping carried by Python:
 
@@ -162,6 +173,19 @@ Recommended regression entrypoint:
 ./scripts/run_python_ecosystem_regression.sh
 ```
 
+Repository benchmark fixture generation:
+
+- the stage benchmark can generate synthetic data at runtime
+- if you want a locally realistic benchmark input, generate an anonymized CSV from a private raw export with:
+
+```bash
+uv run --project python_api python scripts/generate_stage_benchmark_fixture.py \
+  --input /path/to/raw_rows_100k.csv \
+  --output python_api/benchmarks/data/stage_input_100k_anonymized.csv
+```
+
+- keep that generated CSV local and untracked; it is ignored by `.gitignore`
+
 That script covers:
 
 - native extension build
@@ -169,6 +193,28 @@ That script covers:
 - Bazel Python regression targets
 - demo smoke
 - CLI smoke
+
+Benchmark regression entrypoint:
+
+```bash
+./scripts/run_python_stage_benchmark.sh
+```
+
+By default that script generates benchmark input at runtime.
+To use a local anonymized CSV instead, set `VELARIA_STAGE_BENCH_CSV=/path/to/file.csv`.
+The default scenario is `groupby_count_max`.
+
+Benchmark scenario controls:
+
+- set `VELARIA_STAGE_BENCH_SCENARIO=groupby_count_max` for the `caller_psm / count / max(latency)` path
+- set `VELARIA_STAGE_BENCH_SCENARIO=filter_lower_limit` for the `LOWER(method) + filter + LIMIT` path
+- set `VELARIA_STAGE_BENCH_QUERY="..."` only when you intentionally want a custom Velaria query
+- when `VELARIA_STAGE_BENCH_QUERY` does not match the selected scenario query, also set
+  `VELARIA_STAGE_BENCH_SKIP_HARDCODE=1`; otherwise the benchmark rejects the run
+
+`hardcode` is only reported when it is semantically aligned with the selected scenario.
+The benchmark now enforces row-count parity between the hardcode baseline and Velaria result
+before it prints ratios.
 
 ## Packaging
 
@@ -328,6 +374,14 @@ Python ecosystem source groups:
 
 ## Arrow Contract
 
+Arrow is the preferred interop form for high-volume results.
+
+Guidance:
+
+- prefer Arrow/native columnar paths over `to_rows()` when benchmarking or integrating large results
+- treat `to_rows()` as a convenience/debugging surface
+- when profiling Python API performance, separate `sql()` cost from `to_arrow()` / `to_rows()` export cost
+
 Supported Arrow ingestion inputs:
 
 - `pyarrow.Table`
@@ -416,5 +470,6 @@ Python may not:
 - redefine progress/checkpoint/explain semantics
 - become the source of truth for runtime decisions
 - introduce a second vector-search implementation for supported interfaces
+- pull the native kernel back toward a row-first design for ecosystem convenience
 
 For core boundaries, see [docs/core-boundary.md](../docs/core-boundary.md). For stable runtime semantics, see [docs/runtime-contract.md](../docs/runtime-contract.md).

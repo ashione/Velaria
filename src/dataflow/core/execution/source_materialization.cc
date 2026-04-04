@@ -16,9 +16,6 @@
 namespace dataflow {
 
 namespace {
-
-constexpr const char* kRootEnv = "VELARIA_MATERIALIZATION_DIR";
-constexpr const char* kDataFormatEnv = "VELARIA_MATERIALIZATION_FORMAT";
 constexpr const char* kMetadataFile = "meta.txt";
 
 std::uint64_t fnv1a64(const std::string& input) {
@@ -212,7 +209,8 @@ void serialize_materialized_table(MaterializationDataFormat format, const Table&
 }
 
 Table deserialize_materialized_table(MaterializationDataFormat format,
-                                     const std::string& path) {
+                                     const std::string& path,
+                                     bool materialize_rows) {
   switch (format) {
     case MaterializationDataFormat::BinaryRowBatch: {
       const auto payload = read_binary_file(path);
@@ -220,7 +218,7 @@ Table deserialize_materialized_table(MaterializationDataFormat format,
       return codec.deserialize(payload);
     }
     case MaterializationDataFormat::NanoArrowIpc:
-      return load_nanoarrow_ipc_table(path);
+      return load_nanoarrow_ipc_table(path, materialize_rows);
   }
   throw std::runtime_error("unsupported materialization data format");
 }
@@ -228,23 +226,11 @@ Table deserialize_materialized_table(MaterializationDataFormat format,
 }  // namespace
 
 std::string default_source_materialization_root() {
-  if (const char* env = std::getenv(kRootEnv)) {
-    if (env[0] != '\0') {
-      return env;
-    }
-  }
   return (std::filesystem::temp_directory_path() / "velaria_source_materialization_cache")
       .string();
 }
 
 MaterializationDataFormat default_source_materialization_data_format() {
-  if (const char* env = std::getenv(kDataFormatEnv)) {
-    if (env[0] != '\0') {
-      if (const auto parsed = parse_materialization_data_format(env)) {
-        return *parsed;
-      }
-    }
-  }
   return MaterializationDataFormat::BinaryRowBatch;
 }
 
@@ -354,8 +340,9 @@ void SourceMaterializationStore::save(const MaterializedSourceFingerprint& finge
   write_atomic_text(metadata_path(id), metadata.str());
 }
 
-Table SourceMaterializationStore::load(const SourceMaterializationEntry& entry) const {
-  return deserialize_materialized_table(entry.data_format, entry.data_path);
+Table SourceMaterializationStore::load(const SourceMaterializationEntry& entry,
+                                       bool materialize_rows) const {
+  return deserialize_materialized_table(entry.data_format, entry.data_path, materialize_rows);
 }
 
 }  // namespace dataflow

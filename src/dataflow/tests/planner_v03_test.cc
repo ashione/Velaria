@@ -2,9 +2,10 @@
 #include <memory>
 #include <stdexcept>
 
+#include "src/dataflow/core/contract/api/dataframe.h"
 #include "src/dataflow/core/execution/columnar_batch.h"
-#include "src/dataflow/core/logical/planner/plan.h"
 #include "src/dataflow/core/execution/runtime/executor.h"
+#include "src/dataflow/core/logical/planner/plan.h"
 
 namespace {
 
@@ -113,7 +114,8 @@ int main() {
       aggregate_plan, std::vector<std::size_t>{0}, std::vector<dataflow::AggregateSpec>{sum_spec});
   const auto aggregate_encoded = dataflow::serializePlan(aggregate_plan);
   const auto aggregate_decoded = dataflow::deserializePlan(aggregate_encoded);
-  const auto aggregate_out = executor.execute(aggregate_decoded);
+  auto aggregate_out = executor.execute(aggregate_decoded);
+  dataflow::materializeRows(&aggregate_out);
   expect(aggregate_out.rows.size() == 2, "aggregate should group two keys");
   expect(aggregate_out.schema.has("total_score"), "aggregate should expose output column");
   const auto total_idx = aggregate_out.schema.indexOf("total_score");
@@ -156,6 +158,31 @@ int main() {
   expect(join_scores.values.size() == 2, "join cached score size mismatch");
   expect(join_scores.values[0].asInt64() == 9, "join cached matched payload mismatch");
   expect(join_scores.values[1].isNull(), "join cached unmatched payload should be null");
+
+  dataflow::Schema limit_schema({"method", "score"});
+  dataflow::Table limit_source(
+      limit_schema,
+      {
+          {dataflow::Value("GET"), dataflow::Value(int64_t(10))},
+          {dataflow::Value("POST"), dataflow::Value(int64_t(20))},
+          {dataflow::Value("PUT"), dataflow::Value(int64_t(30))},
+      });
+  dataflow::ComputedColumnArg method_arg;
+  method_arg.is_literal = false;
+  method_arg.source_column_index = 0;
+  dataflow::DataFrame limited_df(limit_source);
+  limited_df = limited_df.filter("score", ">=", dataflow::Value(int64_t(10)))
+                   .withColumn("method_lower", dataflow::ComputedColumnKind::StringLower,
+                               {method_arg})
+                   .select({"method_lower", "score"})
+                   .limit(1);
+  const auto limit_explain = limited_df.explain();
+  expect(limit_explain.find("Select\n  WithColumn\n    added=method_lower\n    function=2\n    Limit\n") ==
+             0,
+         "limit should push below select and withColumn");
+  const auto limited_out = limited_df.toTable();
+  expect(limited_out.rows.size() == 1, "pushed limit query should retain single row");
+  expect(limited_out.rows[0][0].toString() == "get", "pushed limit query should preserve value");
 
   std::cout << "[test] planner v0.3 logical nodes ok" << std::endl;
   return 0;

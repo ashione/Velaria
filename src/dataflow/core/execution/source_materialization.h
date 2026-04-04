@@ -29,6 +29,16 @@ struct SourceMaterializationEntry {
   std::string data_path;
 };
 
+struct SourceMaterializationOptions {
+  bool enabled = false;
+  std::string root;
+  MaterializationDataFormat data_format = MaterializationDataFormat::BinaryRowBatch;
+};
+
+struct SourceOptions {
+  SourceMaterializationOptions materialization;
+};
+
 std::string default_source_materialization_root();
 MaterializationDataFormat default_source_materialization_data_format();
 std::string materialization_data_format_name(MaterializationDataFormat format);
@@ -46,7 +56,7 @@ class SourceMaterializationStore {
   std::optional<SourceMaterializationEntry> lookup(
       const MaterializedSourceFingerprint& fingerprint) const;
   void save(const MaterializedSourceFingerprint& fingerprint, const Table& table) const;
-  Table load(const SourceMaterializationEntry& entry) const;
+  Table load(const SourceMaterializationEntry& entry, bool materialize_rows = true) const;
 
   MaterializationDataFormat data_format() const { return data_format_; }
   std::string source_id(const MaterializedSourceFingerprint& fingerprint) const;

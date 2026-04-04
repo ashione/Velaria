@@ -55,6 +55,13 @@ jobs:
         run: |
           ./scripts/run_python_ecosystem_regression.sh
 
+      - name: Python Stage Benchmark
+        env:
+          VELARIA_STAGE_BENCH_ROWS: "100000"
+          VELARIA_STAGE_BENCH_ROUNDS: "1"
+        run: |
+          ./scripts/run_python_stage_benchmark.sh
+
   wheel-manylinux:
     if: startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/release/')
     runs-on: ubuntu-22.04

@@ -7,6 +7,7 @@
 
 #include "src/dataflow/core/execution/nanoarrow_ipc_codec.h"
 #include "src/dataflow/core/execution/stream/binary_row_batch.h"
+#include "src/dataflow/experimental/rpc/rpc_codec_ids.h"
 
 namespace dataflow {
 
@@ -143,7 +144,7 @@ std::string extractJsonString(const std::string& source,
 
 class JsonControlRpcSerializer : public IRpcSerializer {
  public:
-  std::string codec_id() const override { return "json-control-v1"; }
+  std::string codec_id() const override { return kRpcCodecIdJsonControlV1; }
 
   std::vector<uint8_t> serialize(const RpcEnvelope& envelope,
                                 const void* message) const override {
@@ -174,7 +175,7 @@ class JsonControlRpcSerializer : public IRpcSerializer {
 
 class TableBatchRpcSerializer : public IRpcSerializer {
  public:
-  std::string codec_id() const override { return "table-bin-v1"; }
+  std::string codec_id() const override { return kRpcCodecIdTableBinV1; }
 
   std::vector<uint8_t> serialize(const RpcEnvelope& envelope,
                                 const void* message) const override {
@@ -201,7 +202,7 @@ class TableBatchRpcSerializer : public IRpcSerializer {
 
 class ArrowTableBatchRpcSerializer : public IRpcSerializer {
  public:
-  std::string codec_id() const override { return "table-arrow-ipc-v1"; }
+  std::string codec_id() const override { return kRpcCodecIdTableArrowIpcV1; }
 
   std::vector<uint8_t> serialize(const RpcEnvelope& envelope,
                                  const void* message) const override {
@@ -320,13 +321,13 @@ bool LengthPrefixedFrameCodec::decode(const std::vector<uint8_t>& bytes,
 
 void registerBuiltinRpcSerializers() {
   auto& registry = RpcSerializerRegistry::instance();
-  if (registry.find("json-control-v1") == nullptr) {
+  if (registry.find(kRpcCodecIdJsonControlV1) == nullptr) {
     registry.registerSerializer(makeJsonControlRpcSerializer());
   }
-  if (registry.find("table-bin-v1") == nullptr) {
+  if (registry.find(kRpcCodecIdTableBinV1) == nullptr) {
     registry.registerSerializer(makeTableRpcSerializer());
   }
-  if (registry.find("table-arrow-ipc-v1") == nullptr) {
+  if (registry.find(kRpcCodecIdTableArrowIpcV1) == nullptr) {
     registry.registerSerializer(makeArrowTableRpcSerializer());
   }
 }

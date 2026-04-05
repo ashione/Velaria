@@ -22,9 +22,10 @@ int main() {
     std::vector<double> values = {1.0, 5.0, -3.0, 5.0, 9.0};
     std::vector<uint8_t> is_null = {0, 0, 1, 0, 0};
 
-    setenv("VELARIA_SIMD_BACKEND", "scalar", 1);
+    setenv(dataflow::kSimdBackendEnvVar, dataflow::kSimdBackendNameScalar, 1);
     dataflow::resetSimdDispatchForTest();
-    expect(dataflow::activeSimdBackendName() == "scalar", "forced scalar backend mismatch");
+    expect(dataflow::activeSimdBackendName() == dataflow::kSimdBackendNameScalar,
+           "forced scalar backend mismatch");
     const auto scalar_dot = dataflow::simdDispatch().dot_f32(lhs.data(), rhs.data(), lhs.size());
     const auto scalar_l2 =
         dataflow::simdDispatch().squared_l2_f32(lhs.data(), rhs.data(), lhs.size());
@@ -32,7 +33,7 @@ int main() {
         values.data(), is_null.data(), values.size(), 5.0, dataflow::NumericCompareOp::Ge, 0);
     expect(scalar_selection.selected_count == 3, "scalar selection count mismatch");
 
-    setenv("VELARIA_SIMD_BACKEND", "definitely-not-a-backend", 1);
+    setenv(dataflow::kSimdBackendEnvVar, "definitely-not-a-backend", 1);
     dataflow::resetSimdDispatchForTest();
     expect(!dataflow::activeSimdBackendName().empty(), "fallback backend should be initialized");
     const auto fallback_dot = dataflow::simdDispatch().dot_f32(lhs.data(), rhs.data(), lhs.size());
@@ -45,7 +46,7 @@ int main() {
     expect(fallback_selection.selected_count == scalar_selection.selected_count,
            "fallback selection mismatch");
 
-    unsetenv("VELARIA_SIMD_BACKEND");
+    unsetenv(dataflow::kSimdBackendEnvVar);
     dataflow::resetSimdDispatchForTest();
     expect(!dataflow::activeSimdBackendName().empty(), "auto backend should be initialized");
 

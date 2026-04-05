@@ -7,6 +7,12 @@
 
 namespace dataflow {
 
+inline constexpr char kSimdBackendEnvVar[] = "VELARIA_SIMD_BACKEND";
+inline constexpr char kSimdBackendNameAuto[] = "auto";
+inline constexpr char kSimdBackendNameScalar[] = "scalar";
+inline constexpr char kSimdBackendNameAvx2[] = "avx2";
+inline constexpr char kSimdBackendNameNeon[] = "neon";
+
 enum class SimdBackendKind : uint8_t {
   Scalar = 0,
   Avx2 = 1,
@@ -30,7 +36,7 @@ struct NumericSelectionResult {
 
 struct SimdKernelDispatch {
   SimdBackendKind backend = SimdBackendKind::Scalar;
-  const char* backend_name = "scalar";
+  const char* backend_name = kSimdBackendNameScalar;
   NumericSelectionResult (*select_double)(const double* values, const uint8_t* is_null,
                                           std::size_t row_count, double rhs,
                                           NumericCompareOp op,
@@ -41,6 +47,7 @@ struct SimdKernelDispatch {
   double (*squared_l2_f32)(const float* lhs, const float* rhs, std::size_t size) = nullptr;
 };
 
+const char* simdBackendName(SimdBackendKind kind);
 const SimdKernelDispatch& simdDispatch();
 std::string activeSimdBackendName();
 void resetSimdDispatchForTest();

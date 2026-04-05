@@ -10,6 +10,7 @@
 #include <stdexcept>
 
 #include "src/dataflow/core/execution/runtime/simd_dispatch.h"
+#include "src/dataflow/core/execution/arrow_format.h"
 
 namespace dataflow {
 
@@ -373,7 +374,7 @@ ValueColumnBuffer copySelectedArrowColumn(const ValueColumnBuffer& input_column,
     case 'U':
       return copySelectedArrowStringColumn<int64_t>(backing, selection);
     case '+':
-      if (backing.format.rfind("+w:", 0) == 0) {
+      if (isArrowFixedSizeListFormat(backing.format)) {
         return copySelectedArrowFixedVectorColumn(backing, selection);
       }
       break;
@@ -431,7 +432,7 @@ ValueColumnBuffer shareArrowPrefixColumn(const ValueColumnBuffer& input_column,
   auto output_backing = std::make_shared<ArrowColumnBacking>(backing);
   output_backing->length = shared_length;
   output_backing->null_count = static_cast<int64_t>(countArrowNullsPrefix(backing, shared_length));
-  if (backing.format.rfind("+w:", 0) == 0) {
+  if (isArrowFixedSizeListFormat(backing.format)) {
     output_backing->child_length =
         shared_length * static_cast<std::size_t>(std::max(backing.fixed_list_size, 0));
   }
@@ -680,7 +681,7 @@ bool valueColumnIsNullAt(const ValueColumnBuffer& buffer, std::size_t row_index)
   if (buffer.arrow_backing == nullptr) {
     return true;
   }
-  if (buffer.arrow_backing->format == "n") {
+  if (buffer.arrow_backing->format == kArrowFormatNull) {
     return true;
   }
   return !arrowBitmapHasValue(static_cast<const uint8_t*>(buffer.arrow_backing->null_bitmap.get()),
@@ -698,14 +699,14 @@ std::string_view valueColumnStringViewAt(const ValueColumnBuffer& buffer, std::s
     return std::string_view();
   }
   const auto& backing = *buffer.arrow_backing;
-  if (backing.format == "u") {
+  if (backing.format == kArrowFormatUtf8) {
     const auto* offsets = static_cast<const int32_t*>(backing.value_buffer.get());
     const auto* data = static_cast<const char*>(backing.extra_buffer.get());
     const auto begin = offsets[row_index];
     const auto end = offsets[row_index + 1];
     return std::string_view(data + begin, static_cast<std::size_t>(end - begin));
   }
-  if (backing.format == "U") {
+  if (backing.format == kArrowFormatLargeUtf8) {
     const auto* offsets = static_cast<const int64_t*>(backing.value_buffer.get());
     const auto* data = static_cast<const char*>(backing.extra_buffer.get());
     const auto begin = offsets[row_index];
@@ -726,37 +727,37 @@ std::string valueColumnStringAt(const ValueColumnBuffer& buffer, std::size_t row
   if (valueColumnIsNullAt(buffer, row_index)) {
     return std::string("null");
   }
-  if (backing.format == "u") {
+  if (backing.format == kArrowFormatUtf8) {
     const auto* offsets = static_cast<const int32_t*>(backing.value_buffer.get());
     const auto* data = static_cast<const char*>(backing.extra_buffer.get());
     return std::string(data + offsets[row_index], data + offsets[row_index + 1]);
   }
-  if (backing.format == "U") {
+  if (backing.format == kArrowFormatLargeUtf8) {
     const auto* offsets = static_cast<const int64_t*>(backing.value_buffer.get());
     const auto* data = static_cast<const char*>(backing.extra_buffer.get());
     return std::string(data + offsets[row_index], data + offsets[row_index + 1]);
   }
-  if (backing.format == "b") {
+  if (backing.format == kArrowFormatBool) {
     const auto* bits = static_cast<const uint8_t*>(backing.value_buffer.get());
     return ((bits[row_index >> 3] >> (row_index & 7)) & 0x01u) != 0 ? "1" : "0";
   }
-  if (backing.format == "i") {
+  if (backing.format == kArrowFormatInt32) {
     return std::to_string(static_cast<const int32_t*>(backing.value_buffer.get())[row_index]);
   }
-  if (backing.format == "I") {
+  if (backing.format == kArrowFormatUInt32) {
     return std::to_string(static_cast<const uint32_t*>(backing.value_buffer.get())[row_index]);
   }
-  if (backing.format == "l") {
+  if (backing.format == kArrowFormatInt64) {
     return std::to_string(static_cast<const int64_t*>(backing.value_buffer.get())[row_index]);
   }
-  if (backing.format == "L") {
+  if (backing.format == kArrowFormatUInt64) {
     return std::to_string(static_cast<const uint64_t*>(backing.value_buffer.get())[row_index]);
   }
-  if (backing.format == "f") {
+  if (backing.format == kArrowFormatFloat32) {
     return Value(static_cast<double>(static_cast<const float*>(backing.value_buffer.get())[row_index]))
         .toString();
   }
-  if (backing.format == "g") {
+  if (backing.format == kArrowFormatFloat64) {
     return Value(static_cast<const double*>(backing.value_buffer.get())[row_index]).toString();
   }
   return valueColumnValueAt(buffer, row_index).toString();
@@ -835,46 +836,46 @@ Value valueColumnValueAt(const ValueColumnBuffer& buffer, std::size_t row_index)
     return Value();
   }
 
-  if (backing.format == "b") {
+  if (backing.format == kArrowFormatBool) {
     const auto* bits = static_cast<const uint8_t*>(backing.value_buffer.get());
     return Value(static_cast<int64_t>(((bits[row_index >> 3] >> (row_index & 7)) & 0x01u) != 0));
   }
-  if (backing.format == "n") {
+  if (backing.format == kArrowFormatNull) {
     return Value();
   }
-  if (backing.format == "i") {
+  if (backing.format == kArrowFormatInt32) {
     return Value(static_cast<int64_t>(
         static_cast<const int32_t*>(backing.value_buffer.get())[row_index]));
   }
-  if (backing.format == "I") {
+  if (backing.format == kArrowFormatUInt32) {
     return Value(static_cast<int64_t>(
         static_cast<const uint32_t*>(backing.value_buffer.get())[row_index]));
   }
-  if (backing.format == "l") {
+  if (backing.format == kArrowFormatInt64) {
     return Value(static_cast<const int64_t*>(backing.value_buffer.get())[row_index]);
   }
-  if (backing.format == "L") {
+  if (backing.format == kArrowFormatUInt64) {
     return Value(static_cast<int64_t>(
         static_cast<const uint64_t*>(backing.value_buffer.get())[row_index]));
   }
-  if (backing.format == "f") {
+  if (backing.format == kArrowFormatFloat32) {
     return Value(static_cast<double>(
         static_cast<const float*>(backing.value_buffer.get())[row_index]));
   }
-  if (backing.format == "g") {
+  if (backing.format == kArrowFormatFloat64) {
     return Value(static_cast<const double*>(backing.value_buffer.get())[row_index]);
   }
-  if (backing.format == "u") {
+  if (backing.format == kArrowFormatUtf8) {
     const auto* offsets = static_cast<const int32_t*>(backing.value_buffer.get());
     const auto* data = static_cast<const char*>(backing.extra_buffer.get());
     return Value(std::string(data + offsets[row_index], data + offsets[row_index + 1]));
   }
-  if (backing.format == "U") {
+  if (backing.format == kArrowFormatLargeUtf8) {
     const auto* offsets = static_cast<const int64_t*>(backing.value_buffer.get());
     const auto* data = static_cast<const char*>(backing.extra_buffer.get());
     return Value(std::string(data + offsets[row_index], data + offsets[row_index + 1]));
   }
-  if (backing.format.rfind("+w:", 0) == 0) {
+  if (isArrowFixedSizeListFormat(backing.format)) {
     const auto* values = static_cast<const float*>(backing.child_value_buffer.get());
     std::vector<float> vec(static_cast<std::size_t>(backing.fixed_list_size));
     std::memcpy(vec.data(), values + row_index * static_cast<std::size_t>(backing.fixed_list_size),
@@ -977,8 +978,7 @@ StringColumnBuffer materializeStringColumn(const Table& table, std::size_t colum
       continue;
     }
     if (value_column.buffer->arrow_backing != nullptr &&
-        (value_column.buffer->arrow_backing->format == "u" ||
-         value_column.buffer->arrow_backing->format == "U")) {
+        isArrowUtf8Format(value_column.buffer->arrow_backing->format)) {
       const auto view = valueColumnStringViewAt(*value_column.buffer, row_index);
       out.values[row_index].assign(view.data(), view.size());
     } else {
@@ -1191,7 +1191,7 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
   }
 
   if (rhs.type() == DataType::String &&
-      (input.arrow_backing->format == "u" || input.arrow_backing->format == "U")) {
+      isArrowUtf8Format(input.arrow_backing->format)) {
     const auto rhs_view = std::string_view(rhs.asString());
     for (std::size_t i = 0; i < row_count; ++i) {
       if (valueColumnIsNullAt(input, i)) {

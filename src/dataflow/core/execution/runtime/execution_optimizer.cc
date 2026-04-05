@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "src/dataflow/core/execution/arrow_format.h"
 #include "src/dataflow/core/execution/columnar_batch.h"
 
 namespace dataflow {
@@ -17,10 +18,10 @@ enum class KeyColumnShape {
 KeyColumnShape analyzeKeyColumnShape(const ValueColumnBuffer& column) {
   if (column.arrow_backing != nullptr) {
     const auto format = column.arrow_backing->format;
-    if (format == "u" || format == "U") {
+    if (isArrowUtf8Format(format)) {
       return KeyColumnShape::String;
     }
-    if (format == "b" || format == "i" || format == "I" || format == "l" || format == "L") {
+    if (isArrowIntegerLikeFormat(format)) {
       return KeyColumnShape::Int64;
     }
     return KeyColumnShape::Unknown;

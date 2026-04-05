@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "src/dataflow/core/execution/columnar_batch.h"
+#include "src/dataflow/core/execution/arrow_format.h"
 #include "src/dataflow/core/execution/csv.h"
 #include "src/dataflow/core/execution/source_materialization.h"
 #include "src/dataflow/core/execution/runtime/execution_optimizer.h"
@@ -64,8 +65,7 @@ bool rowMatchesFilter(const ValueColumnBuffer& column, std::size_t row_index, co
     }
     if (column.arrow_backing != nullptr) {
       const auto format = column.arrow_backing->format;
-      if (format == "b" || format == "i" || format == "I" || format == "l" || format == "L" ||
-          format == "f" || format == "g") {
+      if (isArrowPrimitiveNumericFormat(format)) {
         return matchesFilterCompareOp(
             compareFilterScalar(valueColumnDoubleAt(column, row_index), rhs.asDouble()), op);
       }
@@ -80,8 +80,7 @@ bool rowMatchesFilter(const ValueColumnBuffer& column, std::size_t row_index, co
       }
       return matchesFilterCompareOp(compareFilterScalar(lhs.asString(), rhs.asString()), op);
     }
-    if (column.arrow_backing != nullptr &&
-        (column.arrow_backing->format == "u" || column.arrow_backing->format == "U")) {
+    if (column.arrow_backing != nullptr && isArrowUtf8Format(column.arrow_backing->format)) {
       return matchesFilterCompareOp(
           compareFilterScalar(valueColumnStringViewAt(column, row_index),
                               std::string_view(rhs.asString())),

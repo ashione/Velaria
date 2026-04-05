@@ -10,6 +10,12 @@
 
 namespace dataflow {
 namespace {
+constexpr double kMinCosineSimilarity = -1.0;
+constexpr double kMaxCosineSimilarity = 1.0;
+constexpr double kCosineDistanceForZeroNorm = 1.0;
+constexpr std::size_t kMinimumTopK = 1;
+constexpr char kExplainModeExactScan[] = "exact-scan";
+constexpr char kExplainAccelerationSimdTopK[] = "flat-buffer+simd-topk";
 
 const char* metricName(VectorSearchMetric metric) {
   switch (metric) {
@@ -20,7 +26,7 @@ const char* metricName(VectorSearchMetric metric) {
     case VectorSearchMetric::L2:
       return "l2";
   }
-  return "cosine";
+  return metricName(VectorSearchMetric::Cosine);
 }
 
 class ExactScanVectorIndex : public VectorIndex {
@@ -55,7 +61,7 @@ class ExactScanVectorIndex : public VectorIndex {
       throw std::invalid_argument("query vector dimension mismatch");
     }
 
-    const std::size_t k = std::max<std::size_t>(1, options.top_k);
+    const std::size_t k = std::max<std::size_t>(kMinimumTopK, options.top_k);
     auto cmp_max = [](const VectorSearchResult& lhs, const VectorSearchResult& rhs) {
       return lhs.score < rhs.score;
     };
@@ -127,7 +133,10 @@ class ExactScanVectorIndex : public VectorIndex {
       const double dot = simdDispatch().dot_f32(base, query.data(), dimension_);
       const double denom = norms_[row] * query_norm;
       const double cosine_distance =
-          denom == 0.0 ? 1.0 : (1.0 - std::max(-1.0, std::min(1.0, dot / denom)));
+          denom == 0.0
+              ? kCosineDistanceForZeroNorm
+              : (1.0 - std::max(kMinCosineSimilarity,
+                                std::min(kMaxCosineSimilarity, dot / denom)));
       VectorSearchResult current{row, cosine_distance};
       if (max_heap.size() < k) {
         max_heap.push(current);
@@ -149,12 +158,12 @@ class ExactScanVectorIndex : public VectorIndex {
 
   std::string explain(const VectorSearchOptions& options) const override {
     std::ostringstream out;
-    out << "mode=exact-scan\n";
+    out << "mode=" << kExplainModeExactScan << "\n";
     out << "metric=" << metricName(options.metric) << "\n";
     out << "dimension=" << dimension() << "\n";
     out << "top_k=" << options.top_k << "\n";
     out << "candidate_rows=" << size() << "\n";
-    out << "acceleration=flat-buffer+simd-topk\n";
+    out << "acceleration=" << kExplainAccelerationSimdTopK << "\n";
     out << "backend=" << activeSimdBackendName() << "\n";
     out << "filter_pushdown=false\n";
     return out.str();

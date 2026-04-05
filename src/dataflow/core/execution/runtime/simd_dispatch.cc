@@ -48,21 +48,21 @@ bool runtimeSupportsNeon() {
 }
 
 const SimdKernelDispatch& chooseDispatch() {
-  const char* env = std::getenv("VELARIA_SIMD_BACKEND");
-  const std::string requested = env == nullptr ? "auto" : lowerCopy(env);
+  const char* env = std::getenv(kSimdBackendEnvVar);
+  const std::string requested = env == nullptr ? kSimdBackendNameAuto : lowerCopy(env);
 
-  if (requested == "scalar") {
+  if (requested == kSimdBackendNameScalar) {
     return scalarDispatch();
   }
 
-  if (requested == "avx2") {
+  if (requested == kSimdBackendNameAvx2) {
     if (avx2DispatchCompiled() && runtimeSupportsAvx2()) {
       return avx2Dispatch();
     }
     return scalarDispatch();
   }
 
-  if (requested == "neon") {
+  if (requested == kSimdBackendNameNeon) {
     if (neonDispatchCompiled() && runtimeSupportsNeon()) {
       return neonDispatch();
     }
@@ -79,6 +79,18 @@ const SimdKernelDispatch& chooseDispatch() {
 }
 
 }  // namespace
+
+const char* simdBackendName(SimdBackendKind kind) {
+  switch (kind) {
+    case SimdBackendKind::Scalar:
+      return kSimdBackendNameScalar;
+    case SimdBackendKind::Avx2:
+      return kSimdBackendNameAvx2;
+    case SimdBackendKind::Neon:
+      return kSimdBackendNameNeon;
+  }
+  return kSimdBackendNameScalar;
+}
 
 const SimdKernelDispatch& simdDispatch() {
   std::lock_guard<std::mutex> lock(stateMutex());

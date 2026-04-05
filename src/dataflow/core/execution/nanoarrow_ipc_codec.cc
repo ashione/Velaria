@@ -1,5 +1,7 @@
 #include "src/dataflow/core/execution/nanoarrow_ipc_codec.h"
 
+#include "src/dataflow/core/execution/arrow_format.h"
+
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -431,7 +433,7 @@ Table table_from_nanoarrow_batch(const ArrowSchema* schema, const ArrowArray* ar
     auto backing = std::make_shared<ArrowColumnBacking>();
     backing->format = child_schema != nullptr && child_schema->format != nullptr
                           ? child_schema->format
-                          : "u";
+                          : kArrowFormatUtf8;
     backing->length = static_cast<std::size_t>(array->length);
     backing->null_count = child_array->null_count;
     backing->null_bitmap = copyBitmapBuffer(
@@ -442,43 +444,43 @@ Table table_from_nanoarrow_batch(const ArrowSchema* schema, const ArrowArray* ar
         backing->value_buffer = copyBooleanValueBuffer(
             static_cast<const uint8_t*>(child_array->buffers[1]), child_array->offset,
             child_array->length);
-        if (backing->format.empty()) backing->format = "b";
+        if (backing->format.empty()) backing->format = kArrowFormatBool;
         break;
       case NANOARROW_TYPE_INT32:
         backing->value_buffer = copyValueBuffer<int32_t>(
             static_cast<const int32_t*>(child_array->buffers[1]), child_array->offset,
             child_array->length);
-        if (backing->format.empty()) backing->format = "i";
+        if (backing->format.empty()) backing->format = kArrowFormatInt32;
         break;
       case NANOARROW_TYPE_UINT32:
         backing->value_buffer = copyValueBuffer<uint32_t>(
             static_cast<const uint32_t*>(child_array->buffers[1]), child_array->offset,
             child_array->length);
-        if (backing->format.empty()) backing->format = "I";
+        if (backing->format.empty()) backing->format = kArrowFormatUInt32;
         break;
       case NANOARROW_TYPE_INT64:
         backing->value_buffer = copyValueBuffer<int64_t>(
             static_cast<const int64_t*>(child_array->buffers[1]), child_array->offset,
             child_array->length);
-        if (backing->format.empty()) backing->format = "l";
+        if (backing->format.empty()) backing->format = kArrowFormatInt64;
         break;
       case NANOARROW_TYPE_UINT64:
         backing->value_buffer = copyValueBuffer<uint64_t>(
             static_cast<const uint64_t*>(child_array->buffers[1]), child_array->offset,
             child_array->length);
-        if (backing->format.empty()) backing->format = "L";
+        if (backing->format.empty()) backing->format = kArrowFormatUInt64;
         break;
       case NANOARROW_TYPE_FLOAT:
         backing->value_buffer = copyValueBuffer<float>(
             static_cast<const float*>(child_array->buffers[1]), child_array->offset,
             child_array->length);
-        if (backing->format.empty()) backing->format = "f";
+        if (backing->format.empty()) backing->format = kArrowFormatFloat32;
         break;
       case NANOARROW_TYPE_DOUBLE:
         backing->value_buffer = copyValueBuffer<double>(
             static_cast<const double*>(child_array->buffers[1]), child_array->offset,
             child_array->length);
-        if (backing->format.empty()) backing->format = "g";
+        if (backing->format.empty()) backing->format = kArrowFormatFloat64;
         break;
       case NANOARROW_TYPE_STRING: {
         auto buffers = copyUtf8Buffers(
@@ -487,7 +489,7 @@ Table table_from_nanoarrow_batch(const ArrowSchema* schema, const ArrowArray* ar
             child_array->length);
         backing->value_buffer = std::move(buffers.first);
         backing->extra_buffer = std::move(buffers.second);
-        if (backing->format.empty()) backing->format = "u";
+        if (backing->format.empty()) backing->format = kArrowFormatUtf8;
         break;
       }
       case NANOARROW_TYPE_LARGE_STRING: {
@@ -497,19 +499,20 @@ Table table_from_nanoarrow_batch(const ArrowSchema* schema, const ArrowArray* ar
             child_array->length);
         backing->value_buffer = std::move(buffers.first);
         backing->extra_buffer = std::move(buffers.second);
-        if (backing->format.empty()) backing->format = "U";
+        if (backing->format.empty()) backing->format = kArrowFormatLargeUtf8;
         break;
       }
       case NANOARROW_TYPE_FIXED_SIZE_LIST: {
         backing->fixed_list_size = child_schema_view.fixed_size;
-        backing->child_format = "f";
+        backing->child_format = kArrowFormatFloat32;
         backing->child_length =
             static_cast<std::size_t>(child_array->length) * static_cast<std::size_t>(backing->fixed_list_size);
         backing->child_value_buffer =
             copyFixedSizeListFloat32Buffer(child_array->children[0], backing->fixed_list_size,
                                            child_array->offset, child_array->length);
         if (backing->format.empty()) {
-          backing->format = "+w:" + std::to_string(backing->fixed_list_size);
+          backing->format = std::string(kArrowFormatFixedSizeListPrefix) +
+                            std::to_string(backing->fixed_list_size);
         }
         break;
       }

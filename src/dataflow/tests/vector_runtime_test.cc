@@ -12,6 +12,7 @@
 #include "src/dataflow/core/execution/runtime/simd_dispatch.h"
 #include "src/dataflow/experimental/rpc/actor_rpc_codec.h"
 #include "src/dataflow/experimental/rpc/rpc_codec.h"
+#include "src/dataflow/experimental/rpc/rpc_codec_ids.h"
 #include "src/dataflow/core/execution/serial/serializer.h"
 #include "src/dataflow/core/execution/stream/binary_row_batch.h"
 
@@ -56,7 +57,7 @@ int main() {
 
     dataflow::RpcEnvelope rpc_envelope;
     rpc_envelope.type = dataflow::RpcMessageType::DataBatch;
-    rpc_envelope.codec_id = "table-arrow-ipc-v1";
+    rpc_envelope.codec_id = dataflow::kRpcCodecIdTableArrowIpcV1;
     auto table_serializer = dataflow::makeArrowTableRpcSerializer();
     dataflow::RpcDataBatchMessage batch_message{table};
     const auto rpc_payload = table_serializer->serialize(rpc_envelope, &batch_message);
@@ -113,7 +114,7 @@ int main() {
     data_frame.header.type = dataflow::RpcMessageType::DataBatch;
     data_frame.header.message_id = 18;
     data_frame.header.correlation_id = control_frame.header.message_id;
-    data_frame.header.codec_id = "table-arrow-ipc-v1";
+    data_frame.header.codec_id = dataflow::kRpcCodecIdTableArrowIpcV1;
     data_frame.header.source = "vector-worker";
     data_frame.header.target = "vector-client";
     data_frame.payload = rpc_payload;

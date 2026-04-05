@@ -19,6 +19,7 @@ filegroup(
     name = "velaria_core_execution_sources",
     srcs = [
         "src/dataflow/core/execution/columnar_batch.cc",
+        "src/dataflow/core/execution/arrow_format.h",
         "src/dataflow/core/execution/columnar_batch.h",
         "src/dataflow/core/execution/csv.cc",
         "src/dataflow/core/execution/csv.h",
@@ -85,6 +86,7 @@ filegroup(
         "src/dataflow/ai/plugin_runtime.h",
         "src/dataflow/experimental/rpc/actor_rpc_codec.cc",
         "src/dataflow/experimental/rpc/actor_rpc_codec.h",
+        "src/dataflow/experimental/rpc/rpc_codec_ids.h",
         "src/dataflow/experimental/rpc/rpc_codec.cc",
         "src/dataflow/experimental/rpc/rpc_codec.h",
         "src/dataflow/experimental/rpc/serialization.cc",
@@ -149,6 +151,7 @@ cc_library(
     ],
     hdrs = [
         "src/dataflow/core/execution/columnar_batch.h",
+        "src/dataflow/core/execution/arrow_format.h",
         "src/dataflow/core/execution/value.h",
         "src/dataflow/core/execution/table.h",
         "src/dataflow/core/execution/csv.h",
@@ -175,6 +178,7 @@ cc_library(
         "src/dataflow/core/execution/runtime/vector_index.h",
         "src/dataflow/ai/plugin_runtime.h",
         "src/dataflow/experimental/rpc/rpc_codec.h",
+        "src/dataflow/experimental/rpc/rpc_codec_ids.h",
         "src/dataflow/experimental/transport/ipc_transport.h",
         "src/dataflow/core/execution/stream/binary_row_batch.h",
         "src/dataflow/experimental/stream/actor_stream_runtime.h",

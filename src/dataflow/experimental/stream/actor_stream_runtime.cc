@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "src/dataflow/core/contract/api/dataframe.h"
+#include "src/dataflow/core/execution/arrow_format.h"
 #include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/nanoarrow_ipc_codec.h"
 #include "src/dataflow/core/execution/stream/binary_row_batch.h"
@@ -107,7 +108,7 @@ bool isStringLikeColumn(const Table& table, std::size_t column_index) {
   }
   if (column.buffer->arrow_backing != nullptr) {
     const auto& format = column.buffer->arrow_backing->format;
-    return format == "u" || format == "U";
+    return isArrowUtf8Format(format);
   }
   const auto row_count = valueColumnRowCount(*column.buffer);
   for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
@@ -868,7 +869,7 @@ std::string stringKeyAt(const ValueColumnBuffer& column, size_t row_idx) {
     return std::string();
   }
   if (column.arrow_backing != nullptr &&
-      (column.arrow_backing->format == "u" || column.arrow_backing->format == "U")) {
+      isArrowUtf8Format(column.arrow_backing->format)) {
     const auto view = valueColumnStringViewAt(column, row_idx);
     return std::string(view.data(), view.size());
   }

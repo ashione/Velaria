@@ -80,7 +80,7 @@ double scalarSquaredL2F32(const float* lhs, const float* rhs, std::size_t size) 
 
 const SimdKernelDispatch kScalarDispatch = {
     SimdBackendKind::Scalar,
-    "scalar",
+    simdBackendName(SimdBackendKind::Scalar),
     &scalarSelectDouble,
     &scalarSumDouble,
     &scalarDotF32,

@@ -1,5 +1,42 @@
 # AI 插件化接入方案（v0.1 骨架）
 
+## 当前角色
+
+这份文档记录 AI plugin hook 接入的初版设计说明。
+当前它主要是历史设计背景，不是仓库的主状态板；当前仓库状态以源码和主 plan 为准。
+
+## 当前实现对照（2026-04）
+
+当前仓库已经具备最小 plugin runtime 骨架，并已接入主链路：
+
+- 已存在实现文件：
+  - `src/dataflow/ai/plugin_runtime.h`
+  - `src/dataflow/ai/plugin_runtime.cc`
+- 已接入的当前源码路径：
+  - `src/dataflow/core/contract/api/session.cc`
+  - `src/dataflow/core/contract/api/dataframe.cc`
+  - `src/dataflow/core/execution/stream/stream.cc`
+  - `BUILD.bazel`
+- 当前可见 hook 点包括：
+  - `kBeforeSqlParse`
+  - `kAfterSqlParse`
+  - `kBeforePlanBuild`
+  - `kAfterPlanBuild`
+  - `kPlanBeforeExecute`
+  - `kPlanAfterExecute`
+  - `kStreamingBatchStart`
+  - `kStreamingBatchEnd`
+
+当前仍应按“骨架能力”理解这条线：
+
+- 目标是提供统一 hook/runtime 入口，而不是引入第二套执行语义
+- 该文档中的后续扩展设想不自动等于当前仓库承诺
+
+## 历史部分说明
+
+下文保留最初设计说明。
+如果示例路径或“待新增/待接入”的措辞与当前仓库现状不一致，应以本节和当前源码路径为准。
+
 本次改造只引入插件接口与挂钩，不改变现有 SQL/执行语义。
 
 ## 一、目标
@@ -13,9 +50,9 @@
 
 - `src/dataflow/ai/plugin_runtime.h`
 - `src/dataflow/ai/plugin_runtime.cc`
-- `src/dataflow/api/dataframe.h` / `.cc`（新增 `explain()` 与 materialize 钩子）
-- `src/dataflow/api/session.cc`（session.sql 钩子）
-- `src/dataflow/stream/stream.cc`（streaming batch 钩子）
+- `src/dataflow/core/contract/api/dataframe.h` / `.cc`（新增 `explain()` 与 materialize 钩子）
+- `src/dataflow/core/contract/api/session.cc`（session.sql 钩子）
+- `src/dataflow/core/execution/stream/stream.cc`（streaming batch 钩子）
 - `BUILD.bazel`（引入新源码）
 
 ## 三、Hook 点定义

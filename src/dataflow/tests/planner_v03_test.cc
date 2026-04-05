@@ -32,7 +32,8 @@ int main() {
   expect(decoded->kind == dataflow::PlanKind::Sink, "root should remain sink");
 
   dataflow::LocalExecutor executor;
-  const auto out = executor.execute(decoded);
+  auto out = executor.execute(decoded);
+  dataflow::materializeRows(&out);
   expect(out.schema.has("window_start"), "window assign should append output column");
   const auto idx = out.schema.indexOf("window_start");
   expect(out.rows.size() == 2, "window output rows should match input rows");
@@ -53,7 +54,8 @@ int main() {
 
   const auto encoded_string = dataflow::serializePlan(string_plan);
   const auto decoded_string = dataflow::deserializePlan(encoded_string);
-  const auto string_out = executor.execute(decoded_string);
+  auto string_out = executor.execute(decoded_string);
+  dataflow::materializeRows(&string_out);
   expect(string_out.schema.has("region_lower"), "string withColumn should append output column");
   const auto string_idx = string_out.schema.indexOf("region_lower");
   expect(string_out.rows[0][string_idx].toString() == "apac",
@@ -78,7 +80,8 @@ int main() {
       std::vector<dataflow::ComputedColumnArg>{ts_arg});
   const auto encoded_stream_style = dataflow::serializePlan(stream_style_plan);
   const auto decoded_stream_style = dataflow::deserializePlan(encoded_stream_style);
-  const auto stream_style_out = executor.execute(decoded_stream_style);
+  auto stream_style_out = executor.execute(decoded_stream_style);
+  dataflow::materializeRows(&stream_style_out);
   expect(stream_style_out.schema.has("event_year"),
          "withColumn plan roundtrip should preserve named source column");
   const auto year_idx = stream_style_out.schema.indexOf("event_year");
@@ -101,7 +104,8 @@ int main() {
       order_plan, std::vector<std::size_t>{1, 0}, std::vector<bool>{false, true});
   const auto order_encoded = dataflow::serializePlan(order_plan);
   const auto order_decoded = dataflow::deserializePlan(order_encoded);
-  const auto order_out = executor.execute(order_decoded);
+  auto order_out = executor.execute(order_decoded);
+  dataflow::materializeRows(&order_out);
   expect(order_out.rows.size() == 3, "order by should preserve row count");
   expect(order_out.rows[0][1].asInt64() == 7, "order by highest score first");
   expect(order_out.rows[1][1].asInt64() == 5, "order by second score");
@@ -147,7 +151,8 @@ int main() {
       join_left, join_right, 0, 0, dataflow::JoinKind::Left);
   const auto join_encoded = dataflow::serializePlan(join_plan);
   const auto join_decoded = dataflow::deserializePlan(join_encoded);
-  const auto join_out = executor.execute(join_decoded);
+  auto join_out = executor.execute(join_decoded);
+  dataflow::materializeRows(&join_out);
   expect(join_out.rows.size() == 2, "left join should retain unmatched rows");
   expect(join_out.rows[0][0].asInt64() == 1, "join first left key mismatch");
   expect(join_out.rows[0][3].asInt64() == 9, "join matched payload mismatch");
@@ -180,7 +185,8 @@ int main() {
   expect(limit_explain.find("Select\n  WithColumn\n    added=method_lower\n    function=2\n    Limit\n") ==
              0,
          "limit should push below select and withColumn");
-  const auto limited_out = limited_df.toTable();
+  auto limited_out = limited_df.toTable();
+  expect(!limited_out.rows.empty(), "toTable should materialize rows");
   expect(limited_out.rows.size() == 1, "pushed limit query should retain single row");
   expect(limited_out.rows[0][0].toString() == "get", "pushed limit query should preserve value");
 

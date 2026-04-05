@@ -5,7 +5,9 @@
 #include <sstream>
 #include <string>
 
+#include "src/dataflow/core/execution/nanoarrow_ipc_codec.h"
 #include "src/dataflow/core/execution/stream/binary_row_batch.h"
+#include "src/dataflow/experimental/rpc/rpc_codec_ids.h"
 
 namespace dataflow {
 
@@ -142,7 +144,7 @@ std::string extractJsonString(const std::string& source,
 
 class JsonControlRpcSerializer : public IRpcSerializer {
  public:
-  std::string codec_id() const override { return "json-control-v1"; }
+  std::string codec_id() const override { return kRpcCodecIdJsonControlV1; }
 
   std::vector<uint8_t> serialize(const RpcEnvelope& envelope,
                                 const void* message) const override {
@@ -173,7 +175,7 @@ class JsonControlRpcSerializer : public IRpcSerializer {
 
 class TableBatchRpcSerializer : public IRpcSerializer {
  public:
-  std::string codec_id() const override { return "table-bin-v1"; }
+  std::string codec_id() const override { return kRpcCodecIdTableBinV1; }
 
   std::vector<uint8_t> serialize(const RpcEnvelope& envelope,
                                 const void* message) const override {
@@ -194,6 +196,29 @@ class TableBatchRpcSerializer : public IRpcSerializer {
     if (batch == nullptr) return false;
     BinaryRowBatchCodec serializer;
     batch->table = serializer.deserialize(payload);
+    return true;
+  }
+};
+
+class ArrowTableBatchRpcSerializer : public IRpcSerializer {
+ public:
+  std::string codec_id() const override { return kRpcCodecIdTableArrowIpcV1; }
+
+  std::vector<uint8_t> serialize(const RpcEnvelope& envelope,
+                                 const void* message) const override {
+    if (envelope.type != RpcMessageType::DataBatch) return {};
+    const auto* batch = static_cast<const RpcDataBatchMessage*>(message);
+    if (batch == nullptr) return {};
+    return serialize_nanoarrow_ipc_table(batch->table);
+  }
+
+  bool deserialize(const RpcEnvelope& envelope,
+                   const std::vector<uint8_t>& payload,
+                   void* out_message) const override {
+    if (envelope.type != RpcMessageType::DataBatch) return false;
+    auto* batch = static_cast<RpcDataBatchMessage*>(out_message);
+    if (batch == nullptr) return false;
+    batch->table = deserialize_nanoarrow_ipc_table(payload, false);
     return true;
   }
 };
@@ -296,11 +321,14 @@ bool LengthPrefixedFrameCodec::decode(const std::vector<uint8_t>& bytes,
 
 void registerBuiltinRpcSerializers() {
   auto& registry = RpcSerializerRegistry::instance();
-  if (registry.find("json-control-v1") == nullptr) {
+  if (registry.find(kRpcCodecIdJsonControlV1) == nullptr) {
     registry.registerSerializer(makeJsonControlRpcSerializer());
   }
-  if (registry.find("table-bin-v1") == nullptr) {
+  if (registry.find(kRpcCodecIdTableBinV1) == nullptr) {
     registry.registerSerializer(makeTableRpcSerializer());
+  }
+  if (registry.find(kRpcCodecIdTableArrowIpcV1) == nullptr) {
+    registry.registerSerializer(makeArrowTableRpcSerializer());
   }
 }
 
@@ -310,6 +338,10 @@ std::unique_ptr<IRpcSerializer> makeJsonControlRpcSerializer() {
 
 std::unique_ptr<IRpcSerializer> makeTableRpcSerializer() {
   return std::unique_ptr<IRpcSerializer>(new TableBatchRpcSerializer());
+}
+
+std::unique_ptr<IRpcSerializer> makeArrowTableRpcSerializer() {
+  return std::unique_ptr<IRpcSerializer>(new ArrowTableBatchRpcSerializer());
 }
 
 }  // namespace dataflow

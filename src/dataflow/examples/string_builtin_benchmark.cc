@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/execution/columnar_batch.h"
 
 namespace {
 
@@ -55,9 +56,15 @@ long long microsBetween(Clock::time_point begin, Clock::time_point end) {
 
 std::size_t stringChecksum(const dataflow::Table& table, std::size_t column_index) {
   std::size_t checksum = 0;
-  for (const auto& row : table.rows) {
-    if (column_index >= row.size() || row[column_index].isNull()) continue;
-    checksum += row[column_index].toString().size();
+  if (column_index >= table.schema.fields.size()) {
+    return checksum;
+  }
+  const auto column = dataflow::materializeValueColumn(table, column_index);
+  const auto row_count = dataflow::valueColumnRowCount(column);
+  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+    const auto value = dataflow::valueColumnValueAt(column, row_index);
+    if (value.isNull()) continue;
+    checksum += value.toString().size();
   }
   return checksum;
 }

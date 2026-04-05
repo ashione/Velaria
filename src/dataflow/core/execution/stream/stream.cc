@@ -117,7 +117,9 @@ std::shared_ptr<ColumnarTable> makeReservedColumnarCache(const Schema& schema,
 
 void appendOutputValue(Row* row, ColumnarTable* cache, std::size_t* column_index,
                        const Value& value) {
-  row->push_back(value);
+  if (row != nullptr) {
+    row->push_back(value);
+  }
   cache->columns[*column_index].values.push_back(value);
   ++(*column_index);
 }
@@ -158,27 +160,67 @@ size_t safeWorkerCount(const StreamingQueryOptions& options) {
 }
 
 size_t partitionCountForBatch(const Table& table, const StreamingQueryOptions& options) {
-  if (table.rows.empty()) return 1;
-  return std::min<size_t>(safeWorkerCount(options), table.rows.size());
+  const auto row_count = table.rowCount();
+  if (row_count == 0) return 1;
+  return std::min<size_t>(safeWorkerCount(options), row_count);
+}
+
+Table sliceTable(const Table& table, size_t row_begin, size_t row_end) {
+  const auto row_count = table.rowCount();
+  Table out;
+  out.schema = table.schema;
+  if (row_begin >= row_end || row_begin >= row_count) {
+    auto cache = std::make_shared<ColumnarTable>();
+    cache->schema = out.schema;
+    cache->columns.resize(out.schema.fields.size());
+    cache->arrow_formats.resize(out.schema.fields.size());
+    out.columnar_cache = std::move(cache);
+    return out;
+  }
+  row_end = std::min(row_end, row_count);
+  const auto source_cache = ensureColumnarCache(&table);
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = out.schema;
+  cache->columns.resize(out.schema.fields.size());
+  cache->arrow_formats = source_cache->arrow_formats;
+  cache->row_count = row_end - row_begin;
+  if (cache->row_count > 0) {
+    cache->batch_row_counts.push_back(cache->row_count);
+  }
+  for (std::size_t column_index = 0; column_index < source_cache->columns.size(); ++column_index) {
+    auto& output_column = cache->columns[column_index].values;
+    output_column.reserve(cache->row_count);
+    for (std::size_t row_index = row_begin; row_index < row_end; ++row_index) {
+      output_column.push_back(valueColumnValueAt(source_cache->columns[column_index], row_index));
+    }
+  }
+  if (!table.rows.empty()) {
+    out.rows.reserve(cache->row_count);
+    for (std::size_t row_index = row_begin; row_index < row_end; ++row_index) {
+      out.rows.push_back(table.rows[row_index]);
+    }
+  }
+  out.columnar_cache = std::move(cache);
+  return out;
 }
 
 std::vector<Table> splitTable(const Table& table, size_t parts) {
-  if (parts <= 1 || table.rows.size() <= 1) {
+  const auto row_count = table.rowCount();
+  if (parts <= 1 || row_count <= 1) {
     return {table};
   }
 
-  parts = std::min<size_t>(parts, table.rows.size());
-  std::vector<Table> out(parts, Table(table.schema, {}));
-  const size_t rows_per_part = (table.rows.size() + parts - 1) / parts;
-  size_t part = 0;
-  size_t assigned = 0;
-  for (const auto& row : table.rows) {
-    out[part].rows.push_back(row);
-    ++assigned;
-    if (assigned >= rows_per_part && part + 1 < parts) {
-      ++part;
-      assigned = 0;
+  parts = std::min<size_t>(parts, row_count);
+  std::vector<Table> out;
+  out.reserve(parts);
+  const size_t rows_per_part = (row_count + parts - 1) / parts;
+  for (size_t part = 0; part < parts; ++part) {
+    const size_t begin = part * rows_per_part;
+    const size_t end = std::min(begin + rows_per_part, row_count);
+    if (begin >= end) {
+      break;
     }
+    out.push_back(sliceTable(table, begin, end));
   }
   return out;
 }
@@ -188,7 +230,7 @@ Table mergeTables(const std::vector<Table>& tables);
 Table executePartitionStage(const Table& input, const std::vector<StreamTransform>& stage,
                             const StreamingQueryOptions& options, size_t worker_count) {
   if (stage.empty()) return input;
-  if (worker_count <= 1 || input.rows.size() <= 1) {
+  if (worker_count <= 1 || input.rowCount() <= 1) {
     Table table = input;
     for (const auto& transform : stage) {
       table = transform(table, options);
@@ -217,19 +259,16 @@ Table executePartitionStage(const Table& input, const std::vector<StreamTransfor
 
 Table mergeTables(const std::vector<Table>& tables) {
   if (tables.empty()) return Table();
-  Table out(tables.front().schema, {});
-  std::size_t total_rows = 0;
   for (const auto& table : tables) {
-    if (table.schema.fields != out.schema.fields) {
+    if (table.schema.fields != tables.front().schema.fields) {
       throw std::runtime_error("cannot merge stream partitions with different schema");
     }
-    total_rows += table.rows.size();
   }
-  out.rows.reserve(total_rows);
+  bool materialize_rows = false;
   for (const auto& table : tables) {
-    out.rows.insert(out.rows.end(), table.rows.begin(), table.rows.end());
+    materialize_rows = materialize_rows || !table.rows.empty();
   }
-  return out;
+  return concatenateTables(tables, materialize_rows);
 }
 
 bool findWindowKeyPosition(const std::vector<std::string>& keys, size_t* pos) {
@@ -603,7 +642,6 @@ Table applyStatefulGroupedAggregates(const Table& input, const std::vector<std::
   std::vector<StreamAggregateRuntimeSpec> runtime_specs;
   const auto batch_specs = buildBatchAggregateSpecs(input, specs, &runtime_specs);
   Table batch_out = executeAggregateTable(input, key_indices, batch_specs);
-  materializeRows(&batch_out);
 
   Table out;
   out.schema.fields = keys;
@@ -613,20 +651,29 @@ Table applyStatefulGroupedAggregates(const Table& input, const std::vector<std::
   for (size_t i = 0; i < out.schema.fields.size(); ++i) {
     out.schema.index[out.schema.fields[i]] = i;
   }
-  out.rows.reserve(batch_out.rows.size());
-  auto cache = makeReservedColumnarCache(out.schema, batch_out.rows.size());
+  const auto batch_row_count = batch_out.rowCount();
+  auto cache = makeReservedColumnarCache(out.schema, batch_row_count);
+  cache->row_count = batch_row_count;
+  if (batch_row_count > 0) {
+    cache->batch_row_counts.push_back(batch_row_count);
+  }
+  std::vector<std::size_t> batch_indices(batch_out.schema.fields.size());
+  for (std::size_t i = 0; i < batch_indices.size(); ++i) {
+    batch_indices[i] = i;
+  }
+  const auto batch_columns = viewValueColumns(batch_out, batch_indices);
 
   size_t window_pos = 0;
   const bool has_window = findWindowKeyPosition(keys, &window_pos);
   std::unordered_set<std::string> touched_labels;
   const size_t key_cols = keys.size();
-  for (const auto& batch_row : batch_out.rows) {
+  for (std::size_t row_index = 0; row_index < batch_row_count; ++row_index) {
     Row out_row;
     out_row.reserve(key_cols + specs.size());
     std::size_t output_column_index = 0;
     for (size_t i = 0; i < key_cols; ++i) {
       appendOutputValue(&out_row, cache.get(), &output_column_index,
-                        i < batch_row.size() ? batch_row[i] : Value());
+                        valueColumnValueAt(*batch_columns[i].buffer, row_index));
     }
 
     std::vector<size_t> state_key_indices;
@@ -640,20 +687,25 @@ Table applyStatefulGroupedAggregates(const Table& input, const std::vector<std::
       const auto state_key = makeStateKey(out_row, state_key_indices, label + ":");
 
       if (runtime.user_spec.function == AggregateFunction::Sum) {
-        const double delta = batch_row[batch_out.schema.indexOf(*runtime.batch_value_output)].asDouble();
+        const double delta = valueColumnDoubleAt(
+            *batch_columns[batch_out.schema.indexOf(*runtime.batch_value_output)].buffer,
+            row_index);
         appendOutputValue(&out_row, cache.get(), &output_column_index,
                           Value(state_store->addDouble(state_key, delta)));
       } else if (runtime.user_spec.function == AggregateFunction::Count) {
-        const double delta =
-            static_cast<double>(batch_row[batch_out.schema.indexOf(*runtime.batch_count_output)].asInt64());
+        const double delta = static_cast<double>(valueColumnInt64At(
+            *batch_columns[batch_out.schema.indexOf(*runtime.batch_count_output)].buffer,
+            row_index));
         appendOutputValue(
             &out_row, cache.get(), &output_column_index,
             Value(static_cast<int64_t>(state_store->addDouble(state_key, delta))));
       } else if (runtime.user_spec.function == AggregateFunction::Avg) {
-        const double delta_sum =
-            batch_row[batch_out.schema.indexOf(*runtime.batch_value_output)].asDouble();
-        const int64_t delta_count =
-            batch_row[batch_out.schema.indexOf(*runtime.batch_count_output)].asInt64();
+        const double delta_sum = valueColumnDoubleAt(
+            *batch_columns[batch_out.schema.indexOf(*runtime.batch_value_output)].buffer,
+            row_index);
+        const int64_t delta_count = valueColumnInt64At(
+            *batch_columns[batch_out.schema.indexOf(*runtime.batch_count_output)].buffer,
+            row_index);
         std::string raw;
         double current_sum = 0.0;
         int64_t current_count = 0;
@@ -667,7 +719,9 @@ Table applyStatefulGroupedAggregates(const Table& input, const std::vector<std::
             &out_row, cache.get(), &output_column_index,
             Value(current_count == 0 ? 0.0 : current_sum / static_cast<double>(current_count)));
       } else {
-        const Value batch_value = batch_row[batch_out.schema.indexOf(*runtime.batch_value_output)];
+        const Value batch_value = valueColumnValueAt(
+            *batch_columns[batch_out.schema.indexOf(*runtime.batch_value_output)].buffer,
+            row_index);
         std::string raw;
         Value current_value;
         const bool has_current = state_store->get(state_key, &raw) && parseStateValue(raw, &current_value);
@@ -688,7 +742,6 @@ Table applyStatefulGroupedAggregates(const Table& input, const std::vector<std::
         registerWindowState(state_store.get(), label, out_row[window_pos].toString(), state_key);
       }
     }
-    out.rows.push_back(std::move(out_row));
   }
 
   for (const auto& label : touched_labels) {
@@ -732,7 +785,7 @@ Table buildActorAggregateInput(const Table& table, const StreamAcceleratorSpec& 
   for (const auto& column : columns) {
     indices.push_back(table.schema.indexOf(column));
   }
-  return projectTable(table, indices);
+  return projectTable(table, indices, {}, false);
 }
 
 [[maybe_unused]] void renameColumn(Table* table, const std::string& from, const std::string& to) {
@@ -748,7 +801,6 @@ Table finalizeActorGroupedAggregateOutput(Table aggregated, const StreamAccelera
                                           const StreamingQueryOptions& options,
                                           uint64_t* state_ms) {
   auto started = std::chrono::steady_clock::now();
-  materializeRows(&aggregated);
   Table out;
   out.schema.fields = accelerator.group_keys;
   for (const auto& aggregate : accelerator.aggregates) {
@@ -759,21 +811,24 @@ Table finalizeActorGroupedAggregateOutput(Table aggregated, const StreamAccelera
   }
 
   if (!accelerator.stateful) {
-    auto cache = makeReservedColumnarCache(out.schema, aggregated.rows.size());
-    out.rows.reserve(aggregated.rows.size());
-    for (const auto& row : aggregated.rows) {
-      Row out_row;
-      out_row.reserve(out.schema.fields.size());
-      std::size_t output_column_index = 0;
-      for (const auto& key : accelerator.group_keys) {
-        appendOutputValue(&out_row, cache.get(), &output_column_index,
-                          row[aggregated.schema.indexOf(key)]);
-      }
-      for (const auto& aggregate : accelerator.aggregates) {
-        appendOutputValue(&out_row, cache.get(), &output_column_index,
-                          row[aggregated.schema.indexOf(aggregate.output_column)]);
-      }
-      out.rows.push_back(std::move(out_row));
+    const auto aggregated_row_count = aggregated.rowCount();
+    auto cache = makeReservedColumnarCache(out.schema, aggregated_row_count);
+    cache->row_count = aggregated_row_count;
+    if (aggregated_row_count > 0) {
+      cache->batch_row_counts.push_back(aggregated_row_count);
+    }
+    const auto aggregated_cache = ensureColumnarCache(&aggregated);
+    for (const auto& key : accelerator.group_keys) {
+      const auto source_index = aggregated.schema.indexOf(key);
+      const auto output_index = out.schema.indexOf(key);
+      cache->columns[output_index] = aggregated_cache->columns[source_index];
+      cache->arrow_formats[output_index] = aggregated_cache->arrow_formats[source_index];
+    }
+    for (const auto& aggregate : accelerator.aggregates) {
+      const auto source_index = aggregated.schema.indexOf(aggregate.output_column);
+      const auto output_index = out.schema.indexOf(aggregate.output_column);
+      cache->columns[output_index] = aggregated_cache->columns[source_index];
+      cache->arrow_formats[output_index] = aggregated_cache->arrow_formats[source_index];
     }
     out.columnar_cache = std::move(cache);
     if (state_ms != nullptr) *state_ms = 0;
@@ -789,37 +844,54 @@ Table finalizeActorGroupedAggregateOutput(Table aggregated, const StreamAccelera
   size_t window_pos = 0;
   const bool has_window = findWindowKeyPosition(accelerator.group_keys, &window_pos);
   std::unordered_set<std::string> touched_labels;
-  auto cache = makeReservedColumnarCache(out.schema, aggregated.rows.size());
-  out.rows.reserve(aggregated.rows.size());
-  for (const auto& row : aggregated.rows) {
+  const auto aggregated_row_count = aggregated.rowCount();
+  auto cache = makeReservedColumnarCache(out.schema, aggregated_row_count);
+  cache->row_count = aggregated_row_count;
+  if (aggregated_row_count > 0) {
+    cache->batch_row_counts.push_back(aggregated_row_count);
+  }
+  std::vector<std::size_t> aggregated_indices(aggregated.schema.fields.size());
+  for (std::size_t i = 0; i < aggregated_indices.size(); ++i) {
+    aggregated_indices[i] = i;
+  }
+  const auto aggregated_columns = viewValueColumns(aggregated, aggregated_indices);
+  for (std::size_t row_index = 0; row_index < aggregated_row_count; ++row_index) {
     Row out_row;
     out_row.reserve(out.schema.fields.size());
     std::size_t output_column_index = 0;
     for (const auto& key : accelerator.group_keys) {
       appendOutputValue(&out_row, cache.get(), &output_column_index,
-                        row[aggregated.schema.indexOf(key)]);
+                        valueColumnValueAt(
+                            *aggregated_columns[aggregated.schema.indexOf(key)].buffer, row_index));
     }
     for (const auto& aggregate : accelerator.aggregates) {
       const auto label = stateLabelForAggregate(aggregate);
       touched_labels.insert(label);
       const auto state_key = makeStateKey(out_row, state_key_indices, label + ":");
       if (aggregate.function == AggregateFunction::Sum) {
-        const double delta = row[aggregated.schema.indexOf(aggregate.output_column)].asDouble();
+        const double delta = valueColumnDoubleAt(
+            *aggregated_columns[aggregated.schema.indexOf(aggregate.output_column)].buffer,
+            row_index);
         appendOutputValue(&out_row, cache.get(), &output_column_index,
                           Value(state_store->addDouble(state_key, delta)));
       } else if (aggregate.function == AggregateFunction::Count) {
-        const double delta = static_cast<double>(
-            row[aggregated.schema.indexOf(aggregate.output_column)].asInt64());
+        const double delta = static_cast<double>(valueColumnInt64At(
+            *aggregated_columns[aggregated.schema.indexOf(aggregate.output_column)].buffer,
+            row_index));
         appendOutputValue(
             &out_row, cache.get(), &output_column_index,
             Value(static_cast<int64_t>(state_store->addDouble(state_key, delta))));
       } else if (aggregate.function == AggregateFunction::Avg) {
-        const double delta_sum =
-            row[aggregated.schema.indexOf(actorStateAverageSumColumnName(aggregate.output_column))]
-                .asDouble();
-        const int64_t delta_count = row[aggregated.schema.indexOf(
-                                            actorStateAverageCountColumnName(aggregate.output_column))]
-                                        .asInt64();
+        const double delta_sum = valueColumnDoubleAt(
+            *aggregated_columns[aggregated.schema.indexOf(
+                actorStateAverageSumColumnName(aggregate.output_column))]
+                 .buffer,
+            row_index);
+        const int64_t delta_count = valueColumnInt64At(
+            *aggregated_columns[aggregated.schema.indexOf(
+                actorStateAverageCountColumnName(aggregate.output_column))]
+                 .buffer,
+            row_index);
         std::string raw;
         double current_sum = 0.0;
         int64_t current_count = 0;
@@ -833,7 +905,9 @@ Table finalizeActorGroupedAggregateOutput(Table aggregated, const StreamAccelera
             &out_row, cache.get(), &output_column_index,
             Value(current_count == 0 ? 0.0 : current_sum / static_cast<double>(current_count)));
       } else {
-        const Value batch_value = row[aggregated.schema.indexOf(aggregate.output_column)];
+        const Value batch_value = valueColumnValueAt(
+            *aggregated_columns[aggregated.schema.indexOf(aggregate.output_column)].buffer,
+            row_index);
         std::string raw;
         Value current_value;
         const bool has_current =
@@ -854,7 +928,6 @@ Table finalizeActorGroupedAggregateOutput(Table aggregated, const StreamAccelera
         registerWindowState(state_store.get(), label, out_row[window_pos].toString(), state_key);
       }
     }
-    out.rows.push_back(std::move(out_row));
   }
   for (const auto& label : touched_labels) {
     evictExpiredWindows(state_store.get(), label, options);
@@ -1634,7 +1707,7 @@ StreamingDataFrame StreamingDataFrame::select(const std::vector<std::string>& co
         for (const auto& column : columns) {
           indices.push_back(input.schema.indexOf(column));
         }
-        return projectTable(input, indices);
+        return projectTable(input, indices, {}, false);
       },
       StreamTransformMode::PartitionLocal, false, "select");
   return StreamingDataFrame(source_, std::move(t), state_);
@@ -1647,7 +1720,7 @@ StreamingDataFrame StreamingDataFrame::filter(const std::string& column, const s
       [column, op, value](const Table& input, const StreamingQueryOptions&) {
         const auto input_column = viewValueColumn(input, input.schema.indexOf(column));
         const auto selection = vectorizedFilterSelection(input_column, value, op);
-        return filterTable(input, selection);
+        return filterTable(input, selection, false);
       },
       StreamTransformMode::PartitionLocal, false, "filter");
   return StreamingDataFrame(source_, std::move(t), state_);
@@ -1660,7 +1733,7 @@ StreamingDataFrame StreamingDataFrame::withColumn(const std::string& name,
       [name, sourceColumn](const Table& input, const StreamingQueryOptions&) {
         Table out = input;
         const auto source_index = out.schema.indexOf(sourceColumn);
-        appendNamedColumn(&out, name, materializeValueColumn(out, source_index));
+        appendNamedColumn(&out, name, materializeValueColumn(out, source_index), false);
         return out;
       },
                  StreamTransformMode::PartitionLocal, false, "withColumn");
@@ -1675,7 +1748,7 @@ StreamingDataFrame StreamingDataFrame::withColumn(const std::string& name,
       [name, function, args](const Table& input, const StreamingQueryOptions&) {
         Table out = input;
         auto values = computeComputedColumnValues(&out, function, args);
-        appendNamedColumn(&out, name, std::move(values));
+        appendNamedColumn(&out, name, std::move(values), false);
         return out;
       },
       StreamTransformMode::PartitionLocal, false, "withColumn");
@@ -1692,7 +1765,7 @@ StreamingDataFrame StreamingDataFrame::drop(const std::string& column) const {
                        keep.push_back(i);
                      }
                    }
-                   return projectTable(input, keep);
+                   return projectTable(input, keep, {}, false);
                  },
                  StreamTransformMode::PartitionLocal, false, "drop");
   return StreamingDataFrame(source_, std::move(t), state_);
@@ -1724,7 +1797,7 @@ StreamingDataFrame StreamingDataFrame::orderBy(const std::vector<std::string>& c
 StreamingDataFrame StreamingDataFrame::limit(size_t n) const {
   auto t = transforms_;
   t.emplace_back([n](const Table& input, const StreamingQueryOptions&) {
-                   return limitTable(input, n);
+                   return limitTable(input, n, false);
                  },
                  StreamTransformMode::GlobalBarrier, false, "limit");
   return StreamingDataFrame(source_, std::move(t), state_);
@@ -1749,7 +1822,7 @@ StreamingDataFrame StreamingDataFrame::window(const std::string& timeColumn, uin
           for (auto& value : bucket_values) {
             value = Value(formatTimestampMillis(static_cast<uint64_t>(value.asInt64())));
           }
-          appendNamedColumn(&out, outputColumn, std::move(bucket_values));
+          appendNamedColumn(&out, outputColumn, std::move(bucket_values), false);
         }
         return out;
       },

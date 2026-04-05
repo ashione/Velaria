@@ -57,18 +57,17 @@ struct ColumnarTable {
 struct ValueColumnView {
   std::shared_ptr<const ColumnarTable> owner;
   const ValueColumnBuffer* buffer = nullptr;
-
-  const std::vector<Value>& values() const;
 };
 
 struct RowSelection {
+  std::size_t input_row_count = 0;
   std::vector<uint8_t> selected;
+  std::vector<std::size_t> indices;
   std::size_t selected_count = 0;
 };
 
 std::shared_ptr<ColumnarTable> makeColumnarCache(const Table& table);
 std::shared_ptr<const ColumnarTable> ensureColumnarCache(const Table* table);
-const std::vector<Value>& materializeValueBuffer(const ValueColumnBuffer* buffer);
 std::size_t valueColumnRowCount(const ValueColumnBuffer& buffer);
 bool valueColumnIsNullAt(const ValueColumnBuffer& buffer, std::size_t row_index);
 std::string_view valueColumnStringViewAt(const ValueColumnBuffer& buffer, std::size_t row_index);
@@ -117,6 +116,10 @@ Table filterTable(const Table& table, const RowSelection& selection,
 Table limitTable(const Table& table, std::size_t limit, bool materialize_rows = true);
 Table sortTable(const Table& table, const std::vector<std::size_t>& indices,
                 const std::vector<bool>& ascending);
+Table topNTable(const Table& table, const std::vector<std::size_t>& indices,
+                const std::vector<bool>& ascending, std::size_t limit,
+                bool materialize_rows = false);
+Table concatenateTables(const std::vector<Table>& tables, bool materialize_rows = false);
 
 std::vector<Value> vectorizedWindowStart(const ValueColumnBuffer& input, uint64_t window_ms);
 std::vector<Value> vectorizedWindowStart(const ValueColumnView& input, uint64_t window_ms);

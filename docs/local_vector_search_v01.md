@@ -64,7 +64,8 @@ Current explain output contains:
 - `top_k=<K>`
 - `candidate_rows=<M>`
 - `filter_pushdown=false`
-- `acceleration=flat-buffer+heap-topk`
+- `acceleration=flat-buffer+simd-topk`
+- `backend=<simd-backend>`
 
 ## Test matrix
 

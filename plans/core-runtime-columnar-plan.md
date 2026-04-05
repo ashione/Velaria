@@ -7,6 +7,24 @@ It is intended to complement older design notes in `plans/` by separating:
 - what is intentionally not in scope for this line of work
 - what the next phases are
 
+## Document Role
+
+Use repository documents with the following split:
+
+- root `README.md` / `README-zh.md`
+  - repository-facing implementation summary and current scope
+- `docs/core-boundary.md`
+  - ownership and layering boundaries
+- `docs/runtime-contract.md`
+  - stable runtime-facing contract
+- `docs/streaming_runtime_design.md`
+  - current streaming/runtime implementation shape
+- this document
+  - current status board for the core-runtime columnar line only
+
+This plan should not become a second copy of the whole repository README.
+When repository-wide scope changes, update the root README first and keep this file focused on the columnar runtime track.
+
 ## Goal
 
 Keep the existing core kernel contract stable while reducing repeated `Arrow -> row -> column`

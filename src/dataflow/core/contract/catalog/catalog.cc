@@ -1,5 +1,7 @@
 #include "src/dataflow/core/contract/catalog/catalog.h"
 
+#include "src/dataflow/core/execution/columnar_batch.h"
+
 namespace dataflow {
 
 void ViewCatalog::createView(const std::string& name, const DataFrame& df) {
@@ -61,7 +63,7 @@ DataFrame& ViewCatalog::getViewMutable(const std::string& name) {
 
 void ViewCatalog::appendToView(const std::string& name, const Table& appendTable) {
   auto& view = getViewMutable(name);
-  Table current = view.toTable();
+  const Table& current = view.materializedTable();
   if (!appendTable.schema.fields.empty()) {
     if (current.schema.fields.size() != appendTable.schema.fields.size()) {
       throw SQLSemanticError("column count mismatch");
@@ -72,8 +74,7 @@ void ViewCatalog::appendToView(const std::string& name, const Table& appendTable
       }
     }
   }
-  current.rows.insert(current.rows.end(), appendTable.rows.begin(), appendTable.rows.end());
-  views_[name] = DataFrame(current);
+  views_[name] = DataFrame(concatenateTables({current, appendTable}, false));
 }
 
 }  // namespace dataflow

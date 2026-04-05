@@ -12,6 +12,7 @@
 
 #include "src/dataflow/core/contract/api/dataframe.h"
 #include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/execution/arrow_format.h"
 #include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/table.h"
 #include "src/dataflow/core/execution/value.h"
@@ -267,22 +268,24 @@ FastArrowColumnSpec fastArrowColumnSpec(const ArrowSchema* schema) {
     return spec;
   }
   const std::string format(schema->format);
-  if (format == "b") spec.kind = FastArrowColumnKind::Bool;
-  if (format == "i") spec.kind = FastArrowColumnKind::Int32;
-  if (format == "I") spec.kind = FastArrowColumnKind::UInt32;
-  if (format == "l") spec.kind = FastArrowColumnKind::Int64;
-  if (format == "L") spec.kind = FastArrowColumnKind::UInt64;
-  if (format == "f") spec.kind = FastArrowColumnKind::Float32;
-  if (format == "g") spec.kind = FastArrowColumnKind::Float64;
-  if (format == "u") spec.kind = FastArrowColumnKind::Utf8;
-  if (format == "U") spec.kind = FastArrowColumnKind::LargeUtf8;
+  if (format == df::kArrowFormatBool) spec.kind = FastArrowColumnKind::Bool;
+  if (format == df::kArrowFormatInt32) spec.kind = FastArrowColumnKind::Int32;
+  if (format == df::kArrowFormatUInt32) spec.kind = FastArrowColumnKind::UInt32;
+  if (format == df::kArrowFormatInt64) spec.kind = FastArrowColumnKind::Int64;
+  if (format == df::kArrowFormatUInt64) spec.kind = FastArrowColumnKind::UInt64;
+  if (format == df::kArrowFormatFloat32) spec.kind = FastArrowColumnKind::Float32;
+  if (format == df::kArrowFormatFloat64) spec.kind = FastArrowColumnKind::Float64;
+  if (format == df::kArrowFormatUtf8) spec.kind = FastArrowColumnKind::Utf8;
+  if (format == df::kArrowFormatLargeUtf8) spec.kind = FastArrowColumnKind::LargeUtf8;
   if (spec.kind != FastArrowColumnKind::Unsupported) return spec;
 
   // Arrow C data interface fixed-size list format: +w:<list_size>
-  if (format.rfind("+w:", 0) == 0 && schema->n_children == 1 && schema->children != nullptr &&
-      schema->children[0] != nullptr && std::string(schema->children[0]->format) == "f") {
+  if (df::isArrowFixedSizeListFormat(format) && schema->n_children == 1 &&
+      schema->children != nullptr && schema->children[0] != nullptr &&
+      std::string(schema->children[0]->format) == df::kArrowFormatFloat32) {
     spec.kind = FastArrowColumnKind::FixedSizeListFloat32;
-    spec.fixed_list_size = static_cast<int32_t>(std::stoi(format.substr(3)));
+    spec.fixed_list_size = static_cast<int32_t>(
+        std::stoi(format.substr(std::string(df::kArrowFormatFixedSizeListPrefix).size())));
     return spec;
   }
   return spec;
@@ -739,22 +742,22 @@ std::string arrowFormatForValue(const df::Value& value) {
   switch (value.type()) {
     case df::DataType::Nil:
     case df::DataType::String:
-      return "u";
+      return df::kArrowFormatUtf8;
     case df::DataType::Int64:
-      return "l";
+      return df::kArrowFormatInt64;
     case df::DataType::Double:
-      return "g";
+      return df::kArrowFormatFloat64;
     case df::DataType::FixedVector: {
-      return "+w:" + std::to_string(value.asFixedVector().size());
+      return std::string(df::kArrowFormatFixedSizeListPrefix) +
+             std::to_string(value.asFixedVector().size());
     }
   }
-  return "u";
+  return df::kArrowFormatUtf8;
 }
 
 bool supportsArrowExportFormat(const std::string& format) {
-  return format == "b" || format == "i" || format == "I" || format == "l" || format == "L" ||
-         format == "f" || format == "g" || format == "u" || format == "U" ||
-         format.rfind("+w:", 0) == 0;
+  return df::isArrowPrimitiveNumericFormat(format) || df::isArrowUtf8Format(format) ||
+         df::isArrowFixedSizeListFormat(format);
 }
 
 std::string arrowFormatForColumn(const df::ValueColumnBuffer& column,
@@ -772,7 +775,7 @@ std::string arrowFormatForColumn(const df::ValueColumnBuffer& column,
       return arrowFormatForValue(value);
     }
   }
-  return "u";
+  return df::kArrowFormatUtf8;
 }
 
 template <typename T, typename ConvertFn>
@@ -933,10 +936,10 @@ std::vector<PreparedArrowColumn> prepareArrowColumns(const df::ColumnarTable& ca
       item.fixed_list_size = column.arrow_backing->fixed_list_size;
       item.child_length = static_cast<int64_t>(column.arrow_backing->child_length);
       item.n_buffers = item.fixed_list_size > 0 ? 1 : (item.extra_buffer ? 3 : 2);
-      if (item.format == "u" || item.format == "U") {
+      if (df::isArrowUtf8Format(item.format)) {
         item.n_buffers = 3;
       }
-      if (item.format.rfind("+w:", 0) == 0) {
+      if (df::isArrowFixedSizeListFormat(item.format)) {
         item.n_buffers = 1;
       }
       prepared.push_back(std::move(item));
@@ -944,7 +947,11 @@ std::vector<PreparedArrowColumn> prepareArrowColumns(const df::ColumnarTable& ca
     }
     df::ValueColumnBuffer materialized_column;
     if (column.values.empty()) {
-      materialized_column.values = df::materializeValueBuffer(&column);
+      const auto row_count = df::valueColumnRowCount(column);
+      materialized_column.values.reserve(row_count);
+      for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+        materialized_column.values.push_back(df::valueColumnValueAt(column, row_index));
+      }
     }
     const auto& source_column = materialized_column.values.empty() ? column : materialized_column;
     if (item.format == "b") {
@@ -968,7 +975,7 @@ std::vector<PreparedArrowColumn> prepareArrowColumns(const df::ColumnarTable& ca
       item.null_bitmap = std::move(buffers.first);
       item.value_buffer = std::move(buffers.second);
       item.n_buffers = 2;
-    } else if (item.format == "l") {
+    } else if (item.format == df::kArrowFormatInt64) {
       auto buffers = makeNumericBuffers<int64_t>(
           source_column, [](const df::Value& value) { return value.asInt64(); }, &item.null_count);
       item.null_bitmap = std::move(buffers.first);
@@ -990,20 +997,20 @@ std::vector<PreparedArrowColumn> prepareArrowColumns(const df::ColumnarTable& ca
       item.null_bitmap = std::move(buffers.first);
       item.value_buffer = std::move(buffers.second);
       item.n_buffers = 2;
-    } else if (item.format == "g") {
+    } else if (item.format == df::kArrowFormatFloat64) {
       auto buffers = makeNumericBuffers<double>(
           source_column, [](const df::Value& value) { return value.asDouble(); }, &item.null_count);
       item.null_bitmap = std::move(buffers.first);
       item.value_buffer = std::move(buffers.second);
       item.n_buffers = 2;
-    } else if (item.format == "U") {
+    } else if (item.format == df::kArrowFormatLargeUtf8) {
       item.null_bitmap = std::shared_ptr<void>(
           std::calloc(source_column.values.empty() ? 1 : (source_column.values.size() + 7) / 8, 1), std::free);
       auto strings = makeStringBuffers<int64_t>(source_column, item.null_bitmap, &item.null_count);
       item.value_buffer = std::move(strings.offsets);
       item.extra_buffer = std::move(strings.data);
       item.n_buffers = 3;
-    } else if (item.format.rfind("+w:", 0) == 0) {
+    } else if (df::isArrowFixedSizeListFormat(item.format)) {
       item.fixed_list_size = static_cast<int32_t>(std::stoi(item.format.substr(3)));
       item.child_format = "f";
       item.null_bitmap = std::shared_ptr<void>(

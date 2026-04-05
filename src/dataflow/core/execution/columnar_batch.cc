@@ -1,19 +1,26 @@
 #include "src/dataflow/core/execution/columnar_batch.h"
 
 #include <algorithm>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <span>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+
+#include "src/dataflow/core/execution/runtime/simd_dispatch.h"
+#include "src/dataflow/core/execution/arrow_format.h"
 
 namespace dataflow {
 
 namespace {
 
 constexpr char kGroupDelim = '\x1f';
+
+enum class CompareOp { Eq, Ne, Lt, Gt, Le, Ge };
 
 int64_t parseEpochMillis(const std::string& raw);
 
@@ -45,6 +52,354 @@ bool arrowBitmapHasValue(const uint8_t* bitmap, std::size_t index) {
   return ((bitmap[index >> 3] >> (index & 7)) & 0x01u) != 0;
 }
 
+template <typename T>
+std::shared_ptr<void> allocateArrowArray(std::size_t size) {
+  if (size == 0) {
+    return nullptr;
+  }
+  return std::shared_ptr<void>(new T[size], [](void* ptr) {
+    delete[] static_cast<T*>(ptr);
+  });
+}
+
+void arrowBitmapSetValue(uint8_t* bitmap, std::size_t index, bool valid) {
+  if (bitmap == nullptr || !valid) {
+    return;
+  }
+  bitmap[index >> 3] |= static_cast<uint8_t>(1u << (index & 7));
+}
+
+std::size_t countBitmapValidBits(std::span<const uint8_t> bitmap, std::size_t bit_count) {
+  if (bitmap.empty() || bit_count == 0) {
+    return 0;
+  }
+  const std::size_t full_bytes = bit_count / 8;
+  const std::size_t remaining_bits = bit_count % 8;
+  std::size_t set_bits = 0;
+  for (std::size_t index = 0; index < full_bytes; ++index) {
+    set_bits += static_cast<std::size_t>(std::popcount(static_cast<unsigned int>(bitmap[index])));
+  }
+  if (remaining_bits != 0) {
+    const auto mask = static_cast<uint8_t>((1u << remaining_bits) - 1u);
+    set_bits += static_cast<std::size_t>(
+        std::popcount(static_cast<unsigned int>(bitmap[full_bytes] & mask)));
+  }
+  return set_bits;
+}
+
+int64_t countBitmapNulls(const std::shared_ptr<void>& bitmap, std::size_t bit_count) {
+  if (bitmap == nullptr || bit_count == 0) {
+    return 0;
+  }
+  const auto byte_count = (bit_count + 7) / 8;
+  const auto* bits = static_cast<const uint8_t*>(bitmap.get());
+  const auto valid_bits = countBitmapValidBits(std::span<const uint8_t>(bits, byte_count), bit_count);
+  return static_cast<int64_t>(bit_count - valid_bits);
+}
+
+std::shared_ptr<void> copySelectedArrowBitmap(const uint8_t* input_bitmap,
+                                              const RowSelection& selection) {
+  if (selection.selected_count == 0 || input_bitmap == nullptr) {
+    return nullptr;
+  }
+  const auto output_bytes = (selection.selected_count + 7) / 8;
+  auto output_bitmap = allocateArrowArray<uint8_t>(output_bytes);
+  auto* output = static_cast<uint8_t*>(output_bitmap.get());
+  std::memset(output, 0, output_bytes);
+  std::size_t out_index = 0;
+  for (const auto row_index : selection.indices) {
+    arrowBitmapSetValue(output, out_index, arrowBitmapHasValue(input_bitmap, row_index));
+    ++out_index;
+  }
+  return output_bitmap;
+}
+
+template <typename T>
+std::shared_ptr<void> copySelectedArrowValues(const T* input_values,
+                                              const RowSelection& selection) {
+  if (selection.selected_count == 0) {
+    return nullptr;
+  }
+  auto output_values = allocateArrowArray<T>(selection.selected_count);
+  auto* output = static_cast<T*>(output_values.get());
+  std::size_t out_index = 0;
+  for (const auto row_index : selection.indices) {
+    output[out_index++] = input_values[row_index];
+  }
+  return output_values;
+}
+
+template <typename Offset>
+ValueColumnBuffer copySelectedArrowStringColumn(const ArrowColumnBacking& backing,
+                                                const RowSelection& selection) {
+  ValueColumnBuffer output_column;
+  auto output_backing = std::make_shared<ArrowColumnBacking>();
+  output_backing->format = backing.format;
+  output_backing->length = selection.selected_count;
+  output_backing->null_bitmap = copySelectedArrowBitmap(
+      static_cast<const uint8_t*>(backing.null_bitmap.get()), selection);
+
+  auto offsets = allocateArrowArray<Offset>(selection.selected_count + 1);
+  auto* output_offsets = static_cast<Offset*>(offsets.get());
+  const auto* input_offsets = static_cast<const Offset*>(backing.value_buffer.get());
+  const auto* input_data = static_cast<const char*>(backing.extra_buffer.get());
+  output_offsets[0] = 0;
+
+  std::size_t total_bytes = 0;
+  std::size_t out_index = 0;
+  for (const auto row_index : selection.indices) {
+    const auto begin = static_cast<std::size_t>(input_offsets[row_index]);
+    const auto end = static_cast<std::size_t>(input_offsets[row_index + 1]);
+    total_bytes += (end - begin);
+    output_offsets[++out_index] = static_cast<Offset>(total_bytes);
+  }
+
+  auto values = allocateArrowArray<char>(total_bytes);
+  auto* output_data = static_cast<char*>(values.get());
+  std::size_t data_offset = 0;
+  for (const auto row_index : selection.indices) {
+    const auto begin = static_cast<std::size_t>(input_offsets[row_index]);
+    const auto end = static_cast<std::size_t>(input_offsets[row_index + 1]);
+    const auto size = end - begin;
+    if (size > 0) {
+      std::memcpy(output_data + data_offset, input_data + begin, size);
+      data_offset += size;
+    }
+  }
+
+  output_backing->value_buffer = std::move(offsets);
+  output_backing->extra_buffer = std::move(values);
+  output_backing->null_count =
+      countBitmapNulls(output_backing->null_bitmap, selection.selected_count);
+  output_column.arrow_backing = std::move(output_backing);
+  return output_column;
+}
+
+ValueColumnBuffer copySelectedArrowFixedVectorColumn(const ArrowColumnBacking& backing,
+                                                     const RowSelection& selection) {
+  ValueColumnBuffer output_column;
+  auto output_backing = std::make_shared<ArrowColumnBacking>();
+  output_backing->format = backing.format;
+  output_backing->child_format = backing.child_format;
+  output_backing->fixed_list_size = backing.fixed_list_size;
+  output_backing->length = selection.selected_count;
+  output_backing->child_length =
+      selection.selected_count * static_cast<std::size_t>(std::max(backing.fixed_list_size, 0));
+  output_backing->null_bitmap = copySelectedArrowBitmap(
+      static_cast<const uint8_t*>(backing.null_bitmap.get()), selection);
+
+  const auto child_length = output_backing->child_length;
+  auto child_values = allocateArrowArray<float>(child_length);
+  auto* output = static_cast<float*>(child_values.get());
+  const auto* input = static_cast<const float*>(backing.child_value_buffer.get());
+  const auto width = static_cast<std::size_t>(std::max(backing.fixed_list_size, 0));
+  std::size_t out_index = 0;
+  for (const auto row_index : selection.indices) {
+    if (width > 0) {
+      std::memcpy(output + out_index * width, input + row_index * width, sizeof(float) * width);
+    }
+    ++out_index;
+  }
+  output_backing->child_value_buffer = std::move(child_values);
+  output_backing->null_count =
+      countBitmapNulls(output_backing->null_bitmap, selection.selected_count);
+  output_column.arrow_backing = std::move(output_backing);
+  return output_column;
+}
+
+ValueColumnBuffer copySelectedArrowColumn(const ValueColumnBuffer& input_column,
+                                          const RowSelection& selection) {
+  if (input_column.arrow_backing == nullptr || !input_column.values.empty()) {
+    return {};
+  }
+  const auto& backing = *input_column.arrow_backing;
+  switch (backing.format.empty() ? '?' : backing.format[0]) {
+    case 'n': {
+      ValueColumnBuffer output_column;
+      auto output_backing = std::make_shared<ArrowColumnBacking>();
+      output_backing->format = backing.format;
+      output_backing->length = selection.selected_count;
+      output_backing->null_count = static_cast<int64_t>(selection.selected_count);
+      output_column.arrow_backing = std::move(output_backing);
+      return output_column;
+    }
+    case 'b': {
+      auto output_column = ValueColumnBuffer{};
+      auto output_backing = std::make_shared<ArrowColumnBacking>();
+      output_backing->format = backing.format;
+      output_backing->length = selection.selected_count;
+      output_backing->null_bitmap = copySelectedArrowBitmap(
+          static_cast<const uint8_t*>(backing.null_bitmap.get()), selection);
+      const auto output_bytes = (selection.selected_count + 7) / 8;
+      auto output_values = allocateArrowArray<uint8_t>(output_bytes);
+      auto* output = static_cast<uint8_t*>(output_values.get());
+      std::memset(output, 0, output_bytes);
+      const auto* input = static_cast<const uint8_t*>(backing.value_buffer.get());
+      std::size_t out_index = 0;
+      for (const auto row_index : selection.indices) {
+        arrowBitmapSetValue(
+            output, out_index,
+            ((input[row_index >> 3] >> (row_index & 7)) & 0x01u) != 0);
+        ++out_index;
+      }
+      output_backing->value_buffer = std::move(output_values);
+      output_backing->null_count =
+          countBitmapNulls(output_backing->null_bitmap, selection.selected_count);
+      output_column.arrow_backing = std::move(output_backing);
+      return output_column;
+    }
+    case 'i':
+      return ValueColumnBuffer{
+          {},
+          [&]() {
+            auto output_backing = std::make_shared<ArrowColumnBacking>();
+            output_backing->format = backing.format;
+            output_backing->length = selection.selected_count;
+            output_backing->null_bitmap = copySelectedArrowBitmap(
+                static_cast<const uint8_t*>(backing.null_bitmap.get()), selection);
+            output_backing->value_buffer = copySelectedArrowValues(
+                static_cast<const int32_t*>(backing.value_buffer.get()), selection);
+            output_backing->null_count =
+                countBitmapNulls(output_backing->null_bitmap, selection.selected_count);
+            return std::shared_ptr<const ArrowColumnBacking>(std::move(output_backing));
+          }()};
+    case 'I':
+      return ValueColumnBuffer{
+          {},
+          [&]() {
+            auto output_backing = std::make_shared<ArrowColumnBacking>();
+            output_backing->format = backing.format;
+            output_backing->length = selection.selected_count;
+            output_backing->null_bitmap = copySelectedArrowBitmap(
+                static_cast<const uint8_t*>(backing.null_bitmap.get()), selection);
+            output_backing->value_buffer = copySelectedArrowValues(
+                static_cast<const uint32_t*>(backing.value_buffer.get()), selection);
+            output_backing->null_count =
+                countBitmapNulls(output_backing->null_bitmap, selection.selected_count);
+            return std::shared_ptr<const ArrowColumnBacking>(std::move(output_backing));
+          }()};
+    case 'l':
+      return ValueColumnBuffer{
+          {},
+          [&]() {
+            auto output_backing = std::make_shared<ArrowColumnBacking>();
+            output_backing->format = backing.format;
+            output_backing->length = selection.selected_count;
+            output_backing->null_bitmap = copySelectedArrowBitmap(
+                static_cast<const uint8_t*>(backing.null_bitmap.get()), selection);
+            output_backing->value_buffer = copySelectedArrowValues(
+                static_cast<const int64_t*>(backing.value_buffer.get()), selection);
+            output_backing->null_count =
+                countBitmapNulls(output_backing->null_bitmap, selection.selected_count);
+            return std::shared_ptr<const ArrowColumnBacking>(std::move(output_backing));
+          }()};
+    case 'L':
+      return ValueColumnBuffer{
+          {},
+          [&]() {
+            auto output_backing = std::make_shared<ArrowColumnBacking>();
+            output_backing->format = backing.format;
+            output_backing->length = selection.selected_count;
+            output_backing->null_bitmap = copySelectedArrowBitmap(
+                static_cast<const uint8_t*>(backing.null_bitmap.get()), selection);
+            output_backing->value_buffer = copySelectedArrowValues(
+                static_cast<const uint64_t*>(backing.value_buffer.get()), selection);
+            output_backing->null_count =
+                countBitmapNulls(output_backing->null_bitmap, selection.selected_count);
+            return std::shared_ptr<const ArrowColumnBacking>(std::move(output_backing));
+          }()};
+    case 'f':
+      return ValueColumnBuffer{
+          {},
+          [&]() {
+            auto output_backing = std::make_shared<ArrowColumnBacking>();
+            output_backing->format = backing.format;
+            output_backing->length = selection.selected_count;
+            output_backing->null_bitmap = copySelectedArrowBitmap(
+                static_cast<const uint8_t*>(backing.null_bitmap.get()), selection);
+            output_backing->value_buffer = copySelectedArrowValues(
+                static_cast<const float*>(backing.value_buffer.get()), selection);
+            output_backing->null_count =
+                countBitmapNulls(output_backing->null_bitmap, selection.selected_count);
+            return std::shared_ptr<const ArrowColumnBacking>(std::move(output_backing));
+          }()};
+    case 'g':
+      return ValueColumnBuffer{
+          {},
+          [&]() {
+            auto output_backing = std::make_shared<ArrowColumnBacking>();
+            output_backing->format = backing.format;
+            output_backing->length = selection.selected_count;
+            output_backing->null_bitmap = copySelectedArrowBitmap(
+                static_cast<const uint8_t*>(backing.null_bitmap.get()), selection);
+            output_backing->value_buffer = copySelectedArrowValues(
+                static_cast<const double*>(backing.value_buffer.get()), selection);
+            output_backing->null_count =
+                countBitmapNulls(output_backing->null_bitmap, selection.selected_count);
+            return std::shared_ptr<const ArrowColumnBacking>(std::move(output_backing));
+          }()};
+    case 'u':
+      return copySelectedArrowStringColumn<int32_t>(backing, selection);
+    case 'U':
+      return copySelectedArrowStringColumn<int64_t>(backing, selection);
+    case '+':
+      if (isArrowFixedSizeListFormat(backing.format)) {
+        return copySelectedArrowFixedVectorColumn(backing, selection);
+      }
+      break;
+    default:
+      break;
+  }
+  return {};
+}
+
+template <typename T>
+std::shared_ptr<void> copyArrowPrefixValues(const T* input_values, std::size_t row_count) {
+  if (row_count == 0) {
+    return nullptr;
+  }
+  auto output_values = allocateArrowArray<T>(row_count);
+  std::memcpy(output_values.get(), input_values, sizeof(T) * row_count);
+  return output_values;
+}
+
+std::size_t countArrowNullsPrefix(const ArrowColumnBacking& backing, std::size_t row_count) {
+  return static_cast<std::size_t>(countBitmapNulls(backing.null_bitmap, row_count));
+}
+
+ValueColumnBuffer shareArrowPrefixColumn(const ValueColumnBuffer& input_column,
+                                         std::size_t row_count) {
+  if (input_column.arrow_backing == nullptr || !input_column.values.empty()) {
+    return {};
+  }
+  const auto& backing = *input_column.arrow_backing;
+  const auto shared_length = std::min<std::size_t>(row_count, backing.length);
+  if (shared_length == 0) {
+    return ValueColumnBuffer{{}, std::make_shared<ArrowColumnBacking>(ArrowColumnBacking{
+                                         backing.format,
+                                         backing.child_format,
+                                         backing.null_bitmap,
+                                         backing.value_buffer,
+                                         backing.extra_buffer,
+                                         backing.child_value_buffer,
+                                         backing.fixed_list_size,
+                                         0,
+                                         0,
+                                         0})};
+  }
+  if (shared_length == backing.length) {
+    return input_column;
+  }
+  auto output_backing = std::make_shared<ArrowColumnBacking>(backing);
+  output_backing->length = shared_length;
+  output_backing->null_count = static_cast<int64_t>(countArrowNullsPrefix(backing, shared_length));
+  if (isArrowFixedSizeListFormat(backing.format)) {
+    output_backing->child_length =
+        shared_length * static_cast<std::size_t>(std::max(backing.fixed_list_size, 0));
+  }
+  return ValueColumnBuffer{{}, std::move(output_backing)};
+}
+
 [[maybe_unused]] int64_t valueAsInt64(const Value& value) {
   if (value.type() == DataType::Nil) {
     throw std::runtime_error("computed function argument cannot be null");
@@ -53,16 +408,6 @@ bool arrowBitmapHasValue(const uint8_t* bitmap, std::size_t index) {
     throw std::runtime_error("computed function argument must be numeric");
   }
   return value.asInt64();
-}
-
-double valueAsDouble(const Value& value) {
-  if (value.type() == DataType::Nil) {
-    throw std::runtime_error("computed function argument cannot be null");
-  }
-  if (!value.isNumber()) {
-    throw std::runtime_error("computed function argument must be numeric");
-  }
-  return value.asDouble();
 }
 
 int64_t valueAsEpochMillis(const Value& value) {
@@ -75,17 +420,53 @@ int64_t valueAsEpochMillis(const Value& value) {
   return parseEpochMillis(value.toString());
 }
 
-bool matchesCompareOp(int compare_result, const std::string& op) {
-  if (op == "=" || op == "==") return compare_result == 0;
-  if (op == "!=") return compare_result != 0;
-  if (op == "<") return compare_result < 0;
-  if (op == ">") return compare_result > 0;
-  if (op == "<=") return compare_result <= 0;
-  if (op == ">=") return compare_result >= 0;
+CompareOp parseCompareOp(const std::string& op) {
+  if (op == "=" || op == "==") return CompareOp::Eq;
+  if (op == "!=") return CompareOp::Ne;
+  if (op == "<") return CompareOp::Lt;
+  if (op == ">") return CompareOp::Gt;
+  if (op == "<=") return CompareOp::Le;
+  if (op == ">=") return CompareOp::Ge;
   throw std::runtime_error("unsupported filter op: " + op);
 }
 
-bool tryMatchesValueCompare(const Value& lhs, const Value& rhs, const std::string& op) {
+bool matchesCompareOp(int compare_result, CompareOp op) {
+  switch (op) {
+    case CompareOp::Eq:
+      return compare_result == 0;
+    case CompareOp::Ne:
+      return compare_result != 0;
+    case CompareOp::Lt:
+      return compare_result < 0;
+    case CompareOp::Gt:
+      return compare_result > 0;
+    case CompareOp::Le:
+      return compare_result <= 0;
+    case CompareOp::Ge:
+      return compare_result >= 0;
+  }
+  return false;
+}
+
+NumericCompareOp toNumericCompareOp(const std::string& op) {
+  switch (parseCompareOp(op)) {
+    case CompareOp::Eq:
+      return NumericCompareOp::Eq;
+    case CompareOp::Ne:
+      return NumericCompareOp::Ne;
+    case CompareOp::Lt:
+      return NumericCompareOp::Lt;
+    case CompareOp::Gt:
+      return NumericCompareOp::Gt;
+    case CompareOp::Le:
+      return NumericCompareOp::Le;
+    case CompareOp::Ge:
+      return NumericCompareOp::Ge;
+  }
+  throw std::runtime_error("unsupported filter op: " + op);
+}
+
+bool tryMatchesValueCompare(const Value& lhs, const Value& rhs, CompareOp op) {
   try {
     return matchesCompareOp(lhs == rhs ? 0 : (lhs < rhs ? -1 : 1), op);
   } catch (...) {
@@ -96,6 +477,29 @@ bool tryMatchesValueCompare(const Value& lhs, const Value& rhs, const std::strin
 template <typename T>
 int compareScalar(const T& lhs, const T& rhs) {
   return lhs < rhs ? -1 : (lhs > rhs ? 1 : 0);
+}
+
+bool valueIsNull(const Value& value) {
+  return value.type() == DataType::Nil;
+}
+
+bool matchesTypedValueCompare(const Value& lhs, const Value& rhs, CompareOp op) {
+  if (lhs.type() == DataType::Nil || rhs.type() == DataType::Nil) {
+    if (op == CompareOp::Eq) {
+      return valueIsNull(lhs) && valueIsNull(rhs);
+    }
+    if (op == CompareOp::Ne) {
+      return valueIsNull(lhs) != valueIsNull(rhs);
+    }
+    return false;
+  }
+  if (rhs.isNumber() && lhs.isNumber()) {
+    return matchesCompareOp(compareScalar(lhs.asDouble(), rhs.asDouble()), op);
+  }
+  if (rhs.type() == DataType::String && lhs.type() == DataType::String) {
+    return matchesCompareOp(compareScalar(lhs.asString(), rhs.asString()), op);
+  }
+  return tryMatchesValueCompare(lhs, rhs, op);
 }
 
 int64_t parseEpochMillis(const std::string& raw) {
@@ -221,115 +625,6 @@ std::vector<Value> unaryStringKernel(const StringColumnBuffer& input, Fn&& fn) {
 
 }  // namespace
 
-const std::vector<Value>& materializeValueBuffer(const ValueColumnBuffer* buffer) {
-  if (buffer == nullptr) {
-    throw std::invalid_argument("materializeValueBuffer buffer is null");
-  }
-  if (!buffer->values.empty() || buffer->arrow_backing == nullptr) {
-    return buffer->values;
-  }
-
-  const auto& backing = *buffer->arrow_backing;
-  std::vector<Value>& out = const_cast<std::vector<Value>&>(buffer->values);
-  out.resize(backing.length);
-  const auto* validity = static_cast<const uint8_t*>(backing.null_bitmap.get());
-
-  if (backing.format == "b") {
-    const auto* bits = static_cast<const uint8_t*>(backing.value_buffer.get());
-    for (std::size_t row = 0; row < backing.length; ++row) {
-      if (!arrowBitmapHasValue(validity, row)) continue;
-      out[row] = Value(static_cast<int64_t>(((bits[row >> 3] >> (row & 7)) & 0x01u) != 0));
-    }
-    return out;
-  }
-  if (backing.format == "n") {
-    return out;
-  }
-  if (backing.format == "i") {
-    const auto* values = static_cast<const int32_t*>(backing.value_buffer.get());
-    for (std::size_t row = 0; row < backing.length; ++row) {
-      if (!arrowBitmapHasValue(validity, row)) continue;
-      out[row] = Value(static_cast<int64_t>(values[row]));
-    }
-    return out;
-  }
-  if (backing.format == "I") {
-    const auto* values = static_cast<const uint32_t*>(backing.value_buffer.get());
-    for (std::size_t row = 0; row < backing.length; ++row) {
-      if (!arrowBitmapHasValue(validity, row)) continue;
-      out[row] = Value(static_cast<int64_t>(values[row]));
-    }
-    return out;
-  }
-  if (backing.format == "l") {
-    const auto* values = static_cast<const int64_t*>(backing.value_buffer.get());
-    for (std::size_t row = 0; row < backing.length; ++row) {
-      if (!arrowBitmapHasValue(validity, row)) continue;
-      out[row] = Value(values[row]);
-    }
-    return out;
-  }
-  if (backing.format == "L") {
-    const auto* values = static_cast<const uint64_t*>(backing.value_buffer.get());
-    for (std::size_t row = 0; row < backing.length; ++row) {
-      if (!arrowBitmapHasValue(validity, row)) continue;
-      out[row] = Value(static_cast<int64_t>(values[row]));
-    }
-    return out;
-  }
-  if (backing.format == "f") {
-    const auto* values = static_cast<const float*>(backing.value_buffer.get());
-    for (std::size_t row = 0; row < backing.length; ++row) {
-      if (!arrowBitmapHasValue(validity, row)) continue;
-      out[row] = Value(static_cast<double>(values[row]));
-    }
-    return out;
-  }
-  if (backing.format == "g") {
-    const auto* values = static_cast<const double*>(backing.value_buffer.get());
-    for (std::size_t row = 0; row < backing.length; ++row) {
-      if (!arrowBitmapHasValue(validity, row)) continue;
-      out[row] = Value(values[row]);
-    }
-    return out;
-  }
-  if (backing.format == "u") {
-    const auto* offsets = static_cast<const int32_t*>(backing.value_buffer.get());
-    const auto* data = static_cast<const char*>(backing.extra_buffer.get());
-    for (std::size_t row = 0; row < backing.length; ++row) {
-      if (!arrowBitmapHasValue(validity, row)) continue;
-      const auto begin = offsets[row];
-      const auto end = offsets[row + 1];
-      out[row] = Value(std::string(data + begin, data + end));
-    }
-    return out;
-  }
-  if (backing.format == "U") {
-    const auto* offsets = static_cast<const int64_t*>(backing.value_buffer.get());
-    const auto* data = static_cast<const char*>(backing.extra_buffer.get());
-    for (std::size_t row = 0; row < backing.length; ++row) {
-      if (!arrowBitmapHasValue(validity, row)) continue;
-      const auto begin = offsets[row];
-      const auto end = offsets[row + 1];
-      out[row] = Value(std::string(data + begin, data + end));
-    }
-    return out;
-  }
-  if (backing.format.rfind("+w:", 0) == 0) {
-    const auto* values = static_cast<const float*>(backing.child_value_buffer.get());
-    for (std::size_t row = 0; row < backing.length; ++row) {
-      if (!arrowBitmapHasValue(validity, row)) continue;
-      std::vector<float> vec(static_cast<std::size_t>(backing.fixed_list_size));
-      std::memcpy(vec.data(), values + row * static_cast<std::size_t>(backing.fixed_list_size),
-                  sizeof(float) * static_cast<std::size_t>(backing.fixed_list_size));
-      out[row] = Value(std::move(vec));
-    }
-    return out;
-  }
-
-  throw std::runtime_error("unsupported Arrow backing format: " + backing.format);
-}
-
 std::size_t valueColumnRowCount(const ValueColumnBuffer& buffer) {
   if (!buffer.values.empty()) {
     return buffer.values.size();
@@ -347,7 +642,7 @@ bool valueColumnIsNullAt(const ValueColumnBuffer& buffer, std::size_t row_index)
   if (buffer.arrow_backing == nullptr) {
     return true;
   }
-  if (buffer.arrow_backing->format == "n") {
+  if (buffer.arrow_backing->format == kArrowFormatNull) {
     return true;
   }
   return !arrowBitmapHasValue(static_cast<const uint8_t*>(buffer.arrow_backing->null_bitmap.get()),
@@ -365,14 +660,14 @@ std::string_view valueColumnStringViewAt(const ValueColumnBuffer& buffer, std::s
     return std::string_view();
   }
   const auto& backing = *buffer.arrow_backing;
-  if (backing.format == "u") {
+  if (backing.format == kArrowFormatUtf8) {
     const auto* offsets = static_cast<const int32_t*>(backing.value_buffer.get());
     const auto* data = static_cast<const char*>(backing.extra_buffer.get());
     const auto begin = offsets[row_index];
     const auto end = offsets[row_index + 1];
     return std::string_view(data + begin, static_cast<std::size_t>(end - begin));
   }
-  if (backing.format == "U") {
+  if (backing.format == kArrowFormatLargeUtf8) {
     const auto* offsets = static_cast<const int64_t*>(backing.value_buffer.get());
     const auto* data = static_cast<const char*>(backing.extra_buffer.get());
     const auto begin = offsets[row_index];
@@ -393,37 +688,37 @@ std::string valueColumnStringAt(const ValueColumnBuffer& buffer, std::size_t row
   if (valueColumnIsNullAt(buffer, row_index)) {
     return std::string("null");
   }
-  if (backing.format == "u") {
+  if (backing.format == kArrowFormatUtf8) {
     const auto* offsets = static_cast<const int32_t*>(backing.value_buffer.get());
     const auto* data = static_cast<const char*>(backing.extra_buffer.get());
     return std::string(data + offsets[row_index], data + offsets[row_index + 1]);
   }
-  if (backing.format == "U") {
+  if (backing.format == kArrowFormatLargeUtf8) {
     const auto* offsets = static_cast<const int64_t*>(backing.value_buffer.get());
     const auto* data = static_cast<const char*>(backing.extra_buffer.get());
     return std::string(data + offsets[row_index], data + offsets[row_index + 1]);
   }
-  if (backing.format == "b") {
+  if (backing.format == kArrowFormatBool) {
     const auto* bits = static_cast<const uint8_t*>(backing.value_buffer.get());
     return ((bits[row_index >> 3] >> (row_index & 7)) & 0x01u) != 0 ? "1" : "0";
   }
-  if (backing.format == "i") {
+  if (backing.format == kArrowFormatInt32) {
     return std::to_string(static_cast<const int32_t*>(backing.value_buffer.get())[row_index]);
   }
-  if (backing.format == "I") {
+  if (backing.format == kArrowFormatUInt32) {
     return std::to_string(static_cast<const uint32_t*>(backing.value_buffer.get())[row_index]);
   }
-  if (backing.format == "l") {
+  if (backing.format == kArrowFormatInt64) {
     return std::to_string(static_cast<const int64_t*>(backing.value_buffer.get())[row_index]);
   }
-  if (backing.format == "L") {
+  if (backing.format == kArrowFormatUInt64) {
     return std::to_string(static_cast<const uint64_t*>(backing.value_buffer.get())[row_index]);
   }
-  if (backing.format == "f") {
+  if (backing.format == kArrowFormatFloat32) {
     return Value(static_cast<double>(static_cast<const float*>(backing.value_buffer.get())[row_index]))
         .toString();
   }
-  if (backing.format == "g") {
+  if (backing.format == kArrowFormatFloat64) {
     return Value(static_cast<const double*>(backing.value_buffer.get())[row_index]).toString();
   }
   return valueColumnValueAt(buffer, row_index).toString();
@@ -493,12 +788,63 @@ Value valueColumnValueAt(const ValueColumnBuffer& buffer, std::size_t row_index)
   if (!buffer.values.empty()) {
     return buffer.values[row_index];
   }
-  const auto& values = materializeValueBuffer(&buffer);
-  return values[row_index];
-}
+  if (buffer.arrow_backing == nullptr) {
+    return Value();
+  }
 
-const std::vector<Value>& ValueColumnView::values() const {
-  return materializeValueBuffer(buffer);
+  const auto& backing = *buffer.arrow_backing;
+  if (valueColumnIsNullAt(buffer, row_index)) {
+    return Value();
+  }
+
+  if (backing.format == kArrowFormatBool) {
+    const auto* bits = static_cast<const uint8_t*>(backing.value_buffer.get());
+    return Value(static_cast<int64_t>(((bits[row_index >> 3] >> (row_index & 7)) & 0x01u) != 0));
+  }
+  if (backing.format == kArrowFormatNull) {
+    return Value();
+  }
+  if (backing.format == kArrowFormatInt32) {
+    return Value(static_cast<int64_t>(
+        static_cast<const int32_t*>(backing.value_buffer.get())[row_index]));
+  }
+  if (backing.format == kArrowFormatUInt32) {
+    return Value(static_cast<int64_t>(
+        static_cast<const uint32_t*>(backing.value_buffer.get())[row_index]));
+  }
+  if (backing.format == kArrowFormatInt64) {
+    return Value(static_cast<const int64_t*>(backing.value_buffer.get())[row_index]);
+  }
+  if (backing.format == kArrowFormatUInt64) {
+    return Value(static_cast<int64_t>(
+        static_cast<const uint64_t*>(backing.value_buffer.get())[row_index]));
+  }
+  if (backing.format == kArrowFormatFloat32) {
+    return Value(static_cast<double>(
+        static_cast<const float*>(backing.value_buffer.get())[row_index]));
+  }
+  if (backing.format == kArrowFormatFloat64) {
+    return Value(static_cast<const double*>(backing.value_buffer.get())[row_index]);
+  }
+  if (backing.format == kArrowFormatUtf8) {
+    const auto* offsets = static_cast<const int32_t*>(backing.value_buffer.get());
+    const auto* data = static_cast<const char*>(backing.extra_buffer.get());
+    return Value(std::string(data + offsets[row_index], data + offsets[row_index + 1]));
+  }
+  if (backing.format == kArrowFormatLargeUtf8) {
+    const auto* offsets = static_cast<const int64_t*>(backing.value_buffer.get());
+    const auto* data = static_cast<const char*>(backing.extra_buffer.get());
+    return Value(std::string(data + offsets[row_index], data + offsets[row_index + 1]));
+  }
+  if (isArrowFixedSizeListFormat(backing.format)) {
+    const auto* values = static_cast<const float*>(backing.child_value_buffer.get());
+    std::vector<float> vec(static_cast<std::size_t>(backing.fixed_list_size));
+    std::memcpy(vec.data(), values + row_index * static_cast<std::size_t>(backing.fixed_list_size),
+                sizeof(float) * static_cast<std::size_t>(backing.fixed_list_size));
+    return Value(std::move(vec));
+  }
+
+  throw std::runtime_error("unsupported Arrow backing format: " + backing.format);
 }
 
 std::shared_ptr<const ColumnarTable> snapshotColumnarCache(const Table* table) {
@@ -520,10 +866,7 @@ std::shared_ptr<ColumnarTable> makeColumnarCache(const Table& table) {
     ValueColumnBuffer column;
     column.values.reserve(table.rows.size());
     for (const auto& row : table.rows) {
-      if (column_index >= row.size()) {
-        throw std::runtime_error("column index out of range");
-      }
-      column.values.push_back(row[column_index]);
+      column.values.push_back(column_index < row.size() ? row[column_index] : Value());
     }
     cache->columns.push_back(std::move(column));
   }
@@ -539,6 +882,13 @@ std::shared_ptr<const ColumnarTable> ensureColumnarCache(const Table* table) {
     table->columnar_cache = makeColumnarCache(*table);
   }
   return table->columnar_cache;
+}
+
+std::size_t valueColumnViewRowCount(const ValueColumnView& view) {
+  if (view.buffer == nullptr) {
+    return 0;
+  }
+  return valueColumnRowCount(*view.buffer);
 }
 
 ValueColumnView viewValueColumn(const Table& table, std::size_t column_index) {
@@ -589,8 +939,7 @@ StringColumnBuffer materializeStringColumn(const Table& table, std::size_t colum
       continue;
     }
     if (value_column.buffer->arrow_backing != nullptr &&
-        (value_column.buffer->arrow_backing->format == "u" ||
-         value_column.buffer->arrow_backing->format == "U")) {
+        isArrowUtf8Format(value_column.buffer->arrow_backing->format)) {
       const auto view = valueColumnStringViewAt(*value_column.buffer, row_index);
       out.values[row_index].assign(view.data(), view.size());
     } else {
@@ -644,16 +993,16 @@ DoubleColumnBuffer makeNullDoubleColumn(std::size_t row_count) {
 DoubleColumnBuffer materializeDoubleColumn(const Table& table, std::size_t column_index) {
   const auto value_column = viewValueColumn(table, column_index);
   DoubleColumnBuffer out;
-  out.values.resize(value_column.values().size());
-  out.is_null.assign(value_column.values().size(), 0);
-  for (std::size_t row_index = 0; row_index < value_column.values().size(); ++row_index) {
-    const auto& value = value_column.values()[row_index];
-    if (value.isNull()) {
+  const auto row_count = valueColumnRowCount(*value_column.buffer);
+  out.values.resize(row_count);
+  out.is_null.assign(row_count, 0);
+  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+    if (valueColumnIsNullAt(*value_column.buffer, row_index)) {
       out.is_null[row_index] = 1;
       continue;
     }
     try {
-      out.values[row_index] = valueAsDouble(value);
+      out.values[row_index] = valueColumnDoubleAt(*value_column.buffer, row_index);
     } catch (...) {
       out.is_null[row_index] = 1;
       throw;
@@ -695,6 +1044,7 @@ std::vector<std::string> materializeSerializedKeys(const Table& table,
 std::unordered_map<std::string, std::vector<std::size_t>> buildHashBuckets(
     const std::vector<std::string>& keys) {
   std::unordered_map<std::string, std::vector<std::size_t>> buckets;
+  buckets.reserve(keys.size());
   for (std::size_t row_index = 0; row_index < keys.size(); ++row_index) {
     buckets[keys[row_index]].push_back(row_index);
   }
@@ -705,12 +1055,15 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
                                        bool (*pred)(const Value& lhs, const Value& rhs)) {
   RowSelection out;
   const auto row_count = valueColumnRowCount(input);
+  out.input_row_count = row_count;
   out.selected.assign(row_count, 0);
+  out.indices.reserve(row_count);
   for (std::size_t i = 0; i < row_count; ++i) {
     if (!pred(valueColumnValueAt(input, i), rhs)) {
       continue;
     }
     out.selected[i] = 1;
+    out.indices.push_back(i);
     ++out.selected_count;
   }
   return out;
@@ -733,18 +1086,63 @@ RowSelection vectorizedFilterSelection(const ValueColumnView& input, const Value
 
 RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Value& rhs,
                                        const std::string& op, std::size_t max_selected) {
+  const auto parsed_op = parseCompareOp(op);
   RowSelection out;
   const auto row_count = valueColumnRowCount(input);
+  out.input_row_count = row_count;
   out.selected.assign(row_count, 0);
+  out.indices.reserve(row_count);
   const bool bounded = max_selected != 0;
+
+  if (!input.values.empty()) {
+    if (rhs.isNumber()) {
+      const auto rhs_value = rhs.asDouble();
+      for (std::size_t i = 0; i < row_count; ++i) {
+        const auto& lhs = input.values[i];
+        if (lhs.type() == DataType::Nil || !lhs.isNumber()) {
+          continue;
+        }
+        if (!matchesCompareOp(compareScalar(lhs.asDouble(), rhs_value), parsed_op)) {
+          continue;
+        }
+        out.selected[i] = 1;
+        out.indices.push_back(i);
+        ++out.selected_count;
+        if (bounded && out.selected_count >= max_selected) {
+          break;
+        }
+      }
+      return out;
+    }
+    if (rhs.type() == DataType::String) {
+      const auto& rhs_value = rhs.asString();
+      for (std::size_t i = 0; i < row_count; ++i) {
+        const auto& lhs = input.values[i];
+        if (lhs.type() != DataType::String) {
+          continue;
+        }
+        if (!matchesCompareOp(compareScalar(lhs.asString(), rhs_value), parsed_op)) {
+          continue;
+        }
+        out.selected[i] = 1;
+        out.indices.push_back(i);
+        ++out.selected_count;
+        if (bounded && out.selected_count >= max_selected) {
+          break;
+        }
+      }
+      return out;
+    }
+  }
 
   if (rhs.isNull() || input.arrow_backing == nullptr) {
     for (std::size_t i = 0; i < row_count; ++i) {
-      const auto lhs = valueColumnValueAt(input, i);
-      if (!tryMatchesValueCompare(lhs, rhs, op)) {
+      const Value& lhs = input.values.empty() ? valueColumnValueAt(input, i) : input.values[i];
+      if (!matchesTypedValueCompare(lhs, rhs, parsed_op)) {
         continue;
       }
       out.selected[i] = 1;
+      out.indices.push_back(i);
       ++out.selected_count;
       if (bounded && out.selected_count >= max_selected) {
         break;
@@ -754,16 +1152,17 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
   }
 
   if (rhs.type() == DataType::String &&
-      (input.arrow_backing->format == "u" || input.arrow_backing->format == "U")) {
+      isArrowUtf8Format(input.arrow_backing->format)) {
     const auto rhs_view = std::string_view(rhs.asString());
     for (std::size_t i = 0; i < row_count; ++i) {
       if (valueColumnIsNullAt(input, i)) {
         continue;
       }
-      if (!matchesCompareOp(compareScalar(valueColumnStringViewAt(input, i), rhs_view), op)) {
+      if (!matchesCompareOp(compareScalar(valueColumnStringViewAt(input, i), rhs_view), parsed_op)) {
         continue;
       }
       out.selected[i] = 1;
+      out.indices.push_back(i);
       ++out.selected_count;
       if (bounded && out.selected_count >= max_selected) {
         break;
@@ -781,20 +1180,22 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
       case 'L':
       case 'f':
       case 'g': {
-        const auto rhs_number = rhs.asDouble();
+        DoubleColumnBuffer numeric;
+        numeric.values.resize(row_count);
+        numeric.is_null.assign(row_count, 0);
         for (std::size_t i = 0; i < row_count; ++i) {
           if (valueColumnIsNullAt(input, i)) {
+            numeric.is_null[i] = 1;
             continue;
           }
-          if (!matchesCompareOp(compareScalar(valueColumnDoubleAt(input, i), rhs_number), op)) {
-            continue;
-          }
-          out.selected[i] = 1;
-          ++out.selected_count;
-          if (bounded && out.selected_count >= max_selected) {
-            break;
-          }
+          numeric.values[i] = valueColumnDoubleAt(input, i);
         }
+        auto selected = simdDispatch().select_double(
+            numeric.values.data(), numeric.is_null.data(), row_count, rhs.asDouble(),
+            toNumericCompareOp(op), max_selected);
+        out.selected = std::move(selected.selected);
+        out.indices = std::move(selected.indices);
+        out.selected_count = selected.selected_count;
         return out;
       }
       default:
@@ -804,10 +1205,11 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
 
   for (std::size_t i = 0; i < row_count; ++i) {
     const auto lhs = valueColumnValueAt(input, i);
-    if (!tryMatchesValueCompare(lhs, rhs, op)) {
+    if (!matchesTypedValueCompare(lhs, rhs, parsed_op)) {
       continue;
     }
     out.selected[i] = 1;
+    out.indices.push_back(i);
     ++out.selected_count;
     if (bounded && out.selected_count >= max_selected) {
       break;
@@ -859,8 +1261,7 @@ Table projectTable(const Table& table, const std::vector<std::size_t>& indices,
         Row projected;
         projected.reserve(indices.size());
         for (const auto index : indices) {
-          const auto& values = materializeValueBuffer(&cache_in->columns[index]);
-          projected.push_back(values[row_index]);
+          projected.push_back(valueColumnValueAt(cache_in->columns[index], row_index));
         }
         out.rows.push_back(std::move(projected));
       }
@@ -883,7 +1284,9 @@ Table projectTable(const Table& table, const std::vector<std::size_t>& indices,
 }
 
 Table filterTable(const Table& table, const RowSelection& selection, bool materialize_rows) {
-  if (selection.selected.size() != table.rowCount()) {
+  const auto input_row_count =
+      selection.input_row_count != 0 ? selection.input_row_count : selection.selected.size();
+  if (input_row_count != table.rowCount()) {
     throw std::runtime_error("selection size mismatch");
   }
   Table out(table.schema, {});
@@ -897,12 +1300,11 @@ Table filterTable(const Table& table, const RowSelection& selection, bool materi
       cache->batch_row_counts.push_back(selection.selected_count);
     }
     for (const auto& input_column : cache_in->columns) {
-      ValueColumnBuffer output_column;
-      output_column.values.reserve(selection.selected_count);
-      const auto& values = materializeValueBuffer(&input_column);
-      for (std::size_t row_index = 0; row_index < values.size(); ++row_index) {
-        if (selection.selected[row_index] != 0) {
-          output_column.values.push_back(values[row_index]);
+      ValueColumnBuffer output_column = copySelectedArrowColumn(input_column, selection);
+      if (output_column.arrow_backing == nullptr) {
+        output_column.values.reserve(selection.selected_count);
+        for (const auto row_index : selection.indices) {
+          output_column.values.push_back(valueColumnValueAt(input_column, row_index));
         }
       }
       cache->columns.push_back(std::move(output_column));
@@ -910,25 +1312,18 @@ Table filterTable(const Table& table, const RowSelection& selection, bool materi
     out.columnar_cache = std::move(cache);
     if (materialize_rows) {
       out.rows.reserve(selection.selected_count);
-      for (std::size_t row_index = 0; row_index < selection.selected.size(); ++row_index) {
-        if (selection.selected[row_index] == 0) {
-          continue;
-        }
+      for (const auto row_index : selection.indices) {
         Row row;
         row.reserve(cache_in->columns.size());
         for (const auto& input_column : cache_in->columns) {
-          const auto& values = materializeValueBuffer(&input_column);
-          row.push_back(values[row_index]);
+          row.push_back(valueColumnValueAt(input_column, row_index));
         }
         out.rows.push_back(std::move(row));
       }
     }
   } else {
     out.rows.reserve(selection.selected_count);
-    for (std::size_t row_index = 0; row_index < table.rows.size(); ++row_index) {
-      if (selection.selected[row_index] == 0) {
-        continue;
-      }
+    for (const auto row_index : selection.indices) {
       out.rows.push_back(table.rows[row_index]);
     }
   }
@@ -948,11 +1343,12 @@ Table limitTable(const Table& table, std::size_t limit, bool materialize_rows) {
       cache->batch_row_counts.push_back(row_count);
     }
     for (const auto& input_column : cache_in->columns) {
-      ValueColumnBuffer output_column;
-      output_column.values.reserve(row_count);
-      const auto& values = materializeValueBuffer(&input_column);
-      for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
-        output_column.values.push_back(values[row_index]);
+      ValueColumnBuffer output_column = shareArrowPrefixColumn(input_column, row_count);
+      if (output_column.arrow_backing == nullptr) {
+        output_column.values.reserve(row_count);
+        for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+          output_column.values.push_back(valueColumnValueAt(input_column, row_index));
+        }
       }
       cache->columns.push_back(std::move(output_column));
     }
@@ -963,8 +1359,7 @@ Table limitTable(const Table& table, std::size_t limit, bool materialize_rows) {
         Row row;
         row.reserve(cache_in->columns.size());
         for (const auto& input_column : cache_in->columns) {
-          const auto& values = materializeValueBuffer(&input_column);
-          row.push_back(values[row_index]);
+          row.push_back(valueColumnValueAt(input_column, row_index));
         }
         out.rows.push_back(std::move(row));
       }
@@ -1003,8 +1398,8 @@ Table sortTable(const Table& table, const std::vector<std::size_t>& indices,
       row_order.begin(), row_order.end(),
       [&](std::size_t lhs_index, std::size_t rhs_index) {
         for (std::size_t column_index = 0; column_index < columns.size(); ++column_index) {
-          const auto& lhs = columns[column_index].values()[lhs_index];
-          const auto& rhs = columns[column_index].values()[rhs_index];
+          const auto lhs = valueColumnValueAt(*columns[column_index].buffer, lhs_index);
+          const auto rhs = valueColumnValueAt(*columns[column_index].buffer, rhs_index);
           if (lhs.isNull() && rhs.isNull()) {
             continue;
           }
@@ -1046,6 +1441,133 @@ Table sortTable(const Table& table, const std::vector<std::size_t>& indices,
       cache->columns.push_back(std::move(output_column));
     }
     out.columnar_cache = std::move(cache);
+  }
+  return out;
+}
+
+Table topNTable(const Table& table, const std::vector<std::size_t>& indices,
+                const std::vector<bool>& ascending, std::size_t limit,
+                bool materialize_rows) {
+  if (!ascending.empty() && ascending.size() != indices.size()) {
+    throw std::runtime_error("ORDER BY direction count mismatch");
+  }
+  const auto row_count = table.rowCount();
+  if (indices.empty() || row_count < 2 || limit >= row_count) {
+    auto sorted = sortTable(table, indices, ascending);
+    if (materialize_rows && sorted.rows.empty()) {
+      materializeRows(&sorted);
+    }
+    return sorted;
+  }
+
+  const auto columns = viewValueColumns(table, indices);
+  std::vector<bool> directions = ascending;
+  if (directions.empty()) {
+    directions.assign(indices.size(), true);
+  }
+
+  auto less = [&](std::size_t lhs_index, std::size_t rhs_index) {
+    for (std::size_t column_index = 0; column_index < columns.size(); ++column_index) {
+      const auto lhs = valueColumnValueAt(*columns[column_index].buffer, lhs_index);
+      const auto rhs = valueColumnValueAt(*columns[column_index].buffer, rhs_index);
+      if (lhs.isNull() && rhs.isNull()) {
+        continue;
+      }
+      if (lhs.isNull()) {
+        return false;
+      }
+      if (rhs.isNull()) {
+        return true;
+      }
+      if (lhs == rhs) {
+        continue;
+      }
+      return directions[column_index] ? (lhs < rhs) : (lhs > rhs);
+    }
+    return lhs_index < rhs_index;
+  };
+
+  std::vector<std::size_t> row_order(row_count);
+  for (std::size_t i = 0; i < row_order.size(); ++i) {
+    row_order[i] = i;
+  }
+
+  std::partial_sort(row_order.begin(), row_order.begin() + limit, row_order.end(), less);
+  row_order.resize(limit);
+
+  Table out(table.schema, {});
+  if (materialize_rows && !table.rows.empty()) {
+    out.rows.reserve(limit);
+    for (auto row_index : row_order) {
+      out.rows.push_back(table.rows[row_index]);
+    }
+  }
+  if (const auto cache_in = snapshotColumnarCache(&table)) {
+    auto cache = std::make_shared<ColumnarTable>();
+    cache->schema = out.schema;
+    cache->arrow_formats = cache_in->arrow_formats;
+    cache->batch_row_counts = {limit};
+    cache->row_count = limit;
+    cache->columns.reserve(cache_in->columns.size());
+    for (std::size_t column_index = 0; column_index < cache_in->columns.size(); ++column_index) {
+      const auto& input_column = cache_in->columns[column_index];
+      ValueColumnBuffer output_column;
+      output_column.values.reserve(limit);
+      for (auto row_index : row_order) {
+        output_column.values.push_back(valueColumnValueAt(input_column, row_index));
+      }
+      cache->columns.push_back(std::move(output_column));
+    }
+    out.columnar_cache = std::move(cache);
+  }
+  if (materialize_rows && out.rows.empty()) {
+    materializeRows(&out);
+  }
+  return out;
+}
+
+Table concatenateTables(const std::vector<Table>& tables, bool materialize_rows) {
+  Table out;
+  std::size_t total_rows = 0;
+  for (const auto& table : tables) {
+    if (table.schema.fields.empty()) {
+      continue;
+    }
+    if (out.schema.fields.empty()) {
+      out.schema = table.schema;
+    } else if (out.schema.fields != table.schema.fields) {
+      throw std::runtime_error("concatenateTables schema mismatch");
+    }
+    total_rows += table.rowCount();
+  }
+  if (out.schema.fields.empty()) {
+    return out;
+  }
+
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = out.schema;
+  cache->columns.resize(out.schema.fields.size());
+  cache->arrow_formats.resize(out.schema.fields.size());
+  cache->row_count = total_rows;
+
+  for (const auto& table : tables) {
+    if (table.schema.fields.empty() || table.rowCount() == 0) {
+      continue;
+    }
+    const auto source_cache = ensureColumnarCache(&table);
+    cache->batch_row_counts.push_back(table.rowCount());
+    for (std::size_t column = 0; column < source_cache->columns.size(); ++column) {
+      auto& out_values = cache->columns[column].values;
+      const auto row_count = valueColumnRowCount(source_cache->columns[column]);
+      out_values.reserve(out_values.size() + row_count);
+      for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+        out_values.push_back(valueColumnValueAt(source_cache->columns[column], row_index));
+      }
+    }
+  }
+  out.columnar_cache = std::move(cache);
+  if (materialize_rows) {
+    materializeRows(&out);
   }
   return out;
 }
@@ -1328,12 +1850,13 @@ std::vector<Value> vectorizedRound(const DoubleColumnBuffer& input) {
 }
 
 std::vector<Value> vectorizedDateYear(const ValueColumnView& input) {
-  std::vector<Value> out(input.values().size());
-  for (std::size_t i = 0; i < input.values().size(); ++i) {
-    if (input.values()[i].isNull()) {
+  const auto row_count = valueColumnViewRowCount(input);
+  std::vector<Value> out(row_count);
+  for (std::size_t i = 0; i < row_count; ++i) {
+    if (valueColumnIsNullAt(*input.buffer, i)) {
       continue;
     }
-    const int64_t millis = valueAsEpochMillis(input.values()[i]);
+    const int64_t millis = valueColumnEpochMillisAt(*input.buffer, i);
     std::time_t sec = static_cast<std::time_t>(millis / 1000);
     const auto tm_utc = toUtcTm(sec);
     out[i] = Value(static_cast<int64_t>(tm_utc.tm_year + 1900));
@@ -1342,12 +1865,13 @@ std::vector<Value> vectorizedDateYear(const ValueColumnView& input) {
 }
 
 std::vector<Value> vectorizedDateMonth(const ValueColumnView& input) {
-  std::vector<Value> out(input.values().size());
-  for (std::size_t i = 0; i < input.values().size(); ++i) {
-    if (input.values()[i].isNull()) {
+  const auto row_count = valueColumnViewRowCount(input);
+  std::vector<Value> out(row_count);
+  for (std::size_t i = 0; i < row_count; ++i) {
+    if (valueColumnIsNullAt(*input.buffer, i)) {
       continue;
     }
-    const int64_t millis = valueAsEpochMillis(input.values()[i]);
+    const int64_t millis = valueColumnEpochMillisAt(*input.buffer, i);
     std::time_t sec = static_cast<std::time_t>(millis / 1000);
     const auto tm_utc = toUtcTm(sec);
     out[i] = Value(static_cast<int64_t>(tm_utc.tm_mon + 1));
@@ -1356,12 +1880,13 @@ std::vector<Value> vectorizedDateMonth(const ValueColumnView& input) {
 }
 
 std::vector<Value> vectorizedDateDay(const ValueColumnView& input) {
-  std::vector<Value> out(input.values().size());
-  for (std::size_t i = 0; i < input.values().size(); ++i) {
-    if (input.values()[i].isNull()) {
+  const auto row_count = valueColumnViewRowCount(input);
+  std::vector<Value> out(row_count);
+  for (std::size_t i = 0; i < row_count; ++i) {
+    if (valueColumnIsNullAt(*input.buffer, i)) {
       continue;
     }
-    const int64_t millis = valueAsEpochMillis(input.values()[i]);
+    const int64_t millis = valueColumnEpochMillisAt(*input.buffer, i);
     std::time_t sec = static_cast<std::time_t>(millis / 1000);
     const auto tm_utc = toUtcTm(sec);
     out[i] = Value(static_cast<int64_t>(tm_utc.tm_mday));
@@ -1407,7 +1932,7 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
     bound.push_back(std::move(item));
   }
 
-  const auto row_count = table->rows.size();
+  const auto row_count = table->rowCount();
 
   auto resolve_source_index = [&](const BoundComputedArg& arg) {
     if (arg.source_column_index != static_cast<size_t>(-1)) {
@@ -1476,10 +2001,10 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
         value = arg.literal_is_numeric ? Value(arg.literal_double) : Value(arg.literal_string);
       } else {
         const auto input = viewValueColumn(*table, resolve_source_index(arg));
-        if (i >= input.values().size()) {
+        if (i >= valueColumnViewRowCount(input)) {
           throw std::runtime_error("computed function argument index out of range");
         }
-        value = input.values()[i];
+        value = valueColumnValueAt(*input.buffer, i);
       }
       if (value.isNull()) {
         continue;
@@ -1658,15 +2183,11 @@ void appendColumn(Table* table, ValueColumnBuffer&& column, bool materialize_row
   const bool maintain_rows = !table->rows.empty();
   const bool maintain_cache = cache_snapshot != nullptr;
   if (maintain_rows) {
-    const auto& values = materializeValueBuffer(&column);
     for (std::size_t row_index = 0; row_index < table->rows.size(); ++row_index) {
-      table->rows[row_index].push_back(values[row_index]);
+      table->rows[row_index].push_back(valueColumnValueAt(column, row_index));
     }
   }
   ValueColumnBuffer appended = maintain_cache ? std::move(column) : ValueColumnBuffer{};
-  if (maintain_rows && maintain_cache && appended.values.empty()) {
-    appended.values = materializeValueBuffer(&appended);
-  }
   std::lock_guard<std::mutex> lock(table->columnar_cache_mu);
   if (table->columnar_cache) {
     auto cache = table->columnar_cache;

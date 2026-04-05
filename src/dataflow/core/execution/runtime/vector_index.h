@@ -7,11 +7,13 @@
 
 namespace dataflow {
 
+inline constexpr std::size_t kDefaultVectorSearchTopK = 10;
+
 enum class VectorSearchMetric { Cosine, Dot, L2 };
 
 struct VectorSearchOptions {
   VectorSearchMetric metric = VectorSearchMetric::Cosine;
-  std::size_t top_k = 10;
+  std::size_t top_k = kDefaultVectorSearchTopK;
 };
 
 struct VectorSearchResult {

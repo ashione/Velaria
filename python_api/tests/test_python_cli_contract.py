@@ -547,7 +547,8 @@ class PythonCliContractTest(unittest.TestCase):
             "top_k=2\n"
             "candidate_rows=3\n"
             "filter_pushdown=false\n"
-            "acceleration=flat-buffer+heap-topk\n"
+            "acceleration=flat-buffer+simd-topk\n"
+            "backend=neon\n"
         )
 
         with tempfile.TemporaryDirectory(prefix="velaria-cli-contract-") as tmp:

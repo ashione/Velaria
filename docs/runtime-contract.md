@@ -138,8 +138,9 @@ Current required fields:
 - `dimension=<N>`
 - `top_k=<K>`
 - `candidate_rows=<M>`
+- `backend=<simd-backend>`
 - `filter_pushdown=false`
-- `acceleration=flat-buffer+heap-topk`
+- `acceleration=flat-buffer+simd-topk`
 
 Python `Session.explain_vector_search(...)` and CLI output must project this same core explain behavior.
 

@@ -47,7 +47,8 @@ class VectorSearchTest(unittest.TestCase):
         self.assertIn("top_k=2", explain)
         self.assertIn("candidate_rows=3", explain)
         self.assertIn("filter_pushdown=false", explain)
-        self.assertIn("acceleration=flat-buffer+heap-topk", explain)
+        self.assertIn("acceleration=flat-buffer+simd-topk", explain)
+        self.assertIn("backend=", explain)
 
     def test_vector_dimension_mismatch(self):
         session = Session()

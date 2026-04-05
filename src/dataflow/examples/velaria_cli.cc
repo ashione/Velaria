@@ -159,6 +159,8 @@ int main(int argc, char** argv) {
       }
       const auto result =
           session.vectorQuery(table, vector_column, needle, top_k, runtime_metric).toTable();
+      auto materialized = result;
+      dataflow::materializeRows(&materialized);
       const auto explain =
           session.explainVectorQuery(table, vector_column, needle, top_k, runtime_metric);
       std::cout << "{\n";
@@ -166,16 +168,16 @@ int main(int argc, char** argv) {
       std::cout << "  \"top_k\": " << top_k << ",\n";
       std::cout << "  \"explain\": \"" << escapeJson(explain) << "\",\n";
       std::cout << "  \"rows\": [\n";
-      for (std::size_t i = 0; i < result.rows.size(); ++i) {
-        const auto& row = result.rows[i];
+      for (std::size_t i = 0; i < materialized.rows.size(); ++i) {
+        const auto& row = materialized.rows[i];
         std::cout << "    {";
         for (std::size_t j = 0; j < row.size(); ++j) {
           if (j > 0) std::cout << ", ";
-          std::cout << "\"" << escapeJson(result.schema.fields[j]) << "\": "
+          std::cout << "\"" << escapeJson(materialized.schema.fields[j]) << "\": "
                     << valueToJson(row[j]);
         }
         std::cout << "}";
-        if (i + 1 < result.rows.size()) {
+        if (i + 1 < materialized.rows.size()) {
           std::cout << ",";
         }
         std::cout << "\n";
@@ -186,6 +188,7 @@ int main(int argc, char** argv) {
     }
 
     auto result = session.sql(query).toTable();
+    dataflow::materializeRows(&result);
 
     std::cout << "{\n";
     std::cout << "  \"table\": \"" << escapeJson(table) << "\",\n";

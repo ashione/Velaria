@@ -1,5 +1,43 @@
 # Stream SQL v1 设计说明
 
+## 当前角色
+
+这份文档记录的是 stream SQL 最小落地阶段的设计背景。
+它现在不是当前主状态板；当前状态以根 `README`、`docs/runtime-contract.md`、`docs/streaming_runtime_design.md` 和 `plans/core-runtime-columnar-plan.md` 为准。
+
+## 当前实现对照（2026-04）
+
+当前仓库已经落地并稳定对外暴露的 stream SQL 能力包括：
+
+- 已实现入口：
+  - `DataflowSession::streamSql(...)`
+  - `DataflowSession::explainStreamSql(...)`
+  - `DataflowSession::startStreamSql(...)`
+- 已实现表类型约束：
+  - `CREATE SOURCE TABLE` 用于流式 source，保持只读
+  - `CREATE SINK TABLE` 用于流式 sink，允许写入但不作为查询输入
+- 已实现最小 stream SQL 子集：
+  - 单表 `SELECT`
+  - `WHERE` / `GROUP BY` / `HAVING` / `LIMIT`
+  - bounded source 上的 `ORDER BY`
+  - 最小 window SQL：`WINDOW BY <time_col> EVERY <window_ms> AS <output_col>`
+  - 当前 stateful 聚合：`SUM` / `COUNT(*)` / `MIN` / `MAX` / `AVG`
+- 已实现 explain / runtime 对齐：
+  - explain 固定输出 `logical / physical / strategy`
+  - 不支持形态会优先返回明确错误，不退化成模糊运行时失败
+
+当前仍保持的边界：
+
+- 不扩展到完整 ANSI stream SQL
+- 不引入 `CTE` / 子查询 / `UNION`
+- 不把更复杂多表查询当成当前 SQL v1 范围
+- unbounded source 上的 `ORDER BY` 仍会被显式拒绝
+
+## 历史部分说明
+
+下文保留的是最初 v1 设计阶段的说明。
+如果下文和当前仓库实现存在冲突，应以本节“当前实现对照”和当前主 plan 为准。
+
 ## 目标
 
 在不推翻现有 `DataflowSession -> StreamingDataFrame -> StreamingQuery` 主链路的前提下，补上一个最小可用的流式 SQL 入口。
@@ -11,7 +49,7 @@
 - 流式聚合
 - `csv sink`
 
-## 当前接口
+## 初版接口（历史）
 
 ### 查询入口
 
@@ -39,9 +77,9 @@ StreamingQuery DataflowSession::startStreamSql(
 - 内部会把 `SELECT` 子句先翻译成 `StreamingDataFrame`
 - 再把结果绑定到已注册 sink 并启动 query
 
-## 当前 SQL 语义
+## 初版 SQL 语义（历史）
 
-### 已支持
+### 初版阶段计划支持
 
 - `CREATE SOURCE TABLE ... USING csv OPTIONS(...)`
 - `CREATE SINK TABLE ... USING csv OPTIONS(...)`
@@ -54,7 +92,7 @@ StreamingQuery DataflowSession::startStreamSql(
 - `COUNT(*)`
 - `INSERT INTO sink_table SELECT ...`
 
-### 当前不支持
+### 初版阶段未支持
 
 - `JOIN`
 - `AVG`

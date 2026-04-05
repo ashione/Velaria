@@ -8,14 +8,15 @@
 
 #include "src/dataflow/core/execution/table.h"
 #include "src/dataflow/experimental/rpc/rpc_codec.h"
+#include "src/dataflow/experimental/rpc/rpc_codec_ids.h"
 #include "src/dataflow/experimental/runtime/rpc_contract.h"
 #include "src/dataflow/experimental/runtime/byte_transport.h"
 
 namespace dataflow {
 
 struct RpcRunnerCodecConfig {
-  std::string control_codec_id = "json-control-v1";
-  std::string data_codec_id = "table-bin-v1";
+  std::string control_codec_id = kRpcCodecIdJsonControlV1;
+  std::string data_codec_id = kRpcCodecIdTableArrowIpcV1;
   uint8_t protocol_version = 1;
 };
 

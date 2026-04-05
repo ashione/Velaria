@@ -35,15 +35,17 @@ struct AggregateRow {
 };
 
 std::unordered_map<std::string, AggregateRow> toMap(const dataflow::Table& table) {
+  auto materialized = table;
+  dataflow::materializeRows(&materialized);
   std::unordered_map<std::string, AggregateRow> out;
-  const auto segment_idx = table.schema.indexOf("segment");
-  const auto bucket_idx = table.schema.indexOf("bucket");
-  const auto sum_idx = table.schema.indexOf("value_sum");
-  const auto count_idx = table.schema.indexOf("event_count");
-  const auto min_idx = table.schema.indexOf("min_value");
-  const auto max_idx = table.schema.indexOf("max_value");
-  const auto avg_idx = table.schema.indexOf("avg_value");
-  for (const auto& row : table.rows) {
+  const auto segment_idx = materialized.schema.indexOf("segment");
+  const auto bucket_idx = materialized.schema.indexOf("bucket");
+  const auto sum_idx = materialized.schema.indexOf("value_sum");
+  const auto count_idx = materialized.schema.indexOf("event_count");
+  const auto min_idx = materialized.schema.indexOf("min_value");
+  const auto max_idx = materialized.schema.indexOf("max_value");
+  const auto avg_idx = materialized.schema.indexOf("avg_value");
+  for (const auto& row : materialized.rows) {
     out[row[segment_idx].toString() + "|" + row[bucket_idx].toString()] = AggregateRow{
         row[sum_idx].asInt64(),
         row[count_idx].asInt64(),

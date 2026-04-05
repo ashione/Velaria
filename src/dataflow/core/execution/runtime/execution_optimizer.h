@@ -19,6 +19,10 @@ enum class AggregateExecutionShape {
   GenericSingleStringKey = 2,
   GenericSingleInt64Key = 3,
   GenericDoubleInt64Key = 4,
+  // Local fast-path for multi-key (2-3 keys) grouping when keys are mixed
+  // String/Int64/Null. Avoids materializeSerializedKeys + splitKey roundtrip.
+  GenericPackedKeys2 = 8,
+  GenericPackedKeys3 = 9,
   SumNoKey = 5,
   SumSingleInt64Key = 6,
   SumDoubleInt64Key = 7,

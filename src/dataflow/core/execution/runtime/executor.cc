@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <span>
@@ -819,7 +820,7 @@ bool buildSourcePushdownSpec(const PlanNodePtr& plan, const SourceRequirementMap
       if (!buildSourcePushdownSpec(node->child, requirements, &source, &spec)) {
         return false;
       }
-      if (spec.filter.enabled || spec.limit != 0 || spec.has_aggregate) {
+      if (spec.limit != 0 || spec.has_aggregate) {
         return false;
       }
       spec.has_aggregate = true;
@@ -836,7 +837,7 @@ bool buildSourcePushdownSpec(const PlanNodePtr& plan, const SourceRequirementMap
       if (!buildSourcePushdownSpec(node->child, requirements, &source, &spec)) {
         return false;
       }
-      if (spec.filter.enabled || spec.limit != 0 || spec.has_aggregate) {
+      if (spec.limit != 0 || spec.has_aggregate) {
         return false;
       }
       spec.has_aggregate = true;
@@ -973,6 +974,8 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
     case AggregateExecutionShape::GenericSingleStringKey:
     case AggregateExecutionShape::GenericSingleInt64Key:
     case AggregateExecutionShape::GenericDoubleInt64Key:
+    case AggregateExecutionShape::GenericPackedKeys2:
+    case AggregateExecutionShape::GenericPackedKeys3:
     case AggregateExecutionShape::GenericSerializedKeys:
       break;
   }
@@ -1149,6 +1152,177 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
     }
     out.columnar_cache = std::move(cache);
     return out;
+  }
+
+  struct PackedAggregateKey {
+    // Up to 3 components; only first (arity) elements are meaningful.
+    uint8_t arity = 0;
+    std::array<uint8_t, 3> tag{};  // 0=null, 1=int64, 2=string
+    std::array<int64_t, 3> i64{};
+    std::array<std::string_view, 3> sv{};
+
+    bool operator==(const PackedAggregateKey& other) const {
+      if (arity != other.arity) return false;
+      for (uint8_t i = 0; i < arity; ++i) {
+        if (tag[i] != other.tag[i]) return false;
+        switch (tag[i]) {
+          case 0:
+            break;
+          case 1:
+            if (i64[i] != other.i64[i]) return false;
+            break;
+          case 2:
+            if (sv[i] != other.sv[i]) return false;
+            break;
+          default:
+            return false;
+        }
+      }
+      return true;
+    }
+  };
+
+  struct PackedAggregateKeyHash {
+    std::size_t operator()(const PackedAggregateKey& key) const noexcept {
+      std::size_t h = 1469598103934665603ull;  // FNV offset
+      auto mix = [&](uint64_t v) {
+        h ^= static_cast<std::size_t>(v);
+        h *= 1099511628211ull;
+      };
+      mix(key.arity);
+      for (uint8_t i = 0; i < key.arity; ++i) {
+        mix(key.tag[i]);
+        switch (key.tag[i]) {
+          case 0:
+            break;
+          case 1:
+            mix(static_cast<uint64_t>(key.i64[i]));
+            break;
+          case 2: {
+            const auto sv = key.sv[i];
+            mix(std::hash<std::string_view>{}(sv));
+            break;
+          }
+          default:
+            break;
+        }
+      }
+      return h;
+    }
+  };
+
+  auto executePackedKeys = [&](uint8_t arity) -> Table {
+    const auto k0 = viewValueColumn(input, key_indices[0]);
+    const auto k1 = viewValueColumn(input, key_indices[1]);
+    ValueColumnView k2;
+    bool has_k2 = false;
+    if (arity == 3) {
+      k2 = viewValueColumn(input, key_indices[2]);
+      has_k2 = true;
+    }
+
+    std::unordered_map<PackedAggregateKey, std::size_t, PackedAggregateKeyHash> key_to_index;
+    std::vector<AggregateAccumulator> ordered_states;
+    std::vector<PackedAggregateKey> ordered_keys;
+    key_to_index.reserve(input.rowCount());
+    ordered_states.reserve(input.rowCount());
+    ordered_keys.reserve(input.rowCount());
+
+    auto packAt = [&](const ValueColumnView& col, std::size_t row, uint8_t idx,
+                      PackedAggregateKey* out_key) -> bool {
+      if (valueColumnIsNullAt(*col.buffer, row)) {
+        out_key->tag[idx] = 0;
+        return true;
+      }
+      try {
+        out_key->tag[idx] = 1;
+        out_key->i64[idx] = valueColumnInt64At(*col.buffer, row);
+        return true;
+      } catch (...) {
+      }
+      try {
+        out_key->tag[idx] = 2;
+        out_key->sv[idx] = valueColumnStringAt(*col.buffer, row);
+        return true;
+      } catch (...) {
+      }
+      return false;
+    };
+
+    for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
+      PackedAggregateKey key;
+      key.arity = arity;
+      if (!packAt(k0, row_index, 0, &key) || !packAt(k1, row_index, 1, &key) ||
+          (arity == 3 && (!has_k2 || !packAt(k2, row_index, 2, &key)))) {
+        // Fallback to safe slow path if we hit an unsupported value type.
+        return Table();
+      }
+
+      auto it = key_to_index.find(key);
+      if (it == key_to_index.end()) {
+        ordered_keys.push_back(key);
+        ordered_states.push_back(initAccumulator(aggs));
+        const auto index = ordered_states.size() - 1;
+        it = key_to_index.emplace(key, index).first;
+      }
+      updateAccumulator(&ordered_states[it->second], aggs, aggregate_columns, row_index);
+    }
+
+    Table out = makeAggregateOutputSchema(input, key_indices, aggs);
+    auto cache = std::make_shared<ColumnarTable>();
+    cache->schema = out.schema;
+    cache->columns.resize(out.schema.fields.size());
+    cache->arrow_formats.resize(out.schema.fields.size());
+    cache->row_count = ordered_keys.size();
+    for (auto& column : cache->columns) {
+      column.values.reserve(ordered_keys.size());
+    }
+
+    for (std::size_t index = 0; index < ordered_keys.size(); ++index) {
+      const auto& key = ordered_keys[index];
+      const auto& acc = ordered_states[index];
+      std::size_t out_column_index = 0;
+      for (uint8_t i = 0; i < arity; ++i) {
+        switch (key.tag[i]) {
+          case 0:
+            cache->columns[out_column_index++].values.push_back(Value());
+            break;
+          case 1:
+            cache->columns[out_column_index++].values.push_back(Value(key.i64[i]));
+            break;
+          case 2:
+            cache->columns[out_column_index++].values.push_back(Value(std::string(key.sv[i])));
+            break;
+          default:
+            cache->columns[out_column_index++].values.push_back(Value());
+            break;
+        }
+      }
+      appendAggregateValues(cache.get(), &out_column_index, acc, aggs);
+    }
+    out.columnar_cache = std::move(cache);
+    return out;
+  };
+
+  if (aggregate_pattern.shape == AggregateExecutionShape::GenericPackedKeys2) {
+    Table packed = executePackedKeys(2);
+    if (packed.rowCount() != 0 || input.rowCount() == 0) {
+      // If packed succeeded or input empty, return it.
+      // executePackedKeys returns empty table only on fallback; empty input is OK.
+      if (packed.schema.fields.size() != 0 || input.rowCount() == 0) {
+        return packed;
+      }
+    }
+    // else fall through to serialized key path
+  }
+
+  if (aggregate_pattern.shape == AggregateExecutionShape::GenericPackedKeys3) {
+    Table packed = executePackedKeys(3);
+    if (packed.rowCount() != 0 || input.rowCount() == 0) {
+      if (packed.schema.fields.size() != 0 || input.rowCount() == 0) {
+        return packed;
+      }
+    }
   }
 
   std::vector<std::string> ordered_keys;

@@ -473,11 +473,10 @@ bool execute_csv_source_pushdown(const std::string& path, const Schema& schema,
     throw std::invalid_argument("csv source pushdown output is null");
   }
   if (pushdown.has_aggregate) {
-    if (pushdown.filter.enabled) {
-      return false;
-    }
+    const SourceFilterPushdownSpec* filter = pushdown.filter.enabled ? &pushdown.filter : nullptr;
     if (!try_execute_csv_aggregate(path, schema, pushdown.aggregate.keys,
-                                   pushdown.aggregate.aggregates, delimiter, out)) {
+                                   pushdown.aggregate.aggregates, filter,
+                                   delimiter, out)) {
       return false;
     }
     if (pushdown.limit != 0 && out->rowCount() > pushdown.limit) {
@@ -606,7 +605,9 @@ bool execute_csv_source_pushdown(const std::string& path, const Schema& schema,
 
 bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
                                const std::vector<std::size_t>& key_indices,
-                               const std::vector<AggregateSpec>& aggs, char delimiter,
+                               const std::vector<AggregateSpec>& aggs,
+                               const SourceFilterPushdownSpec* filter,
+                               char delimiter,
                                Table* out) {
   if (out == nullptr) {
     throw std::invalid_argument("csv aggregate output is null");
@@ -619,6 +620,12 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
     return false;
   }
   std::size_t last_required_column = key_index;
+  if (filter != nullptr) {
+    if (filter->column_index >= schema.fields.size()) {
+      return false;
+    }
+    last_required_column = std::max(last_required_column, filter->column_index);
+  }
   for (const auto& agg : aggs) {
     if (agg.function != AggregateFunction::Count &&
         (agg.value_index >= schema.fields.size())) {
@@ -666,6 +673,9 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
   std::vector<std::string> ordered_keys;
   std::vector<uint8_t> capture_mask(last_required_column + 1, static_cast<uint8_t>(0));
   capture_mask[key_index] = 1;
+  if (filter != nullptr) {
+    capture_mask[filter->column_index] = 1;
+  }
   std::vector<std::vector<std::size_t>> agg_positions_by_column(last_required_column + 1);
   for (std::size_t i = 0; i < aggs.size(); ++i) {
     if (aggs[i].function == AggregateFunction::Count) {
@@ -677,6 +687,7 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
 
   bool skip_header = true;
   bool have_key = false;
+  bool filter_match = (filter == nullptr);
   std::string key_value;
   std::vector<double> numeric_values(aggs.size(), 0.0);
   std::vector<bool> numeric_present(aggs.size(), false);
@@ -687,6 +698,7 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
       &input, delimiter, last_required_column, &capture_mask,
       [&]() {
         have_key = false;
+        filter_match = (filter == nullptr);
         key_value.clear();
         std::fill(numeric_values.begin(), numeric_values.end(), 0.0);
         std::fill(numeric_present.begin(), numeric_present.end(), false);
@@ -694,6 +706,10 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
         std::fill(int_values.begin(), int_values.end(), int64_t(0));
       },
       [&](std::size_t column_index, std::string&& cell) {
+        if (filter != nullptr && column_index == filter->column_index) {
+          const Value parsed = parseCell(cell);
+          filter_match = tryMatchesValueFilter(parsed, filter->value, filter->op);
+        }
         if (column_index == key_index) {
           key_value = normalizeGroupKeyCell(cell);
           have_key = true;
@@ -727,7 +743,7 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           skip_header = false;
           return true;
         }
-        if (total_columns < last_required_column + 1 || !have_key) {
+        if (total_columns < last_required_column + 1 || !have_key || !filter_match) {
           return true;
         }
 

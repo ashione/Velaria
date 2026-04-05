@@ -13,6 +13,7 @@ enum class KeyColumnShape {
   Unknown = 0,
   String = 1,
   Int64 = 2,
+  MixedStringInt64OrNull = 3,
 };
 
 KeyColumnShape analyzeKeyColumnShape(const ValueColumnBuffer& column) {
@@ -26,17 +27,31 @@ KeyColumnShape analyzeKeyColumnShape(const ValueColumnBuffer& column) {
     }
     return KeyColumnShape::Unknown;
   }
+
+  bool saw_string = false;
+  bool saw_int64 = false;
   for (const auto& value : column.values) {
     if (value.isNull()) {
       continue;
     }
     if (value.type() == DataType::String) {
-      return KeyColumnShape::String;
+      saw_string = true;
+      continue;
     }
     if (value.type() == DataType::Int64) {
-      return KeyColumnShape::Int64;
+      saw_int64 = true;
+      continue;
     }
     return KeyColumnShape::Unknown;
+  }
+  if (saw_string && saw_int64) {
+    return KeyColumnShape::MixedStringInt64OrNull;
+  }
+  if (saw_string) {
+    return KeyColumnShape::String;
+  }
+  if (saw_int64) {
+    return KeyColumnShape::Int64;
   }
   return KeyColumnShape::Unknown;
 }
@@ -98,6 +113,7 @@ AggregateExecutionPattern analyzeAggregateExecution(
             single_sum ? AggregateExecutionShape::SumSingleInt64Key
                        : AggregateExecutionShape::GenericSingleInt64Key;
         return pattern;
+      case KeyColumnShape::MixedStringInt64OrNull:
       case KeyColumnShape::Unknown:
         break;
     }
@@ -106,11 +122,42 @@ AggregateExecutionPattern analyzeAggregateExecution(
   if (key_indices.size() == 2) {
     const auto first_key = viewValueColumn(input, key_indices[0]);
     const auto second_key = viewValueColumn(input, key_indices[1]);
-    if (analyzeKeyColumnShape(*first_key.buffer) == KeyColumnShape::Int64 &&
-        analyzeKeyColumnShape(*second_key.buffer) == KeyColumnShape::Int64) {
+    const auto first_shape = analyzeKeyColumnShape(*first_key.buffer);
+    const auto second_shape = analyzeKeyColumnShape(*second_key.buffer);
+    if (first_shape == KeyColumnShape::Int64 && second_shape == KeyColumnShape::Int64) {
       pattern.shape =
           single_sum ? AggregateExecutionShape::SumDoubleInt64Key
                      : AggregateExecutionShape::GenericDoubleInt64Key;
+      return pattern;
+    }
+    // Multi-key mixed (String/Int64/Null only) fast-path.
+    const bool supported =
+        (first_shape == KeyColumnShape::String || first_shape == KeyColumnShape::Int64 ||
+         first_shape == KeyColumnShape::MixedStringInt64OrNull) &&
+        (second_shape == KeyColumnShape::String || second_shape == KeyColumnShape::Int64 ||
+         second_shape == KeyColumnShape::MixedStringInt64OrNull);
+    if (supported) {
+      pattern.shape = AggregateExecutionShape::GenericPackedKeys2;
+      return pattern;
+    }
+  }
+
+  if (key_indices.size() == 3) {
+    const auto k0 = viewValueColumn(input, key_indices[0]);
+    const auto k1 = viewValueColumn(input, key_indices[1]);
+    const auto k2 = viewValueColumn(input, key_indices[2]);
+    const auto s0 = analyzeKeyColumnShape(*k0.buffer);
+    const auto s1 = analyzeKeyColumnShape(*k1.buffer);
+    const auto s2 = analyzeKeyColumnShape(*k2.buffer);
+    const bool supported =
+        (s0 == KeyColumnShape::String || s0 == KeyColumnShape::Int64 ||
+         s0 == KeyColumnShape::MixedStringInt64OrNull) &&
+        (s1 == KeyColumnShape::String || s1 == KeyColumnShape::Int64 ||
+         s1 == KeyColumnShape::MixedStringInt64OrNull) &&
+        (s2 == KeyColumnShape::String || s2 == KeyColumnShape::Int64 ||
+         s2 == KeyColumnShape::MixedStringInt64OrNull);
+    if (supported) {
+      pattern.shape = AggregateExecutionShape::GenericPackedKeys3;
       return pattern;
     }
   }

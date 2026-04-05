@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/execution/nanoarrow_ipc_codec.h"
 #include "src/dataflow/experimental/rpc/actor_rpc_codec.h"
 #include "src/dataflow/core/execution/serial/serializer.h"
 #include "src/dataflow/core/execution/stream/binary_row_batch.h"
@@ -117,6 +118,13 @@ void runTransportCase(std::size_t rows, std::size_t dim) {
   const auto binary_roundtrip = batch_codec.deserialize(binary_payload);
   const auto binary_deserialize_end = std::chrono::steady_clock::now();
 
+  const auto arrow_serialize_begin = std::chrono::steady_clock::now();
+  const auto arrow_payload = dataflow::serialize_nanoarrow_ipc_table(table);
+  const auto arrow_serialize_end = std::chrono::steady_clock::now();
+  const auto arrow_deserialize_begin = std::chrono::steady_clock::now();
+  const auto arrow_roundtrip = dataflow::deserialize_nanoarrow_ipc_table(arrow_payload, false);
+  const auto arrow_deserialize_end = std::chrono::steady_clock::now();
+
   dataflow::ActorRpcMessage actor_payload;
   actor_payload.action = dataflow::ActorRpcAction::Result;
   actor_payload.job_id = "bench-job";
@@ -137,7 +145,8 @@ void runTransportCase(std::size_t rows, std::size_t dim) {
   const bool actor_decode_ok = decodeActorRpcMessage(actor_wire, &actor_roundtrip);
   const auto actor_decode_end = std::chrono::steady_clock::now();
 
-  if (proto_roundtrip.rowCount() != table.rowCount() || binary_roundtrip.rowCount() != table.rowCount()) {
+  if (proto_roundtrip.rowCount() != table.rowCount() || binary_roundtrip.rowCount() != table.rowCount() ||
+      arrow_roundtrip.rowCount() != table.rowCount()) {
     std::cerr << "[vector-benchmark] transport roundtrip row count mismatch" << std::endl;
     std::exit(1);
   }
@@ -157,6 +166,9 @@ void runTransportCase(std::size_t rows, std::size_t dim) {
             << "\"binary_serialize_us\":" << microsBetween(binary_serialize_begin, binary_serialize_end) << ","
             << "\"binary_deserialize_us\":" << microsBetween(binary_deserialize_begin, binary_deserialize_end) << ","
             << "\"binary_payload_bytes\":" << binary_payload.size() << ","
+            << "\"arrow_ipc_serialize_us\":" << microsBetween(arrow_serialize_begin, arrow_serialize_end) << ","
+            << "\"arrow_ipc_deserialize_us\":" << microsBetween(arrow_deserialize_begin, arrow_deserialize_end) << ","
+            << "\"arrow_ipc_payload_bytes\":" << arrow_payload.size() << ","
             << "\"actor_rpc_encode_us\":" << microsBetween(actor_encode_begin, actor_encode_end) << ","
             << "\"actor_rpc_decode_us\":" << microsBetween(actor_decode_begin, actor_decode_end) << ","
             << "\"actor_rpc_control_bytes\":" << actor_wire.size()

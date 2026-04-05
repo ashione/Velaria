@@ -9,6 +9,8 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "src/dataflow/core/execution/runtime/simd_dispatch.h"
+
 namespace dataflow {
 
 namespace {
@@ -82,6 +84,16 @@ bool matchesCompareOp(int compare_result, const std::string& op) {
   if (op == ">") return compare_result > 0;
   if (op == "<=") return compare_result <= 0;
   if (op == ">=") return compare_result >= 0;
+  throw std::runtime_error("unsupported filter op: " + op);
+}
+
+NumericCompareOp toNumericCompareOp(const std::string& op) {
+  if (op == "=" || op == "==") return NumericCompareOp::Eq;
+  if (op == "!=") return NumericCompareOp::Ne;
+  if (op == "<") return NumericCompareOp::Lt;
+  if (op == ">") return NumericCompareOp::Gt;
+  if (op == "<=") return NumericCompareOp::Le;
+  if (op == ">=") return NumericCompareOp::Ge;
   throw std::runtime_error("unsupported filter op: " + op);
 }
 
@@ -781,20 +793,21 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
       case 'L':
       case 'f':
       case 'g': {
-        const auto rhs_number = rhs.asDouble();
+        DoubleColumnBuffer numeric;
+        numeric.values.resize(row_count);
+        numeric.is_null.assign(row_count, 0);
         for (std::size_t i = 0; i < row_count; ++i) {
           if (valueColumnIsNullAt(input, i)) {
+            numeric.is_null[i] = 1;
             continue;
           }
-          if (!matchesCompareOp(compareScalar(valueColumnDoubleAt(input, i), rhs_number), op)) {
-            continue;
-          }
-          out.selected[i] = 1;
-          ++out.selected_count;
-          if (bounded && out.selected_count >= max_selected) {
-            break;
-          }
+          numeric.values[i] = valueColumnDoubleAt(input, i);
         }
+        auto selected = simdDispatch().select_double(
+            numeric.values.data(), numeric.is_null.data(), row_count, rhs.asDouble(),
+            toNumericCompareOp(op), max_selected);
+        out.selected = std::move(selected.selected);
+        out.selected_count = selected.selected_count;
         return out;
       }
       default:
@@ -1046,6 +1059,49 @@ Table sortTable(const Table& table, const std::vector<std::size_t>& indices,
       cache->columns.push_back(std::move(output_column));
     }
     out.columnar_cache = std::move(cache);
+  }
+  return out;
+}
+
+Table concatenateTables(const std::vector<Table>& tables, bool materialize_rows) {
+  Table out;
+  std::size_t total_rows = 0;
+  for (const auto& table : tables) {
+    if (table.schema.fields.empty()) {
+      continue;
+    }
+    if (out.schema.fields.empty()) {
+      out.schema = table.schema;
+    } else if (out.schema.fields != table.schema.fields) {
+      throw std::runtime_error("concatenateTables schema mismatch");
+    }
+    total_rows += table.rowCount();
+  }
+  if (out.schema.fields.empty()) {
+    return out;
+  }
+
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = out.schema;
+  cache->columns.resize(out.schema.fields.size());
+  cache->arrow_formats.resize(out.schema.fields.size());
+  cache->row_count = total_rows;
+
+  for (const auto& table : tables) {
+    if (table.schema.fields.empty() || table.rowCount() == 0) {
+      continue;
+    }
+    const auto source_cache = ensureColumnarCache(&table);
+    cache->batch_row_counts.push_back(table.rowCount());
+    for (std::size_t column = 0; column < source_cache->columns.size(); ++column) {
+      auto& out_values = cache->columns[column].values;
+      const auto& source_values = materializeValueBuffer(&source_cache->columns[column]);
+      out_values.insert(out_values.end(), source_values.begin(), source_values.end());
+    }
+  }
+  out.columnar_cache = std::move(cache);
+  if (materialize_rows) {
+    materializeRows(&out);
   }
   return out;
 }

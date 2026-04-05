@@ -117,6 +117,7 @@ Table filterTable(const Table& table, const RowSelection& selection,
 Table limitTable(const Table& table, std::size_t limit, bool materialize_rows = true);
 Table sortTable(const Table& table, const std::vector<std::size_t>& indices,
                 const std::vector<bool>& ascending);
+Table concatenateTables(const std::vector<Table>& tables, bool materialize_rows = false);
 
 std::vector<Value> vectorizedWindowStart(const ValueColumnBuffer& input, uint64_t window_ms);
 std::vector<Value> vectorizedWindowStart(const ValueColumnView& input, uint64_t window_ms);

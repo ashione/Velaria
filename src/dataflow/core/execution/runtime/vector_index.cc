@@ -6,6 +6,8 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "src/dataflow/core/execution/runtime/simd_dispatch.h"
+
 namespace dataflow {
 namespace {
 
@@ -34,13 +36,12 @@ class ExactScanVectorIndex : public VectorIndex {
     data_.resize(row_count_ * dimension_);
     norms_.resize(row_count_, 0.0);
     for (std::size_t row = 0; row < row_count_; ++row) {
-      double norm = 0.0;
       for (std::size_t col = 0; col < dimension_; ++col) {
         const float v = vectors[row][col];
         data_[row * dimension_ + col] = v;
-        norm += static_cast<double>(v) * static_cast<double>(v);
       }
-      norms_[row] = std::sqrt(norm);
+      const float* base = data_.data() + row * dimension_;
+      norms_[row] = std::sqrt(simdDispatch().dot_f32(base, base, dimension_));
     }
   }
 
@@ -70,10 +71,7 @@ class ExactScanVectorIndex : public VectorIndex {
           min_heap(cmp_min, std::move(heap_storage));
       for (std::size_t row = 0; row < row_count_; ++row) {
         const float* base = data_.data() + row * dimension_;
-        double dot = 0.0;
-        for (std::size_t col = 0; col < dimension_; ++col) {
-          dot += static_cast<double>(base[col]) * static_cast<double>(query[col]);
-        }
+        const double dot = simdDispatch().dot_f32(base, query.data(), dimension_);
         VectorSearchResult current{row, dot};
         if (min_heap.size() < k) {
           min_heap.push(current);
@@ -100,11 +98,7 @@ class ExactScanVectorIndex : public VectorIndex {
     if (options.metric == VectorSearchMetric::L2) {
       for (std::size_t row = 0; row < row_count_; ++row) {
         const float* base = data_.data() + row * dimension_;
-        double squared_l2 = 0.0;
-        for (std::size_t col = 0; col < dimension_; ++col) {
-          const double diff = static_cast<double>(base[col]) - static_cast<double>(query[col]);
-          squared_l2 += diff * diff;
-        }
+        const double squared_l2 = simdDispatch().squared_l2_f32(base, query.data(), dimension_);
         VectorSearchResult current{row, squared_l2};
         if (max_heap.size() < k) {
           max_heap.push(current);
@@ -127,15 +121,10 @@ class ExactScanVectorIndex : public VectorIndex {
       return scored;
     }
 
-    double query_norm = 0.0;
-    for (float v : query) query_norm += static_cast<double>(v) * static_cast<double>(v);
-    query_norm = std::sqrt(query_norm);
+    const double query_norm = std::sqrt(simdDispatch().dot_f32(query.data(), query.data(), dimension_));
     for (std::size_t row = 0; row < row_count_; ++row) {
       const float* base = data_.data() + row * dimension_;
-      double dot = 0.0;
-      for (std::size_t col = 0; col < dimension_; ++col) {
-        dot += static_cast<double>(base[col]) * static_cast<double>(query[col]);
-      }
+      const double dot = simdDispatch().dot_f32(base, query.data(), dimension_);
       const double denom = norms_[row] * query_norm;
       const double cosine_distance =
           denom == 0.0 ? 1.0 : (1.0 - std::max(-1.0, std::min(1.0, dot / denom)));
@@ -165,7 +154,8 @@ class ExactScanVectorIndex : public VectorIndex {
     out << "dimension=" << dimension() << "\n";
     out << "top_k=" << options.top_k << "\n";
     out << "candidate_rows=" << size() << "\n";
-    out << "acceleration=flat-buffer+heap-topk\n";
+    out << "acceleration=flat-buffer+simd-topk\n";
+    out << "backend=" << activeSimdBackendName() << "\n";
     out << "filter_pushdown=false\n";
     return out.str();
   }

@@ -1,0 +1,101 @@
+#include "src/dataflow/core/execution/runtime/simd_dispatch.h"
+
+#include "src/dataflow/core/execution/runtime/simd_backend_internal.h"
+
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <mutex>
+#include <string>
+
+namespace dataflow {
+
+namespace {
+std::mutex& stateMutex() {
+  static std::mutex mu;
+  return mu;
+}
+
+const SimdKernelDispatch*& stateDispatch() {
+  static const SimdKernelDispatch* dispatch = nullptr;
+  return dispatch;
+}
+
+std::string lowerCopy(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  return value;
+}
+
+bool runtimeSupportsAvx2() {
+#if defined(__x86_64__) || defined(__i386__)
+#if defined(__clang__) || defined(__GNUC__)
+  return __builtin_cpu_supports("avx2");
+#else
+  return false;
+#endif
+#else
+  return false;
+#endif
+}
+
+bool runtimeSupportsNeon() {
+#if defined(__aarch64__) || defined(__ARM_NEON)
+  return true;
+#else
+  return false;
+#endif
+}
+
+const SimdKernelDispatch& chooseDispatch() {
+  const char* env = std::getenv("VELARIA_SIMD_BACKEND");
+  const std::string requested = env == nullptr ? "auto" : lowerCopy(env);
+
+  if (requested == "scalar") {
+    return scalarDispatch();
+  }
+
+  if (requested == "avx2") {
+    if (avx2DispatchCompiled() && runtimeSupportsAvx2()) {
+      return avx2Dispatch();
+    }
+    return scalarDispatch();
+  }
+
+  if (requested == "neon") {
+    if (neonDispatchCompiled() && runtimeSupportsNeon()) {
+      return neonDispatch();
+    }
+    return scalarDispatch();
+  }
+
+  if (neonDispatchCompiled() && runtimeSupportsNeon()) {
+    return neonDispatch();
+  }
+  if (avx2DispatchCompiled() && runtimeSupportsAvx2()) {
+    return avx2Dispatch();
+  }
+  return scalarDispatch();
+}
+
+}  // namespace
+
+const SimdKernelDispatch& simdDispatch() {
+  std::lock_guard<std::mutex> lock(stateMutex());
+  auto& dispatch = stateDispatch();
+  if (dispatch == nullptr) {
+    dispatch = &chooseDispatch();
+  }
+  return *dispatch;
+}
+
+std::string activeSimdBackendName() {
+  return simdDispatch().backend_name;
+}
+
+void resetSimdDispatchForTest() {
+  std::lock_guard<std::mutex> lock(stateMutex());
+  stateDispatch() = nullptr;
+}
+
+}  // namespace dataflow

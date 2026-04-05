@@ -9,7 +9,7 @@
 
 namespace {
 
-std::vector<dataflow::Table> makeLineitemQ1ShapeBatches(size_t batch_count, size_t rows_per_batch) {
+std::vector<dataflow::Table> makeStringKeyBatches(size_t batch_count, size_t rows_per_batch) {
   std::vector<dataflow::Table> batches;
   batches.reserve(batch_count);
 
@@ -40,12 +40,52 @@ std::vector<dataflow::Table> makeLineitemQ1ShapeBatches(size_t batch_count, size
   return batches;
 }
 
+std::vector<dataflow::Table> makeNumericKeyBatches(size_t batch_count, size_t rows_per_batch) {
+  std::vector<dataflow::Table> batches;
+  batches.reserve(batch_count);
+
+  for (size_t batch = 0; batch < batch_count; ++batch) {
+    dataflow::Table table;
+    table.schema = dataflow::Schema(
+        {"window_start", "key", "value", "extendedprice", "discount", "tax", "comment"});
+    table.rows.reserve(rows_per_batch);
+    for (size_t row = 0; row < rows_per_batch; ++row) {
+      const int64_t window_start =
+          static_cast<int64_t>(1710000000000LL + static_cast<int64_t>(((batch / 2) + (row / 512)) * 60000));
+      const int64_t key = static_cast<int64_t>((batch + row) % 128);
+      const double value = 1.0 + static_cast<double>(row % 50);
+      const double extendedprice = 100.0 + static_cast<double>(row % 1000) * 0.25;
+      const double discount = static_cast<double>(row % 10) / 100.0;
+      const double tax = static_cast<double>(row % 8) / 100.0;
+      const std::string comment = "numeric-bench-" + std::to_string(batch) + "-" +
+                                  std::to_string(row % 4096);
+      table.rows.push_back(
+          {dataflow::Value(window_start), dataflow::Value(key), dataflow::Value(value),
+           dataflow::Value(extendedprice), dataflow::Value(discount), dataflow::Value(tax),
+           dataflow::Value(comment)});
+    }
+    batches.push_back(std::move(table));
+  }
+  return batches;
+}
+
+std::vector<dataflow::Table> makeLineitemQ1ShapeBatches(const std::string& scenario,
+                                                        size_t batch_count,
+                                                        size_t rows_per_batch) {
+  if (scenario == "numeric-keys") {
+    return makeNumericKeyBatches(batch_count, rows_per_batch);
+  }
+  return makeStringKeyBatches(batch_count, rows_per_batch);
+}
+
 void printMetrics(const std::string& label, const dataflow::LocalActorStreamResult& result,
-                  size_t rows_per_batch) {
+                  const std::string& scenario, size_t rows_per_batch) {
   const double elapsed_s = static_cast<double>(result.elapsed_ms) / 1000.0;
   const double rows_per_s =
       elapsed_s > 0.0 ? (result.processed_batches * rows_per_batch) / elapsed_s : 0.0;
-  std::cout << "[tpch-q1-shape] " << label << " batches=" << result.processed_batches
+  std::cout << "[tpch-q1-shape] " << label
+            << " scenario=" << scenario
+            << " batches=" << result.processed_batches
             << " partitions=" << result.processed_partitions
             << " elapsed_ms=" << result.elapsed_ms
             << " rows_per_s=" << rows_per_s
@@ -92,6 +132,7 @@ int main(int argc, char** argv) {
   uint64_t worker_delay_ms = 0;
   size_t cpu_spin_per_row = 0;
   std::string mode = "all";
+  std::string scenario = "string-keys";
 
   if (argc > 1) batch_count = static_cast<size_t>(std::strtoull(argv[1], nullptr, 10));
   if (argc > 2) rows_per_batch = static_cast<size_t>(std::strtoull(argv[2], nullptr, 10));
@@ -100,8 +141,9 @@ int main(int argc, char** argv) {
   if (argc > 5) worker_delay_ms = static_cast<uint64_t>(std::strtoull(argv[5], nullptr, 10));
   if (argc > 6) cpu_spin_per_row = static_cast<size_t>(std::strtoull(argv[6], nullptr, 10));
   if (argc > 7) mode = argv[7];
+  if (argc > 8) scenario = argv[8];
 
-  const auto batches = makeLineitemQ1ShapeBatches(batch_count, rows_per_batch);
+  const auto batches = makeLineitemQ1ShapeBatches(scenario, batch_count, rows_per_batch);
 
   dataflow::LocalActorStreamOptions actor_options;
   actor_options.worker_count = worker_count;
@@ -119,12 +161,12 @@ int main(int argc, char** argv) {
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - single_started)
             .count());
-    printMetrics("single-process", single_result, rows_per_batch);
+    printMetrics("single-process", single_result, scenario, rows_per_batch);
   }
 
   if (mode == "actor" || mode == "all") {
     const auto actor_result = dataflow::runLocalActorStreamWindowKeySum(batches, actor_options);
-    printMetrics("actor-credit", actor_result, rows_per_batch);
+    printMetrics("actor-credit", actor_result, scenario, rows_per_batch);
   }
 
   if (mode == "auto" || mode == "all") {
@@ -132,7 +174,7 @@ int main(int argc, char** argv) {
     const auto auto_result =
         dataflow::runAutoLocalActorStreamWindowKeySum(batches, actor_options, {}, &decision);
     printDecision(decision);
-    printMetrics("auto-selected", auto_result, rows_per_batch);
+    printMetrics("auto-selected", auto_result, scenario, rows_per_batch);
   }
 
   return 0;

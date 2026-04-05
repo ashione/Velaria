@@ -526,25 +526,24 @@ Table table_from_nanoarrow_batch(const ArrowSchema* schema, const ArrowArray* ar
   return table;
 }
 
-}  // namespace
-
-void save_nanoarrow_ipc_table(const Table& table, const std::string& path) {
-  ArrowError error;
-  std::memset(&error, 0, sizeof(error));
-
+std::vector<ColumnLayout> infer_column_layouts(const Table& table) {
   std::vector<ColumnLayout> layouts;
   layouts.reserve(table.schema.fields.size());
   for (std::size_t i = 0; i < table.schema.fields.size(); ++i) {
     layouts.push_back(infer_column_layout(table, i));
   }
+  return layouts;
+}
 
-  ArrowSchemaGuard schema;
-  build_schema(table, layouts, &schema.value);
+void build_arrow_array_from_table(const Table& table, const std::vector<ColumnLayout>& layouts,
+                                  ArrowSchema* schema, ArrowArray* array) {
+  ArrowError error;
+  std::memset(&error, 0, sizeof(error));
 
-  ArrowArrayGuard array;
-  throw_nanoarrow_status(ArrowArrayInitFromSchema(&array.value, &schema.value, &error), &error,
+  build_schema(table, layouts, schema);
+  throw_nanoarrow_status(ArrowArrayInitFromSchema(array, schema, &error), &error,
                          "init nanoarrow array from schema");
-  throw_nanoarrow_status(ArrowArrayStartAppending(&array.value), nullptr,
+  throw_nanoarrow_status(ArrowArrayStartAppending(array), nullptr,
                          "start appending nanoarrow array");
 
   std::vector<std::size_t> all_indices;
@@ -555,31 +554,30 @@ void save_nanoarrow_ipc_table(const Table& table, const std::string& path) {
   const auto columns = viewValueColumns(table, all_indices);
   for (std::size_t row_index = 0; row_index < table.rowCount(); ++row_index) {
     for (std::size_t i = 0; i < table.schema.fields.size(); ++i) {
-      append_row_value(array.value.children[i], layouts[i], columns[i].values()[row_index]);
+      append_row_value(array->children[i], layouts[i], columns[i].values()[row_index]);
     }
-    throw_nanoarrow_status(ArrowArrayFinishElement(&array.value), nullptr,
-                           "finish struct row");
+    throw_nanoarrow_status(ArrowArrayFinishElement(array), nullptr, "finish struct row");
   }
-  throw_nanoarrow_status(ArrowArrayFinishBuildingDefault(&array.value, &error), &error,
+  throw_nanoarrow_status(ArrowArrayFinishBuildingDefault(array, &error), &error,
                          "finish nanoarrow array");
+}
 
-  FilePtr file(open_file_or_throw(path, "wb"));
-  ArrowIpcOutputStreamGuard output_stream;
-  throw_nanoarrow_status(ArrowIpcOutputStreamInitFile(&output_stream.value, file.get(), 1),
-                         nullptr, "init nanoarrow output stream");
-  file.release();
+void write_nanoarrow_stream(const ArrowSchema* schema, const ArrowArray* array,
+                            ArrowIpcOutputStream* output_stream) {
+  ArrowError error;
+  std::memset(&error, 0, sizeof(error));
 
   ArrowIpcWriterGuard writer;
-  throw_nanoarrow_status(ArrowIpcWriterInit(&writer.value, &output_stream.value), nullptr,
+  throw_nanoarrow_status(ArrowIpcWriterInit(&writer.value, output_stream), nullptr,
                          "init nanoarrow writer");
 
   ArrowArrayViewGuard array_view;
-  throw_nanoarrow_status(ArrowArrayViewInitFromSchema(&array_view.value, &schema.value, &error),
-                         &error, "init nanoarrow array view");
-  throw_nanoarrow_status(ArrowArrayViewSetArray(&array_view.value, &array.value, &error), &error,
+  throw_nanoarrow_status(ArrowArrayViewInitFromSchema(&array_view.value, schema, &error), &error,
+                         "init nanoarrow array view");
+  throw_nanoarrow_status(ArrowArrayViewSetArray(&array_view.value, array, &error), &error,
                          "set nanoarrow array view");
 
-  throw_nanoarrow_status(ArrowIpcWriterWriteSchema(&writer.value, &schema.value, &error), &error,
+  throw_nanoarrow_status(ArrowIpcWriterWriteSchema(&writer.value, schema, &error), &error,
                          "write nanoarrow schema");
   throw_nanoarrow_status(
       ArrowIpcWriterWriteArrayView(&writer.value, &array_view.value, &error), &error,
@@ -588,13 +586,7 @@ void save_nanoarrow_ipc_table(const Table& table, const std::string& path) {
                          "write nanoarrow end-of-stream");
 }
 
-Table load_nanoarrow_ipc_table(const std::string& path, bool materialize_rows) {
-  FilePtr file(open_file_or_throw(path, "rb"));
-  ArrowIpcInputStreamGuard input_stream;
-  throw_nanoarrow_status(ArrowIpcInputStreamInitFile(&input_stream.value, file.get(), 1),
-                         nullptr, "init nanoarrow input stream");
-  file.release();
-
+Table read_nanoarrow_stream(ArrowIpcInputStream* input_stream, bool materialize_rows) {
   ArrowIpcArrayStreamReaderOptions options;
   std::memset(&options, 0, sizeof(options));
   options.field_index = -1;
@@ -602,7 +594,7 @@ Table load_nanoarrow_ipc_table(const std::string& path, bool materialize_rows) {
 
   ArrowArrayStreamGuard stream;
   throw_nanoarrow_status(
-      ArrowIpcArrayStreamReaderInit(&stream.value, &input_stream.value, &options), nullptr,
+      ArrowIpcArrayStreamReaderInit(&stream.value, input_stream, &options), nullptr,
       "init nanoarrow ipc reader");
 
   ArrowSchemaGuard schema;
@@ -641,6 +633,7 @@ Table load_nanoarrow_ipc_table(const std::string& path, bool materialize_rows) {
         out_values.insert(out_values.end(), std::make_move_iterator(batch_values.begin()),
                           std::make_move_iterator(batch_values.end()));
       }
+      table.columnar_cache->row_count += batch.rowCount();
       table.columnar_cache->batch_row_counts.push_back(batch.rowCount());
       table.columnar_cache->arrow_formats.assign(table.columnar_cache->columns.size(), "");
     }
@@ -655,6 +648,73 @@ Table load_nanoarrow_ipc_table(const std::string& path, bool materialize_rows) {
   }
 
   return table;
+}
+
+}  // namespace
+
+std::vector<uint8_t> serialize_nanoarrow_ipc_table(const Table& table) {
+  return serialize_nanoarrow_ipc_table(table, nullptr);
+}
+
+std::vector<uint8_t> serialize_nanoarrow_ipc_table(const Table& table, std::size_t* payload_size) {
+  ArrowSchemaGuard schema;
+  ArrowArrayGuard array;
+  build_arrow_array_from_table(table, infer_column_layouts(table), &schema.value, &array.value);
+
+  ArrowBuffer output;
+  ArrowBufferInit(&output);
+  ArrowIpcOutputStreamGuard output_stream;
+  throw_nanoarrow_status(ArrowIpcOutputStreamInitBuffer(&output_stream.value, &output), nullptr,
+                         "init nanoarrow output buffer");
+  write_nanoarrow_stream(&schema.value, &array.value, &output_stream.value);
+
+  std::vector<uint8_t> payload;
+  payload.assign(output.data, output.data + output.size_bytes);
+  if (payload_size != nullptr) {
+    *payload_size = payload.size();
+  }
+  ArrowBufferReset(&output);
+  return payload;
+}
+
+Table deserialize_nanoarrow_ipc_table(const std::vector<uint8_t>& payload, bool materialize_rows) {
+  return deserialize_nanoarrow_ipc_table(payload.data(), payload.size(), materialize_rows);
+}
+
+Table deserialize_nanoarrow_ipc_table(const uint8_t* payload, std::size_t size,
+                                      bool materialize_rows) {
+  ArrowBuffer input;
+  ArrowBufferInit(&input);
+  throw_nanoarrow_status(
+      ArrowBufferAppend(&input, payload, static_cast<int64_t>(size)),
+      nullptr, "append nanoarrow input payload");
+
+  ArrowIpcInputStreamGuard input_stream;
+  throw_nanoarrow_status(ArrowIpcInputStreamInitBuffer(&input_stream.value, &input), nullptr,
+                         "init nanoarrow input buffer");
+  return read_nanoarrow_stream(&input_stream.value, materialize_rows);
+}
+
+void save_nanoarrow_ipc_table(const Table& table, const std::string& path) {
+  ArrowSchemaGuard schema;
+  ArrowArrayGuard array;
+  build_arrow_array_from_table(table, infer_column_layouts(table), &schema.value, &array.value);
+
+  FilePtr file(open_file_or_throw(path, "wb"));
+  ArrowIpcOutputStreamGuard output_stream;
+  throw_nanoarrow_status(ArrowIpcOutputStreamInitFile(&output_stream.value, file.get(), 1),
+                         nullptr, "init nanoarrow output stream");
+  file.release();
+  write_nanoarrow_stream(&schema.value, &array.value, &output_stream.value);
+}
+
+Table load_nanoarrow_ipc_table(const std::string& path, bool materialize_rows) {
+  FilePtr file(open_file_or_throw(path, "rb"));
+  ArrowIpcInputStreamGuard input_stream;
+  throw_nanoarrow_status(ArrowIpcInputStreamInitFile(&input_stream.value, file.get(), 1),
+                         nullptr, "init nanoarrow input stream");
+  file.release();
+  return read_nanoarrow_stream(&input_stream.value, materialize_rows);
 }
 
 }  // namespace dataflow

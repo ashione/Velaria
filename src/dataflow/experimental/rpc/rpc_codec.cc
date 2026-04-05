@@ -5,6 +5,7 @@
 #include <sstream>
 #include <string>
 
+#include "src/dataflow/core/execution/nanoarrow_ipc_codec.h"
 #include "src/dataflow/core/execution/stream/binary_row_batch.h"
 
 namespace dataflow {
@@ -198,6 +199,29 @@ class TableBatchRpcSerializer : public IRpcSerializer {
   }
 };
 
+class ArrowTableBatchRpcSerializer : public IRpcSerializer {
+ public:
+  std::string codec_id() const override { return "table-arrow-ipc-v1"; }
+
+  std::vector<uint8_t> serialize(const RpcEnvelope& envelope,
+                                 const void* message) const override {
+    if (envelope.type != RpcMessageType::DataBatch) return {};
+    const auto* batch = static_cast<const RpcDataBatchMessage*>(message);
+    if (batch == nullptr) return {};
+    return serialize_nanoarrow_ipc_table(batch->table);
+  }
+
+  bool deserialize(const RpcEnvelope& envelope,
+                   const std::vector<uint8_t>& payload,
+                   void* out_message) const override {
+    if (envelope.type != RpcMessageType::DataBatch) return false;
+    auto* batch = static_cast<RpcDataBatchMessage*>(out_message);
+    if (batch == nullptr) return false;
+    batch->table = deserialize_nanoarrow_ipc_table(payload, false);
+    return true;
+  }
+};
+
 }  // namespace
 
 RpcSerializerRegistry& RpcSerializerRegistry::instance() {
@@ -302,6 +326,9 @@ void registerBuiltinRpcSerializers() {
   if (registry.find("table-bin-v1") == nullptr) {
     registry.registerSerializer(makeTableRpcSerializer());
   }
+  if (registry.find("table-arrow-ipc-v1") == nullptr) {
+    registry.registerSerializer(makeArrowTableRpcSerializer());
+  }
 }
 
 std::unique_ptr<IRpcSerializer> makeJsonControlRpcSerializer() {
@@ -310,6 +337,10 @@ std::unique_ptr<IRpcSerializer> makeJsonControlRpcSerializer() {
 
 std::unique_ptr<IRpcSerializer> makeTableRpcSerializer() {
   return std::unique_ptr<IRpcSerializer>(new TableBatchRpcSerializer());
+}
+
+std::unique_ptr<IRpcSerializer> makeArrowTableRpcSerializer() {
+  return std::unique_ptr<IRpcSerializer>(new ArrowTableBatchRpcSerializer());
 }
 
 }  // namespace dataflow

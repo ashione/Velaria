@@ -72,7 +72,7 @@ class FakeRuntimeSink : public dataflow::RuntimeSink {
   }
 
   dataflow::SinkStatus write(const dataflow::Table& batch) override {
-    writes.push_back(batch.rows.size());
+    writes.push_back(batch.rowCount());
     return dataflow::SinkStatus::Ok;
   }
 

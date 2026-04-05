@@ -15,7 +15,7 @@ namespace dataflow {
 
 struct RpcRunnerCodecConfig {
   std::string control_codec_id = "json-control-v1";
-  std::string data_codec_id = "table-bin-v1";
+  std::string data_codec_id = "table-arrow-ipc-v1";
   uint8_t protocol_version = 1;
 };
 

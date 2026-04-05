@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -7,6 +8,8 @@
 #include <vector>
 
 #include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/execution/columnar_batch.h"
+#include "src/dataflow/core/execution/runtime/simd_dispatch.h"
 #include "src/dataflow/experimental/rpc/actor_rpc_codec.h"
 #include "src/dataflow/experimental/rpc/rpc_codec.h"
 #include "src/dataflow/core/execution/serial/serializer.h"
@@ -51,16 +54,18 @@ int main() {
 
     dataflow::RpcEnvelope rpc_envelope;
     rpc_envelope.type = dataflow::RpcMessageType::DataBatch;
-    rpc_envelope.codec_id = "table-bin-v1";
-    auto table_serializer = dataflow::makeTableRpcSerializer();
+    rpc_envelope.codec_id = "table-arrow-ipc-v1";
+    auto table_serializer = dataflow::makeArrowTableRpcSerializer();
     dataflow::RpcDataBatchMessage batch_message{table};
     const auto rpc_payload = table_serializer->serialize(rpc_envelope, &batch_message);
     expect(!rpc_payload.empty(), "rpc table payload should not be empty");
     dataflow::RpcDataBatchMessage decoded_batch;
     expect(table_serializer->deserialize(rpc_envelope, rpc_payload, &decoded_batch),
            "rpc table batch deserialize failed");
-    expect(decoded_batch.table.rows.size() == 3, "rpc table batch row count mismatch");
-    expect(decoded_batch.table.rows[2][1].asFixedVector()[1] == 1.0f,
+    expect(decoded_batch.table.rowCount() == 3, "rpc table batch row count mismatch");
+    expect(decoded_batch.table.rows.empty(), "rpc arrow batch should remain rowless");
+    const auto decoded_vectors = dataflow::materializeValueColumn(decoded_batch.table, 1);
+    expect(dataflow::materializeValueBuffer(&decoded_vectors)[2].asFixedVector()[1] == 1.0f,
            "rpc table batch vector content mismatch");
 
     dataflow::ActorRpcMessage actor_origin;
@@ -106,7 +111,7 @@ int main() {
     data_frame.header.type = dataflow::RpcMessageType::DataBatch;
     data_frame.header.message_id = 18;
     data_frame.header.correlation_id = control_frame.header.message_id;
-    data_frame.header.codec_id = "table-bin-v1";
+    data_frame.header.codec_id = "table-arrow-ipc-v1";
     data_frame.header.source = "vector-worker";
     data_frame.header.target = "vector-client";
     data_frame.payload = rpc_payload;
@@ -120,9 +125,10 @@ int main() {
     dataflow::RpcDataBatchMessage framed_batch;
     expect(table_serializer->deserialize(decoded_data_frame.header, decoded_data_frame.payload, &framed_batch),
            "framed data batch deserialize failed");
-    expect(framed_batch.table.rows.size() == table.rows.size(),
+    expect(framed_batch.table.rowCount() == table.rowCount(),
            "framed data batch row count mismatch");
-    expect(framed_batch.table.rows[0][1].asFixedVector()[0] == 1.0f,
+    const auto framed_vectors = dataflow::materializeValueColumn(framed_batch.table, 1);
+    expect(dataflow::materializeValueBuffer(&framed_vectors)[0].asFixedVector()[0] == 1.0f,
            "framed data batch vector content mismatch");
 
     auto& session = dataflow::DataflowSession::builder();
@@ -156,8 +162,10 @@ int main() {
     expect(explain.find("candidate_rows=3") != std::string::npos, "explain candidate_rows missing");
     expect(explain.find("filter_pushdown=false") != std::string::npos,
            "explain filter_pushdown contract missing");
-    expect(explain.find("acceleration=flat-buffer+heap-topk") != std::string::npos,
+    expect(explain.find("acceleration=flat-buffer+simd-topk") != std::string::npos,
            "explain acceleration hint missing");
+    expect(explain.find("backend=") != std::string::npos,
+           "explain backend hint missing");
 
     dataflow::Table sparse_table;
     sparse_table.schema = dataflow::Schema({"id", "embedding"});
@@ -213,6 +221,7 @@ int main() {
            "csv explain mode missing");
     expect(csv_explain.find("candidate_rows=3") != std::string::npos,
            "csv explain candidate_rows missing");
+    expect(!dataflow::activeSimdBackendName().empty(), "active simd backend should be reported");
 
     std::cout << "[test] vector runtime query and transport ok" << std::endl;
     return 0;

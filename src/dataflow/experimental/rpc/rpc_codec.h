@@ -87,5 +87,6 @@ class LengthPrefixedFrameCodec : public IRpcFrameCodec {
 void registerBuiltinRpcSerializers();
 std::unique_ptr<IRpcSerializer> makeJsonControlRpcSerializer();
 std::unique_ptr<IRpcSerializer> makeTableRpcSerializer();
+std::unique_ptr<IRpcSerializer> makeArrowTableRpcSerializer();
 
 }  // namespace dataflow

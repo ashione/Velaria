@@ -33,6 +33,12 @@ filegroup(
         "src/dataflow/core/execution/runtime/executor.cc",
         "src/dataflow/core/execution/runtime/executor.h",
         "src/dataflow/core/execution/runtime/observability.h",
+        "src/dataflow/core/execution/runtime/simd_backend_avx2.cc",
+        "src/dataflow/core/execution/runtime/simd_backend_internal.h",
+        "src/dataflow/core/execution/runtime/simd_backend_neon.cc",
+        "src/dataflow/core/execution/runtime/simd_backend_scalar.cc",
+        "src/dataflow/core/execution/runtime/simd_dispatch.cc",
+        "src/dataflow/core/execution/runtime/simd_dispatch.h",
         "src/dataflow/core/execution/runtime/vector_index.cc",
         "src/dataflow/core/execution/runtime/vector_index.h",
         "src/dataflow/core/execution/serial/serializer.cc",
@@ -121,6 +127,10 @@ cc_library(
         "src/dataflow/core/execution/serial/serializer.cc",
         "src/dataflow/core/logical/planner/plan.cc",
         "src/dataflow/core/execution/runtime/executor.cc",
+        "src/dataflow/core/execution/runtime/simd_backend_avx2.cc",
+        "src/dataflow/core/execution/runtime/simd_backend_neon.cc",
+        "src/dataflow/core/execution/runtime/simd_backend_scalar.cc",
+        "src/dataflow/core/execution/runtime/simd_dispatch.cc",
         "src/dataflow/experimental/runtime/job_master.cc",
         "src/dataflow/experimental/runtime/byte_transport.cc",
         "src/dataflow/experimental/runtime/rpc_runner.cc",
@@ -151,6 +161,8 @@ cc_library(
         "src/dataflow/core/logical/sql/sql_planner.h",
         "src/dataflow/core/logical/planner/plan.h",
         "src/dataflow/core/execution/runtime/executor.h",
+        "src/dataflow/core/execution/runtime/simd_backend_internal.h",
+        "src/dataflow/core/execution/runtime/simd_dispatch.h",
         "src/dataflow/experimental/runtime/byte_transport.h",
         "src/dataflow/experimental/runtime/rpc_contract.h",
         "src/dataflow/experimental/runtime/job_master.h",
@@ -176,6 +188,7 @@ test_suite(
         ":planner_v03_test",
         ":source_sink_abi_test",
         ":sql_regression_test",
+        ":simd_dispatch_test",
         ":stream_runtime_test",
         ":stream_strategy_explain_test",
         ":vector_runtime_test",
@@ -406,6 +419,12 @@ cc_test(
     name = "stream_actor_credit_test",
     srcs = ["src/dataflow/tests/stream_actor_credit_test.cc"],
     deps = [":dataflow_stream_actor_runtime"],
+)
+
+cc_test(
+    name = "simd_dispatch_test",
+    srcs = ["src/dataflow/tests/simd_dispatch_test.cc"],
+    deps = [":dataflow_core"],
 )
 
 cc_test(

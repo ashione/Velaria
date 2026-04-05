@@ -21,6 +21,7 @@
 
 #include "src/dataflow/core/contract/api/dataframe.h"
 #include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/execution/nanoarrow_ipc_codec.h"
 #include "src/dataflow/experimental/rpc/actor_rpc_codec.h"
 #include "src/dataflow/experimental/rpc/rpc_codec.h"
 #include "src/dataflow/experimental/runtime/job_master.h"
@@ -255,17 +256,22 @@ RpcFrame makeDataBatchFrame(uint64_t msg_id,
   frame.header.type = RpcMessageType::DataBatch;
   frame.header.message_id = msg_id;
   frame.header.correlation_id = correlation_id;
-  frame.header.codec_id = "table-bin-v1";
+  frame.header.codec_id = "table-arrow-ipc-v1";
   frame.header.source = source;
   frame.header.target = target;
-  BinaryRowBatchCodec codec;
-  codec.serialize(table, &frame.payload);
+  frame.payload = serialize_nanoarrow_ipc_table(table);
   return frame;
 }
 
 bool decodeDataBatchFrame(const RpcFrame& frame, Table* out) {
-  if (out == nullptr || frame.header.type != RpcMessageType::DataBatch ||
-      frame.header.codec_id != "table-bin-v1") {
+  if (out == nullptr || frame.header.type != RpcMessageType::DataBatch) {
+    return false;
+  }
+  if (frame.header.codec_id == "table-arrow-ipc-v1") {
+    *out = deserialize_nanoarrow_ipc_table(frame.payload, false);
+    return true;
+  }
+  if (frame.header.codec_id != "table-bin-v1") {
     return false;
   }
   BinaryRowBatchCodec codec;

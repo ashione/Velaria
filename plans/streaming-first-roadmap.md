@@ -1,5 +1,40 @@
 # 流式优先（Streaming-first）版本路线图
 
+## 当前角色
+
+这份文档记录的是流式优先阶段的早期路线图。
+它现在主要作为历史演进背景保留，不是当前流式能力的状态板。
+
+## 当前实现吸收情况（2026-04）
+
+后续实现已经吸收的内容主要包括：
+
+- `readStream` / `writeStream` 主链路
+- `StreamingQuery`、checkpoint、progress 和 explain 合同
+- `csv-dir` / local source 的最小流式入口
+- `console/file` 风格的本地 sink 路径
+- stream SQL 最小子集
+- 最小 window SQL 与 stateful grouped aggregate
+- `SingleProcess` / `LocalWorkers` 的本地执行模式
+
+当前未按这份路线图完整实现或不再作为当前主线推进的内容包括：
+
+- “micro-batch / continuous 两路并行”的完整抽象
+- 通用 `StreamingPlanner` 扩展为更宽广计划系统
+- 完整事件时间 / watermark 体系
+- exactly-once 或更强幂等输出语义
+- 更广泛的 source/sink 和更复杂流式 SQL
+
+## 与当前主 plan 的关系
+
+当前流式 contract 与实现形态应以根 `README`、`docs/runtime-contract.md`、`docs/streaming_runtime_design.md` 和 `plans/core-runtime-columnar-plan.md` 为准。
+这份文档用于保留“为什么先做流式入口与最小状态语义”的历史背景。
+
+## 历史部分说明
+
+下文保留原始路线图。
+若其中出现更大的未来能力面，应理解为早期路线判断，而不是当前状态承诺。
+
 ## 结论（立即采纳）
 你这边要求「优先支持流式」，我会把后续版本切换为：
 

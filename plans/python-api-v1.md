@@ -1,5 +1,42 @@
 # Python API v1 设计说明
 
+## 当前角色
+
+这份文档记录 Python API 最初设计阶段的目标和取舍。
+它现在主要作为设计背景说明使用，不是当前 Python 生态能力的状态板；当前能力范围以根 `README`、`python_api/README.md` 和 `plans/core-runtime-columnar-plan.md` 为准。
+
+## 当前实现对照（2026-04）
+
+当前仓库已经落地并可见的 Python 生态能力包括：
+
+- 已实现对象和入口：
+  - `Session`
+  - `DataFrame`
+  - `StreamingDataFrame`
+  - `StreamingQuery`
+- 已实现 batch / stream Python surface：
+  - `Session.read_csv(...)`
+  - `Session.sql(...)`
+  - `Session.create_dataframe_from_arrow(...)`
+  - `Session.create_stream_from_arrow(...)`
+  - `Session.read_stream_csv_dir(...)`
+  - `Session.stream_sql(...)`
+  - `Session.explain_stream_sql(...)`
+  - `Session.start_stream_sql(...)`
+- 已实现 Python 生态能力：
+  - Arrow 进程内 ingress / output
+  - vector search 与 explain
+  - CLI 入口
+  - local workspace / run / artifact tracking
+- 已实现约束：
+  - Python 继续映射核心 contract，不定义第二套 explain / progress / checkpoint 语义
+  - 热路径方向已经转向更深的 column-first runtime；本设计文档中关于 `Table / Row / Value` 为主内部形态的描述只代表早期阶段背景
+
+## 历史部分说明
+
+下文保留最初 Python API v1 的设计说明。
+若下文与当前 README、`python_api/README.md` 或运行时 contract 描述冲突，应以后者为准。
+
 ## 目标
 
 在不改写现有 C++ 执行核心的前提下，为 Velaria 提供可用的 Python 调用入口，并满足以下约束：
@@ -68,7 +105,7 @@
 
 这意味着 Python 侧既可继续走 CSV，也可完全跳过文件落盘，直接把内存中的 Arrow 数据交给 batch / stream 执行链。
 
-## 当前内部表示
+## 初版内部表示假设（历史）
 
 内部执行核心仍使用：
 

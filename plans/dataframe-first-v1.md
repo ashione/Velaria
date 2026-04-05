@@ -1,5 +1,38 @@
 # DataFrame 优先：语义对齐 C++ 引擎 v1 兼容计划
 
+## 当前角色
+
+这份文档是较早阶段的总体路线图，记录了 DataFrame-first 时期对 API、SQL、分布式执行和兼容层的早期设想。
+它现在不是当前状态板，主要作为历史路线图保留。
+
+## 当前实现吸收情况（2026-04）
+
+这份路线图里已经被后续实现吸收的部分主要是：
+
+- `DataflowSession` 作为统一 session 入口
+- `DataFrame` / `StreamingDataFrame` 作为核心对外对象
+- SQL 继续作为重要入口，但保持最小 SQL v1 范围
+- Bazel 作为当前构建系统
+- batch / streaming 共用核心运行时方向，而不是分裂成两套完全独立内核
+
+当前没有按这份路线图完整推进的内容包括：
+
+- 更宽泛的 DataFrame API 面
+- `parquet/json/orc` 等更广文件输入面
+- 更复杂 SQL 方言与更广 catalog 语义
+- DAG / stage / task / shuffle 的完整分布式执行主线
+- RDD 兼容层作为正式产品面
+
+## 与当前主 plan 的关系
+
+当前主状态以 `plans/core-runtime-columnar-plan.md` 为准。
+这份文档主要用于回溯为什么仓库早期强调 DataFrame-first 和统一执行核心，而不是用于维护当前里程碑。
+
+## 历史部分说明
+
+下文保留原始路线图内容。
+如果其中的目标与当前仓库已收敛的范围不一致，应把它们理解为历史阶段设想，而不是当前承诺。
+
 ## 结论（直接执行）
 你明确了方向：**DataFrame 优先 + 流式优先**。
 

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/execution/columnar_batch.h"
 
 namespace {
 

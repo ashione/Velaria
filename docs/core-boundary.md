@@ -5,7 +5,7 @@
 Velaria is organized around one kernel and two non-kernel layers:
 
 - `Core Kernel`
-  - pure `C++17`
+  - pure `C++20`
   - local-first execution
   - batch and stream share one execution model
   - runtime behavior is exposed through stable contract surfaces

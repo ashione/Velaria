@@ -1,12 +1,12 @@
-# Velaria: A Pure C++17 Local Dataflow Kernel
+# Velaria: A Pure C++20 Local Dataflow Kernel
 
 `README.md` is the English source of truth. The Chinese mirror lives in [README-zh.md](./README-zh.md). Keep both files aligned.
 
-Velaria is a performance-first, unified batch/stream, columnar-native C++17 dataflow kernel with built-in vector capability.
+Velaria is a performance-first, unified batch/stream, columnar-native C++20 dataflow kernel with built-in vector capability.
 
 ## 1. What This Project Is
 
-Velaria is a local-first C++17 dataflow engine research project.
+Velaria is a local-first C++20 dataflow engine research project.
 
 Its current goal is narrow:
 
@@ -149,7 +149,7 @@ For more detail, use:
 
 Repository baseline:
 
-- language baseline: `C++17`
+- language baseline: `C++20`
 - build system: `Bazel`
 - keep `DataflowSession` as the public session entry
 - do not break `sql_demo / df_demo / stream_demo`

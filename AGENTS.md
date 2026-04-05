@@ -1,10 +1,10 @@
 # AGENTS.md
 
-本仓库（Velaria）用于纯 C++17 数据流引擎调研与演进，当前工作重心是先稳住本地最小闭环，再逐步把执行链路扩展到本地多进程与后续分布式运行时。
+本仓库（Velaria）用于纯 C++20 数据流引擎调研与演进，当前工作重心是先稳住本地最小闭环，再逐步把执行链路扩展到本地多进程与后续分布式运行时。
 
 ## 适用范围
 
-- 主要语言：`C++17`
+- 主要语言：`C++20`
 - 构建系统：`Bazel`
 - 当前重点目录：`sql`、`runtime`、`planner`、`api`、`stream`、`catalog`
 - 当前执行路线：`operator chain in-proc + cross-process RPC + simple jobmaster`
@@ -162,7 +162,7 @@ bazel run //:stream_demo
 
 ## 错误规避要点
 
-- 编译标准固定为 `C++17`，不要引入更高版本语法或库假设。
+- 编译标准固定为 `C++20`，不要引入更高版本语法或库假设。
 - 示例文件统一保持 `.cc`；不要新建 `.cpp` / `.cxx` 示例。
 - `--listen` / `--connect` 参数必须是 `host:port`。
 - 多进程验收顺序必须是 `scheduler -> worker -> client`。

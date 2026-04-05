@@ -1,12 +1,12 @@
-# Velaria：纯 C++17 本地数据流内核
+# Velaria：纯 C++20 本地数据流内核
 
 `README-zh.md` 是中文镜像文档，对应英文主文档位于 [README.md](./README.md)。两份文档必须保持同步。
 
-Velaria 是一个以极致性能为目标、batch/stream 一体化、列式原生、内建向量能力的 C++17 数据流内核。
+Velaria 是一个以极致性能为目标、batch/stream 一体化、列式原生、内建向量能力的 C++20 数据流内核。
 
 ## 1. 这个项目是什么
 
-Velaria 是一个本地优先的 C++17 数据流引擎研究项目。
+Velaria 是一个本地优先的 C++20 数据流引擎研究项目。
 
 它当前的目标保持收敛：
 
@@ -149,7 +149,7 @@ Arrow / CSV / Python ingress
 
 仓库基线：
 
-- 语言基线：`C++17`
+- 语言基线：`C++20`
 - 构建系统：`Bazel`
 - 对外 session 入口保持为 `DataflowSession`
 - 不要破坏 `sql_demo / df_demo / stream_demo`

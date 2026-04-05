@@ -36,6 +36,7 @@ int main() {
     dataflow::ProtoLikeSerializer text_codec;
     auto text_payload = text_codec.serialize(table);
     auto text_roundtrip = text_codec.deserialize(text_payload);
+    dataflow::materializeRows(&text_roundtrip);
     expect(text_roundtrip.rows.size() == 3, "proto-like row count mismatch");
     expect(text_roundtrip.rows[0][1].type() == dataflow::DataType::FixedVector,
            "proto-like should keep vector type");
@@ -46,6 +47,7 @@ int main() {
     std::vector<uint8_t> binary_payload;
     batch_codec.serialize(table, &binary_payload);
     auto binary_roundtrip = batch_codec.deserialize(binary_payload);
+    dataflow::materializeRows(&binary_roundtrip);
     expect(binary_roundtrip.rows.size() == 3, "binary row batch row count mismatch");
     expect(binary_roundtrip.rows[1][1].type() == dataflow::DataType::FixedVector,
            "binary row batch should keep vector type");
@@ -65,7 +67,7 @@ int main() {
     expect(decoded_batch.table.rowCount() == 3, "rpc table batch row count mismatch");
     expect(decoded_batch.table.rows.empty(), "rpc arrow batch should remain rowless");
     const auto decoded_vectors = dataflow::materializeValueColumn(decoded_batch.table, 1);
-    expect(dataflow::materializeValueBuffer(&decoded_vectors)[2].asFixedVector()[1] == 1.0f,
+    expect(dataflow::valueColumnValueAt(decoded_vectors, 2).asFixedVector()[1] == 1.0f,
            "rpc table batch vector content mismatch");
 
     dataflow::ActorRpcMessage actor_origin;
@@ -128,7 +130,7 @@ int main() {
     expect(framed_batch.table.rowCount() == table.rowCount(),
            "framed data batch row count mismatch");
     const auto framed_vectors = dataflow::materializeValueColumn(framed_batch.table, 1);
-    expect(dataflow::materializeValueBuffer(&framed_vectors)[0].asFixedVector()[0] == 1.0f,
+    expect(dataflow::valueColumnValueAt(framed_vectors, 0).asFixedVector()[0] == 1.0f,
            "framed data batch vector content mismatch");
 
     auto& session = dataflow::DataflowSession::builder();
@@ -138,20 +140,24 @@ int main() {
     auto cosine = session.vectorQuery("vec_src", "embedding", {1.0f, 0.0f, 0.0f}, 2,
                                       dataflow::VectorDistanceMetric::Cosine)
                       .toTable();
-    expect(cosine.rows.size() == 2, "cosine vector query top-k mismatch");
+    expect(cosine.rowCount() == 2, "cosine vector query top-k mismatch");
     expect(cosine.schema.fields[0] == "row_id", "cosine result schema mismatch");
-    expect(cosine.rows[0][0].asInt64() == 0, "cosine nearest should be row 0");
+    const auto cosine_ids = dataflow::materializeValueColumn(cosine, 0);
+    expect(dataflow::valueColumnValueAt(cosine_ids, 0).asInt64() == 0,
+           "cosine nearest should be row 0");
 
     auto l2 = session.vectorQuery("vec_src", "embedding", {0.0f, 1.0f, 0.0f}, 1,
                                   dataflow::VectorDistanceMetric::L2)
                   .toTable();
-    expect(l2.rows.size() == 1, "l2 vector query top-k mismatch");
-    expect(l2.rows[0][0].asInt64() == 2, "l2 nearest should be row 2");
+    expect(l2.rowCount() == 1, "l2 vector query top-k mismatch");
+    const auto l2_ids = dataflow::materializeValueColumn(l2, 0);
+    expect(dataflow::valueColumnValueAt(l2_ids, 0).asInt64() == 2, "l2 nearest should be row 2");
 
     auto dot = session.vectorQuery("vec_src", "embedding", {1.0f, 0.0f, 0.0f}, 1,
                                    dataflow::VectorDistanceMetric::Dot)
                    .toTable();
-    expect(dot.rows[0][0].asInt64() == 0, "dot nearest should be row 0");
+    const auto dot_ids = dataflow::materializeValueColumn(dot, 0);
+    expect(dataflow::valueColumnValueAt(dot_ids, 0).asInt64() == 0, "dot nearest should be row 0");
 
     const auto explain = session.explainVectorQuery("vec_src", "embedding", {1.0f, 0.0f, 0.0f}, 2,
                                                     dataflow::VectorDistanceMetric::Cosine);
@@ -178,8 +184,10 @@ int main() {
     auto sparse = session.vectorQuery("vec_sparse", "embedding", {1.0f, 0.0f, 0.0f}, 1,
                                       dataflow::VectorDistanceMetric::Cosine)
                       .toTable();
-    expect(sparse.rows.size() == 1, "sparse vector query top-k mismatch");
-    expect(sparse.rows[0][0].asInt64() == 2, "sparse vector query should preserve source row id");
+    expect(sparse.rowCount() == 1, "sparse vector query top-k mismatch");
+    const auto sparse_ids = dataflow::materializeValueColumn(sparse, 0);
+    expect(dataflow::valueColumnValueAt(sparse_ids, 0).asInt64() == 2,
+           "sparse vector query should preserve source row id");
 
     const auto parsed_space = dataflow::Value::parseFixedVector("[1 0 0]");
     expect(parsed_space.size() == 3, "space-separated vector parse should keep dimension");
@@ -211,8 +219,10 @@ int main() {
                                                 dataflow::VectorDistanceMetric::Cosine)
                                 .toTable();
     std::remove(csv_path.c_str());
-    expect(csv_cosine.rows.size() == 2, "csv vector query top-k mismatch");
-    expect(csv_cosine.rows[0][0].asInt64() == 0, "csv vector query nearest should be row 0");
+    expect(csv_cosine.rowCount() == 2, "csv vector query top-k mismatch");
+    const auto csv_ids = dataflow::materializeValueColumn(csv_cosine, 0);
+    expect(dataflow::valueColumnValueAt(csv_ids, 0).asInt64() == 0,
+           "csv vector query nearest should be row 0");
 
     const auto csv_explain = session.explainVectorQuery("vec_csv_src", "embedding",
                                                         {1.0f, 0.0f, 0.0f}, 2,

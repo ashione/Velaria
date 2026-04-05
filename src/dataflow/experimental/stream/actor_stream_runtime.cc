@@ -109,8 +109,9 @@ bool isStringLikeColumn(const Table& table, std::size_t column_index) {
     const auto& format = column.buffer->arrow_backing->format;
     return format == "u" || format == "U";
   }
-  const auto& values = column.values();
-  for (const auto& value : values) {
+  const auto row_count = valueColumnRowCount(*column.buffer);
+  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+    const auto value = valueColumnValueAt(*column.buffer, row_index);
     if (value.isNull()) continue;
     return value.type() == DataType::String;
   }
@@ -334,7 +335,8 @@ Table finalizeMergedPartialAggregates(const Table& partials,
 
   const auto key_indices = resolveGroupKeyIndices(partials, aggregate.group_keys);
   const auto merge_specs = buildRuntimeMergeAggregateSpecs(partials, layouts);
-  const Table merged = DataFrame(partials).aggregate(key_indices, merge_specs).toTable();
+  Table merged = DataFrame(partials).aggregate(key_indices, merge_specs).toTable();
+  materializeRows(&merged);
 
   Table output = makeAggregateOutputSkeleton(aggregate, true);
   output.rows.reserve(merged.rows.size());
@@ -1551,8 +1553,11 @@ LocalActorStreamResult runAutoLocalActorStreamWindowKeySum(
   const bool heuristic_ok =
       rows_ok && payload_ok && speed_ok && (ratio_ok || strong_speed_ok);
   const bool measured_override_ok = speed_ok && ratio_ok;
+  const bool soft_measured_override_ok =
+      local_decision.actor_speedup > 1.0 && ratio_ok;
 
-  local_decision.thresholds_met = heuristic_ok || measured_override_ok;
+  local_decision.thresholds_met =
+      heuristic_ok || measured_override_ok || soft_measured_override_ok;
   if (local_decision.thresholds_met) {
     local_decision.chosen_mode = LocalExecutionMode::ActorCredit;
     if (heuristic_ok && ratio_ok) {
@@ -1561,6 +1566,9 @@ LocalActorStreamResult runAutoLocalActorStreamWindowKeySum(
     } else if (heuristic_ok) {
       local_decision.reason =
           "actor sample speedup is strong enough to override compute/overhead threshold";
+    } else if (soft_measured_override_ok) {
+      local_decision.reason =
+          "actor sample is measurably faster with healthy compute/overhead despite conservative speed threshold";
     } else {
       local_decision.reason =
           "actor sample throughput and compute/overhead beat single-process despite small batch heuristics";

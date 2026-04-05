@@ -148,8 +148,10 @@ std::FILE* open_file_or_throw(const std::string& path, const char* mode) {
 ColumnLayout infer_column_layout(const Table& table, std::size_t column) {
   bool seen_non_null = false;
   ColumnLayout layout;
-  const auto values = viewValueColumn(table, column).values();
-  for (const auto& value : values) {
+  const auto value_column = viewValueColumn(table, column);
+  const auto row_count = valueColumnRowCount(*value_column.buffer);
+  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+    const auto value = valueColumnValueAt(*value_column.buffer, row_index);
     if (value.isNull()) {
       continue;
     }
@@ -554,7 +556,8 @@ void build_arrow_array_from_table(const Table& table, const std::vector<ColumnLa
   const auto columns = viewValueColumns(table, all_indices);
   for (std::size_t row_index = 0; row_index < table.rowCount(); ++row_index) {
     for (std::size_t i = 0; i < table.schema.fields.size(); ++i) {
-      append_row_value(array->children[i], layouts[i], columns[i].values()[row_index]);
+      append_row_value(array->children[i], layouts[i],
+                       valueColumnValueAt(*columns[i].buffer, row_index));
     }
     throw_nanoarrow_status(ArrowArrayFinishElement(array), nullptr, "finish struct row");
   }
@@ -620,11 +623,19 @@ Table read_nanoarrow_stream(ArrowIpcInputStream* input_stream, bool materialize_
     }
     if (table.columnar_cache && batch.columnar_cache) {
       for (auto& column : table.columnar_cache->columns) {
-        materializeValueBuffer(&column);
+        const auto row_count = valueColumnRowCount(column);
+        column.values.reserve(row_count);
+        for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+          column.values.push_back(valueColumnValueAt(column, row_index));
+        }
         column.arrow_backing.reset();
       }
       for (auto& column : batch.columnar_cache->columns) {
-        materializeValueBuffer(&column);
+        const auto row_count = valueColumnRowCount(column);
+        column.values.reserve(row_count);
+        for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+          column.values.push_back(valueColumnValueAt(column, row_index));
+        }
         column.arrow_backing.reset();
       }
       for (std::size_t column = 0; column < table.columnar_cache->columns.size(); ++column) {

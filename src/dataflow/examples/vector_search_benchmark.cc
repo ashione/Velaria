@@ -67,7 +67,7 @@ void runCase(std::size_t rows, std::size_t dim, dataflow::VectorDistanceMetric m
     auto warm = session.vectorQuery(view_name, "embedding", query, 10, metric).toTable();
     const auto end = std::chrono::steady_clock::now();
     warm_query_us += microsBetween(begin, end);
-    if (warm.rows.size() != out.rows.size()) {
+    if (warm.rowCount() != out.rowCount()) {
       std::cerr << "[vector-benchmark] warm query cardinality mismatch" << std::endl;
       std::exit(1);
     }
@@ -94,7 +94,7 @@ void runCase(std::size_t rows, std::size_t dim, dataflow::VectorDistanceMetric m
             << "\"cold_query_us\":" << microsBetween(cold_begin, cold_end) << ","
             << "\"warm_query_avg_us\":" << (warm_query_us / static_cast<long long>(kWarmIterations)) << ","
             << "\"warm_explain_avg_us\":" << (explain_us / static_cast<long long>(kWarmIterations)) << ","
-            << "\"result_rows\":" << out.rows.size() << ""
+            << "\"result_rows\":" << out.rowCount() << ""
             << "}" << std::endl;
 }
 

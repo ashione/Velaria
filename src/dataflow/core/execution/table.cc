@@ -98,12 +98,11 @@ void materializeRows(Table* table) {
     row.reserve(cache->columns.size());
   }
   for (const auto& column : cache->columns) {
-    const auto& values = materializeValueBuffer(&column);
-    if (values.size() != row_count) {
+    if (valueColumnRowCount(column) != row_count) {
       throw std::runtime_error("columnar cache row count mismatch");
     }
     for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
-      table->rows[row_index].push_back(values[row_index]);
+      table->rows[row_index].push_back(valueColumnValueAt(column, row_index));
     }
   }
 }

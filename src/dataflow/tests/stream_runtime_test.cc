@@ -268,9 +268,11 @@ void expectNear(double actual, double expected, double tolerance, const std::str
 
 double lookupMetric(const dataflow::Table& table, const std::string& output_column,
                     const std::string& user) {
-  const auto key_idx = table.schema.indexOf("key");
-  const auto value_idx = table.schema.indexOf(output_column);
-  for (const auto& row : table.rows) {
+  auto materialized = table;
+  dataflow::materializeRows(&materialized);
+  const auto key_idx = materialized.schema.indexOf("key");
+  const auto value_idx = materialized.schema.indexOf(output_column);
+  for (const auto& row : materialized.rows) {
     if (row[key_idx].toString() == user) {
       return row[value_idx].asDouble();
     }
@@ -339,7 +341,8 @@ void testStatefulWindowCount() {
 
   expect(processed == 2, "window count test should process all batches");
   expect(collected.size() == 2, "window count sink should contain two outputs");
-  const auto& last = collected.back();
+  auto last = collected.back();
+  dataflow::materializeRows(&last);
   expect(last.schema.has("window_start"), "window output should contain window_start");
   expect(last.schema.has("event_count"), "window output should contain event_count");
   expect(last.columnar_cache != nullptr, "window output should retain columnar cache");
@@ -768,7 +771,8 @@ void testLocalWorkersRetainColumnarCacheAcrossPartitions() {
 
   const auto outputs = sink->batches();
   expect(outputs.size() == 1, "local worker cache test should emit one batch");
-  const auto& table = outputs.front();
+  auto table = outputs.front();
+  dataflow::materializeRows(&table);
   expect(table.schema.has("window_start"),
          "local worker cache test should keep window_start column");
   expect(table.schema.has("key_copy"),

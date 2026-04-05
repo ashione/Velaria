@@ -719,7 +719,8 @@ void runStreamSqlRegression() {
   const auto processed = query.awaitTermination(2);
   expect(processed == 2, "stream_sql_csv_insert_processed_batches");
 
-  const auto sink_table = s.read_csv(sink_path).toTable();
+  auto sink_table = s.read_csv(sink_path).toTable();
+  dataflow::materializeRows(&sink_table);
   expect(sink_table.rows.size() == 2, "stream_sql_csv_sink_rows");
 
   bool has_user_a = false;
@@ -824,7 +825,8 @@ void runStreamSqlRegression() {
     expect(function_query.awaitTermination(1) == 1, "stream_sql_function_query_processed_batches");
   });
 
-  const auto function_sink_table = s.read_csv(function_sink_path).toTable();
+  auto function_sink_table = s.read_csv(function_sink_path).toTable();
+  dataflow::materializeRows(&function_sink_table);
   expect(function_sink_table.rows.size() == 2, "stream_sql_function_output_rows");
   const auto function_k_lower_idx = function_sink_table.schema.indexOf("key_lower");
   const auto function_k_upper_idx = function_sink_table.schema.indexOf("key_upper");
@@ -880,7 +882,8 @@ void runStreamSqlRegression() {
         s.streamSql("SELECT key FROM stream_order_events_v1 ORDER BY value DESC");
       },
       "ORDER BY column must appear in SELECT output");
-  const auto order_sink_table = s.read_csv(order_sink_path).toTable();
+  auto order_sink_table = s.read_csv(order_sink_path).toTable();
+  dataflow::materializeRows(&order_sink_table);
   expect(order_sink_table.rows.size() == 3, "stream_sql_order_output_rows");
   expect(order_sink_table.rows[0][0].asInt64() == 3, "stream_sql_order_first_row");
   expect(order_sink_table.rows[1][0].asInt64() == 2, "stream_sql_order_second_row");
@@ -951,7 +954,8 @@ void runStreamSqlRegression() {
   expect(multi_hot_query.progress().used_actor_runtime,
          "stream_sql_multi_aggregate_hot_credit_accelerator_used");
 
-  const auto multi_hot_sink_table = s.read_csv(multi_hot_sink_path).toTable();
+  auto multi_hot_sink_table = s.read_csv(multi_hot_sink_path).toTable();
+  dataflow::materializeRows(&multi_hot_sink_table);
   expect(multi_hot_sink_table.rows.size() == 2, "stream_sql_multi_aggregate_hot_rows");
 
   auto multi_query = s.startStreamSql(
@@ -964,7 +968,8 @@ void runStreamSqlRegression() {
       multi_options);
   expect(multi_query.awaitTermination(1) == 1, "stream_sql_multi_aggregate_processed_batches");
 
-  const auto multi_sink_table = s.read_csv(multi_sink_path).toTable();
+  auto multi_sink_table = s.read_csv(multi_sink_path).toTable();
+  dataflow::materializeRows(&multi_sink_table);
   expect(multi_sink_table.rows.size() == 2, "stream_sql_multi_aggregate_rows");
   bool has_multi_user_a = false;
   bool has_multi_user_b = false;
@@ -1036,7 +1041,8 @@ void runStreamSqlRegression() {
   expect(window_query.progress().used_actor_runtime,
          "stream_sql_window_credit_accelerator_used");
 
-  const auto window_sink_table = s.read_csv(window_sink_path).toTable();
+  auto window_sink_table = s.read_csv(window_sink_path).toTable();
+  dataflow::materializeRows(&window_sink_table);
   expect(window_sink_table.rows.size() == 2, "stream_sql_window_sink_rows");
   bool has_window_user_a = false;
   bool has_window_user_b = false;
@@ -1079,7 +1085,8 @@ void runStreamSqlRegression() {
   expect(window_count_query.progress().used_actor_runtime,
          "stream_sql_window_count_credit_accelerator_used");
 
-  const auto window_count_sink_table = s.read_csv(window_count_sink_path).toTable();
+  auto window_count_sink_table = s.read_csv(window_count_sink_path).toTable();
+  dataflow::materializeRows(&window_count_sink_table);
   expect(window_count_sink_table.rows.size() == 2, "stream_sql_window_count_sink_rows");
   bool has_count_user_a = false;
   bool has_count_user_b = false;
@@ -1118,7 +1125,8 @@ void runStreamSqlRegression() {
       window_options);
   expect(alias_query.awaitTermination() == 1, "stream_sql_window_alias_processed_batches");
 
-  const auto alias_sink_table = s.read_csv(alias_sink_path).toTable();
+  auto alias_sink_table = s.read_csv(alias_sink_path).toTable();
+  dataflow::materializeRows(&alias_sink_table);
   expect(alias_sink_table.schema.has("bucket"), "stream_sql_window_alias_bucket_column");
   expect(alias_sink_table.schema.has("entity_key"), "stream_sql_window_alias_entity_key_column");
   expect(alias_sink_table.rows.size() == 2, "stream_sql_window_alias_rows");

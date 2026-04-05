@@ -3,6 +3,7 @@
 #include <string>
 
 #include "src/dataflow/core/execution/columnar_batch.h"
+#include "src/dataflow/core/execution/nanoarrow_ipc_codec.h"
 
 namespace {
 
@@ -55,20 +56,26 @@ int main() {
   expect(selection.selected_count == 2, "selection count mismatch");
 
   const auto filtered = dataflow::filterTable(table, selection);
-  expect(filtered.rows.size() == 2, "filterTable row count mismatch");
-  expect(filtered.rows[0][0].toString() == " APAC ", "filterTable first row mismatch");
-  expect(filtered.rows[1][0].toString() == "EMEA", "filterTable second row mismatch");
+  expect(filtered.rowCount() == 2, "filterTable row count mismatch");
+  auto filtered_rows = filtered;
+  dataflow::materializeRows(&filtered_rows);
+  expect(filtered_rows.rows[0][0].toString() == " APAC ", "filterTable first row mismatch");
+  expect(filtered_rows.rows[1][0].toString() == "EMEA", "filterTable second row mismatch");
 
   const auto projected = dataflow::projectTable(filtered, {2, 0}, {"needle_alias", "region_alias"});
   expect(projected.schema.fields.size() == 2, "projectTable schema width mismatch");
   expect(projected.schema.fields[0] == "needle_alias", "projectTable first alias mismatch");
   expect(projected.schema.fields[1] == "region_alias", "projectTable second alias mismatch");
-  expect(projected.rows[1][1].toString() == "EMEA", "projectTable projected row mismatch");
+  auto projected_rows = projected;
+  dataflow::materializeRows(&projected_rows);
+  expect(projected_rows.rows[1][1].toString() == "EMEA", "projectTable projected row mismatch");
   const auto limited = dataflow::limitTable(projected, 1);
-  expect(limited.rows.size() == 1, "limitTable row count mismatch");
-  expect(limited.rows[0][0].toString() == "A", "limitTable row value mismatch");
+  expect(limited.rowCount() == 1, "limitTable row count mismatch");
+  auto limited_rows = limited;
+  dataflow::materializeRows(&limited_rows);
+  expect(limited_rows.rows[0][0].toString() == "A", "limitTable row value mismatch");
 
-  const auto suffix = dataflow::makeConstantStringColumn(table.rows.size(), "_x");
+  const auto suffix = dataflow::makeConstantStringColumn(table.rowCount(), "_x");
   const auto concat = dataflow::vectorizedStringConcat({region, suffix});
   expect(concat[0].toString() == " APAC _x", "concat first row mismatch");
   expect(concat[1].isNull(), "concat should preserve null");
@@ -120,11 +127,13 @@ int main() {
           {dataflow::Value(int64_t(4)), dataflow::Value(5.0), dataflow::Value("c")},
       });
   const auto sorted = dataflow::sortTable(sort_table, {1, 2}, {false, true});
-  expect(sorted.rows.size() == 4, "sortTable row count mismatch");
-  expect(sorted.rows[0][0].asInt64() == 4, "sortTable first row mismatch");
-  expect(sorted.rows[1][0].asInt64() == 3, "sortTable second row mismatch");
-  expect(sorted.rows[2][0].asInt64() == 1, "sortTable third row mismatch");
-  expect(sorted.rows[3][0].asInt64() == 2, "sortTable null row should sort last");
+  expect(sorted.rowCount() == 4, "sortTable row count mismatch");
+  auto sorted_rows = sorted;
+  dataflow::materializeRows(&sorted_rows);
+  expect(sorted_rows.rows[0][0].asInt64() == 4, "sortTable first row mismatch");
+  expect(sorted_rows.rows[1][0].asInt64() == 3, "sortTable second row mismatch");
+  expect(sorted_rows.rows[2][0].asInt64() == 1, "sortTable third row mismatch");
+  expect(sorted_rows.rows[3][0].asInt64() == 2, "sortTable null row should sort last");
 
   dataflow::Table lazy_sort_table(
       dataflow::Schema({"id", "score", "region"}),
@@ -196,11 +205,32 @@ int main() {
       dataflow::vectorizedStringUpper(dataflow::materializeStringColumn(snapshot_table, 0)));
   expect(snapshot_table.schema.has("name_upper"), "appendNamedColumn should update schema");
   expect(snapshot_table.columnar_cache != nullptr, "appendNamedColumn should hydrate cache");
-  expect(name_view.values()[0].toString() == "alpha",
+  expect(dataflow::valueColumnValueAt(*name_view.buffer, 0).toString() == "alpha",
          "column view snapshot should remain stable after append");
   const auto upper_snapshot = dataflow::materializeValueColumn(snapshot_table, 1);
   expect(upper_snapshot.values[0].toString() == "ALPHA",
          "appendNamedColumn should append cached values");
+
+  dataflow::Table arrow_source(
+      dataflow::Schema({"id", "name"}),
+      {
+          {dataflow::Value(int64_t(7)), dataflow::Value("seven")},
+          {dataflow::Value(int64_t(8)), dataflow::Value("eight")},
+      });
+  const auto arrow_payload = dataflow::serialize_nanoarrow_ipc_table(arrow_source);
+  auto arrow_lazy = dataflow::deserialize_nanoarrow_ipc_table(arrow_payload, false);
+  expect(arrow_lazy.rows.empty(), "arrow lazy table should start rowless");
+  expect(arrow_lazy.columnar_cache != nullptr, "arrow lazy table should have columnar cache");
+  expect(arrow_lazy.columnar_cache->columns[0].values.empty(),
+         "arrow lazy table should not pre-materialize value cache");
+  dataflow::materializeRows(&arrow_lazy);
+  expect(arrow_lazy.rows.size() == 2, "arrow lazy table materialized row count mismatch");
+  expect(arrow_lazy.rows[0][0].asInt64() == 7, "arrow lazy first id mismatch");
+  expect(arrow_lazy.rows[1][1].toString() == "eight", "arrow lazy second name mismatch");
+  expect(arrow_lazy.columnar_cache->columns[0].values.empty(),
+         "materializeRows should not force boxed value cache for arrow-backed int column");
+  expect(arrow_lazy.columnar_cache->columns[1].values.empty(),
+         "materializeRows should not force boxed value cache for arrow-backed string column");
 
   return 0;
 }

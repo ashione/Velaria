@@ -200,7 +200,13 @@ void explainPlan(const PlanNodePtr& node, std::ostringstream& out, int depth = 0
 }  // namespace
 
 DataFrame::DataFrame(Table table)
-    : plan_(std::make_shared<SourcePlan>("memory", std::move(table))),
+    : plan_([&]() {
+        if (!table.schema.fields.empty()) {
+          ensureColumnarCache(&table);
+          table.rows.clear();
+        }
+        return std::make_shared<SourcePlan>("memory", std::move(table));
+      }()),
       executor_(defaultExecutor()) {
   const auto* source = static_cast<const SourcePlan*>(plan_.get());
   schema_hint_ = makeSchemaHint(source->schema);
@@ -270,46 +276,25 @@ const CachedVectorColumn& DataFrame::vectorColumnCache(const std::string& vector
 
   std::size_t expected_dim = 0;
   bool has_dimension = false;
-  if (!source.rows.empty()) {
-    cache.row_ids.reserve(source.rows.size());
-    vectors.reserve(source.rows.size());
-    for (size_t row_id = 0; row_id < source.rows.size(); ++row_id) {
-      if (vector_index >= source.rows[row_id].size()) continue;
-      const auto& cell = source.rows[row_id][vector_index];
-      if (cell.isNull()) continue;
+  const auto vector_column = viewValueColumn(source, vector_index);
+  const auto row_count = valueColumnRowCount(*vector_column.buffer);
+  cache.row_ids.reserve(row_count);
+  vectors.reserve(row_count);
+  for (size_t row_id = 0; row_id < row_count; ++row_id) {
+    const auto cell = valueColumnValueAt(*vector_column.buffer, row_id);
+    if (cell.isNull()) continue;
 
-      std::vector<float> vec = cell.type() == DataType::FixedVector
-                                   ? cell.asFixedVector()
-                                   : Value::parseFixedVector(cell.toString());
-      if (!has_dimension) {
-        expected_dim = vec.size();
-        has_dimension = true;
-      } else if (vec.size() != expected_dim) {
-        throw std::invalid_argument("fixed vector length mismatch in vector column cache");
-      }
-      cache.row_ids.push_back(row_id);
-      vectors.push_back(std::move(vec));
+    std::vector<float> vec = cell.type() == DataType::FixedVector
+                                 ? cell.asFixedVector()
+                                 : Value::parseFixedVector(cell.toString());
+    if (!has_dimension) {
+      expected_dim = vec.size();
+      has_dimension = true;
+    } else if (vec.size() != expected_dim) {
+      throw std::invalid_argument("fixed vector length mismatch in vector column cache");
     }
-  } else {
-    const auto vector_column = viewValueColumn(source, vector_index);
-    cache.row_ids.reserve(vector_column.values().size());
-    vectors.reserve(vector_column.values().size());
-    for (size_t row_id = 0; row_id < vector_column.values().size(); ++row_id) {
-      const auto& cell = vector_column.values()[row_id];
-      if (cell.isNull()) continue;
-
-      std::vector<float> vec = cell.type() == DataType::FixedVector
-                                   ? cell.asFixedVector()
-                                   : Value::parseFixedVector(cell.toString());
-      if (!has_dimension) {
-        expected_dim = vec.size();
-        has_dimension = true;
-      } else if (vec.size() != expected_dim) {
-        throw std::invalid_argument("fixed vector length mismatch in vector column cache");
-      }
-      cache.row_ids.push_back(row_id);
-      vectors.push_back(std::move(vec));
-    }
+    cache.row_ids.push_back(row_id);
+    vectors.push_back(std::move(vec));
   }
 
   cache.index = std::shared_ptr<VectorIndex>(makeExactScanVectorIndex(std::move(vectors)).release());
@@ -489,13 +474,21 @@ DataFrame DataFrame::vectorQuery(const std::string& vectorColumn,
   const size_t take = scored.size();
   Table out;
   out.schema = Schema({"row_id", "score"});
-  out.rows.reserve(take);
-  for (size_t i = 0; i < take; ++i) {
-    Row row;
-    row.emplace_back(static_cast<int64_t>(cache.row_ids.at(scored[i].row_id)));
-    row.emplace_back(scored[i].score);
-    out.rows.push_back(std::move(row));
+  auto cache_out = std::make_shared<ColumnarTable>();
+  cache_out->schema = out.schema;
+  cache_out->columns.resize(out.schema.fields.size());
+  cache_out->arrow_formats.resize(out.schema.fields.size());
+  cache_out->row_count = take;
+  if (take > 0) {
+    cache_out->batch_row_counts.push_back(take);
   }
+  cache_out->columns[0].values.reserve(take);
+  cache_out->columns[1].values.reserve(take);
+  for (size_t i = 0; i < take; ++i) {
+    cache_out->columns[0].values.emplace_back(static_cast<int64_t>(cache.row_ids.at(scored[i].row_id)));
+    cache_out->columns[1].values.emplace_back(scored[i].score);
+  }
+  out.columnar_cache = std::move(cache_out);
   return DataFrame(std::move(out));
 }
 
@@ -543,6 +536,7 @@ size_t DataFrame::count() const {
 
 std::vector<Row> DataFrame::collect() const {
   auto table = toTable();
+  materializeRows(&table);
   return std::move(table.rows);
 }
 
@@ -551,7 +545,8 @@ std::string DataFrame::serializePlan() const {
 }
 
 void DataFrame::show(size_t max_rows) const {
-  const auto t = toTable();
+  auto t = toTable();
+  materializeRows(&t);
   for (size_t i = 0; i < t.schema.fields.size(); ++i) {
     if (i) std::cout << "\t";
     std::cout << t.schema.fields[i];
@@ -567,9 +562,7 @@ void DataFrame::show(size_t max_rows) const {
 }
 
 Table DataFrame::toTable() const {
-  Table out = materialize();
-  materializeRows(&out);
-  return out;
+  return materialize();
 }
 
 const Table& DataFrame::materializedTable() const {

@@ -65,22 +65,26 @@ Table makeGenericMultiAggregateBatch() {
 }
 
 std::unordered_map<std::string, double> sumTableToMap(const Table& table) {
+  auto materialized = table;
+  dataflow::materializeRows(&materialized);
   std::unordered_map<std::string, double> out;
-  const auto window_idx = table.schema.indexOf("window_start");
-  const auto key_idx = table.schema.indexOf("key");
-  const auto value_idx = table.schema.indexOf("value_sum");
-  for (const auto& row : table.rows) {
+  const auto window_idx = materialized.schema.indexOf("window_start");
+  const auto key_idx = materialized.schema.indexOf("key");
+  const auto value_idx = materialized.schema.indexOf("value_sum");
+  for (const auto& row : materialized.rows) {
     out[row[window_idx].toString() + "|" + row[key_idx].toString()] = row[value_idx].asDouble();
   }
   return out;
 }
 
 std::unordered_map<std::string, double> countTableToMap(const Table& table) {
+  auto materialized = table;
+  dataflow::materializeRows(&materialized);
   std::unordered_map<std::string, double> out;
-  const auto window_idx = table.schema.indexOf("window_start");
-  const auto key_idx = table.schema.indexOf("key");
-  const auto value_idx = table.schema.indexOf("event_count");
-  for (const auto& row : table.rows) {
+  const auto window_idx = materialized.schema.indexOf("window_start");
+  const auto key_idx = materialized.schema.indexOf("key");
+  const auto value_idx = materialized.schema.indexOf("event_count");
+  for (const auto& row : materialized.rows) {
     out[row[window_idx].toString() + "|" + row[key_idx].toString()] = row[value_idx].asDouble();
   }
   return out;
@@ -95,15 +99,17 @@ struct AggregateRow {
 };
 
 std::unordered_map<std::string, AggregateRow> multiAggregateTableToMap(const Table& table) {
+  auto materialized = table;
+  dataflow::materializeRows(&materialized);
   std::unordered_map<std::string, AggregateRow> out;
-  const auto segment_idx = table.schema.indexOf("segment");
-  const auto bucket_idx = table.schema.indexOf("bucket");
-  const auto sum_idx = table.schema.indexOf("value_sum");
-  const auto count_idx = table.schema.indexOf("event_count");
-  const auto min_idx = table.schema.indexOf("min_value");
-  const auto max_idx = table.schema.indexOf("max_value");
-  const auto avg_idx = table.schema.indexOf("avg_value");
-  for (const auto& row : table.rows) {
+  const auto segment_idx = materialized.schema.indexOf("segment");
+  const auto bucket_idx = materialized.schema.indexOf("bucket");
+  const auto sum_idx = materialized.schema.indexOf("value_sum");
+  const auto count_idx = materialized.schema.indexOf("event_count");
+  const auto min_idx = materialized.schema.indexOf("min_value");
+  const auto max_idx = materialized.schema.indexOf("max_value");
+  const auto avg_idx = materialized.schema.indexOf("avg_value");
+  for (const auto& row : materialized.rows) {
     out[row[segment_idx].toString() + "|" + row[bucket_idx].toString()] = AggregateRow{
         row[sum_idx].asInt64(),
         row[count_idx].asInt64(),

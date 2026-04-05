@@ -3,6 +3,7 @@
 #include <memory>
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -14,6 +15,7 @@
 #include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/csv.h"
 #include "src/dataflow/core/execution/source_materialization.h"
+#include "src/dataflow/core/execution/runtime/execution_optimizer.h"
 #include "src/dataflow/experimental/runtime/rpc_runner.h"
 
 namespace dataflow {
@@ -21,6 +23,80 @@ namespace dataflow {
 namespace {
 
 constexpr char kGroupDelim = '\x1f';
+
+bool matchesFilterCompareOp(int compare_result, const std::string& op) {
+  if (op == "=" || op == "==") return compare_result == 0;
+  if (op == "!=") return compare_result != 0;
+  if (op == "<") return compare_result < 0;
+  if (op == ">") return compare_result > 0;
+  if (op == "<=") return compare_result <= 0;
+  if (op == ">=") return compare_result >= 0;
+  throw std::runtime_error("unsupported filter op: " + op);
+}
+
+template <typename T>
+int compareFilterScalar(const T& lhs, const T& rhs) {
+  return lhs < rhs ? -1 : (lhs > rhs ? 1 : 0);
+}
+
+bool rowMatchesFilter(const ValueColumnBuffer& column, std::size_t row_index, const Value& rhs,
+                      const std::string& op) {
+  if (valueColumnIsNullAt(column, row_index)) {
+    if (op == "=" || op == "==") {
+      return rhs.isNull();
+    }
+    if (op == "!=") {
+      return !rhs.isNull();
+    }
+    return false;
+  }
+  if (rhs.isNull()) {
+    return op == "!=";
+  }
+
+  if (rhs.isNumber()) {
+    if (!column.values.empty()) {
+      const auto& lhs = column.values[row_index];
+      if (!lhs.isNumber()) {
+        return false;
+      }
+      return matchesFilterCompareOp(compareFilterScalar(lhs.asDouble(), rhs.asDouble()), op);
+    }
+    if (column.arrow_backing != nullptr) {
+      const auto format = column.arrow_backing->format;
+      if (format == "b" || format == "i" || format == "I" || format == "l" || format == "L" ||
+          format == "f" || format == "g") {
+        return matchesFilterCompareOp(
+            compareFilterScalar(valueColumnDoubleAt(column, row_index), rhs.asDouble()), op);
+      }
+    }
+  }
+
+  if (rhs.type() == DataType::String) {
+    if (!column.values.empty()) {
+      const auto& lhs = column.values[row_index];
+      if (lhs.type() != DataType::String) {
+        return false;
+      }
+      return matchesFilterCompareOp(compareFilterScalar(lhs.asString(), rhs.asString()), op);
+    }
+    if (column.arrow_backing != nullptr &&
+        (column.arrow_backing->format == "u" || column.arrow_backing->format == "U")) {
+      return matchesFilterCompareOp(
+          compareFilterScalar(valueColumnStringViewAt(column, row_index),
+                              std::string_view(rhs.asString())),
+          op);
+    }
+  }
+
+  const Value lhs = column.values.empty() ? valueColumnValueAt(column, row_index)
+                                          : column.values[row_index];
+  try {
+    return matchesFilterCompareOp(lhs == rhs ? 0 : (lhs < rhs ? -1 : 1), op);
+  } catch (...) {
+    return false;
+  }
+}
 
 std::vector<std::string> splitKey(const std::string& key) {
   std::vector<std::string> out;
@@ -64,10 +140,355 @@ struct AggregateAccumulator {
   std::vector<double> sum;
   std::vector<std::size_t> count;
   std::vector<Value> minVal;
-  std::vector<bool> hasMin;
+  std::vector<uint8_t> hasMin;
   std::vector<Value> maxVal;
-  std::vector<bool> hasMax;
+  std::vector<uint8_t> hasMax;
 };
+
+bool canUseSingleInt64KeyFastPath(const ValueColumnBuffer& column) {
+  if (column.arrow_backing != nullptr) {
+    const auto format = column.arrow_backing->format;
+    return format == "b" || format == "i" || format == "I" || format == "l" || format == "L";
+  }
+  for (const auto& value : column.values) {
+    if (!value.isNull()) {
+      return value.type() == DataType::Int64;
+    }
+  }
+  return true;
+}
+
+struct Int64AggregateKey {
+  bool is_null = true;
+  int64_t value = 0;
+
+  bool operator==(const Int64AggregateKey& other) const {
+    return is_null == other.is_null && value == other.value;
+  }
+};
+
+struct Int64AggregateKeyHash {
+  std::size_t operator()(const Int64AggregateKey& key) const {
+    std::size_t seed = std::hash<bool>{}(key.is_null);
+    seed ^= std::hash<int64_t>{}(key.value) + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+    return seed;
+  }
+};
+
+struct Int64PairAggregateKey {
+  Int64AggregateKey first;
+  Int64AggregateKey second;
+
+  bool operator==(const Int64PairAggregateKey& other) const {
+    return first == other.first && second == other.second;
+  }
+};
+
+struct Int64PairAggregateKeyHash {
+  std::size_t operator()(const Int64PairAggregateKey& key) const {
+    std::size_t seed = Int64AggregateKeyHash{}(key.first);
+    const auto second_hash = Int64AggregateKeyHash{}(key.second);
+    seed ^= second_hash + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+    return seed;
+  }
+};
+
+AggregateAccumulator initAccumulator(const std::vector<AggregateSpec>& aggs) {
+  AggregateAccumulator acc;
+  const auto aggregate_count = aggs.size();
+  bool needs_min = false;
+  bool needs_max = false;
+  for (const auto& agg : aggs) {
+    switch (agg.function) {
+      case AggregateFunction::Sum:
+      case AggregateFunction::Count:
+      case AggregateFunction::Avg:
+        break;
+      case AggregateFunction::Min:
+        needs_min = true;
+        break;
+      case AggregateFunction::Max:
+        needs_max = true;
+        break;
+      }
+  }
+  acc.sum.assign(aggregate_count, 0.0);
+  acc.count.assign(aggregate_count, 0);
+  if (needs_min) {
+    acc.minVal.resize(aggregate_count);
+    acc.hasMin.assign(aggregate_count, static_cast<uint8_t>(0));
+  }
+  if (needs_max) {
+    acc.maxVal.resize(aggregate_count);
+    acc.hasMax.assign(aggregate_count, static_cast<uint8_t>(0));
+  }
+  return acc;
+}
+
+void updateAccumulator(AggregateAccumulator* acc, const std::vector<AggregateSpec>& aggs,
+                       const std::vector<const ValueColumnView*>& aggregate_columns,
+                       std::size_t row_index) {
+  if (acc == nullptr) {
+    throw std::invalid_argument("aggregate accumulator is null");
+  }
+  for (std::size_t i = 0; i < aggs.size(); ++i) {
+    const auto& agg = aggs[i];
+    if (agg.function == AggregateFunction::Count) {
+      acc->count[i] += 1;
+      continue;
+    }
+    const auto& column = *aggregate_columns[i]->buffer;
+    if (valueColumnIsNullAt(column, row_index)) {
+      continue;
+    }
+    if (agg.function == AggregateFunction::Sum || agg.function == AggregateFunction::Avg) {
+      acc->sum[i] += valueColumnDoubleAt(column, row_index);
+      acc->count[i] += 1;
+    } else if (agg.function == AggregateFunction::Min) {
+      const auto v = valueColumnValueAt(column, row_index);
+      if (!acc->hasMin[i] || v < acc->minVal[i]) {
+        acc->minVal[i] = v;
+        acc->hasMin[i] = true;
+      }
+    } else if (agg.function == AggregateFunction::Max) {
+      const auto v = valueColumnValueAt(column, row_index);
+      if (!acc->hasMax[i] || v > acc->maxVal[i]) {
+        acc->maxVal[i] = v;
+        acc->hasMax[i] = true;
+      }
+    }
+  }
+}
+
+Value finalizeAggregateValue(const AggregateAccumulator& acc, const AggregateSpec& agg,
+                             std::size_t aggregate_index) {
+  switch (agg.function) {
+    case AggregateFunction::Sum:
+      return Value(acc.sum[aggregate_index]);
+    case AggregateFunction::Count:
+      return Value(static_cast<int64_t>(acc.count[aggregate_index]));
+    case AggregateFunction::Avg:
+      return Value(acc.count[aggregate_index] == 0
+                       ? 0.0
+                       : acc.sum[aggregate_index] /
+                             static_cast<double>(acc.count[aggregate_index]));
+    case AggregateFunction::Min:
+      return acc.minVal[aggregate_index];
+    case AggregateFunction::Max:
+      return acc.maxVal[aggregate_index];
+  }
+  return Value();
+}
+
+Table makeAggregateOutputSchema(const Table& input, const std::vector<size_t>& key_indices,
+                                const std::vector<AggregateSpec>& aggs) {
+  Table out;
+  for (const auto idx : key_indices) {
+    out.schema.fields.push_back(input.schema.fields[idx]);
+  }
+  for (const auto& agg : aggs) {
+    out.schema.fields.push_back(agg.output_name);
+  }
+  for (std::size_t i = 0; i < out.schema.fields.size(); ++i) {
+    out.schema.index[out.schema.fields[i]] = i;
+  }
+  return out;
+}
+
+void appendAggregateValues(ColumnarTable* cache, std::size_t* out_column_index,
+                           const AggregateAccumulator& acc,
+                           const std::vector<AggregateSpec>& aggs) {
+  if (cache == nullptr || out_column_index == nullptr) {
+    throw std::invalid_argument("appendAggregateValues requires cache and column index");
+  }
+  for (std::size_t i = 0; i < aggs.size(); ++i) {
+    cache->columns[(*out_column_index)++].values.push_back(finalizeAggregateValue(acc, aggs[i], i));
+  }
+}
+
+Table executeSingleSumNoKeyTable(const Table& input, const AggregateSpec& agg) {
+  Table out = makeAggregateOutputSchema(input, {}, std::vector<AggregateSpec>{agg});
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = out.schema;
+  cache->columns.resize(1);
+  cache->arrow_formats.resize(1);
+  if (input.rowCount() == 0) {
+    cache->row_count = 0;
+    out.columnar_cache = std::move(cache);
+    return out;
+  }
+  const auto column = viewValueColumn(input, agg.value_index);
+  double sum = 0.0;
+  for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
+    if (valueColumnIsNullAt(*column.buffer, row_index)) {
+      continue;
+    }
+    sum += valueColumnDoubleAt(*column.buffer, row_index);
+  }
+  cache->row_count = 1;
+  cache->batch_row_counts.push_back(1);
+  cache->columns[0].values.push_back(Value(sum));
+  out.columnar_cache = std::move(cache);
+  return out;
+}
+
+Table executeSingleSumSingleInt64KeyTable(const Table& input, std::size_t key_index,
+                                          const AggregateSpec& agg) {
+  const auto key_column = viewValueColumn(input, key_index);
+  const auto value_column = viewValueColumn(input, agg.value_index);
+  std::unordered_map<Int64AggregateKey, double, Int64AggregateKeyHash> states;
+  std::vector<Int64AggregateKey> ordered_keys;
+  states.reserve(input.rowCount());
+  ordered_keys.reserve(input.rowCount());
+  for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
+    const Int64AggregateKey key{valueColumnIsNullAt(*key_column.buffer, row_index),
+                                valueColumnIsNullAt(*key_column.buffer, row_index)
+                                    ? 0
+                                    : valueColumnInt64At(*key_column.buffer, row_index)};
+    auto it = states.find(key);
+    if (it == states.end()) {
+      ordered_keys.push_back(key);
+      it = states.emplace(key, 0.0).first;
+    }
+    if (!valueColumnIsNullAt(*value_column.buffer, row_index)) {
+      it->second += valueColumnDoubleAt(*value_column.buffer, row_index);
+    }
+  }
+
+  Table out = makeAggregateOutputSchema(input, {key_index}, std::vector<AggregateSpec>{agg});
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = out.schema;
+  cache->columns.resize(2);
+  cache->arrow_formats.resize(2);
+  cache->row_count = ordered_keys.size();
+  cache->columns[0].values.reserve(ordered_keys.size());
+  cache->columns[1].values.reserve(ordered_keys.size());
+  for (const auto& key : ordered_keys) {
+    cache->columns[0].values.push_back(key.is_null ? Value() : Value(key.value));
+    cache->columns[1].values.push_back(Value(states.at(key)));
+  }
+  if (!ordered_keys.empty()) {
+    cache->batch_row_counts.push_back(ordered_keys.size());
+  }
+  out.columnar_cache = std::move(cache);
+  return out;
+}
+
+Table executeSingleSumDoubleInt64KeyTable(const Table& input, std::size_t first_key_index,
+                                          std::size_t second_key_index,
+                                          const AggregateSpec& agg) {
+  const auto first_key = viewValueColumn(input, first_key_index);
+  const auto second_key = viewValueColumn(input, second_key_index);
+  const auto value_column = viewValueColumn(input, agg.value_index);
+  std::unordered_map<Int64PairAggregateKey, double, Int64PairAggregateKeyHash> states;
+  std::vector<Int64PairAggregateKey> ordered_keys;
+  states.reserve(input.rowCount());
+  ordered_keys.reserve(input.rowCount());
+  for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
+    const Int64PairAggregateKey key{
+        {valueColumnIsNullAt(*first_key.buffer, row_index),
+         valueColumnIsNullAt(*first_key.buffer, row_index)
+             ? 0
+             : valueColumnInt64At(*first_key.buffer, row_index)},
+        {valueColumnIsNullAt(*second_key.buffer, row_index),
+         valueColumnIsNullAt(*second_key.buffer, row_index)
+             ? 0
+             : valueColumnInt64At(*second_key.buffer, row_index)}};
+    auto it = states.find(key);
+    if (it == states.end()) {
+      ordered_keys.push_back(key);
+      it = states.emplace(key, 0.0).first;
+    }
+    if (!valueColumnIsNullAt(*value_column.buffer, row_index)) {
+      it->second += valueColumnDoubleAt(*value_column.buffer, row_index);
+    }
+  }
+
+  Table out = makeAggregateOutputSchema(input, {first_key_index, second_key_index},
+                                        std::vector<AggregateSpec>{agg});
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = out.schema;
+  cache->columns.resize(3);
+  cache->arrow_formats.resize(3);
+  cache->row_count = ordered_keys.size();
+  for (auto& column : cache->columns) {
+    column.values.reserve(ordered_keys.size());
+  }
+  for (const auto& key : ordered_keys) {
+    cache->columns[0].values.push_back(key.first.is_null ? Value() : Value(key.first.value));
+    cache->columns[1].values.push_back(key.second.is_null ? Value() : Value(key.second.value));
+    cache->columns[2].values.push_back(Value(states.at(key)));
+  }
+  if (!ordered_keys.empty()) {
+    cache->batch_row_counts.push_back(ordered_keys.size());
+  }
+  out.columnar_cache = std::move(cache);
+  return out;
+}
+
+RowSelection combinedFilterSelection(const Table& input, const std::vector<const FilterPlan*>& filters,
+                                     std::size_t max_selected = 0) {
+  RowSelection out;
+  const auto row_count = input.rowCount();
+  out.selected.assign(row_count, filters.empty() ? 0 : 1);
+  out.selected_count = filters.empty() ? 0 : row_count;
+  if (filters.size() > 1) {
+    std::vector<ValueColumnView> filter_columns;
+    filter_columns.reserve(filters.size());
+    for (const auto* filter : filters) {
+      filter_columns.push_back(viewValueColumn(input, filter->column_index));
+    }
+    out.selected.assign(row_count, 0);
+    out.selected_count = 0;
+    for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+      bool matches = true;
+      for (std::size_t filter_index = 0; filter_index < filters.size(); ++filter_index) {
+        if (!rowMatchesFilter(*filter_columns[filter_index].buffer, row_index,
+                              filters[filter_index]->value, filters[filter_index]->op)) {
+          matches = false;
+          break;
+        }
+      }
+      if (!matches) {
+        continue;
+      }
+      out.selected[row_index] = 1;
+      ++out.selected_count;
+      if (max_selected != 0 && out.selected_count >= max_selected) {
+        break;
+      }
+    }
+    return out;
+  }
+  for (const auto* filter : filters) {
+    const auto column = viewValueColumn(input, filter->column_index);
+    const auto current = vectorizedFilterSelection(column, filter->value, filter->op);
+    std::size_t selected_count = 0;
+    for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+      out.selected[row_index] =
+          static_cast<uint8_t>(out.selected[row_index] != 0 && current.selected[row_index] != 0);
+      selected_count += out.selected[row_index] != 0 ? 1 : 0;
+    }
+    out.selected_count = selected_count;
+    if (out.selected_count == 0) {
+      return out;
+    }
+  }
+  if (max_selected != 0 && out.selected_count > max_selected) {
+    std::size_t kept = 0;
+    for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+      if (out.selected[row_index] == 0) {
+        continue;
+      }
+      ++kept;
+      if (kept > max_selected) {
+        out.selected[row_index] = 0;
+      }
+    }
+    out.selected_count = max_selected;
+  }
+  return out;
+}
 
 std::vector<std::size_t> allColumnIndices(const Schema& schema) {
   std::vector<std::size_t> indices;
@@ -538,6 +959,30 @@ BorrowedOrOwnedTable borrowOrExecute(const LocalExecutor& executor, const PlanNo
 
 Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_indices,
                             const std::vector<AggregateSpec>& aggs) {
+  switch (analyzeAggregateExecutionShape(key_indices, aggs)) {
+    case AggregateExecutionShape::SumNoKey:
+      return executeSingleSumNoKeyTable(input, aggs.front());
+    case AggregateExecutionShape::SumSingleInt64Key: {
+      const auto key_column = viewValueColumn(input, key_indices[0]);
+      if (canUseSingleInt64KeyFastPath(*key_column.buffer)) {
+        return executeSingleSumSingleInt64KeyTable(input, key_indices[0], aggs.front());
+      }
+      break;
+    }
+    case AggregateExecutionShape::SumDoubleInt64Key: {
+      const auto first_key = viewValueColumn(input, key_indices[0]);
+      const auto second_key = viewValueColumn(input, key_indices[1]);
+      if (canUseSingleInt64KeyFastPath(*first_key.buffer) &&
+          canUseSingleInt64KeyFastPath(*second_key.buffer)) {
+        return executeSingleSumDoubleInt64KeyTable(input, key_indices[0], key_indices[1],
+                                                   aggs.front());
+      }
+      break;
+    }
+    case AggregateExecutionShape::Generic:
+      break;
+  }
+
   std::vector<std::size_t> aggregate_value_indices;
   aggregate_value_indices.reserve(aggs.size());
   for (const auto& agg : aggs) {
@@ -557,18 +1002,27 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
     }
   }
 
-  auto initAccumulator = [&]() {
-    AggregateAccumulator acc;
-    acc.sum.assign(aggs.size(), 0.0);
-    acc.count.assign(aggs.size(), 0);
-    acc.minVal.resize(aggs.size());
-    acc.hasMin.assign(aggs.size(), false);
-    acc.maxVal.resize(aggs.size());
-    acc.hasMax.assign(aggs.size(), false);
-    return acc;
-  };
-
   std::vector<std::string> ordered_keys;
+  if (key_indices.empty()) {
+    auto out = makeAggregateOutputSchema(input, key_indices, aggs);
+    auto cache = std::make_shared<ColumnarTable>();
+    cache->schema = out.schema;
+    cache->columns.resize(out.schema.fields.size());
+    cache->arrow_formats.resize(out.schema.fields.size());
+    if (input.rowCount() > 0) {
+      auto acc = initAccumulator(aggs);
+      for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
+        updateAccumulator(&acc, aggs, aggregate_columns, row_index);
+      }
+      cache->row_count = 1;
+      cache->batch_row_counts.push_back(1);
+      std::size_t out_column_index = 0;
+      appendAggregateValues(cache.get(), &out_column_index, acc, aggs);
+    }
+    out.columnar_cache = std::move(cache);
+    return out;
+  }
+
   if (key_indices.size() == 1) {
     const auto key_column = viewValueColumn(input, key_indices[0]);
     if (canUseSingleStringKeyFastPath(*key_column.buffer)) {
@@ -581,48 +1035,12 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
         auto it = states.find(key);
         if (it == states.end()) {
           ordered_key_views.push_back(key);
-          it = states.emplace(key, initAccumulator()).first;
+          it = states.emplace(key, initAccumulator(aggs)).first;
         }
-        auto& acc = it->second;
-        for (std::size_t i = 0; i < aggs.size(); ++i) {
-          const auto& agg = aggs[i];
-          if (agg.function == AggregateFunction::Count) {
-            acc.count[i] += 1;
-            continue;
-          }
-          const auto& column = *aggregate_columns[i]->buffer;
-          if (valueColumnIsNullAt(column, row_index)) {
-            continue;
-          }
-          if (agg.function == AggregateFunction::Sum || agg.function == AggregateFunction::Avg) {
-            acc.sum[i] += valueColumnDoubleAt(column, row_index);
-            acc.count[i] += 1;
-          } else if (agg.function == AggregateFunction::Min) {
-            const auto v = valueColumnValueAt(column, row_index);
-            if (!acc.hasMin[i] || v < acc.minVal[i]) {
-              acc.minVal[i] = v;
-              acc.hasMin[i] = true;
-            }
-          } else if (agg.function == AggregateFunction::Max) {
-            const auto v = valueColumnValueAt(column, row_index);
-            if (!acc.hasMax[i] || v > acc.maxVal[i]) {
-              acc.maxVal[i] = v;
-              acc.hasMax[i] = true;
-            }
-          }
-        }
+        updateAccumulator(&it->second, aggs, aggregate_columns, row_index);
       }
 
-      Table out;
-      for (const auto idx : key_indices) {
-        out.schema.fields.push_back(input.schema.fields[idx]);
-      }
-      for (const auto& agg : aggs) {
-        out.schema.fields.push_back(agg.output_name);
-      }
-      for (std::size_t i = 0; i < out.schema.fields.size(); ++i) {
-        out.schema.index[out.schema.fields[i]] = i;
-      }
+      Table out = makeAggregateOutputSchema(input, key_indices, aggs);
       auto cache = std::make_shared<ColumnarTable>();
       cache->schema = out.schema;
       cache->columns.resize(out.schema.fields.size());
@@ -635,29 +1053,92 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
         const auto& acc = states.at(key_view);
         std::size_t out_column_index = 0;
         cache->columns[out_column_index++].values.push_back(Value(std::string(key_view)));
-        for (std::size_t i = 0; i < aggs.size(); ++i) {
-          const auto& agg = aggs[i];
-          Value value;
-          switch (agg.function) {
-            case AggregateFunction::Sum:
-              value = Value(acc.sum[i]);
-              break;
-            case AggregateFunction::Count:
-              value = Value(static_cast<int64_t>(acc.count[i]));
-              break;
-            case AggregateFunction::Avg:
-              value = Value(acc.count[i] == 0 ? 0.0
-                                              : acc.sum[i] / static_cast<double>(acc.count[i]));
-              break;
-            case AggregateFunction::Min:
-              value = acc.minVal[i];
-              break;
-            case AggregateFunction::Max:
-              value = acc.maxVal[i];
-              break;
-          }
-          cache->columns[out_column_index++].values.push_back(std::move(value));
+        appendAggregateValues(cache.get(), &out_column_index, acc, aggs);
+      }
+      out.columnar_cache = std::move(cache);
+      return out;
+    }
+
+    if (canUseSingleInt64KeyFastPath(*key_column.buffer)) {
+      std::unordered_map<Int64AggregateKey, AggregateAccumulator, Int64AggregateKeyHash> states;
+      std::vector<Int64AggregateKey> ordered_key_values;
+      ordered_key_values.reserve(input.rowCount());
+      for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
+        const Int64AggregateKey key{valueColumnIsNullAt(*key_column.buffer, row_index),
+                                    valueColumnIsNullAt(*key_column.buffer, row_index)
+                                        ? 0
+                                        : valueColumnInt64At(*key_column.buffer, row_index)};
+        auto it = states.find(key);
+        if (it == states.end()) {
+          ordered_key_values.push_back(key);
+          it = states.emplace(key, initAccumulator(aggs)).first;
         }
+        updateAccumulator(&it->second, aggs, aggregate_columns, row_index);
+      }
+
+      Table out = makeAggregateOutputSchema(input, key_indices, aggs);
+      auto cache = std::make_shared<ColumnarTable>();
+      cache->schema = out.schema;
+      cache->columns.resize(out.schema.fields.size());
+      cache->arrow_formats.resize(out.schema.fields.size());
+      cache->row_count = ordered_key_values.size();
+      for (auto& column : cache->columns) {
+        column.values.reserve(ordered_key_values.size());
+      }
+      for (const auto& key : ordered_key_values) {
+        const auto& acc = states.at(key);
+        std::size_t out_column_index = 0;
+        cache->columns[out_column_index++].values.push_back(
+            key.is_null ? Value() : Value(key.value));
+        appendAggregateValues(cache.get(), &out_column_index, acc, aggs);
+      }
+      out.columnar_cache = std::move(cache);
+      return out;
+    }
+  } else if (key_indices.size() == 2) {
+    const auto first_key = viewValueColumn(input, key_indices[0]);
+    const auto second_key = viewValueColumn(input, key_indices[1]);
+    if (canUseSingleInt64KeyFastPath(*first_key.buffer) &&
+        canUseSingleInt64KeyFastPath(*second_key.buffer)) {
+      std::unordered_map<Int64PairAggregateKey, AggregateAccumulator, Int64PairAggregateKeyHash>
+          states;
+      std::vector<Int64PairAggregateKey> ordered_key_values;
+      ordered_key_values.reserve(input.rowCount());
+      for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
+        const Int64PairAggregateKey key{
+            {valueColumnIsNullAt(*first_key.buffer, row_index),
+             valueColumnIsNullAt(*first_key.buffer, row_index)
+                 ? 0
+                 : valueColumnInt64At(*first_key.buffer, row_index)},
+            {valueColumnIsNullAt(*second_key.buffer, row_index),
+             valueColumnIsNullAt(*second_key.buffer, row_index)
+                 ? 0
+                 : valueColumnInt64At(*second_key.buffer, row_index)}};
+        auto it = states.find(key);
+        if (it == states.end()) {
+          ordered_key_values.push_back(key);
+          it = states.emplace(key, initAccumulator(aggs)).first;
+        }
+        updateAccumulator(&it->second, aggs, aggregate_columns, row_index);
+      }
+
+      Table out = makeAggregateOutputSchema(input, key_indices, aggs);
+      auto cache = std::make_shared<ColumnarTable>();
+      cache->schema = out.schema;
+      cache->columns.resize(out.schema.fields.size());
+      cache->arrow_formats.resize(out.schema.fields.size());
+      cache->row_count = ordered_key_values.size();
+      for (auto& column : cache->columns) {
+        column.values.reserve(ordered_key_values.size());
+      }
+      for (const auto& key : ordered_key_values) {
+        const auto& acc = states.at(key);
+        std::size_t out_column_index = 0;
+        cache->columns[out_column_index++].values.push_back(
+            key.first.is_null ? Value() : Value(key.first.value));
+        cache->columns[out_column_index++].values.push_back(
+            key.second.is_null ? Value() : Value(key.second.value));
+        appendAggregateValues(cache.get(), &out_column_index, acc, aggs);
       }
       out.columnar_cache = std::move(cache);
       return out;
@@ -671,49 +1152,12 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
     auto it = states.find(key);
     if (it == states.end()) {
       ordered_keys.push_back(key);
-      it = states.emplace(key, initAccumulator()).first;
+      it = states.emplace(key, initAccumulator(aggs)).first;
     }
-    auto& acc = it->second;
-
-    for (std::size_t i = 0; i < aggs.size(); ++i) {
-      const auto& agg = aggs[i];
-      if (agg.function == AggregateFunction::Count) {
-        acc.count[i] += 1;
-        continue;
-      }
-      const auto& column = *aggregate_columns[i]->buffer;
-      if (valueColumnIsNullAt(column, row_index)) {
-        continue;
-      }
-      if (agg.function == AggregateFunction::Sum || agg.function == AggregateFunction::Avg) {
-        acc.sum[i] += valueColumnDoubleAt(column, row_index);
-        acc.count[i] += 1;
-      } else if (agg.function == AggregateFunction::Min) {
-        const auto v = valueColumnValueAt(column, row_index);
-        if (!acc.hasMin[i] || v < acc.minVal[i]) {
-          acc.minVal[i] = v;
-          acc.hasMin[i] = true;
-        }
-      } else if (agg.function == AggregateFunction::Max) {
-        const auto v = valueColumnValueAt(column, row_index);
-        if (!acc.hasMax[i] || v > acc.maxVal[i]) {
-          acc.maxVal[i] = v;
-          acc.hasMax[i] = true;
-        }
-      }
-    }
+    updateAccumulator(&it->second, aggs, aggregate_columns, row_index);
   }
 
-  Table out;
-  for (const auto idx : key_indices) {
-    out.schema.fields.push_back(input.schema.fields[idx]);
-  }
-  for (const auto& agg : aggs) {
-    out.schema.fields.push_back(agg.output_name);
-  }
-  for (std::size_t i = 0; i < out.schema.fields.size(); ++i) {
-    out.schema.index[out.schema.fields[i]] = i;
-  }
+  Table out = makeAggregateOutputSchema(input, key_indices, aggs);
   auto cache = std::make_shared<ColumnarTable>();
   cache->schema = out.schema;
   cache->columns.resize(out.schema.fields.size());
@@ -732,29 +1176,7 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
         cache->columns[out_column_index++].values.push_back(std::move(value));
       }
     }
-    for (std::size_t i = 0; i < aggs.size(); ++i) {
-      const auto& agg = aggs[i];
-      Value value;
-      switch (agg.function) {
-        case AggregateFunction::Sum:
-          value = Value(acc.sum[i]);
-          break;
-        case AggregateFunction::Count:
-          value = Value(static_cast<int64_t>(acc.count[i]));
-          break;
-        case AggregateFunction::Avg:
-          value = Value(acc.count[i] == 0 ? 0.0
-                                          : acc.sum[i] / static_cast<double>(acc.count[i]));
-          break;
-        case AggregateFunction::Min:
-          value = acc.minVal[i];
-          break;
-        case AggregateFunction::Max:
-          value = acc.maxVal[i];
-          break;
-      }
-      cache->columns[out_column_index++].values.push_back(std::move(value));
-    }
+    appendAggregateValues(cache.get(), &out_column_index, acc, aggs);
   }
   out.columnar_cache = std::move(cache);
   return out;
@@ -808,7 +1230,7 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
       return projectTable(*input.table, node->indices, node->aliases, false);
     }
     case PlanKind::Filter: {
-      const auto* node = static_cast<const FilterPlan*>(plan.get());
+      const auto filter_pattern = analyzeFilterChain(plan);
       const SourcePlan* pushed_source = nullptr;
       SourcePushdownSpec pushed_spec;
       if (buildSourcePushdownSpec(plan, requirements, &pushed_source, &pushed_spec) &&
@@ -818,9 +1240,9 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
           return pushed;
         }
       }
-      const auto child_input = borrowOrExecute(executor, node->child, requirements);
-      const auto input = viewValueColumn(*child_input.table, node->column_index);
-      const auto selection = vectorizedFilterSelection(input, node->value, node->op);
+      const auto child_input = borrowOrExecute(executor, filter_pattern.base_child, requirements);
+      const auto selection =
+          combinedFilterSelection(*child_input.table, filter_pattern.filters);
       return filterTable(*child_input.table, selection, false);
     }
     case PlanKind::WithColumn: {
@@ -852,13 +1274,18 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
           return pushed;
         }
       }
-      if (node->child && node->child->kind == PlanKind::Filter) {
-        const auto* filter = static_cast<const FilterPlan*>(node->child.get());
-        const auto table_input = borrowOrExecute(executor, filter->child, requirements);
-        const auto input = viewValueColumn(*table_input.table, filter->column_index);
-        const auto selection =
-            vectorizedFilterSelection(input, filter->value, filter->op, node->n);
+      const auto limit_pattern = analyzeLimitExecution(*node);
+      if (limit_pattern.use_filter_chain) {
+        const auto table_input =
+            borrowOrExecute(executor, limit_pattern.filter_chain.base_child, requirements);
+        const auto selection = combinedFilterSelection(
+            *table_input.table, limit_pattern.filter_chain.filters, node->n);
         return filterTable(*table_input.table, selection, false);
+      }
+      if (limit_pattern.use_topn) {
+        const auto input = borrowOrExecute(executor, limit_pattern.order_by->child, requirements);
+        return topNTable(*input.table, limit_pattern.order_by->indices,
+                         limit_pattern.order_by->ascending, node->n, false);
       }
       const auto input = borrowOrExecute(executor, node->child, requirements);
       return limitTable(*input.table, node->n, false);
@@ -929,6 +1356,7 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
       cache->schema = out.schema;
       cache->columns.resize(out.schema.fields.size());
       cache->arrow_formats.resize(out.schema.fields.size());
+      std::size_t output_row_count = 0;
 
       const auto rightBuckets = buildHashBuckets(right_keys);
 
@@ -936,39 +1364,34 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
         auto hit = rightBuckets.find(left_keys[left_index]);
         if (hit != rightBuckets.end()) {
           for (const auto right_index : hit->second) {
-            Row merged;
-            merged.reserve(out.schema.fields.size());
             std::size_t out_column_index = 0;
             for (const auto& column : left_columns) {
               const auto value = valueColumnValueAt(*column.buffer, left_index);
-              merged.push_back(value);
               cache->columns[out_column_index++].values.push_back(value);
             }
             for (const auto& column : right_columns) {
               const auto value = valueColumnValueAt(*column.buffer, right_index);
-              merged.push_back(value);
               cache->columns[out_column_index++].values.push_back(value);
             }
-            out.rows.push_back(std::move(merged));
+            ++output_row_count;
           }
         } else if (node->kind == JoinKind::Left) {
-          Row merged;
-          merged.reserve(out.schema.fields.size());
           std::size_t out_column_index = 0;
           for (const auto& column : left_columns) {
             const auto value = valueColumnValueAt(*column.buffer, left_index);
-            merged.push_back(value);
             cache->columns[out_column_index++].values.push_back(value);
           }
           for (size_t i = 0; i < right_input.table->schema.fields.size(); ++i) {
             Value value;
-            merged.push_back(value);
             cache->columns[out_column_index++].values.push_back(std::move(value));
           }
-          out.rows.push_back(std::move(merged));
+          ++output_row_count;
         }
       }
-      cache->row_count = out.rows.size();
+      cache->row_count = output_row_count;
+      if (output_row_count > 0) {
+        cache->batch_row_counts.push_back(output_row_count);
+      }
       out.columnar_cache = std::move(cache);
       return out;
     }

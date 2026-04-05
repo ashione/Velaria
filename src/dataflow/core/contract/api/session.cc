@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "src/dataflow/core/execution/csv.h"
+#include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/ai/plugin_runtime.h"
 
 namespace dataflow {
@@ -96,8 +97,8 @@ StreamingDataFrame DataflowSession::readStreamCsvDir(const std::string& director
   return readStream(std::make_shared<DirectoryCsvStreamSource>(directory, delimiter));
 }
 
-DataFrame DataflowSession::createDataFrame(const Table& table) {
-  return DataFrame(table);
+DataFrame DataflowSession::createDataFrame(Table table) {
+  return DataFrame(std::move(table));
 }
 
 namespace {
@@ -184,9 +185,39 @@ std::size_t findNameIndex(const Schema& schema, const std::string& name) {
   throw SQLSemanticError("column not found: " + name);
 }
 
+std::shared_ptr<ColumnarTable> makeInsertColumnarCache(const Schema& schema,
+                                                       std::size_t row_count) {
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = schema;
+  cache->columns.resize(schema.fields.size());
+  cache->arrow_formats.resize(schema.fields.size());
+  cache->row_count = row_count;
+  if (row_count > 0) {
+    cache->batch_row_counts.push_back(row_count);
+  }
+  for (auto& column : cache->columns) {
+    column.values.reserve(row_count);
+  }
+  return cache;
+}
+
+void appendInsertRow(ColumnarTable* cache, const Row& row) {
+  if (cache == nullptr) {
+    throw std::invalid_argument("appendInsertRow cache is null");
+  }
+  if (row.size() != cache->columns.size()) {
+    throw SQLSemanticError("INSERT row column count mismatch");
+  }
+  for (std::size_t column_index = 0; column_index < row.size(); ++column_index) {
+    cache->columns[column_index].values.push_back(row[column_index]);
+  }
+}
+
 Table normalizeInsertValues(const Table& target, const std::vector<std::string>& columns,
                           const std::vector<Row>& values) {
-  Table out(target.schema, {});
+  Table out;
+  out.schema = target.schema;
+  auto cache = makeInsertColumnarCache(target.schema, values.size());
   std::unordered_set<std::string> targetCols;
   if (!columns.empty()) {
     std::vector<std::size_t> targets;
@@ -205,8 +236,9 @@ Table normalizeInsertValues(const Table& target, const std::vector<std::string>&
       for (std::size_t i = 0; i < targets.size(); ++i) {
         outRow[targets[i]] = row[i];
       }
-      out.rows.push_back(std::move(outRow));
+      appendInsertRow(cache.get(), outRow);
     }
+    out.columnar_cache = std::move(cache);
     return out;
   }
 
@@ -214,29 +246,25 @@ Table normalizeInsertValues(const Table& target, const std::vector<std::string>&
     if (row.size() != target.schema.fields.size()) {
       throw SQLSemanticError("INSERT VALUES column count mismatch");
     }
-    out.rows.push_back(row);
+    appendInsertRow(cache.get(), row);
   }
+  out.columnar_cache = std::move(cache);
   return out;
 }
 
 Table normalizeInsertSelect(const Table& target, const std::vector<std::string>& columns,
                           const Table& source) {
-  Table out(target.schema, {});
+  Table out;
+  out.schema = target.schema;
   if (columns.empty()) {
     if (source.schema.fields.size() != target.schema.fields.size()) {
       throw SQLSemanticError("INSERT SELECT column count mismatch");
     }
-    for (const auto& row : source.rows) {
-      if (row.size() != source.schema.fields.size()) {
-        throw SQLSemanticError("INSERT SELECT column count mismatch");
-      }
-      Row outRow(target.schema.fields.size());
-      for (std::size_t i = 0; i < target.schema.fields.size(); ++i) {
-        outRow[i] = row[i];
-      }
-      out.rows.push_back(std::move(outRow));
+    std::vector<std::size_t> indices(source.schema.fields.size());
+    for (std::size_t i = 0; i < indices.size(); ++i) {
+      indices[i] = i;
     }
-    return out;
+    return projectTable(source, indices, target.schema.fields, false);
   }
 
   std::unordered_set<std::string> targetCols;
@@ -251,16 +279,22 @@ Table normalizeInsertSelect(const Table& target, const std::vector<std::string>&
     }
     targetIndices.push_back(findNameIndex(target.schema, col));
   }
-  for (const auto& row : source.rows) {
-    if (row.size() != source.schema.fields.size()) {
-      throw SQLSemanticError("INSERT SELECT column count mismatch");
-    }
-    Row outRow(target.schema.fields.size());
-    for (std::size_t i = 0; i < columns.size(); ++i) {
-      outRow[targetIndices[i]] = row[i];
-    }
-    out.rows.push_back(std::move(outRow));
+  const auto row_count = source.rowCount();
+  auto cache = makeInsertColumnarCache(target.schema, row_count);
+  std::vector<int64_t> source_by_target(target.schema.fields.size(), -1);
+  for (std::size_t i = 0; i < targetIndices.size(); ++i) {
+    source_by_target[targetIndices[i]] = static_cast<int64_t>(i);
   }
+  for (std::size_t target_index = 0; target_index < target.schema.fields.size(); ++target_index) {
+    const auto source_index = source_by_target[target_index];
+    if (source_index < 0) {
+      cache->columns[target_index].values.resize(row_count);
+      continue;
+    }
+    cache->columns[target_index] =
+        materializeValueColumn(source, static_cast<std::size_t>(source_index));
+  }
+  out.columnar_cache = std::move(cache);
   return out;
 }
 
@@ -269,16 +303,16 @@ DataFrame executeInsert(ViewCatalog& catalog, const sql::InsertStmt& stmt) {
     throwTableKindViolation("INSERT INTO is not allowed on SOURCE TABLE: " + stmt.table);
   }
   DataFrame& view = catalog.getViewMutable(stmt.table);
-  Table target = view.toTable();
+  const Table& target = view.materializedTable();
   Table toInsert;
   if (stmt.select_from) {
     sql::SqlPlanner planner;
-    toInsert = planner.plan(stmt.query, catalog).toTable();
+    toInsert = planner.plan(stmt.query, catalog).materializedTable();
     toInsert = normalizeInsertSelect(target, stmt.columns, toInsert);
   } else {
     toInsert = normalizeInsertValues(target, stmt.columns, stmt.values);
   }
-  auto rows = toInsert.rows.size();
+  auto rows = toInsert.rowCount();
   if (rows == 0) {
     return dmlResult("insert ignored: empty input", 0);
   }

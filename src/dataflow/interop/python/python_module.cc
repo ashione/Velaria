@@ -944,7 +944,11 @@ std::vector<PreparedArrowColumn> prepareArrowColumns(const df::ColumnarTable& ca
     }
     df::ValueColumnBuffer materialized_column;
     if (column.values.empty()) {
-      materialized_column.values = df::materializeValueBuffer(&column);
+      const auto row_count = df::valueColumnRowCount(column);
+      materialized_column.values.reserve(row_count);
+      for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+        materialized_column.values.push_back(df::valueColumnValueAt(column, row_index));
+      }
     }
     const auto& source_column = materialized_column.values.empty() ? column : materialized_column;
     if (item.format == "b") {

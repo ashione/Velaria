@@ -31,6 +31,7 @@ NumericSelectionResult scalarSelectDouble(const double* values, const uint8_t* i
                                           NumericCompareOp op, std::size_t max_selected) {
   NumericSelectionResult out;
   out.selected.assign(row_count, 0);
+  out.indices.reserve(row_count);
   const bool bounded = max_selected != 0;
   for (std::size_t i = 0; i < row_count; ++i) {
     if (is_null != nullptr && is_null[i] != 0) {
@@ -40,6 +41,7 @@ NumericSelectionResult scalarSelectDouble(const double* values, const uint8_t* i
       continue;
     }
     out.selected[i] = 1;
+    out.indices.push_back(i);
     ++out.selected_count;
     if (bounded && out.selected_count >= max_selected) {
       break;

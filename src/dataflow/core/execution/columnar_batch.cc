@@ -76,10 +76,7 @@ std::shared_ptr<void> copySelectedArrowBitmap(const uint8_t* input_bitmap,
   auto* output = static_cast<uint8_t*>(output_bitmap.get());
   std::memset(output, 0, output_bytes);
   std::size_t out_index = 0;
-  for (std::size_t row_index = 0; row_index < selection.selected.size(); ++row_index) {
-    if (selection.selected[row_index] == 0) {
-      continue;
-    }
+  for (const auto row_index : selection.indices) {
     arrowBitmapSetValue(output, out_index, arrowBitmapHasValue(input_bitmap, row_index));
     ++out_index;
   }
@@ -95,10 +92,7 @@ std::shared_ptr<void> copySelectedArrowValues(const T* input_values,
   auto output_values = allocateArrowArray<T>(selection.selected_count);
   auto* output = static_cast<T*>(output_values.get());
   std::size_t out_index = 0;
-  for (std::size_t row_index = 0; row_index < selection.selected.size(); ++row_index) {
-    if (selection.selected[row_index] == 0) {
-      continue;
-    }
+  for (const auto row_index : selection.indices) {
     output[out_index++] = input_values[row_index];
   }
   return output_values;
@@ -122,10 +116,7 @@ ValueColumnBuffer copySelectedArrowStringColumn(const ArrowColumnBacking& backin
 
   std::size_t total_bytes = 0;
   std::size_t out_index = 0;
-  for (std::size_t row_index = 0; row_index < selection.selected.size(); ++row_index) {
-    if (selection.selected[row_index] == 0) {
-      continue;
-    }
+  for (const auto row_index : selection.indices) {
     const auto begin = static_cast<std::size_t>(input_offsets[row_index]);
     const auto end = static_cast<std::size_t>(input_offsets[row_index + 1]);
     total_bytes += (end - begin);
@@ -135,10 +126,7 @@ ValueColumnBuffer copySelectedArrowStringColumn(const ArrowColumnBacking& backin
   auto values = allocateArrowArray<char>(total_bytes);
   auto* output_data = static_cast<char*>(values.get());
   std::size_t data_offset = 0;
-  for (std::size_t row_index = 0; row_index < selection.selected.size(); ++row_index) {
-    if (selection.selected[row_index] == 0) {
-      continue;
-    }
+  for (const auto row_index : selection.indices) {
     const auto begin = static_cast<std::size_t>(input_offsets[row_index]);
     const auto end = static_cast<std::size_t>(input_offsets[row_index + 1]);
     const auto size = end - begin;
@@ -181,10 +169,7 @@ ValueColumnBuffer copySelectedArrowFixedVectorColumn(const ArrowColumnBacking& b
   const auto* input = static_cast<const float*>(backing.child_value_buffer.get());
   const auto width = static_cast<std::size_t>(std::max(backing.fixed_list_size, 0));
   std::size_t out_index = 0;
-  for (std::size_t row_index = 0; row_index < selection.selected.size(); ++row_index) {
-    if (selection.selected[row_index] == 0) {
-      continue;
-    }
+  for (const auto row_index : selection.indices) {
     if (width > 0) {
       std::memcpy(output + out_index * width, input + row_index * width, sizeof(float) * width);
     }
@@ -232,10 +217,7 @@ ValueColumnBuffer copySelectedArrowColumn(const ValueColumnBuffer& input_column,
       std::memset(output, 0, output_bytes);
       const auto* input = static_cast<const uint8_t*>(backing.value_buffer.get());
       std::size_t out_index = 0;
-      for (std::size_t row_index = 0; row_index < selection.selected.size(); ++row_index) {
-        if (selection.selected[row_index] == 0) {
-          continue;
-        }
+      for (const auto row_index : selection.indices) {
         arrowBitmapSetValue(
             output, out_index,
             ((input[row_index >> 3] >> (row_index & 7)) & 0x01u) != 0);
@@ -411,18 +393,49 @@ std::shared_ptr<void> copyArrowPrefixValues(const T* input_values, std::size_t r
   return output_values;
 }
 
-ValueColumnBuffer sliceArrowPrefixColumn(const ValueColumnBuffer& input_column,
+std::size_t countArrowNullsPrefix(const ArrowColumnBacking& backing, std::size_t row_count) {
+  if (backing.null_bitmap == nullptr || row_count == 0) {
+    return 0;
+  }
+  std::size_t null_count = 0;
+  const auto* bitmap = static_cast<const uint8_t*>(backing.null_bitmap.get());
+  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+    null_count += arrowBitmapHasValue(bitmap, row_index) ? 0 : 1;
+  }
+  return null_count;
+}
+
+ValueColumnBuffer shareArrowPrefixColumn(const ValueColumnBuffer& input_column,
                                          std::size_t row_count) {
   if (input_column.arrow_backing == nullptr || !input_column.values.empty()) {
     return {};
   }
   const auto& backing = *input_column.arrow_backing;
-  RowSelection prefix;
-  prefix.selected.assign(backing.length, static_cast<uint8_t>(0));
-  prefix.selected_count = std::min<std::size_t>(row_count, backing.length);
-  std::fill(prefix.selected.begin(), prefix.selected.begin() + prefix.selected_count,
-            static_cast<uint8_t>(1));
-  return copySelectedArrowColumn(input_column, prefix);
+  const auto shared_length = std::min<std::size_t>(row_count, backing.length);
+  if (shared_length == 0) {
+    return ValueColumnBuffer{{}, std::make_shared<ArrowColumnBacking>(ArrowColumnBacking{
+                                         backing.format,
+                                         backing.child_format,
+                                         backing.null_bitmap,
+                                         backing.value_buffer,
+                                         backing.extra_buffer,
+                                         backing.child_value_buffer,
+                                         backing.fixed_list_size,
+                                         0,
+                                         0,
+                                         0})};
+  }
+  if (shared_length == backing.length) {
+    return input_column;
+  }
+  auto output_backing = std::make_shared<ArrowColumnBacking>(backing);
+  output_backing->length = shared_length;
+  output_backing->null_count = static_cast<int64_t>(countArrowNullsPrefix(backing, shared_length));
+  if (backing.format.rfind("+w:", 0) == 0) {
+    output_backing->child_length =
+        shared_length * static_cast<std::size_t>(std::max(backing.fixed_list_size, 0));
+  }
+  return ValueColumnBuffer{{}, std::move(output_backing)};
 }
 
 [[maybe_unused]] int64_t valueAsInt64(const Value& value) {
@@ -1070,6 +1083,7 @@ std::vector<std::string> materializeSerializedKeys(const Table& table,
 std::unordered_map<std::string, std::vector<std::size_t>> buildHashBuckets(
     const std::vector<std::string>& keys) {
   std::unordered_map<std::string, std::vector<std::size_t>> buckets;
+  buckets.reserve(keys.size());
   for (std::size_t row_index = 0; row_index < keys.size(); ++row_index) {
     buckets[keys[row_index]].push_back(row_index);
   }
@@ -1080,12 +1094,15 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
                                        bool (*pred)(const Value& lhs, const Value& rhs)) {
   RowSelection out;
   const auto row_count = valueColumnRowCount(input);
+  out.input_row_count = row_count;
   out.selected.assign(row_count, 0);
+  out.indices.reserve(row_count);
   for (std::size_t i = 0; i < row_count; ++i) {
     if (!pred(valueColumnValueAt(input, i), rhs)) {
       continue;
     }
     out.selected[i] = 1;
+    out.indices.push_back(i);
     ++out.selected_count;
   }
   return out;
@@ -1111,7 +1128,9 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
   const auto parsed_op = parseCompareOp(op);
   RowSelection out;
   const auto row_count = valueColumnRowCount(input);
+  out.input_row_count = row_count;
   out.selected.assign(row_count, 0);
+  out.indices.reserve(row_count);
   const bool bounded = max_selected != 0;
 
   if (!input.values.empty()) {
@@ -1126,6 +1145,7 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
           continue;
         }
         out.selected[i] = 1;
+        out.indices.push_back(i);
         ++out.selected_count;
         if (bounded && out.selected_count >= max_selected) {
           break;
@@ -1144,6 +1164,7 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
           continue;
         }
         out.selected[i] = 1;
+        out.indices.push_back(i);
         ++out.selected_count;
         if (bounded && out.selected_count >= max_selected) {
           break;
@@ -1160,6 +1181,7 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
         continue;
       }
       out.selected[i] = 1;
+      out.indices.push_back(i);
       ++out.selected_count;
       if (bounded && out.selected_count >= max_selected) {
         break;
@@ -1179,6 +1201,7 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
         continue;
       }
       out.selected[i] = 1;
+      out.indices.push_back(i);
       ++out.selected_count;
       if (bounded && out.selected_count >= max_selected) {
         break;
@@ -1210,6 +1233,7 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
             numeric.values.data(), numeric.is_null.data(), row_count, rhs.asDouble(),
             toNumericCompareOp(op), max_selected);
         out.selected = std::move(selected.selected);
+        out.indices = std::move(selected.indices);
         out.selected_count = selected.selected_count;
         return out;
       }
@@ -1224,6 +1248,7 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
       continue;
     }
     out.selected[i] = 1;
+    out.indices.push_back(i);
     ++out.selected_count;
     if (bounded && out.selected_count >= max_selected) {
       break;
@@ -1298,7 +1323,9 @@ Table projectTable(const Table& table, const std::vector<std::size_t>& indices,
 }
 
 Table filterTable(const Table& table, const RowSelection& selection, bool materialize_rows) {
-  if (selection.selected.size() != table.rowCount()) {
+  const auto input_row_count =
+      selection.input_row_count != 0 ? selection.input_row_count : selection.selected.size();
+  if (input_row_count != table.rowCount()) {
     throw std::runtime_error("selection size mismatch");
   }
   Table out(table.schema, {});
@@ -1315,11 +1342,8 @@ Table filterTable(const Table& table, const RowSelection& selection, bool materi
       ValueColumnBuffer output_column = copySelectedArrowColumn(input_column, selection);
       if (output_column.arrow_backing == nullptr) {
         output_column.values.reserve(selection.selected_count);
-        const auto row_count = valueColumnRowCount(input_column);
-        for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
-          if (selection.selected[row_index] != 0) {
-            output_column.values.push_back(valueColumnValueAt(input_column, row_index));
-          }
+        for (const auto row_index : selection.indices) {
+          output_column.values.push_back(valueColumnValueAt(input_column, row_index));
         }
       }
       cache->columns.push_back(std::move(output_column));
@@ -1327,10 +1351,7 @@ Table filterTable(const Table& table, const RowSelection& selection, bool materi
     out.columnar_cache = std::move(cache);
     if (materialize_rows) {
       out.rows.reserve(selection.selected_count);
-      for (std::size_t row_index = 0; row_index < selection.selected.size(); ++row_index) {
-        if (selection.selected[row_index] == 0) {
-          continue;
-        }
+      for (const auto row_index : selection.indices) {
         Row row;
         row.reserve(cache_in->columns.size());
         for (const auto& input_column : cache_in->columns) {
@@ -1341,10 +1362,7 @@ Table filterTable(const Table& table, const RowSelection& selection, bool materi
     }
   } else {
     out.rows.reserve(selection.selected_count);
-    for (std::size_t row_index = 0; row_index < table.rows.size(); ++row_index) {
-      if (selection.selected[row_index] == 0) {
-        continue;
-      }
+    for (const auto row_index : selection.indices) {
       out.rows.push_back(table.rows[row_index]);
     }
   }
@@ -1364,7 +1382,7 @@ Table limitTable(const Table& table, std::size_t limit, bool materialize_rows) {
       cache->batch_row_counts.push_back(row_count);
     }
     for (const auto& input_column : cache_in->columns) {
-      ValueColumnBuffer output_column = sliceArrowPrefixColumn(input_column, row_count);
+      ValueColumnBuffer output_column = shareArrowPrefixColumn(input_column, row_count);
       if (output_column.arrow_backing == nullptr) {
         output_column.values.reserve(row_count);
         for (std::size_t row_index = 0; row_index < row_count; ++row_index) {

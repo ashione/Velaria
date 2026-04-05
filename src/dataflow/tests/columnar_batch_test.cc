@@ -231,6 +231,19 @@ int main() {
          "materializeRows should not force boxed value cache for arrow-backed int column");
   expect(arrow_lazy.columnar_cache->columns[1].values.empty(),
          "materializeRows should not force boxed value cache for arrow-backed string column");
+  const auto arrow_limited = dataflow::limitTable(arrow_lazy, 1, false);
+  expect(arrow_limited.columnar_cache != nullptr, "arrow limit should preserve columnar cache");
+  expect(arrow_limited.columnar_cache->columns[0].arrow_backing != nullptr,
+         "arrow limit should preserve arrow backing");
+  expect(arrow_limited.columnar_cache->columns[0].arrow_backing->value_buffer.get() ==
+             arrow_lazy.columnar_cache->columns[0].arrow_backing->value_buffer.get(),
+         "arrow limit should zero-copy share numeric value buffer");
+  expect(arrow_limited.columnar_cache->columns[1].arrow_backing->value_buffer.get() ==
+             arrow_lazy.columnar_cache->columns[1].arrow_backing->value_buffer.get(),
+         "arrow limit should zero-copy share string offsets buffer");
+  expect(arrow_limited.columnar_cache->columns[1].arrow_backing->extra_buffer.get() ==
+             arrow_lazy.columnar_cache->columns[1].arrow_backing->extra_buffer.get(),
+         "arrow limit should zero-copy share string data buffer");
 
   return 0;
 }

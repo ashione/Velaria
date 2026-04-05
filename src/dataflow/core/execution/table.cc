@@ -26,9 +26,7 @@ bool Schema::has(const std::string& col) const {
 
 Table::Table(const Table& other) : schema(other.schema), rows(other.rows) {
   std::lock_guard<std::mutex> lock(other.columnar_cache_mu);
-  if (other.columnar_cache) {
-    columnar_cache = std::make_shared<ColumnarTable>(*other.columnar_cache);
-  }
+  columnar_cache = other.columnar_cache;
 }
 
 Table& Table::operator=(const Table& other) {
@@ -38,11 +36,7 @@ Table& Table::operator=(const Table& other) {
   std::lock_guard<std::mutex> lock(other.columnar_cache_mu);
   schema = other.schema;
   rows = other.rows;
-  if (other.columnar_cache) {
-    columnar_cache = std::make_shared<ColumnarTable>(*other.columnar_cache);
-  } else {
-    columnar_cache.reset();
-  }
+  columnar_cache = other.columnar_cache;
   return *this;
 }
 

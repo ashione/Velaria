@@ -60,7 +60,9 @@ struct ValueColumnView {
 };
 
 struct RowSelection {
+  std::size_t input_row_count = 0;
   std::vector<uint8_t> selected;
+  std::vector<std::size_t> indices;
   std::size_t selected_count = 0;
 };
 

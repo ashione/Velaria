@@ -6,16 +6,26 @@
 
 namespace dataflow {
 
+struct Table;
+
 struct FilterChainPattern {
   PlanNodePtr base_child;
   std::vector<const FilterPlan*> filters;
 };
 
 enum class AggregateExecutionShape {
-  Generic = 0,
-  SumNoKey = 1,
-  SumSingleInt64Key = 2,
-  SumDoubleInt64Key = 3,
+  GenericSerializedKeys = 0,
+  GenericNoKey = 1,
+  GenericSingleStringKey = 2,
+  GenericSingleInt64Key = 3,
+  GenericDoubleInt64Key = 4,
+  SumNoKey = 5,
+  SumSingleInt64Key = 6,
+  SumDoubleInt64Key = 7,
+};
+
+struct AggregateExecutionPattern {
+  AggregateExecutionShape shape = AggregateExecutionShape::GenericSerializedKeys;
 };
 
 struct LimitExecutionPattern {
@@ -27,7 +37,8 @@ struct LimitExecutionPattern {
 
 FilterChainPattern analyzeFilterChain(const PlanNodePtr& plan);
 LimitExecutionPattern analyzeLimitExecution(const LimitPlan& plan);
-AggregateExecutionShape analyzeAggregateExecutionShape(
+AggregateExecutionPattern analyzeAggregateExecution(
+    const Table& input,
     const std::vector<std::size_t>& key_indices,
     const std::vector<AggregateSpec>& aggregates);
 

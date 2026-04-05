@@ -48,7 +48,7 @@ bazel build //:tpch_q1_style_benchmark
 | Benchmark | 行数 | `simd` | `main` 基线 | 提升 |
 |---|---:|---:|---:|---:|
 | `q18-like-high-card-group-order` | 2,048,000 | `1045 ms` | `2421 ms` | `2.32x` 更快 |
-| `q1` 单进程（`numeric-keys`） | 2,048,000 | `5046 ms` | `7936 ms` | `1.57x` 更快 |
+| `q1` 单进程（`numeric-keys`） | 2,048,000 | `4727 ms` | `7936 ms` | `1.68x` 更快 |
 | `q6-like-scan-filter-sum` | 2,048,000 | `1282 ms` | `5168 ms` | `4.03x` 更快 |
 
 ## String Builtins

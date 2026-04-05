@@ -562,7 +562,9 @@ void DataFrame::show(size_t max_rows) const {
 }
 
 Table DataFrame::toTable() const {
-  return materialize();
+  auto table = materialize();
+  materializeRows(&table);
+  return table;
 }
 
 const Table& DataFrame::materializedTable() const {

@@ -186,7 +186,7 @@ int main() {
              0,
          "limit should push below select and withColumn");
   auto limited_out = limited_df.toTable();
-  dataflow::materializeRows(&limited_out);
+  expect(!limited_out.rows.empty(), "toTable should materialize rows");
   expect(limited_out.rows.size() == 1, "pushed limit query should retain single row");
   expect(limited_out.rows[0][0].toString() == "get", "pushed limit query should preserve value");
 

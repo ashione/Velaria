@@ -3,6 +3,7 @@
 #include "src/dataflow/core/execution/runtime/simd_backend_internal.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <mutex>
@@ -16,8 +17,8 @@ std::mutex& stateMutex() {
   return mu;
 }
 
-const SimdKernelDispatch*& stateDispatch() {
-  static const SimdKernelDispatch* dispatch = nullptr;
+std::atomic<const SimdKernelDispatch*>& stateDispatch() {
+  static std::atomic<const SimdKernelDispatch*> dispatch{nullptr};
   return dispatch;
 }
 
@@ -93,10 +94,16 @@ const char* simdBackendName(SimdBackendKind kind) {
 }
 
 const SimdKernelDispatch& simdDispatch() {
+  const SimdKernelDispatch* dispatch = stateDispatch().load(std::memory_order_acquire);
+  if (dispatch != nullptr) {
+    return *dispatch;
+  }
+
   std::lock_guard<std::mutex> lock(stateMutex());
-  auto& dispatch = stateDispatch();
+  dispatch = stateDispatch().load(std::memory_order_relaxed);
   if (dispatch == nullptr) {
     dispatch = &chooseDispatch();
+    stateDispatch().store(dispatch, std::memory_order_release);
   }
   return *dispatch;
 }
@@ -107,7 +114,7 @@ std::string activeSimdBackendName() {
 
 void resetSimdDispatchForTest() {
   std::lock_guard<std::mutex> lock(stateMutex());
-  stateDispatch() = nullptr;
+  stateDispatch().store(nullptr, std::memory_order_release);
 }
 
 }  // namespace dataflow

@@ -48,7 +48,7 @@ Measured `main` comparison snapshot:
 | Benchmark | Rows | `simd` | `main` baseline | Delta |
 |---|---:|---:|---:|---:|
 | `q18-like-high-card-group-order` | 2,048,000 | `1045 ms` | `2421 ms` | `2.32x` faster |
-| `q1` single-process (`numeric-keys`) | 2,048,000 | `5046 ms` | `7936 ms` | `1.57x` faster |
+| `q1` single-process (`numeric-keys`) | 2,048,000 | `4727 ms` | `7936 ms` | `1.68x` faster |
 | `q6-like-scan-filter-sum` | 2,048,000 | `1282 ms` | `5168 ms` | `4.03x` faster |
 
 ## String Builtins

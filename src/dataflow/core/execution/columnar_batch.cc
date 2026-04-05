@@ -1,9 +1,11 @@
 #include "src/dataflow/core/execution/columnar_batch.h"
 
 #include <algorithm>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <span>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
@@ -65,6 +67,34 @@ void arrowBitmapSetValue(uint8_t* bitmap, std::size_t index, bool valid) {
     return;
   }
   bitmap[index >> 3] |= static_cast<uint8_t>(1u << (index & 7));
+}
+
+std::size_t countBitmapValidBits(std::span<const uint8_t> bitmap, std::size_t bit_count) {
+  if (bitmap.empty() || bit_count == 0) {
+    return 0;
+  }
+  const std::size_t full_bytes = bit_count / 8;
+  const std::size_t remaining_bits = bit_count % 8;
+  std::size_t set_bits = 0;
+  for (std::size_t index = 0; index < full_bytes; ++index) {
+    set_bits += static_cast<std::size_t>(std::popcount(static_cast<unsigned int>(bitmap[index])));
+  }
+  if (remaining_bits != 0) {
+    const auto mask = static_cast<uint8_t>((1u << remaining_bits) - 1u);
+    set_bits += static_cast<std::size_t>(
+        std::popcount(static_cast<unsigned int>(bitmap[full_bytes] & mask)));
+  }
+  return set_bits;
+}
+
+int64_t countBitmapNulls(const std::shared_ptr<void>& bitmap, std::size_t bit_count) {
+  if (bitmap == nullptr || bit_count == 0) {
+    return 0;
+  }
+  const auto byte_count = (bit_count + 7) / 8;
+  const auto* bits = static_cast<const uint8_t*>(bitmap.get());
+  const auto valid_bits = countBitmapValidBits(std::span<const uint8_t>(bits, byte_count), bit_count);
+  return static_cast<int64_t>(bit_count - valid_bits);
 }
 
 std::shared_ptr<void> copySelectedArrowBitmap(const uint8_t* input_bitmap,
@@ -139,14 +169,8 @@ ValueColumnBuffer copySelectedArrowStringColumn(const ArrowColumnBacking& backin
 
   output_backing->value_buffer = std::move(offsets);
   output_backing->extra_buffer = std::move(values);
-  output_backing->null_count = 0;
-  if (output_backing->null_bitmap != nullptr) {
-    for (std::size_t i = 0; i < selection.selected_count; ++i) {
-      if (!arrowBitmapHasValue(static_cast<const uint8_t*>(output_backing->null_bitmap.get()), i)) {
-        ++output_backing->null_count;
-      }
-    }
-  }
+  output_backing->null_count =
+      countBitmapNulls(output_backing->null_bitmap, selection.selected_count);
   output_column.arrow_backing = std::move(output_backing);
   return output_column;
 }
@@ -177,14 +201,8 @@ ValueColumnBuffer copySelectedArrowFixedVectorColumn(const ArrowColumnBacking& b
     ++out_index;
   }
   output_backing->child_value_buffer = std::move(child_values);
-  output_backing->null_count = 0;
-  if (output_backing->null_bitmap != nullptr) {
-    for (std::size_t i = 0; i < selection.selected_count; ++i) {
-      if (!arrowBitmapHasValue(static_cast<const uint8_t*>(output_backing->null_bitmap.get()), i)) {
-        ++output_backing->null_count;
-      }
-    }
-  }
+  output_backing->null_count =
+      countBitmapNulls(output_backing->null_bitmap, selection.selected_count);
   output_column.arrow_backing = std::move(output_backing);
   return output_column;
 }
@@ -225,15 +243,8 @@ ValueColumnBuffer copySelectedArrowColumn(const ValueColumnBuffer& input_column,
         ++out_index;
       }
       output_backing->value_buffer = std::move(output_values);
-      output_backing->null_count = 0;
-      if (output_backing->null_bitmap != nullptr) {
-        for (std::size_t i = 0; i < selection.selected_count; ++i) {
-          if (!arrowBitmapHasValue(static_cast<const uint8_t*>(output_backing->null_bitmap.get()),
-                                   i)) {
-            ++output_backing->null_count;
-          }
-        }
-      }
+      output_backing->null_count =
+          countBitmapNulls(output_backing->null_bitmap, selection.selected_count);
       output_column.arrow_backing = std::move(output_backing);
       return output_column;
     }
@@ -248,15 +259,8 @@ ValueColumnBuffer copySelectedArrowColumn(const ValueColumnBuffer& input_column,
                 static_cast<const uint8_t*>(backing.null_bitmap.get()), selection);
             output_backing->value_buffer = copySelectedArrowValues(
                 static_cast<const int32_t*>(backing.value_buffer.get()), selection);
-            output_backing->null_count = 0;
-            if (output_backing->null_bitmap != nullptr) {
-              for (std::size_t i = 0; i < selection.selected_count; ++i) {
-                if (!arrowBitmapHasValue(
-                        static_cast<const uint8_t*>(output_backing->null_bitmap.get()), i)) {
-                  ++output_backing->null_count;
-                }
-              }
-            }
+            output_backing->null_count =
+                countBitmapNulls(output_backing->null_bitmap, selection.selected_count);
             return std::shared_ptr<const ArrowColumnBacking>(std::move(output_backing));
           }()};
     case 'I':
@@ -270,15 +274,8 @@ ValueColumnBuffer copySelectedArrowColumn(const ValueColumnBuffer& input_column,
                 static_cast<const uint8_t*>(backing.null_bitmap.get()), selection);
             output_backing->value_buffer = copySelectedArrowValues(
                 static_cast<const uint32_t*>(backing.value_buffer.get()), selection);
-            output_backing->null_count = 0;
-            if (output_backing->null_bitmap != nullptr) {
-              for (std::size_t i = 0; i < selection.selected_count; ++i) {
-                if (!arrowBitmapHasValue(
-                        static_cast<const uint8_t*>(output_backing->null_bitmap.get()), i)) {
-                  ++output_backing->null_count;
-                }
-              }
-            }
+            output_backing->null_count =
+                countBitmapNulls(output_backing->null_bitmap, selection.selected_count);
             return std::shared_ptr<const ArrowColumnBacking>(std::move(output_backing));
           }()};
     case 'l':
@@ -292,15 +289,8 @@ ValueColumnBuffer copySelectedArrowColumn(const ValueColumnBuffer& input_column,
                 static_cast<const uint8_t*>(backing.null_bitmap.get()), selection);
             output_backing->value_buffer = copySelectedArrowValues(
                 static_cast<const int64_t*>(backing.value_buffer.get()), selection);
-            output_backing->null_count = 0;
-            if (output_backing->null_bitmap != nullptr) {
-              for (std::size_t i = 0; i < selection.selected_count; ++i) {
-                if (!arrowBitmapHasValue(
-                        static_cast<const uint8_t*>(output_backing->null_bitmap.get()), i)) {
-                  ++output_backing->null_count;
-                }
-              }
-            }
+            output_backing->null_count =
+                countBitmapNulls(output_backing->null_bitmap, selection.selected_count);
             return std::shared_ptr<const ArrowColumnBacking>(std::move(output_backing));
           }()};
     case 'L':
@@ -314,15 +304,8 @@ ValueColumnBuffer copySelectedArrowColumn(const ValueColumnBuffer& input_column,
                 static_cast<const uint8_t*>(backing.null_bitmap.get()), selection);
             output_backing->value_buffer = copySelectedArrowValues(
                 static_cast<const uint64_t*>(backing.value_buffer.get()), selection);
-            output_backing->null_count = 0;
-            if (output_backing->null_bitmap != nullptr) {
-              for (std::size_t i = 0; i < selection.selected_count; ++i) {
-                if (!arrowBitmapHasValue(
-                        static_cast<const uint8_t*>(output_backing->null_bitmap.get()), i)) {
-                  ++output_backing->null_count;
-                }
-              }
-            }
+            output_backing->null_count =
+                countBitmapNulls(output_backing->null_bitmap, selection.selected_count);
             return std::shared_ptr<const ArrowColumnBacking>(std::move(output_backing));
           }()};
     case 'f':
@@ -336,15 +319,8 @@ ValueColumnBuffer copySelectedArrowColumn(const ValueColumnBuffer& input_column,
                 static_cast<const uint8_t*>(backing.null_bitmap.get()), selection);
             output_backing->value_buffer = copySelectedArrowValues(
                 static_cast<const float*>(backing.value_buffer.get()), selection);
-            output_backing->null_count = 0;
-            if (output_backing->null_bitmap != nullptr) {
-              for (std::size_t i = 0; i < selection.selected_count; ++i) {
-                if (!arrowBitmapHasValue(
-                        static_cast<const uint8_t*>(output_backing->null_bitmap.get()), i)) {
-                  ++output_backing->null_count;
-                }
-              }
-            }
+            output_backing->null_count =
+                countBitmapNulls(output_backing->null_bitmap, selection.selected_count);
             return std::shared_ptr<const ArrowColumnBacking>(std::move(output_backing));
           }()};
     case 'g':
@@ -358,15 +334,8 @@ ValueColumnBuffer copySelectedArrowColumn(const ValueColumnBuffer& input_column,
                 static_cast<const uint8_t*>(backing.null_bitmap.get()), selection);
             output_backing->value_buffer = copySelectedArrowValues(
                 static_cast<const double*>(backing.value_buffer.get()), selection);
-            output_backing->null_count = 0;
-            if (output_backing->null_bitmap != nullptr) {
-              for (std::size_t i = 0; i < selection.selected_count; ++i) {
-                if (!arrowBitmapHasValue(
-                        static_cast<const uint8_t*>(output_backing->null_bitmap.get()), i)) {
-                  ++output_backing->null_count;
-                }
-              }
-            }
+            output_backing->null_count =
+                countBitmapNulls(output_backing->null_bitmap, selection.selected_count);
             return std::shared_ptr<const ArrowColumnBacking>(std::move(output_backing));
           }()};
     case 'u':
@@ -395,15 +364,7 @@ std::shared_ptr<void> copyArrowPrefixValues(const T* input_values, std::size_t r
 }
 
 std::size_t countArrowNullsPrefix(const ArrowColumnBacking& backing, std::size_t row_count) {
-  if (backing.null_bitmap == nullptr || row_count == 0) {
-    return 0;
-  }
-  std::size_t null_count = 0;
-  const auto* bitmap = static_cast<const uint8_t*>(backing.null_bitmap.get());
-  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
-    null_count += arrowBitmapHasValue(bitmap, row_index) ? 0 : 1;
-  }
-  return null_count;
+  return static_cast<std::size_t>(countBitmapNulls(backing.null_bitmap, row_count));
 }
 
 ValueColumnBuffer shareArrowPrefixColumn(const ValueColumnBuffer& input_column,

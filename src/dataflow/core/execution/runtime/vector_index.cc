@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <queue>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 
@@ -16,6 +17,21 @@ constexpr double kCosineDistanceForZeroNorm = 1.0;
 constexpr std::size_t kMinimumTopK = 1;
 constexpr char kExplainModeExactScan[] = "exact-scan";
 constexpr char kExplainAccelerationSimdTopK[] = "flat-buffer+simd-topk";
+
+std::span<const float> rowVector(std::span<const float> data, std::size_t row,
+                                 std::size_t dimension) {
+  return data.subspan(row * dimension, dimension);
+}
+
+double dotProduct(const SimdKernelDispatch& dispatch, std::span<const float> lhs,
+                  std::span<const float> rhs) {
+  return dispatch.dot_f32(lhs.data(), rhs.data(), lhs.size());
+}
+
+double squaredL2(const SimdKernelDispatch& dispatch, std::span<const float> lhs,
+                 std::span<const float> rhs) {
+  return dispatch.squared_l2_f32(lhs.data(), rhs.data(), lhs.size());
+}
 
 const char* metricName(VectorSearchMetric metric) {
   switch (metric) {
@@ -41,13 +57,15 @@ class ExactScanVectorIndex : public VectorIndex {
     }
     data_.resize(row_count_ * dimension_);
     norms_.resize(row_count_, 0.0);
+    const auto& dispatch = simdDispatch();
+    const std::span<const float> data_span(data_.data(), data_.size());
     for (std::size_t row = 0; row < row_count_; ++row) {
       for (std::size_t col = 0; col < dimension_; ++col) {
         const float v = vectors[row][col];
         data_[row * dimension_ + col] = v;
       }
-      const float* base = data_.data() + row * dimension_;
-      norms_[row] = std::sqrt(simdDispatch().dot_f32(base, base, dimension_));
+      const auto base = rowVector(data_span, row, dimension_);
+      norms_[row] = std::sqrt(dotProduct(dispatch, base, base));
     }
   }
 
@@ -62,6 +80,9 @@ class ExactScanVectorIndex : public VectorIndex {
     }
 
     const std::size_t k = std::max<std::size_t>(kMinimumTopK, options.top_k);
+    const auto& dispatch = simdDispatch();
+    const std::span<const float> data_span(data_.data(), data_.size());
+    const std::span<const float> query_span(query.data(), query.size());
     auto cmp_max = [](const VectorSearchResult& lhs, const VectorSearchResult& rhs) {
       return lhs.score < rhs.score;
     };
@@ -76,8 +97,8 @@ class ExactScanVectorIndex : public VectorIndex {
       std::priority_queue<VectorSearchResult, std::vector<VectorSearchResult>, decltype(cmp_min)>
           min_heap(cmp_min, std::move(heap_storage));
       for (std::size_t row = 0; row < row_count_; ++row) {
-        const float* base = data_.data() + row * dimension_;
-        const double dot = simdDispatch().dot_f32(base, query.data(), dimension_);
+        const auto base = rowVector(data_span, row, dimension_);
+        const double dot = dotProduct(dispatch, base, query_span);
         VectorSearchResult current{row, dot};
         if (min_heap.size() < k) {
           min_heap.push(current);
@@ -103,8 +124,8 @@ class ExactScanVectorIndex : public VectorIndex {
         max_heap(cmp_max, std::move(heap_storage));
     if (options.metric == VectorSearchMetric::L2) {
       for (std::size_t row = 0; row < row_count_; ++row) {
-        const float* base = data_.data() + row * dimension_;
-        const double squared_l2 = simdDispatch().squared_l2_f32(base, query.data(), dimension_);
+        const auto base = rowVector(data_span, row, dimension_);
+        const double squared_l2 = squaredL2(dispatch, base, query_span);
         VectorSearchResult current{row, squared_l2};
         if (max_heap.size() < k) {
           max_heap.push(current);
@@ -127,10 +148,10 @@ class ExactScanVectorIndex : public VectorIndex {
       return scored;
     }
 
-    const double query_norm = std::sqrt(simdDispatch().dot_f32(query.data(), query.data(), dimension_));
+    const double query_norm = std::sqrt(dotProduct(dispatch, query_span, query_span));
     for (std::size_t row = 0; row < row_count_; ++row) {
-      const float* base = data_.data() + row * dimension_;
-      const double dot = simdDispatch().dot_f32(base, query.data(), dimension_);
+      const auto base = rowVector(data_span, row, dimension_);
+      const double dot = dotProduct(dispatch, base, query_span);
       const double denom = norms_[row] * query_norm;
       const double cosine_distance =
           denom == 0.0

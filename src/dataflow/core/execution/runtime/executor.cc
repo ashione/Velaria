@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -25,34 +26,62 @@ namespace {
 
 constexpr char kGroupDelim = '\x1f';
 
-bool matchesFilterCompareOp(int compare_result, const std::string& op) {
-  if (op == "=" || op == "==") return compare_result == 0;
-  if (op == "!=") return compare_result != 0;
-  if (op == "<") return compare_result < 0;
-  if (op == ">") return compare_result > 0;
-  if (op == "<=") return compare_result <= 0;
-  if (op == ">=") return compare_result >= 0;
-  throw std::runtime_error("unsupported filter op: " + op);
+enum class FilterCompareOp : uint8_t { Eq, Ne, Lt, Gt, Le, Ge };
+
+FilterCompareOp parseFilterCompareOp(std::string_view op) {
+  if (op == "=" || op == "==") return FilterCompareOp::Eq;
+  if (op == "!=") return FilterCompareOp::Ne;
+  if (op == "<") return FilterCompareOp::Lt;
+  if (op == ">") return FilterCompareOp::Gt;
+  if (op == "<=") return FilterCompareOp::Le;
+  if (op == ">=") return FilterCompareOp::Ge;
+  throw std::runtime_error("unsupported filter op: " + std::string(op));
 }
+
+bool matchesFilterCompareOp(int compare_result, FilterCompareOp op) {
+  switch (op) {
+    case FilterCompareOp::Eq:
+      return compare_result == 0;
+    case FilterCompareOp::Ne:
+      return compare_result != 0;
+    case FilterCompareOp::Lt:
+      return compare_result < 0;
+    case FilterCompareOp::Gt:
+      return compare_result > 0;
+    case FilterCompareOp::Le:
+      return compare_result <= 0;
+    case FilterCompareOp::Ge:
+      return compare_result >= 0;
+  }
+  return false;
+}
+
+struct BoundFilter {
+  const ValueColumnBuffer* column = nullptr;
+  const Value* rhs = nullptr;
+  FilterCompareOp op = FilterCompareOp::Eq;
+};
 
 template <typename T>
 int compareFilterScalar(const T& lhs, const T& rhs) {
   return lhs < rhs ? -1 : (lhs > rhs ? 1 : 0);
 }
 
-bool rowMatchesFilter(const ValueColumnBuffer& column, std::size_t row_index, const Value& rhs,
-                      const std::string& op) {
+bool rowMatchesFilter(const BoundFilter& filter, std::size_t row_index) {
+  const auto& column = *filter.column;
+  const auto& rhs = *filter.rhs;
+  const auto op = filter.op;
   if (valueColumnIsNullAt(column, row_index)) {
-    if (op == "=" || op == "==") {
+    if (op == FilterCompareOp::Eq) {
       return rhs.isNull();
     }
-    if (op == "!=") {
+    if (op == FilterCompareOp::Ne) {
       return !rhs.isNull();
     }
     return false;
   }
   if (rhs.isNull()) {
-    return op == "!=";
+    return op == FilterCompareOp::Ne;
   }
 
   if (rhs.isNumber()) {
@@ -95,6 +124,15 @@ bool rowMatchesFilter(const ValueColumnBuffer& column, std::size_t row_index, co
   } catch (...) {
     return false;
   }
+}
+
+bool rowMatchesAllFilters(std::span<const BoundFilter> filters, std::size_t row_index) {
+  for (const auto& filter : filters) {
+    if (!rowMatchesFilter(filter, row_index)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 std::vector<std::string> splitKey(const std::string& key) {
@@ -427,22 +465,18 @@ RowSelection combinedFilterSelection(const Table& input, const std::vector<const
   }
   if (filters.size() > 1) {
     std::vector<ValueColumnView> filter_columns;
+    std::vector<BoundFilter> bound_filters;
     filter_columns.reserve(filters.size());
+    bound_filters.reserve(filters.size());
     for (const auto* filter : filters) {
       filter_columns.push_back(viewValueColumn(input, filter->column_index));
+      bound_filters.push_back(
+          BoundFilter{filter_columns.back().buffer, &filter->value, parseFilterCompareOp(filter->op)});
     }
     out.selected.assign(row_count, 0);
     out.selected_count = 0;
     for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
-      bool matches = true;
-      for (std::size_t filter_index = 0; filter_index < filters.size(); ++filter_index) {
-        if (!rowMatchesFilter(*filter_columns[filter_index].buffer, row_index,
-                              filters[filter_index]->value, filters[filter_index]->op)) {
-          matches = false;
-          break;
-        }
-      }
-      if (!matches) {
+      if (!rowMatchesAllFilters(bound_filters, row_index)) {
         continue;
       }
       out.selected[row_index] = 1;

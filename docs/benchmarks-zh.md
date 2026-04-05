@@ -26,6 +26,8 @@ bazel build //:tpch_q1_style_benchmark
 - batch 行数：`500 * 4096 = 2,048,000`
 - `main` 基线是在独立 `main` worktree 上用同一套 benchmark harness 测得
 - benchmark 统一串行执行，避免多进程同时抢占 CPU
+- 本轮 follow-up 数据覆盖了 actor execution optimizer 拆分、C++20 热路径更新（`std::span` / `<bit>`）、枚举化 filter compare，以及 numeric window-key-sum fast path
+- 对重复测量的 batch case，表中使用 3 次串行复测的中位数
 
 ## TPCH-Like Batch Suite
 
@@ -33,23 +35,23 @@ bazel build //:tpch_q1_style_benchmark
 
 | Benchmark | 行数 | 模式 | 耗时 | Rows/s | 说明 |
 |---|---:|---|---:|---:|---|
-| `q1`（`string-keys`） | 2,048,000 | `single-process` | `2858 ms` | `716,585` | `result_rows=6` |
-| `q1`（`string-keys`） | 2,048,000 | `actor-credit` | `2748 ms` | `745,269` | `coord_serialize_ms=2011`，`input_payload_bytes=8,298,000` |
-| `q1`（`string-keys`） | 2,048,000 | `auto-selected` | `1204 ms` | `1,701,000` | 实际选择 `single-process` |
-| `q1`（`numeric-keys`） | 2,048,000 | `single-process` | `4727 ms` | `433,256` | `result_rows=32,896` |
-| `q1`（`numeric-keys`） | 2,048,000 | `actor-credit` | `4696 ms` | `436,116` | `coord_serialize_ms=59`，`coord_merge_ms=14` |
-| `q1`（`numeric-keys`） | 2,048,000 | `auto-selected` | `3369 ms` | `607,896` | 实际选择 `single-process` |
-| `q6-like-scan-filter-sum` | 2,048,000 | `batch` | `1282 ms` | `1,597,500` | `result_rows=1` |
-| `q3-like-join-group-order` | 2,304,000 | `batch` | `5346 ms` | `430,976` | `result_rows=8` |
-| `q18-like-high-card-group-order` | 2,048,000 | `batch` | `1045 ms` | `1,959,810` | `result_rows=100` |
+| `q1`（`string-keys`） | 2,048,000 | `single-process` | `2907 ms` | `704,506` | 3 次复测中位数，`result_rows=6` |
+| `q1`（`string-keys`） | 2,048,000 | `actor-credit` | `2786 ms` | `735,104` | 3 次复测中位数，`coord_serialize_ms≈2.0s` |
+| `q1`（`string-keys`） | 2,048,000 | `auto-selected` | `1334 ms` | `1,535,230` | 3 次复测中位数，实际选择 `single-process` |
+| `q1`（`numeric-keys`） | 2,048,000 | `single-process` | `3228 ms` | `634,449` | 3 次复测中位数，`result_rows=32,896` |
+| `q1`（`numeric-keys`） | 2,048,000 | `actor-credit` | `5405 ms` | `378,908` | 3 次复测中位数，actor transport 仍是主瓶颈 |
+| `q1`（`numeric-keys`） | 2,048,000 | `auto-selected` | `1496 ms` | `1,368,980` | 3 次复测中位数，实际选择 `single-process` |
+| `q6-like-scan-filter-sum` | 2,048,000 | `batch` | `747 ms` | `2,741,630` | 3 次复测中位数，`result_rows=1` |
+| `q3-like-join-group-order` | 2,304,000 | `batch` | `5346 ms` | `430,976` | 沿用上一轮快照，本轮未重跑 |
+| `q18-like-high-card-group-order` | 2,048,000 | `batch` | `1050 ms` | `1,950,480` | 3 次复测中位数，`result_rows=100` |
 
 已测 `main` 对比快照：
 
 | Benchmark | 行数 | `simd` | `main` 基线 | 提升 |
 |---|---:|---:|---:|---:|
-| `q18-like-high-card-group-order` | 2,048,000 | `1045 ms` | `2421 ms` | `2.32x` 更快 |
-| `q1` 单进程（`numeric-keys`） | 2,048,000 | `4727 ms` | `7936 ms` | `1.68x` 更快 |
-| `q6-like-scan-filter-sum` | 2,048,000 | `1282 ms` | `5168 ms` | `4.03x` 更快 |
+| `q18-like-high-card-group-order` | 2,048,000 | `1050 ms` | `2421 ms` | `2.31x` 更快 |
+| `q1` 单进程（`numeric-keys`） | 2,048,000 | `3228 ms` | `7936 ms` | `2.46x` 更快 |
+| `q6-like-scan-filter-sum` | 2,048,000 | `747 ms` | `5168 ms` | `6.92x` 更快 |
 
 ## String Builtins
 

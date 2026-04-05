@@ -26,6 +26,8 @@ bazel build //:tpch_q1_style_benchmark
 - Batch rows: `500 * 4096 = 2,048,000`
 - `main` baselines were measured with the same benchmark harness in a separate `main` worktree
 - Benchmarks were run serially to avoid cross-process CPU contention
+- Latest follow-up numbers below include the actor execution optimizer split, C++20 hot-path updates (`std::span` / `<bit>`), enum-bound filter comparisons, and the numeric window-key-sum fast path
+- For rerun-heavy batch cases, the table uses the median of three serial runs
 
 ## TPCH-Like Batch Suite
 
@@ -33,23 +35,23 @@ Current `simd` snapshot:
 
 | Benchmark | Rows | Mode | Elapsed | Rows/s | Notes |
 |---|---:|---|---:|---:|---|
-| `q1` (`string-keys`) | 2,048,000 | `single-process` | `2858 ms` | `716,585` | `result_rows=6` |
-| `q1` (`string-keys`) | 2,048,000 | `actor-credit` | `2748 ms` | `745,269` | `coord_serialize_ms=2011`, `input_payload_bytes=8,298,000` |
-| `q1` (`string-keys`) | 2,048,000 | `auto-selected` | `1204 ms` | `1,701,000` | chose `single-process` |
-| `q1` (`numeric-keys`) | 2,048,000 | `single-process` | `4727 ms` | `433,256` | `result_rows=32,896` |
-| `q1` (`numeric-keys`) | 2,048,000 | `actor-credit` | `4696 ms` | `436,116` | `coord_serialize_ms=59`, `coord_merge_ms=14` |
-| `q1` (`numeric-keys`) | 2,048,000 | `auto-selected` | `3369 ms` | `607,896` | chose `single-process` |
-| `q6-like-scan-filter-sum` | 2,048,000 | `batch` | `1282 ms` | `1,597,500` | `result_rows=1` |
-| `q3-like-join-group-order` | 2,304,000 | `batch` | `5346 ms` | `430,976` | `result_rows=8` |
-| `q18-like-high-card-group-order` | 2,048,000 | `batch` | `1045 ms` | `1,959,810` | `result_rows=100` |
+| `q1` (`string-keys`) | 2,048,000 | `single-process` | `2907 ms` | `704,506` | median of 3 reruns, `result_rows=6` |
+| `q1` (`string-keys`) | 2,048,000 | `actor-credit` | `2786 ms` | `735,104` | median of 3 reruns, `coord_serialize_ms≈2.0s` |
+| `q1` (`string-keys`) | 2,048,000 | `auto-selected` | `1334 ms` | `1,535,230` | median of 3 reruns, chose `single-process` |
+| `q1` (`numeric-keys`) | 2,048,000 | `single-process` | `3228 ms` | `634,449` | median of 3 reruns, `result_rows=32,896` |
+| `q1` (`numeric-keys`) | 2,048,000 | `actor-credit` | `5405 ms` | `378,908` | median of 3 reruns, actor transport still dominates |
+| `q1` (`numeric-keys`) | 2,048,000 | `auto-selected` | `1496 ms` | `1,368,980` | median of 3 reruns, chose `single-process` |
+| `q6-like-scan-filter-sum` | 2,048,000 | `batch` | `747 ms` | `2,741,630` | median of 3 reruns, `result_rows=1` |
+| `q3-like-join-group-order` | 2,304,000 | `batch` | `5346 ms` | `430,976` | previous snapshot, not rerun in this follow-up |
+| `q18-like-high-card-group-order` | 2,048,000 | `batch` | `1050 ms` | `1,950,480` | median of 3 reruns, `result_rows=100` |
 
 Measured `main` comparison snapshot:
 
 | Benchmark | Rows | `simd` | `main` baseline | Delta |
 |---|---:|---:|---:|---:|
-| `q18-like-high-card-group-order` | 2,048,000 | `1045 ms` | `2421 ms` | `2.32x` faster |
-| `q1` single-process (`numeric-keys`) | 2,048,000 | `4727 ms` | `7936 ms` | `1.68x` faster |
-| `q6-like-scan-filter-sum` | 2,048,000 | `1282 ms` | `5168 ms` | `4.03x` faster |
+| `q18-like-high-card-group-order` | 2,048,000 | `1050 ms` | `2421 ms` | `2.31x` faster |
+| `q1` single-process (`numeric-keys`) | 2,048,000 | `3228 ms` | `7936 ms` | `2.46x` faster |
+| `q6-like-scan-filter-sum` | 2,048,000 | `747 ms` | `5168 ms` | `6.92x` faster |
 
 ## String Builtins
 

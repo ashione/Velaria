@@ -14,6 +14,7 @@
 #include "src/dataflow/core/execution/csv.h"
 #include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/runtime/execution_optimizer.h"
+#include "src/dataflow/core/execution/runtime/simd_dispatch.h"
 #include "src/dataflow/ai/plugin_runtime.h"
 
 namespace dataflow {
@@ -37,9 +38,17 @@ std::string nextQueryId() {
 
 std::string formatStreamStrategyExplain(const StreamingStrategyDecision& strategy,
                                         const StreamingQueryOptions& options) {
+  const auto compiled_backends = compiledSimdBackendNames();
   std::ostringstream out;
   out << "requested_mode=" << strategy.requested_execution_mode << "\n";
   out << "selected_mode=" << strategy.resolved_execution_mode << "\n";
+  out << "simd_backend=" << activeSimdBackendName() << "\n";
+  out << "compiled_backends=";
+  for (std::size_t i = 0; i < compiled_backends.size(); ++i) {
+    if (i > 0) out << ",";
+    out << compiled_backends[i];
+  }
+  out << "\n";
   out << "aggregate_impl=" << strategy.aggregate_impl << "\n";
   out << "aggregate_reason=" << strategy.aggregate_reason << "\n";
   out << "reason=" << strategy.reason << "\n";
@@ -73,8 +82,16 @@ std::string formatBatchAggregateStrategyExplain(
     const Table& input, const std::vector<std::size_t>& group_keys,
     const std::vector<AggregateSpec>& aggregates) {
   const auto pattern = analyzeAggregateExecution(input, group_keys, aggregates);
+  const auto compiled_backends = compiledSimdBackendNames();
   std::ostringstream out;
   out << "selected_impl=" << aggregateExecKindName(pattern.exec_spec.impl_kind) << "\n";
+  out << "simd_backend=" << activeSimdBackendName() << "\n";
+  out << "compiled_backends=";
+  for (std::size_t i = 0; i < compiled_backends.size(); ++i) {
+    if (i > 0) out << ",";
+    out << compiled_backends[i];
+  }
+  out << "\n";
   out << "partial_layout=" << aggregatePartialLayoutName(pattern.exec_spec.partial_layout) << "\n";
   out << "runtime_shape=" << aggregateExecutionShapeName(pattern.shape) << "\n";
   out << "key_count=" << pattern.exec_spec.properties.key_count << "\n";

@@ -59,6 +59,7 @@ struct SimdKernelDispatch {
 const char* simdBackendName(SimdBackendKind kind);
 const SimdKernelDispatch& simdDispatch();
 std::string activeSimdBackendName();
+std::vector<std::string> compiledSimdBackendNames();
 void resetSimdDispatchForTest();
 
 }  // namespace dataflow

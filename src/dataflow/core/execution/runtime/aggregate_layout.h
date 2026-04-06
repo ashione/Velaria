@@ -11,9 +11,16 @@
 
 namespace dataflow {
 
+enum class AggregateStateMergeOp {
+  Sum,
+  Min,
+  Max,
+};
+
 struct AggregatePartialBatch {
   struct StateColumn {
     std::string name;
+    AggregateStateMergeOp merge_op = AggregateStateMergeOp::Sum;
     BinaryDoubleColumn values;
   };
 
@@ -68,6 +75,9 @@ struct AggregateFixedKeyState {
 AggregatePartialBatch makeAggregatePartialBatch(const TwoKeyValueColumnarBatch& batch,
                                                 const std::vector<std::string>& key_names,
                                                 const std::vector<std::string>& state_names);
+AggregatePartialBatch makeAggregatePartialBatchFromTable(
+    const Table& partials, const std::vector<std::string>& key_names,
+    const std::vector<std::pair<std::string, AggregateStateMergeOp>>& state_columns);
 void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
                                 AggregateStringKeyState* string_state,
                                 AggregateFixedKeyState* fixed_state);

@@ -1,5 +1,8 @@
 #include "src/dataflow/core/execution/runtime/aggregate_layout.h"
 
+#include <algorithm>
+#include "src/dataflow/core/execution/arrow_format.h"
+#include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/runtime/simd_dispatch.h"
 
 #include <stdexcept>
@@ -61,8 +64,83 @@ AggregatePartialBatch makeAggregatePartialBatch(const TwoKeyValueColumnarBatch& 
   out.key_columns.push_back(batch.second_key);
   AggregatePartialBatch::StateColumn state;
   state.name = state_names.empty() ? "sum" : state_names.front();
+  state.merge_op = AggregateStateMergeOp::Sum;
   state.values = batch.value;
   out.state_columns.push_back(std::move(state));
+  return out;
+}
+
+AggregatePartialBatch makeAggregatePartialBatchFromTable(
+    const Table& partials, const std::vector<std::string>& key_names,
+    const std::vector<std::pair<std::string, AggregateStateMergeOp>>& state_columns) {
+  AggregatePartialBatch out;
+  out.row_count = partials.rowCount();
+  out.key_names = key_names;
+
+  for (const auto& key_name : key_names) {
+    if (!partials.schema.has(key_name)) {
+      throw std::runtime_error("partial batch key column not found: " + key_name);
+    }
+    const auto column = viewValueColumn(partials, partials.schema.indexOf(key_name));
+    BinaryKeyColumn key_column;
+    key_column.is_null.assign(out.row_count, 0);
+    bool fixed_width = false;
+    if (column.buffer != nullptr) {
+      if (column.buffer->arrow_backing != nullptr) {
+        fixed_width = column.buffer->arrow_backing->format == kArrowFormatBool ||
+                      isArrowIntegerLikeFormat(column.buffer->arrow_backing->format);
+      } else {
+        fixed_width = std::all_of(
+            column.buffer->values.begin(), column.buffer->values.end(),
+            [](const Value& value) {
+              return value.isNull() || value.type() == DataType::Int64 ||
+                     value.type() == DataType::Bool;
+            });
+      }
+    }
+    key_column.type = fixed_width ? BinaryKeyColumnType::Int64 : BinaryKeyColumnType::String;
+    key_column.dictionary_encoded = !fixed_width;
+    if (fixed_width) {
+      key_column.int64_values.assign(out.row_count, 0);
+    } else {
+      key_column.dictionary_encoded = false;
+      key_column.string_values.reserve(out.row_count, out.row_count * 16);
+    }
+    for (std::size_t row_idx = 0; row_idx < out.row_count; ++row_idx) {
+      const Value value = valueColumnValueAt(*column.buffer, row_idx);
+      if (value.isNull()) {
+        key_column.is_null[row_idx] = 1;
+        continue;
+      }
+      if (fixed_width) {
+        key_column.int64_values[row_idx] =
+            value.type() == DataType::Bool ? (value.asBool() ? 1 : 0) : value.asInt64();
+      } else {
+        key_column.string_values.append(value.toString());
+      }
+    }
+    out.key_columns.push_back(std::move(key_column));
+  }
+
+  for (const auto& state_spec : state_columns) {
+    if (!partials.schema.has(state_spec.first)) {
+      throw std::runtime_error("partial batch state column not found: " + state_spec.first);
+    }
+    const auto column = viewValueColumn(partials, partials.schema.indexOf(state_spec.first));
+    AggregatePartialBatch::StateColumn state;
+    state.name = state_spec.first;
+    state.merge_op = state_spec.second;
+    state.values.is_null.assign(out.row_count, 0);
+    state.values.values.assign(out.row_count, 0.0);
+    for (std::size_t row_idx = 0; row_idx < out.row_count; ++row_idx) {
+      if (valueColumnIsNullAt(*column.buffer, row_idx)) {
+        state.values.is_null[row_idx] = 1;
+        continue;
+      }
+      state.values.values[row_idx] = valueColumnDoubleAt(*column.buffer, row_idx);
+    }
+    out.state_columns.push_back(std::move(state));
+  }
   return out;
 }
 
@@ -117,13 +195,24 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
         fixed_state->state_values.resize((index + 1) * state_count, 0.0);
         it = fixed_state->index_by_key.find(key);
       }
+      auto* dst = fixed_state->state_values.data() + (it->second * state_count);
       std::vector<double> row_values(state_count, 0.0);
       for (std::size_t state_index = 0; state_index < state_count; ++state_index) {
         row_values[state_index] = partial.state_columns[state_index].values.values[row_idx];
       }
-      simdDispatch().accumulate_double(
-          fixed_state->state_values.data() + (it->second * state_count), row_values.data(),
-          state_count);
+      for (std::size_t state_index = 0; state_index < state_count; ++state_index) {
+        switch (partial.state_columns[state_index].merge_op) {
+          case AggregateStateMergeOp::Sum:
+            simdDispatch().accumulate_double(dst + state_index, row_values.data() + state_index, 1);
+            break;
+          case AggregateStateMergeOp::Min:
+            dst[state_index] = std::min(dst[state_index], row_values[state_index]);
+            break;
+          case AggregateStateMergeOp::Max:
+            dst[state_index] = std::max(dst[state_index], row_values[state_index]);
+            break;
+        }
+      }
       continue;
     }
 
@@ -159,13 +248,24 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
       string_state->state_values.resize((index + 1) * state_count, 0.0);
       it = string_state->index_by_key.find(key);
     }
+    auto* dst = string_state->state_values.data() + (it->second * state_count);
     std::vector<double> row_values(state_count, 0.0);
     for (std::size_t state_index = 0; state_index < state_count; ++state_index) {
       row_values[state_index] = partial.state_columns[state_index].values.values[row_idx];
     }
-    simdDispatch().accumulate_double(
-        string_state->state_values.data() + (it->second * state_count), row_values.data(),
-        state_count);
+    for (std::size_t state_index = 0; state_index < state_count; ++state_index) {
+      switch (partial.state_columns[state_index].merge_op) {
+        case AggregateStateMergeOp::Sum:
+          simdDispatch().accumulate_double(dst + state_index, row_values.data() + state_index, 1);
+          break;
+        case AggregateStateMergeOp::Min:
+          dst[state_index] = std::min(dst[state_index], row_values[state_index]);
+          break;
+        case AggregateStateMergeOp::Max:
+          dst[state_index] = std::max(dst[state_index], row_values[state_index]);
+          break;
+      }
+    }
   }
 }
 

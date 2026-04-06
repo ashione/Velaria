@@ -223,6 +223,33 @@ std::vector<AggregateSpec> buildRuntimeMergeAggregateSpecs(
   return specs;
 }
 
+std::vector<std::pair<std::string, AggregateStateMergeOp>> buildRuntimeMergeStateColumns(
+    const std::vector<RuntimeAggregateLayout>& layouts) {
+  std::vector<std::pair<std::string, AggregateStateMergeOp>> columns;
+  columns.reserve(layouts.size() * 2);
+  for (const auto& layout : layouts) {
+    switch (layout.aggregate.function) {
+      case AggregateFunction::Sum:
+      case AggregateFunction::Count:
+      case AggregateFunction::Avg:
+        if (!layout.partial_value_column.empty()) {
+          columns.push_back({layout.partial_value_column, AggregateStateMergeOp::Sum});
+        }
+        if (!layout.partial_count_column.empty()) {
+          columns.push_back({layout.partial_count_column, AggregateStateMergeOp::Sum});
+        }
+        break;
+      case AggregateFunction::Min:
+        columns.push_back({layout.partial_value_column, AggregateStateMergeOp::Min});
+        break;
+      case AggregateFunction::Max:
+        columns.push_back({layout.partial_value_column, AggregateStateMergeOp::Max});
+        break;
+    }
+  }
+  return columns;
+}
+
 Table makeAggregateOutputSkeleton(const LocalGroupedAggregateSpec& aggregate,
                                   bool include_avg_state_helpers) {
   Table table;
@@ -1470,6 +1497,11 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
   Table merged_partials;
   WindowKeySumState window_key_sum_state;
   Int64TwoKeySumState int64_two_key_sum_state;
+  AggregateStringKeyState generic_string_state;
+  AggregateFixedKeyState generic_fixed_state;
+  bool generic_state_initialized = false;
+  std::vector<RuntimeAggregateLayout> generic_layouts;
+  std::vector<std::pair<std::string, AggregateStateMergeOp>> generic_state_columns;
   size_t next_pending = 0;
   size_t inflight = 0;
   std::unordered_map<uint64_t, SharedMemoryPayload> inflight_input_shared_memory;
@@ -1629,7 +1661,36 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
                 partialValueColumnName(aggregate.aggregates[0].output_column),
                 &window_key_sum_state);
           } else {
-            merged_partials = concatenateTables({merged_partials, partial}, false);
+            if (!generic_state_initialized && partial.rowCount() > 0) {
+              for (const auto& aggregate_spec : aggregate.aggregates) {
+                RuntimeAggregateLayout layout;
+                layout.aggregate = aggregate_spec;
+                switch (aggregate_spec.function) {
+                  case AggregateFunction::Sum:
+                  case AggregateFunction::Min:
+                  case AggregateFunction::Max:
+                    layout.partial_value_column = partialValueColumnName(aggregate_spec.output_column);
+                    break;
+                  case AggregateFunction::Count:
+                    layout.partial_count_column = partialValueColumnName(aggregate_spec.output_column);
+                    break;
+                  case AggregateFunction::Avg:
+                    layout.partial_value_column = partialAverageSumColumnName(aggregate_spec.output_column);
+                    layout.partial_count_column = partialAverageCountColumnName(aggregate_spec.output_column);
+                    break;
+                }
+                generic_layouts.push_back(std::move(layout));
+              }
+              generic_state_columns = buildRuntimeMergeStateColumns(generic_layouts);
+              generic_state_initialized = true;
+            }
+            if (generic_state_initialized && partial.rowCount() > 0) {
+              mergeAggregatePartialBatch(
+                  makeAggregatePartialBatchFromTable(partial, aggregate.group_keys, generic_state_columns),
+                  &generic_string_state, &generic_fixed_state);
+            } else {
+              merged_partials = concatenateTables({merged_partials, partial}, false);
+            }
           }
           result.coordinator_merge_ms += toMillis(std::chrono::steady_clock::now() - merge_started);
           ++result.processed_partitions;
@@ -1673,7 +1734,36 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
                 partialValueColumnName(aggregate.aggregates[0].output_column),
                 &window_key_sum_state);
           } else {
-            merged_partials = concatenateTables({merged_partials, partial}, false);
+            if (!generic_state_initialized && partial.rowCount() > 0) {
+              for (const auto& aggregate_spec : aggregate.aggregates) {
+                RuntimeAggregateLayout layout;
+                layout.aggregate = aggregate_spec;
+                switch (aggregate_spec.function) {
+                  case AggregateFunction::Sum:
+                  case AggregateFunction::Min:
+                  case AggregateFunction::Max:
+                    layout.partial_value_column = partialValueColumnName(aggregate_spec.output_column);
+                    break;
+                  case AggregateFunction::Count:
+                    layout.partial_count_column = partialValueColumnName(aggregate_spec.output_column);
+                    break;
+                  case AggregateFunction::Avg:
+                    layout.partial_value_column = partialAverageSumColumnName(aggregate_spec.output_column);
+                    layout.partial_count_column = partialAverageCountColumnName(aggregate_spec.output_column);
+                    break;
+                }
+                generic_layouts.push_back(std::move(layout));
+              }
+              generic_state_columns = buildRuntimeMergeStateColumns(generic_layouts);
+              generic_state_initialized = true;
+            }
+            if (generic_state_initialized && partial.rowCount() > 0) {
+              mergeAggregatePartialBatch(
+                  makeAggregatePartialBatchFromTable(partial, aggregate.group_keys, generic_state_columns),
+                  &generic_string_state, &generic_fixed_state);
+            } else {
+              merged_partials = concatenateTables({merged_partials, partial}, false);
+            }
           }
           result.coordinator_merge_ms += toMillis(std::chrono::steady_clock::now() - merge_started);
           ++result.processed_partitions;
@@ -1700,6 +1790,25 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
     } else {
       result.final_table = materializeWindowKeySumState(window_key_sum_state, aggregate);
     }
+  } else if (generic_state_initialized) {
+    const std::vector<std::string> output_state_names = [&]() {
+      std::vector<std::string> names;
+      names.reserve(generic_state_columns.size());
+      for (const auto& state_column : generic_state_columns) {
+        names.push_back(state_column.first);
+      }
+      return names;
+    }();
+    if (!generic_fixed_state.keys.empty()) {
+      result.final_table =
+          materializeAggregateFixedKeyState(generic_fixed_state, aggregate.group_keys,
+                                            output_state_names);
+    } else {
+      result.final_table =
+          materializeAggregateStringKeyState(generic_string_state, aggregate.group_keys,
+                                             output_state_names);
+    }
+    result.final_table = finalizeMergedPartialAggregates(result.final_table, aggregate);
   } else {
     result.final_table = finalizeMergedPartialAggregates(merged_partials, aggregate);
   }

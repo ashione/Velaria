@@ -60,7 +60,8 @@ Value decodeTaggedKeyValue(std::string_view encoded) {
     case DataType::Bool:
       return Value(!payload.empty() && payload[0] == '1');
     case DataType::Int64:
-      return Value(payload.empty() ? int64_t(0) : std::stoll(payload));
+      return Value(payload.empty() ? int64_t(0)
+                                   : static_cast<int64_t>(std::stoll(payload)));
     case DataType::Double:
       return Value(payload.empty() ? 0.0 : std::stod(payload));
     case DataType::String:

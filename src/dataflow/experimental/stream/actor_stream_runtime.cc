@@ -471,14 +471,14 @@ Table materializeWindowKeySumState(const WindowKeySumState& state,
                                    const LocalGroupedAggregateSpec& aggregate) {
   return materializeAggregateStringKeyState(
       state, {aggregate.group_keys[0], aggregate.group_keys[1]},
-      aggregate.aggregates[0].output_column);
+      {aggregate.aggregates[0].output_column});
 }
 
 Table materializeInt64TwoKeySumState(const Int64TwoKeySumState& state,
                                      const LocalGroupedAggregateSpec& aggregate) {
   return materializeAggregateFixedKeyState(
       state, {aggregate.group_keys[0], aggregate.group_keys[1]},
-      aggregate.aggregates[0].output_column);
+      {aggregate.aggregates[0].output_column});
 }
 
 Table runSingleProcessGroupedAggregateImpl(const std::vector<Table>& batches,

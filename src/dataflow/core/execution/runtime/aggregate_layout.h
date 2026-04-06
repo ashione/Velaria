@@ -73,9 +73,9 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
                                 AggregateFixedKeyState* fixed_state);
 Table materializeAggregateStringKeyState(const AggregateStringKeyState& state,
                                          const std::vector<std::string>& key_names,
-                                         const std::string& output_column);
+                                         const std::vector<std::string>& state_names);
 Table materializeAggregateFixedKeyState(const AggregateFixedKeyState& state,
                                         const std::vector<std::string>& key_names,
-                                        const std::string& output_column);
+                                        const std::vector<std::string>& state_names);
 
 }  // namespace dataflow

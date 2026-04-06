@@ -171,9 +171,9 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
 
 Table materializeAggregateStringKeyState(const AggregateStringKeyState& state,
                                          const std::vector<std::string>& key_names,
-                                         const std::string& output_column) {
+                                         const std::vector<std::string>& state_names) {
   std::vector<std::string> fields = key_names;
-  fields.push_back(output_column);
+  fields.insert(fields.end(), state_names.begin(), state_names.end());
   Table out(Schema(fields), {});
   out.rows.reserve(state.keys.size());
   for (std::size_t i = 0; i < state.keys.size(); ++i) {
@@ -181,7 +181,9 @@ Table materializeAggregateStringKeyState(const AggregateStringKeyState& state,
     for (std::size_t key_index = 0; key_index < state.keys[i].ids.size(); ++key_index) {
       row.emplace_back(state.values_by_key[key_index][state.keys[i].ids[key_index]]);
     }
-    row.emplace_back(state.state_values[i * state.state_count]);
+    for (std::size_t state_index = 0; state_index < state.state_count; ++state_index) {
+      row.emplace_back(state.state_values[i * state.state_count + state_index]);
+    }
     out.rows.push_back(std::move(row));
   }
   return out;
@@ -189,9 +191,9 @@ Table materializeAggregateStringKeyState(const AggregateStringKeyState& state,
 
 Table materializeAggregateFixedKeyState(const AggregateFixedKeyState& state,
                                         const std::vector<std::string>& key_names,
-                                        const std::string& output_column) {
+                                        const std::vector<std::string>& state_names) {
   std::vector<std::string> fields = key_names;
-  fields.push_back(output_column);
+  fields.insert(fields.end(), state_names.begin(), state_names.end());
   Table out(Schema(fields), {});
   out.rows.reserve(state.keys.size());
   for (std::size_t i = 0; i < state.keys.size(); ++i) {
@@ -200,7 +202,9 @@ Table materializeAggregateFixedKeyState(const AggregateFixedKeyState& state,
       row.emplace_back(state.keys[i].is_null[key_index] != 0 ? Value()
                                                              : Value(state.keys[i].values[key_index]));
     }
-    row.emplace_back(state.state_values[i * state.state_count]);
+    for (std::size_t state_index = 0; state_index < state.state_count; ++state_index) {
+      row.emplace_back(state.state_values[i * state.state_count + state_index]);
+    }
     out.rows.push_back(std::move(row));
   }
   return out;

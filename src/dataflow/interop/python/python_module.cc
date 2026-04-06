@@ -1403,6 +1403,21 @@ PyObject* sessionSql(PyVelariaSession* self, PyObject* args) {
   });
 }
 
+PyObject* sessionExplainSql(PyVelariaSession* self, PyObject* args) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    const char* sql = nullptr;
+    if (!PyArg_ParseTuple(args, "s", &sql)) {
+      return nullptr;
+    }
+    std::string explain;
+    {
+      AllowThreads allow;
+      explain = self->session->explainSql(sql);
+    }
+    return PyUnicode_FromStringAndSize(explain.c_str(), static_cast<Py_ssize_t>(explain.size()));
+  });
+}
+
 PyObject* sessionCreateTempView(PyVelariaSession* self, PyObject* args) {
   return withExceptionTranslation([&]() -> PyObject* {
     const char* name = nullptr;
@@ -1897,6 +1912,8 @@ PyMethodDef sessionMethods[] = {
     {"read_csv", reinterpret_cast<PyCFunction>(sessionReadCsv), METH_VARARGS | METH_KEYWORDS,
      "Read a CSV file into a DataFrame."},
     {"sql", reinterpret_cast<PyCFunction>(sessionSql), METH_VARARGS, "Run batch SQL or SQL DDL."},
+    {"explain_sql", reinterpret_cast<PyCFunction>(sessionExplainSql), METH_VARARGS,
+     "Explain a batch SELECT query with logical/physical/strategy sections."},
     {"create_dataframe_from_arrow", reinterpret_cast<PyCFunction>(sessionCreateDataFrameFromArrow),
      METH_VARARGS, "Create a DataFrame from a pyarrow.Table-compatible object."},
     {"create_stream_from_arrow", reinterpret_cast<PyCFunction>(sessionCreateStreamFromArrow),

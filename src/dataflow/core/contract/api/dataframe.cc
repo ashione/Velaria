@@ -53,8 +53,6 @@ std::string planKindName(PlanKind kind) {
       return "OrderBy";
     case PlanKind::WindowAssign:
       return "WindowAssign";
-    case PlanKind::GroupBySum:
-      return "GroupBySum";
     case PlanKind::Aggregate:
       return "Aggregate";
     case PlanKind::Join:
@@ -155,17 +153,10 @@ void explainPlan(const PlanNodePtr& node, std::ostringstream& out, int depth = 0
     explainPlan(n->child, out, depth + 1);
     return;
   }
-  if (node->kind == PlanKind::Aggregate || node->kind == PlanKind::GroupBySum) {
-    if (node->kind == PlanKind::Aggregate) {
-      const auto* n = static_cast<AggregatePlan*>(node.get());
-      out << std::string((depth + 1) * 2, ' ') << "keys=" << n->keys.size() << ", aggs="
-          << n->aggregates.size() << "\n";
-      explainPlan(n->child, out, depth + 1);
-      return;
-    }
-    const auto* n = static_cast<GroupBySumPlan*>(node.get());
-    out << std::string((depth + 1) * 2, ' ') << "keys=" << n->keys.size() << ", value="
-        << n->value_index << "\n";
+  if (node->kind == PlanKind::Aggregate) {
+    const auto* n = static_cast<AggregatePlan*>(node.get());
+    out << std::string((depth + 1) * 2, ' ') << "keys=" << n->keys.size() << ", aggs="
+        << n->aggregates.size() << "\n";
     explainPlan(n->child, out, depth + 1);
     return;
   }

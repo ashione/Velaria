@@ -395,6 +395,12 @@ cc_binary(
 )
 
 cc_binary(
+    name = "batch_aggregate_benchmark",
+    srcs = ["src/dataflow/examples/batch_aggregate_benchmark.cc"],
+    deps = [":dataflow_core"],
+)
+
+cc_binary(
     name = "string_builtin_benchmark",
     srcs = ["src/dataflow/examples/string_builtin_benchmark.cc"],
     deps = [":dataflow_core"],

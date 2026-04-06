@@ -275,8 +275,6 @@ PlanNodePtr unaryChild(const PlanNodePtr& node) {
       return static_cast<const LimitPlan*>(node.get())->child;
     case PlanKind::Aggregate:
       return static_cast<const AggregatePlan*>(node.get())->child;
-    case PlanKind::GroupBySum:
-      return static_cast<const GroupBySumPlan*>(node.get())->child;
     default:
       return nullptr;
   }

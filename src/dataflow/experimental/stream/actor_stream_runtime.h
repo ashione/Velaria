@@ -87,12 +87,9 @@ Table runSingleProcessGroupedAggregate(const std::vector<Table>& batches,
 LocalActorStreamResult runLocalActorStreamGroupedAggregate(
     const std::vector<Table>& batches, const LocalGroupedAggregateSpec& aggregate,
     const LocalActorStreamOptions& options);
-Table runSingleProcessWindowKeySum(const std::vector<Table>& batches,
-                                   size_t cpu_spin_per_row = 0);
-LocalActorStreamResult runLocalActorStreamWindowKeySum(const std::vector<Table>& batches,
-                                                       const LocalActorStreamOptions& options);
-LocalActorStreamResult runAutoLocalActorStreamWindowKeySum(
-    const std::vector<Table>& batches, const LocalActorStreamOptions& actor_options,
+LocalActorStreamResult runAutoLocalActorStreamGroupedAggregate(
+    const std::vector<Table>& batches, const LocalGroupedAggregateSpec& aggregate,
+    const LocalActorStreamOptions& actor_options,
     const LocalExecutionAutoOptions& auto_options = {},
     LocalExecutionDecision* decision = nullptr);
 

@@ -13,6 +13,7 @@
 
 #include "src/dataflow/core/execution/csv.h"
 #include "src/dataflow/core/execution/columnar_batch.h"
+#include "src/dataflow/core/execution/runtime/execution_optimizer.h"
 #include "src/dataflow/ai/plugin_runtime.h"
 
 namespace dataflow {
@@ -39,6 +40,8 @@ std::string formatStreamStrategyExplain(const StreamingStrategyDecision& strateg
   std::ostringstream out;
   out << "requested_mode=" << strategy.requested_execution_mode << "\n";
   out << "selected_mode=" << strategy.resolved_execution_mode << "\n";
+  out << "aggregate_impl=" << strategy.aggregate_impl << "\n";
+  out << "aggregate_reason=" << strategy.aggregate_reason << "\n";
   out << "reason=" << strategy.reason << "\n";
   out << "actor_eligible=" << (strategy.actor_eligible ? "true" : "false") << "\n";
   out << "used_actor_runtime=" << (strategy.used_actor_runtime ? "true" : "false") << "\n";
@@ -63,6 +66,36 @@ std::string formatStreamStrategyExplain(const StreamingStrategyDecision& strateg
       << (options.shared_memory_transport ? "true" : "false") << "\n";
   out << "shared_memory_min_payload_bytes="
       << options.shared_memory_min_payload_bytes << "\n";
+  return out.str();
+}
+
+std::string formatBatchAggregateStrategyExplain(
+    const Table& input, const std::vector<std::size_t>& group_keys,
+    const std::vector<AggregateSpec>& aggregates) {
+  const auto pattern = analyzeAggregateExecution(input, group_keys, aggregates);
+  std::ostringstream out;
+  out << "selected_impl=" << aggregateExecKindName(pattern.exec_spec.impl_kind) << "\n";
+  out << "runtime_shape=" << aggregateExecutionShapeName(pattern.shape) << "\n";
+  out << "key_count=" << pattern.exec_spec.properties.key_count << "\n";
+  out << "ordered_input="
+      << (pattern.exec_spec.properties.ordered_input ? "true" : "false") << "\n";
+  out << "partition_local="
+      << (pattern.exec_spec.properties.partition_local ? "true" : "false") << "\n";
+  out << "fixed_width_keys="
+      << (pattern.exec_spec.properties.all_fixed_width ? "true" : "false") << "\n";
+  out << "packable_keys="
+      << (pattern.exec_spec.properties.packable ? "true" : "false") << "\n";
+  out << "low_cardinality="
+      << (pattern.exec_spec.properties.low_cardinality ? "true" : "false") << "\n";
+  out << "reason=" << pattern.exec_spec.reason << "\n";
+  if (!pattern.exec_spec.rejected_candidates.empty()) {
+    out << "rejected_candidates=";
+    for (std::size_t i = 0; i < pattern.exec_spec.rejected_candidates.size(); ++i) {
+      if (i > 0) out << "; ";
+      out << pattern.exec_spec.rejected_candidates[i];
+    }
+    out << "\n";
+  }
   return out.str();
 }
 
@@ -811,6 +844,85 @@ DataFrame DataflowSession::sql(const std::string& sql) {
   }
 
   return result;
+}
+
+std::string DataflowSession::explainSql(const std::string& sql_text) {
+  const auto statement = sql::SqlParser::parse(sql_text);
+  if (statement.kind != sql::SqlStatementKind::Select) {
+    throwUnsupportedSqlV1("explainSql only supports SELECT");
+  }
+
+  sql::SqlPlanner planner;
+  const auto logical = planner.buildLogicalPlan(statement.query, catalog_);
+  const auto physical = planner.buildPhysicalPlan(logical);
+
+  DataFrame current = physical.seed;
+  std::ostringstream strategy;
+  bool saw_aggregate = false;
+  for (const auto& step : physical.steps) {
+    switch (step.logical_kind) {
+      case sql::LogicalStepKind::Scan:
+        break;
+      case sql::LogicalStepKind::Filter:
+        current = current.filterByIndex(step.logical.filter_column, step.logical.filter_op,
+                                       step.logical.filter_value);
+        break;
+      case sql::LogicalStepKind::Join:
+        current =
+            current.join(step.logical.join_right, step.logical.join_left_column,
+                         step.logical.join_right_column, step.logical.join_kind);
+        break;
+      case sql::LogicalStepKind::Aggregate: {
+        const Table aggregate_input = current.toTable();
+        strategy << formatBatchAggregateStrategyExplain(aggregate_input, step.logical.group_keys,
+                                                        step.logical.aggregates);
+        current = current.aggregate(step.logical.group_keys, step.logical.aggregates);
+        saw_aggregate = true;
+        break;
+      }
+      case sql::LogicalStepKind::Having: {
+        const auto idx = current.schema().indexOf(step.logical.having_column);
+        current = current.filterByIndex(idx, step.logical.filter_op, step.logical.filter_value);
+        break;
+      }
+      case sql::LogicalStepKind::Project:
+        current = current.selectByIndices(step.logical.project_indices,
+                                          step.logical.project_aliases);
+        break;
+      case sql::LogicalStepKind::OrderBy: {
+        std::vector<std::string> columns;
+        columns.reserve(step.logical.order_indices.size());
+        for (auto index : step.logical.order_indices) {
+          columns.push_back(current.schema().fields[index]);
+        }
+        current = current.orderBy(columns, step.logical.order_ascending);
+        break;
+      }
+      case sql::LogicalStepKind::WithColumn:
+        current =
+            current.withColumn(step.logical.with_column_name, step.logical.with_function,
+                              step.logical.with_args);
+        break;
+      case sql::LogicalStepKind::Limit:
+        if (step.logical.limit_set) {
+          current = current.limit(step.logical.limit);
+        }
+        break;
+    }
+  }
+  if (!saw_aggregate) {
+    strategy << "selected_impl=not-applicable\n";
+    strategy << "reason=query does not contain GROUP BY aggregate planning\n";
+  }
+
+  std::ostringstream out;
+  out << "logical\n";
+  out << planner.explainLogicalPlan(logical);
+  out << "physical\n";
+  out << planner.explainPhysicalPlan(physical);
+  out << "strategy\n";
+  out << strategy.str();
+  return out.str();
 }
 
 DataFrame DataflowSession::vectorQuery(const std::string& table, const std::string& vector_column,

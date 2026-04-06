@@ -657,6 +657,201 @@ bool BinaryRowBatchCodec::deserializeWindowKeyValue(const std::vector<uint8_t>& 
   return deserializeWindowKeyValueFromBuffer(payload.data(), payload.size(), out);
 }
 
+bool BinaryRowBatchCodec::deserializeTwoKeyValue(const std::vector<uint8_t>& payload,
+                                                 const std::string& first_key_name,
+                                                 const std::string& second_key_name,
+                                                 const std::string& value_name,
+                                                 TwoKeyValueColumnarBatch* out) const {
+  return deserializeTwoKeyValueFromBuffer(payload.data(), payload.size(), first_key_name,
+                                          second_key_name, value_name, out);
+}
+
+bool BinaryRowBatchCodec::deserializeTwoKeyValueFromBuffer(const uint8_t* payload, size_t size,
+                                                           const std::string& first_key_name,
+                                                           const std::string& second_key_name,
+                                                           const std::string& value_name,
+                                                           TwoKeyValueColumnarBatch* out) const {
+  if (out == nullptr) return false;
+  if (payload == nullptr && size != 0) return false;
+  BufferCursor cursor{payload, size, 0};
+  size_t offset = 0;
+  if (size < 4 || std::memcmp(payload, kMagic, 4) != 0) {
+    return false;
+  }
+  offset += 4;
+
+  uint32_t column_count = 0;
+  uint32_t row_count = 0;
+  if (!readU32(cursor, &offset, &column_count) || !readU32(cursor, &offset, &row_count)) {
+    return false;
+  }
+
+  struct ParsedColumn {
+    std::string name;
+    DataType type = DataType::String;
+    uint8_t encoding = kEncodingPlain;
+    std::vector<std::string> dictionary;
+  };
+
+  std::vector<ParsedColumn> columns;
+  columns.reserve(column_count);
+  int first_key_col = -1;
+  int second_key_col = -1;
+  int value_col = -1;
+
+  for (uint32_t i = 0; i < column_count; ++i) {
+    ParsedColumn column;
+    uint8_t type_raw = 0;
+    if (!readString(cursor, &offset, &column.name) ||
+        !readU8(cursor, &offset, &type_raw) ||
+        !readU8(cursor, &offset, &column.encoding)) {
+      return false;
+    }
+    column.type = static_cast<DataType>(type_raw);
+    if (column.type == DataType::String && column.encoding == kEncodingDictionary) {
+      uint64_t dict_size = 0;
+      if (!readVarint(cursor, &offset, &dict_size)) return false;
+      column.dictionary.reserve(static_cast<size_t>(dict_size));
+      for (uint64_t item = 0; item < dict_size; ++item) {
+        std::string_view value;
+        if (!readStringView(cursor, &offset, &value)) return false;
+        column.dictionary.emplace_back(value);
+      }
+    }
+    if (column.name == first_key_name) first_key_col = static_cast<int>(i);
+    if (column.name == second_key_name) second_key_col = static_cast<int>(i);
+    if (column.name == value_name) value_col = static_cast<int>(i);
+    columns.push_back(std::move(column));
+  }
+
+  if (first_key_col < 0 || second_key_col < 0 || value_col < 0) {
+    return false;
+  }
+
+  auto init_key_column = [row_count](const ParsedColumn& meta, BinaryKeyColumn* column) -> bool {
+    if (column == nullptr) return false;
+    column->is_null.assign(row_count, 0);
+    if (meta.type == DataType::Int64) {
+      column->type = BinaryKeyColumnType::Int64;
+      column->int64_values.assign(row_count, 0);
+      return true;
+    }
+    if (meta.type == DataType::String) {
+      column->type = BinaryKeyColumnType::String;
+      column->dictionary_encoded = meta.encoding == kEncodingDictionary;
+      if (column->dictionary_encoded) {
+        column->dictionary.reserve(meta.dictionary.size(), meta.dictionary.size() * 16);
+        for (const auto& entry : meta.dictionary) {
+          column->dictionary.append(entry);
+        }
+        column->indices.assign(row_count, 0);
+      } else {
+        column->string_values.reserve(row_count, row_count * 16);
+      }
+      return true;
+    }
+    return false;
+  };
+
+  out->row_count = row_count;
+  out->first_key = BinaryKeyColumn();
+  out->second_key = BinaryKeyColumn();
+  out->value = BinaryDoubleColumn();
+  out->value.is_null.assign(row_count, 0);
+  out->value.values.assign(row_count, 0.0);
+
+  if (!init_key_column(columns[static_cast<size_t>(first_key_col)], &out->first_key) ||
+      !init_key_column(columns[static_cast<size_t>(second_key_col)], &out->second_key)) {
+    return false;
+  }
+
+  auto read_key = [&](const ParsedColumn& meta, BinaryKeyColumn* column,
+                      uint32_t row_idx) -> bool {
+    if (column == nullptr) return false;
+    if (column->type == BinaryKeyColumnType::Int64) {
+      uint64_t raw = 0;
+      if (!readVarint(cursor, &offset, &raw)) return false;
+      column->int64_values[row_idx] = zigZagDecode(raw);
+      return true;
+    }
+    if (column->dictionary_encoded) {
+      uint64_t dict_index = 0;
+      if (!readVarint(cursor, &offset, &dict_index) ||
+          dict_index >= column->dictionary.size()) {
+        return false;
+      }
+      column->indices[row_idx] = static_cast<uint32_t>(dict_index);
+      return true;
+    }
+    std::string_view value;
+    if (!readStringView(cursor, &offset, &value)) return false;
+    const uint32_t stored = column->string_values.append(value);
+    return stored == row_idx;
+  };
+
+  const size_t null_bytes = (static_cast<size_t>(column_count) + 7) / 8;
+  for (uint32_t row_idx = 0; row_idx < row_count; ++row_idx) {
+    if (offset + null_bytes > size) return false;
+    const uint8_t* null_bitmap = payload + offset;
+    offset += null_bytes;
+    for (uint32_t col = 0; col < column_count; ++col) {
+      const bool is_null = (null_bitmap[col / 8] & static_cast<uint8_t>(1u << (col % 8))) != 0;
+      if (static_cast<int>(col) == first_key_col) {
+        out->first_key.is_null[row_idx] = is_null ? 1 : 0;
+        if (is_null && out->first_key.type == BinaryKeyColumnType::String &&
+            !out->first_key.dictionary_encoded) {
+          out->first_key.string_values.append(std::string_view());
+        }
+      }
+      if (static_cast<int>(col) == second_key_col) {
+        out->second_key.is_null[row_idx] = is_null ? 1 : 0;
+        if (is_null && out->second_key.type == BinaryKeyColumnType::String &&
+            !out->second_key.dictionary_encoded) {
+          out->second_key.string_values.append(std::string_view());
+        }
+      }
+      if (static_cast<int>(col) == value_col) {
+        out->value.is_null[row_idx] = is_null ? 1 : 0;
+      }
+      if (is_null) continue;
+
+      if (static_cast<int>(col) == first_key_col) {
+        if (!read_key(columns[static_cast<size_t>(col)], &out->first_key, row_idx)) return false;
+        continue;
+      }
+      if (static_cast<int>(col) == second_key_col) {
+        if (!read_key(columns[static_cast<size_t>(col)], &out->second_key, row_idx)) return false;
+        continue;
+      }
+      if (static_cast<int>(col) == value_col) {
+        const auto& meta = columns[static_cast<size_t>(col)];
+        if (meta.type == DataType::Int64) {
+          uint64_t raw = 0;
+          if (!readVarint(cursor, &offset, &raw)) return false;
+          out->value.values[row_idx] = static_cast<double>(zigZagDecode(raw));
+        } else if (meta.type == DataType::Double) {
+          uint64_t raw = 0;
+          if (!readU64(cursor, &offset, &raw)) return false;
+          double d = 0.0;
+          std::memcpy(&d, &raw, sizeof(d));
+          out->value.values[row_idx] = d;
+        } else {
+          std::string_view text;
+          if (!readStringView(cursor, &offset, &text)) return false;
+          out->value.values[row_idx] = std::stod(std::string(text));
+        }
+        continue;
+      }
+
+      Value skipped;
+      if (!readValue(cursor, &offset, columns[static_cast<size_t>(col)].type, &skipped)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 bool BinaryRowBatchCodec::deserializeWindowKeyValueFromBuffer(const uint8_t* payload, size_t size,
                                                               WindowKeyValueColumnarBatch* out) const {
   if (out == nullptr) return false;

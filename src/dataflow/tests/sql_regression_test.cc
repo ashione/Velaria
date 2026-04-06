@@ -661,6 +661,49 @@ void runPlannerPlanRegression() {
   expect(df.schema().fields[1] == "total_score", "planner_output_col_total_score");
 }
 
+std::string explainFieldValue(const std::string& explain, const std::string& key) {
+  const std::string prefix = key + "=";
+  const auto pos = explain.find(prefix);
+  if (pos == std::string::npos) {
+    return "";
+  }
+  const auto start = pos + prefix.size();
+  const auto end = explain.find('\n', start);
+  return explain.substr(start, end == std::string::npos ? std::string::npos : end - start);
+}
+
+void runBatchExplainRegression() {
+  DataflowSession& session = DataflowSession::builder();
+  Table left(Schema({"alpha", "beta", "gamma"}),
+             {Row({Value(int64_t(1)), Value(int64_t(10)), Value(int64_t(3))}),
+              Row({Value(int64_t(1)), Value(int64_t(10)), Value(int64_t(7))}),
+              Row({Value(int64_t(2)), Value(int64_t(20)), Value(int64_t(11))})});
+  Table right(Schema({"window_start", "key", "value"}),
+              {Row({Value(int64_t(1)), Value(int64_t(10)), Value(int64_t(3))}),
+               Row({Value(int64_t(1)), Value(int64_t(10)), Value(int64_t(7))}),
+               Row({Value(int64_t(2)), Value(int64_t(20)), Value(int64_t(11))})});
+  session.createTempView("batch_explain_generic_a", DataFrame(left));
+  session.createTempView("batch_explain_generic_b", DataFrame(right));
+
+  const std::string explain_a = session.explainSql(
+      "SELECT alpha, beta, SUM(gamma) AS total_value "
+      "FROM batch_explain_generic_a GROUP BY alpha, beta");
+  const std::string explain_b = session.explainSql(
+      "SELECT window_start, key, SUM(value) AS total_value "
+      "FROM batch_explain_generic_b GROUP BY window_start, key");
+
+  expect(explain_a.find("logical\n") != std::string::npos,
+         "batch_explain_contains_logical_section");
+  expect(explain_a.find("physical\n") != std::string::npos,
+         "batch_explain_contains_physical_section");
+  expect(explain_a.find("strategy\n") != std::string::npos,
+         "batch_explain_contains_strategy_section");
+  expect(!explainFieldValue(explain_a, "selected_impl").empty(),
+         "batch_explain_reports_selected_impl");
+  expect(explainFieldValue(explain_a, "selected_impl") == explainFieldValue(explain_b, "selected_impl"),
+         "batch_explain_strategy_is_name_agnostic");
+}
+
 void runStreamSqlRegression() {
   namespace fs = std::filesystem;
 
@@ -1207,6 +1250,7 @@ int main() {
   runSemanticRegression();
   runComplexDmlRegression();
   runPlannerPlanRegression();
+  runBatchExplainRegression();
   runStreamSqlRegression();
 
   if (g_failed == 0) {

@@ -257,7 +257,7 @@ void testExplainStreamSql() {
       "FROM strategy_hot_events GROUP BY window_start, key HAVING value_sum > 0",
       options);
   const std::string final_transform_reason =
-      "actor acceleration requires the aggregate hot path to be the final stream transform";
+      "actor acceleration requires the eligible grouped aggregate to be the final stream transform";
   expect(having_explain.find("actor_eligible=false") != std::string::npos,
          "having explain should disable actor eligibility after aggregate");
   expect(having_explain.find("actor_eligibility_reason=" + final_transform_reason) !=

@@ -7,13 +7,10 @@ namespace dataflow {
 
 namespace {
 
-bool canUseWindowKeySumFastPathSpec(const LocalGroupedAggregateSpec& aggregate) {
+bool canUseTwoKeySingleValueSumFastPath(const LocalGroupedAggregateSpec& aggregate) {
   return aggregate.group_keys.size() == 2 &&
-         aggregate.group_keys[0] == "window_start" &&
-         aggregate.group_keys[1] == "key" &&
          aggregate.aggregates.size() == 1 &&
          aggregate.aggregates[0].function == AggregateFunction::Sum &&
-         aggregate.aggregates[0].value_column == "value" &&
          !aggregate.aggregates[0].is_count_star;
 }
 
@@ -75,10 +72,10 @@ const char* localGroupedAggregateShapeName(LocalGroupedAggregateShape shape) {
   switch (shape) {
     case LocalGroupedAggregateShape::Generic:
       return "generic";
-    case LocalGroupedAggregateShape::WindowKeySumString:
-      return "window-key-sum-string";
-    case LocalGroupedAggregateShape::WindowKeySumInt64:
-      return "window-key-sum-int64";
+    case LocalGroupedAggregateShape::TwoKeyStringSum:
+      return "two-key-string-sum";
+    case LocalGroupedAggregateShape::TwoKeyInt64Sum:
+      return "two-key-int64-sum";
   }
   return "generic";
 }
@@ -96,25 +93,26 @@ const char* localTransportEncodingName(LocalTransportEncoding encoding) {
 LocalGroupedAggregateExecutionPattern analyzeLocalGroupedAggregateExecution(
     const Table& input, const LocalGroupedAggregateSpec& aggregate) {
   LocalGroupedAggregateExecutionPattern pattern;
-  if (!canUseWindowKeySumFastPathSpec(aggregate)) {
+  if (!canUseTwoKeySingleValueSumFastPath(aggregate)) {
     return pattern;
   }
-  if (!input.schema.has("window_start") || !input.schema.has("key")) {
+  if (!input.schema.has(aggregate.group_keys[0]) || !input.schema.has(aggregate.group_keys[1]) ||
+      !input.schema.has(aggregate.aggregates[0].value_column)) {
     return pattern;
   }
 
-  const auto window_index = input.schema.indexOf("window_start");
-  const auto key_index = input.schema.indexOf("key");
-  if (isStringLikeColumn(input, window_index) && isStringLikeColumn(input, key_index)) {
-    pattern.aggregate_shape = LocalGroupedAggregateShape::WindowKeySumString;
+  const auto first_key_index = input.schema.indexOf(aggregate.group_keys[0]);
+  const auto second_key_index = input.schema.indexOf(aggregate.group_keys[1]);
+  if (isStringLikeColumn(input, first_key_index) && isStringLikeColumn(input, second_key_index)) {
+    pattern.aggregate_shape = LocalGroupedAggregateShape::TwoKeyStringSum;
     pattern.transport_encoding = LocalTransportEncoding::BinaryRowBatch;
-    pattern.use_window_key_partial_merge = true;
+    pattern.use_two_key_partial_merge = true;
     return pattern;
   }
-  if (isInt64LikeColumn(input, window_index) && isInt64LikeColumn(input, key_index)) {
-    pattern.aggregate_shape = LocalGroupedAggregateShape::WindowKeySumInt64;
-    pattern.transport_encoding = LocalTransportEncoding::ArrowIpc;
-    pattern.use_window_key_partial_merge = true;
+  if (isInt64LikeColumn(input, first_key_index) && isInt64LikeColumn(input, second_key_index)) {
+    pattern.aggregate_shape = LocalGroupedAggregateShape::TwoKeyInt64Sum;
+    pattern.transport_encoding = LocalTransportEncoding::BinaryRowBatch;
+    pattern.use_two_key_partial_merge = true;
     return pattern;
   }
   return pattern;

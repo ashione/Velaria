@@ -1150,6 +1150,74 @@ PhysicalPlan SqlPlanner::buildPhysicalPlan(const LogicalPlan& logical) const {
   return optimizePhysical(physical);
 }
 
+std::string SqlPlanner::explainLogicalPlan(const LogicalPlan& logical) const {
+  std::ostringstream out;
+  out << "seed_columns=" << logical.seed.schema().fields.size() << "\n";
+  for (std::size_t i = 0; i < logical.steps.size(); ++i) {
+    const auto& step = logical.steps[i];
+    out << i + 1 << ". ";
+    switch (step.kind) {
+      case LogicalStepKind::Scan:
+        out << "Scan source=" << step.source_name;
+        break;
+      case LogicalStepKind::Filter:
+        out << "Filter column=" << step.filter_column << " op=" << step.filter_op;
+        break;
+      case LogicalStepKind::Join:
+        out << "Join left=" << step.join_left_column << " right=" << step.join_right_column;
+        break;
+      case LogicalStepKind::Aggregate:
+        out << "Aggregate keys=" << step.group_keys.size() << " aggs=" << step.aggregates.size();
+        break;
+      case LogicalStepKind::Having:
+        out << "Having column=" << step.having_column << " op=" << step.filter_op;
+        break;
+      case LogicalStepKind::WithColumn:
+        out << "WithColumn output=" << step.with_column_name;
+        break;
+      case LogicalStepKind::Project:
+        out << "Project columns=" << step.project_indices.size();
+        break;
+      case LogicalStepKind::OrderBy:
+        out << "OrderBy columns=" << step.order_indices.size();
+        break;
+      case LogicalStepKind::Limit:
+        out << "Limit value=" << step.limit;
+        break;
+    }
+    out << "\n";
+  }
+  return out.str();
+}
+
+std::string SqlPlanner::explainPhysicalPlan(const PhysicalPlan& physical) const {
+  std::ostringstream out;
+  for (std::size_t i = 0; i < physical.steps.size(); ++i) {
+    const auto& step = physical.steps[i];
+    out << i + 1 << ". ";
+    switch (step.physical_kind) {
+      case PhysicalStepKind::SourceOnly:
+        out << "SourceOnly";
+        break;
+      case PhysicalStepKind::FusedUnary:
+        out << "FusedUnary";
+        break;
+      case PhysicalStepKind::Join:
+        out << "Join";
+        break;
+      case PhysicalStepKind::Aggregate:
+        out << "Aggregate";
+        break;
+    }
+    out << " barrier=" << (step.pipeline_barrier ? "true" : "false");
+    if (!step.reason.empty()) {
+      out << " reason=" << step.reason;
+    }
+    out << "\n";
+  }
+  return out.str();
+}
+
 DataFrame SqlPlanner::materializeFromPhysical(const PhysicalPlan& physical) const {
   DataFrame current = physical.seed;
   for (const auto& step : physical.steps) {
@@ -1500,7 +1568,7 @@ StreamPhysicalPlan SqlPlanner::buildStreamPhysicalPlan(const StreamLogicalPlan& 
     }
     if (i + 1 != logical.nodes.size()) {
       physical.actor_eligibility_reason =
-          "actor acceleration requires the aggregate hot path to be the final stream transform";
+          "actor acceleration requires the eligible grouped aggregate to be the final stream transform";
       return physical;
     }
     physical.actor_eligible = true;

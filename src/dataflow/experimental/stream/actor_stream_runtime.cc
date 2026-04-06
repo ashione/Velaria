@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <atomic>
@@ -80,10 +81,26 @@ struct RuntimeAggregateLayout {
   std::string partial_count_column;
 };
 
+struct StringTwoKey {
+  std::string first;
+  std::string second;
+
+  bool operator==(const StringTwoKey& other) const {
+    return first == other.first && second == other.second;
+  }
+};
+
+struct StringTwoKeyHash {
+  std::size_t operator()(const StringTwoKey& value) const {
+    std::size_t seed = std::hash<std::string>{}(value.first);
+    seed ^= std::hash<std::string>{}(value.second) + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+    return seed;
+  }
+};
+
 struct WindowKeySumState {
-  std::unordered_map<std::string, std::size_t> index_by_key;
-  std::vector<Value> window_values;
-  std::vector<Value> key_values;
+  std::unordered_map<StringTwoKey, std::size_t, StringTwoKeyHash> index_by_key;
+  std::vector<StringTwoKey> keys;
   std::vector<double> sums;
 };
 
@@ -109,11 +126,19 @@ struct Int64WindowKeyHash {
   }
 };
 
-double spinValue(double value, size_t cpu_spin_per_row);
+struct Int64TwoKeySumState {
+  std::unordered_map<Int64WindowKey, std::size_t, Int64WindowKeyHash> index_by_key;
+  std::vector<Int64WindowKey> keys;
+  std::vector<double> sums;
+};
 
-Table aggregatePartitionWithWork(const Table& input, const std::string& output_column,
+double spinValue(double value, size_t cpu_spin_per_row);
+std::string_view stringAt(const BinaryKeyColumn& column, size_t row_idx);
+Value binaryKeyValueAt(const BinaryKeyColumn& column, size_t row_idx);
+
+Table aggregatePartitionWithWork(const Table& input, const LocalGroupedAggregateSpec& aggregate,
                                  size_t cpu_spin_per_row);
-Table aggregateInt64WindowKeySumPartial(const Table& input, const std::string& output_column,
+Table aggregateInt64WindowKeySumPartial(const Table& input, const LocalGroupedAggregateSpec& aggregate,
                                         size_t cpu_spin_per_row);
 
 bool isBinaryRowBatchPayload(const uint8_t* payload, std::size_t size) {
@@ -121,11 +146,11 @@ bool isBinaryRowBatchPayload(const uint8_t* payload, std::size_t size) {
   return payload != nullptr && size >= 4 && std::memcmp(payload, kMagic, 4) == 0;
 }
 
-std::string encodeWindowKeyStateKey(const Value& window_value, const Value& key_value) {
-  return std::to_string(static_cast<int>(window_value.type())) + kKeySep +
-         window_value.toString() + kKeySep +
-         std::to_string(static_cast<int>(key_value.type())) + kKeySep +
-         key_value.toString();
+std::string encodeGenericTwoKeyStateKey(const Value& first_value, const Value& second_value) {
+  return std::to_string(static_cast<int>(first_value.type())) + kKeySep +
+         first_value.toString() + kKeySep +
+         std::to_string(static_cast<int>(second_value.type())) + kKeySep +
+         second_value.toString();
 }
 
 std::vector<size_t> resolveGroupKeyIndices(const Table& input,
@@ -284,12 +309,10 @@ Table aggregateInputToPartial(const Table& input, const LocalGroupedAggregateSpe
     return makeAggregateOutputSkeleton(aggregate, false);
   }
   switch (analyzeLocalGroupedAggregateExecution(input, aggregate).aggregate_shape) {
-    case LocalGroupedAggregateShape::WindowKeySumString:
-      return aggregatePartitionWithWork(input, aggregate.aggregates[0].output_column,
-                                        cpu_spin_per_row);
-    case LocalGroupedAggregateShape::WindowKeySumInt64:
-      return aggregateInt64WindowKeySumPartial(input, aggregate.aggregates[0].output_column,
-                                               cpu_spin_per_row);
+    case LocalGroupedAggregateShape::TwoKeyStringSum:
+      return aggregatePartitionWithWork(input, aggregate, cpu_spin_per_row);
+    case LocalGroupedAggregateShape::TwoKeyInt64Sum:
+      return aggregateInt64WindowKeySumPartial(input, aggregate, cpu_spin_per_row);
     case LocalGroupedAggregateShape::Generic:
       break;
   }
@@ -300,11 +323,12 @@ Table aggregateInputToPartial(const Table& input, const LocalGroupedAggregateSpe
   return DataFrame(spun).aggregate(key_indices, partial_specs).toTable();
 }
 
-Table aggregateInt64WindowKeySumPartial(const Table& input, const std::string& output_column,
+Table aggregateInt64WindowKeySumPartial(const Table& input, const LocalGroupedAggregateSpec& aggregate,
                                         size_t cpu_spin_per_row) {
-  const auto window_column = viewValueColumn(input, input.schema.indexOf("window_start"));
-  const auto key_column = viewValueColumn(input, input.schema.indexOf("key"));
-  const auto value_column = viewValueColumn(input, input.schema.indexOf("value"));
+  const auto window_column = viewValueColumn(input, input.schema.indexOf(aggregate.group_keys[0]));
+  const auto key_column = viewValueColumn(input, input.schema.indexOf(aggregate.group_keys[1]));
+  const auto value_column =
+      viewValueColumn(input, input.schema.indexOf(aggregate.aggregates[0].value_column));
   std::unordered_map<Int64WindowKey, std::size_t, Int64WindowKeyHash> key_to_index;
   std::vector<Int64WindowKey> ordered_keys;
   std::vector<double> ordered_sums;
@@ -337,7 +361,8 @@ Table aggregateInt64WindowKeySumPartial(const Table& input, const std::string& o
         cpu_spin_per_row == 0 ? value : spinValue(value, cpu_spin_per_row);
   }
 
-  Table out(Schema({"window_start", "key", partialValueColumnName(output_column)}), {});
+  Table out(Schema({aggregate.group_keys[0], aggregate.group_keys[1],
+                    partialValueColumnName(aggregate.aggregates[0].output_column)}), {});
   out.rows.reserve(ordered_keys.size());
   for (std::size_t index = 0; index < ordered_keys.size(); ++index) {
     Row row;
@@ -418,28 +443,27 @@ Table finalizeMergedPartialAggregates(const Table& partials,
   return output;
 }
 
-void mergeWindowKeySumPartial(const Table& partial, const std::string& partial_column,
-                              WindowKeySumState* state) {
+void mergeWindowKeySumPartial(const Table& partial, const LocalGroupedAggregateSpec& aggregate,
+                              const std::string& partial_column, WindowKeySumState* state) {
   if (state == nullptr) return;
-  if (!partial.schema.has("window_start") || !partial.schema.has("key") ||
+  if (!partial.schema.has(aggregate.group_keys[0]) || !partial.schema.has(aggregate.group_keys[1]) ||
       !partial.schema.has(partial_column)) {
-    throw std::runtime_error("window-key sum partial schema mismatch");
+    throw std::runtime_error("two-key partial aggregate schema mismatch");
   }
   Table materialized = partial;
   if (materialized.rows.empty() && materialized.rowCount() > 0) {
     materializeRows(&materialized);
   }
-  const auto window_idx = materialized.schema.indexOf("window_start");
-  const auto key_idx = materialized.schema.indexOf("key");
+  const auto window_idx = materialized.schema.indexOf(aggregate.group_keys[0]);
+  const auto key_idx = materialized.schema.indexOf(aggregate.group_keys[1]);
   const auto sum_idx = materialized.schema.indexOf(partial_column);
   for (const auto& row : materialized.rows) {
-    const auto state_key = encodeWindowKeyStateKey(row[window_idx], row[key_idx]);
+    const StringTwoKey state_key{row[window_idx].toString(), row[key_idx].toString()};
     auto it = state->index_by_key.find(state_key);
     if (it == state->index_by_key.end()) {
       const std::size_t index = state->sums.size();
       state->index_by_key.emplace(state_key, index);
-      state->window_values.push_back(row[window_idx]);
-      state->key_values.push_back(row[key_idx]);
+      state->keys.push_back(state_key);
       state->sums.push_back(0.0);
       it = state->index_by_key.find(state_key);
     }
@@ -447,14 +471,76 @@ void mergeWindowKeySumPartial(const Table& partial, const std::string& partial_c
   }
 }
 
+void mergeTwoKeyValuePartial(const TwoKeyValueColumnarBatch& partial,
+                             WindowKeySumState* string_state,
+                             Int64TwoKeySumState* int64_state) {
+  const bool int64_keys = partial.first_key.type == BinaryKeyColumnType::Int64 &&
+                          partial.second_key.type == BinaryKeyColumnType::Int64;
+  for (std::size_t row_idx = 0; row_idx < partial.row_count; ++row_idx) {
+    if (partial.first_key.is_null[row_idx] || partial.second_key.is_null[row_idx] ||
+        partial.value.is_null[row_idx]) {
+      continue;
+    }
+    if (int64_keys) {
+      if (int64_state == nullptr) continue;
+      const Int64WindowKey key{false, partial.first_key.int64_values[row_idx], false,
+                               partial.second_key.int64_values[row_idx]};
+      auto it = int64_state->index_by_key.find(key);
+      if (it == int64_state->index_by_key.end()) {
+        const std::size_t index = int64_state->sums.size();
+        int64_state->index_by_key.emplace(key, index);
+        int64_state->keys.push_back(key);
+        int64_state->sums.push_back(0.0);
+        it = int64_state->index_by_key.find(key);
+      }
+      int64_state->sums[it->second] += partial.value.values[row_idx];
+      continue;
+    }
+
+    if (string_state == nullptr) continue;
+    StringTwoKey state_key;
+    {
+      const auto first_view = stringAt(partial.first_key, row_idx);
+      state_key.first.assign(first_view.data(), first_view.size());
+      const auto second_view = stringAt(partial.second_key, row_idx);
+      state_key.second.assign(second_view.data(), second_view.size());
+    }
+    auto it = string_state->index_by_key.find(state_key);
+    if (it == string_state->index_by_key.end()) {
+      const std::size_t index = string_state->sums.size();
+      string_state->index_by_key.emplace(state_key, index);
+      string_state->keys.push_back(state_key);
+      string_state->sums.push_back(0.0);
+      it = string_state->index_by_key.find(state_key);
+    }
+    string_state->sums[it->second] += partial.value.values[row_idx];
+  }
+}
+
 Table materializeWindowKeySumState(const WindowKeySumState& state,
-                                   const std::string& output_column) {
-  Table out(Schema({"window_start", "key", output_column}), {});
+                                   const LocalGroupedAggregateSpec& aggregate) {
+  Table out(Schema({aggregate.group_keys[0], aggregate.group_keys[1],
+                    aggregate.aggregates[0].output_column}), {});
   out.rows.reserve(state.sums.size());
   for (std::size_t i = 0; i < state.sums.size(); ++i) {
     Row row;
-    row.emplace_back(state.window_values[i]);
-    row.emplace_back(state.key_values[i]);
+    row.emplace_back(state.keys[i].first);
+    row.emplace_back(state.keys[i].second);
+    row.emplace_back(state.sums[i]);
+    out.rows.push_back(std::move(row));
+  }
+  return out;
+}
+
+Table materializeInt64TwoKeySumState(const Int64TwoKeySumState& state,
+                                     const LocalGroupedAggregateSpec& aggregate) {
+  Table out(Schema({aggregate.group_keys[0], aggregate.group_keys[1],
+                    aggregate.aggregates[0].output_column}), {});
+  out.rows.reserve(state.sums.size());
+  for (std::size_t i = 0; i < state.sums.size(); ++i) {
+    Row row;
+    row.emplace_back(state.keys[i].window_is_null ? Value() : Value(state.keys[i].window));
+    row.emplace_back(state.keys[i].key_is_null ? Value() : Value(state.keys[i].key));
     row.emplace_back(state.sums[i]);
     out.rows.push_back(std::move(row));
   }
@@ -465,14 +551,14 @@ Table runSingleProcessGroupedAggregateImpl(const std::vector<Table>& batches,
                                            const LocalGroupedAggregateSpec& aggregate,
                                            size_t cpu_spin_per_row) {
   const auto execution_pattern = analyzeLocalGroupedAggregateExecution(batches, aggregate);
-  if (execution_pattern.use_window_key_partial_merge) {
+  if (execution_pattern.use_two_key_partial_merge) {
     WindowKeySumState state;
     const auto partial_column = partialValueColumnName(aggregate.aggregates[0].output_column);
     for (const auto& batch : batches) {
       Table partial = aggregateInputToPartial(batch, aggregate, cpu_spin_per_row);
-      mergeWindowKeySumPartial(partial, partial_column, &state);
+      mergeWindowKeySumPartial(partial, aggregate, partial_column, &state);
     }
-    return materializeWindowKeySumState(state, aggregate.aggregates[0].output_column);
+    return materializeWindowKeySumState(state, aggregate);
   }
 
   std::vector<Table> partials;
@@ -483,14 +569,11 @@ Table runSingleProcessGroupedAggregateImpl(const std::vector<Table>& batches,
   return finalizeMergedPartialAggregates(appendTables(partials), aggregate);
 }
 
-LocalActorStreamResult measureSingleProcessWindowKeySum(const std::vector<Table>& batches,
-                                                        size_t cpu_spin_per_row) {
+LocalActorStreamResult measureSingleProcessGroupedAggregate(
+    const std::vector<Table>& batches, const LocalGroupedAggregateSpec& aggregate,
+    size_t cpu_spin_per_row) {
   LocalActorStreamResult result;
   auto started = std::chrono::steady_clock::now();
-  LocalGroupedAggregateSpec aggregate;
-  aggregate.group_keys = {"window_start", "key"};
-  aggregate.aggregates.push_back(
-      {AggregateFunction::Sum, "value", "value_sum", false});
   result.final_table = runSingleProcessGroupedAggregateImpl(batches, aggregate, cpu_spin_per_row);
   result.processed_batches = batches.size();
   result.processed_partitions = batches.size();
@@ -825,6 +908,23 @@ std::vector<std::pair<size_t, size_t>> splitTableRanges(const Table& table, size
   return out;
 }
 
+size_t chooseLocalAggregatePartitionCount(
+    size_t row_count, size_t worker_count,
+    const LocalGroupedAggregateExecutionPattern& execution_pattern) {
+  if (worker_count <= 1 || row_count <= 1) {
+    return 1;
+  }
+  size_t target_rows_per_partition = 2048;
+  if (execution_pattern.use_two_key_partial_merge) {
+    target_rows_per_partition = 8192;
+  } else if (execution_pattern.transport_encoding == LocalTransportEncoding::ArrowIpc) {
+    target_rows_per_partition = 4096;
+  }
+  const size_t desired_partitions =
+      std::max<size_t>(1, (row_count + target_rows_per_partition - 1) / target_rows_per_partition);
+  return std::max<size_t>(1, std::min(worker_count, desired_partitions));
+}
+
 Table projectAndSliceRange(const Table& table, size_t begin, size_t end,
                            const BinaryRowBatchOptions& projection) {
   const size_t row_count = table.rowCount();
@@ -907,6 +1007,25 @@ std::string_view stringAt(const BinaryStringColumn& column, size_t row_idx) {
   return column.values.view(row_idx);
 }
 
+std::string_view stringAt(const BinaryKeyColumn& column, size_t row_idx) {
+  if (column.dictionary_encoded) {
+    return column.dictionary.view(column.indices[row_idx]);
+  }
+  return column.string_values.view(row_idx);
+}
+
+bool valueColumnIsInt64Like(const ValueColumnBuffer& column) {
+  if (column.arrow_backing != nullptr) {
+    return isArrowIntegerLikeFormat(column.arrow_backing->format);
+  }
+  const auto row_count = valueColumnRowCount(column);
+  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+    if (valueColumnIsNullAt(column, row_index)) continue;
+    return valueColumnValueAt(column, row_index).type() == DataType::Int64;
+  }
+  return false;
+}
+
 std::string stringKeyAt(const ValueColumnBuffer& column, size_t row_idx) {
   if (valueColumnIsNullAt(column, row_idx)) {
     return std::string();
@@ -923,6 +1042,17 @@ std::string stringKeyAt(const ValueColumnBuffer& column, size_t row_idx) {
   return value.toString();
 }
 
+Value binaryKeyValueAt(const BinaryKeyColumn& column, size_t row_idx) {
+  if (column.is_null[row_idx] != 0) {
+    return Value();
+  }
+  if (column.type == BinaryKeyColumnType::Int64) {
+    return Value(column.int64_values[row_idx]);
+  }
+  const auto view = stringAt(column, row_idx);
+  return Value(std::string(view.data(), view.size()));
+}
+
 double spinValue(double value, size_t cpu_spin_per_row) {
   double out = value;
   for (size_t i = 0; i < cpu_spin_per_row; ++i) {
@@ -932,23 +1062,27 @@ double spinValue(double value, size_t cpu_spin_per_row) {
   return out;
 }
 
-Table aggregateVectorizedBatch(const WindowKeyValueColumnarBatch& batch,
+Table aggregateVectorizedBatch(const TwoKeyValueColumnarBatch& batch,
+                               const std::string& first_key_name,
+                               const std::string& second_key_name,
                                const std::string& output_column,
                                size_t cpu_spin_per_row) {
-  Table out(Schema({"window_start", "key", output_column}), {});
+  Table out(Schema({first_key_name, second_key_name, output_column}), {});
   if (batch.row_count == 0) {
     return out;
   }
 
-  if (batch.window_start.dictionary_encoded && batch.key.dictionary_encoded) {
+  if (batch.first_key.type == BinaryKeyColumnType::String &&
+      batch.second_key.type == BinaryKeyColumnType::String &&
+      batch.first_key.dictionary_encoded && batch.second_key.dictionary_encoded) {
     std::unordered_map<uint64_t, double> sums;
     std::vector<uint64_t> ordered;
     ordered.reserve(batch.row_count);
     for (size_t i = 0; i < batch.row_count; ++i) {
-      if (batch.window_start.is_null[i] || batch.key.is_null[i] || batch.value.is_null[i]) continue;
+      if (batch.first_key.is_null[i] || batch.second_key.is_null[i] || batch.value.is_null[i]) continue;
       const uint64_t composite =
-          (static_cast<uint64_t>(batch.window_start.indices[i]) << 32) |
-          static_cast<uint64_t>(batch.key.indices[i]);
+          (static_cast<uint64_t>(batch.first_key.indices[i]) << 32) |
+          static_cast<uint64_t>(batch.second_key.indices[i]);
       auto it = sums.find(composite);
       if (it == sums.end()) {
         ordered.push_back(composite);
@@ -963,11 +1097,44 @@ Table aggregateVectorizedBatch(const WindowKeyValueColumnarBatch& batch,
       const uint32_t window_id = static_cast<uint32_t>(composite >> 32);
       const uint32_t key_id = static_cast<uint32_t>(composite & 0xFFFFFFFFu);
       Row row;
-      const auto window = batch.window_start.dictionary.view(window_id);
-      const auto key = batch.key.dictionary.view(key_id);
+      const auto window = batch.first_key.dictionary.view(window_id);
+      const auto key = batch.second_key.dictionary.view(key_id);
       row.emplace_back(std::string(window.data(), window.size()));
       row.emplace_back(std::string(key.data(), key.size()));
       row.emplace_back(sums.at(composite));
+      out.rows.push_back(std::move(row));
+    }
+    return out;
+  }
+
+  if (batch.first_key.type == BinaryKeyColumnType::Int64 &&
+      batch.second_key.type == BinaryKeyColumnType::Int64) {
+    std::unordered_map<Int64WindowKey, std::size_t, Int64WindowKeyHash> sums_index;
+    std::vector<Int64WindowKey> ordered;
+    std::vector<double> sums;
+    ordered.reserve(batch.row_count);
+    sums.reserve(batch.row_count);
+    for (size_t i = 0; i < batch.row_count; ++i) {
+      if (batch.first_key.is_null[i] || batch.second_key.is_null[i] || batch.value.is_null[i]) continue;
+      const Int64WindowKey composite{
+          batch.first_key.is_null[i] != 0, batch.first_key.int64_values[i],
+          batch.second_key.is_null[i] != 0, batch.second_key.int64_values[i]};
+      auto it = sums_index.find(composite);
+      if (it == sums_index.end()) {
+        ordered.push_back(composite);
+        sums.push_back(0.0);
+        it = sums_index.emplace(composite, sums.size() - 1).first;
+      }
+      const double value = cpu_spin_per_row == 0 ? batch.value.values[i]
+                                                 : spinValue(batch.value.values[i], cpu_spin_per_row);
+      sums[it->second] += value;
+    }
+    out.rows.reserve(ordered.size());
+    for (std::size_t i = 0; i < ordered.size(); ++i) {
+      Row row;
+      row.emplace_back(ordered[i].window_is_null ? Value() : Value(ordered[i].window));
+      row.emplace_back(ordered[i].key_is_null ? Value() : Value(ordered[i].key));
+      row.emplace_back(sums[i]);
       out.rows.push_back(std::move(row));
     }
     return out;
@@ -977,14 +1144,10 @@ Table aggregateVectorizedBatch(const WindowKeyValueColumnarBatch& batch,
   std::vector<std::string> ordered;
   ordered.reserve(batch.row_count);
   for (size_t i = 0; i < batch.row_count; ++i) {
-    if (batch.window_start.is_null[i] || batch.key.is_null[i] || batch.value.is_null[i]) continue;
-    const auto window = stringAt(batch.window_start, i);
-    const auto key = stringAt(batch.key, i);
-    std::string state_key;
-    state_key.reserve(window.size() + 1 + key.size());
-    state_key.append(window.data(), window.size());
-    state_key.push_back(kKeySep);
-    state_key.append(key.data(), key.size());
+    if (batch.first_key.is_null[i] || batch.second_key.is_null[i] || batch.value.is_null[i]) continue;
+    const auto window_value = binaryKeyValueAt(batch.first_key, i);
+    const auto key_value = binaryKeyValueAt(batch.second_key, i);
+    std::string state_key = encodeGenericTwoKeyStateKey(window_value, key_value);
     auto it = sums.find(state_key);
     if (it == sums.end()) {
       ordered.push_back(state_key);
@@ -1006,55 +1169,77 @@ Table aggregateVectorizedBatch(const WindowKeyValueColumnarBatch& batch,
   return out;
 }
 
-WindowKeyValueColumnarBatch buildColumnarFromTable(const Table& input) {
-  if (!input.schema.has("window_start") || !input.schema.has("key") || !input.schema.has("value")) {
+TwoKeyValueColumnarBatch buildColumnarFromTable(const Table& input,
+                                                const LocalGroupedAggregateSpec& aggregate) {
+  if (!input.schema.has(aggregate.group_keys[0]) || !input.schema.has(aggregate.group_keys[1]) ||
+      !input.schema.has(aggregate.aggregates[0].value_column)) {
     throw std::runtime_error("buildColumnarFromTable schema mismatch");
   }
 
-  const size_t window_idx = input.schema.indexOf("window_start");
-  const size_t key_idx = input.schema.indexOf("key");
-  const size_t value_idx = input.schema.indexOf("value");
+  const size_t window_idx = input.schema.indexOf(aggregate.group_keys[0]);
+  const size_t key_idx = input.schema.indexOf(aggregate.group_keys[1]);
+  const size_t value_idx = input.schema.indexOf(aggregate.aggregates[0].value_column);
   const auto window_column = viewValueColumn(input, window_idx);
   const auto key_column = viewValueColumn(input, key_idx);
   const auto value_column = viewValueColumn(input, value_idx);
-  WindowKeyValueColumnarBatch batch;
+  TwoKeyValueColumnarBatch batch;
   batch.row_count = input.rowCount();
-  batch.window_start.dictionary_encoded = true;
-  batch.key.dictionary_encoded = true;
-  batch.window_start.indices.assign(batch.row_count, 0);
-  batch.key.indices.assign(batch.row_count, 0);
-  batch.window_start.is_null.assign(batch.row_count, 0);
-  batch.key.is_null.assign(batch.row_count, 0);
+  const bool first_is_int64 = valueColumnIsInt64Like(*window_column.buffer);
+  const bool second_is_int64 = valueColumnIsInt64Like(*key_column.buffer);
+  batch.first_key.type = first_is_int64 ? BinaryKeyColumnType::Int64 : BinaryKeyColumnType::String;
+  batch.second_key.type = second_is_int64 ? BinaryKeyColumnType::Int64 : BinaryKeyColumnType::String;
+  batch.first_key.dictionary_encoded = !first_is_int64;
+  batch.second_key.dictionary_encoded = !second_is_int64;
+  batch.first_key.is_null.assign(batch.row_count, 0);
+  batch.second_key.is_null.assign(batch.row_count, 0);
   batch.value.is_null.assign(batch.row_count, 0);
   batch.value.values.assign(batch.row_count, 0.0);
+  if (first_is_int64) {
+    batch.first_key.int64_values.assign(batch.row_count, 0);
+  } else {
+    batch.first_key.indices.assign(batch.row_count, 0);
+  }
+  if (second_is_int64) {
+    batch.second_key.int64_values.assign(batch.row_count, 0);
+  } else {
+    batch.second_key.indices.assign(batch.row_count, 0);
+  }
 
   std::unordered_map<std::string, uint32_t> window_dict;
   std::unordered_map<std::string, uint32_t> key_dict;
   for (size_t row_idx = 0; row_idx < batch.row_count; ++row_idx) {
     if (valueColumnIsNullAt(*window_column.buffer, row_idx)) {
-      batch.window_start.is_null[row_idx] = 1;
+      batch.first_key.is_null[row_idx] = 1;
     } else {
-      const std::string text = stringKeyAt(*window_column.buffer, row_idx);
-      auto it = window_dict.find(text);
-      if (it == window_dict.end()) {
-        const uint32_t id = static_cast<uint32_t>(batch.window_start.dictionary.size());
-        batch.window_start.dictionary.append(text);
-        it = window_dict.emplace(text, id).first;
+      if (first_is_int64) {
+        batch.first_key.int64_values[row_idx] = valueColumnInt64At(*window_column.buffer, row_idx);
+      } else {
+        const std::string text = stringKeyAt(*window_column.buffer, row_idx);
+        auto it = window_dict.find(text);
+        if (it == window_dict.end()) {
+          const uint32_t id = static_cast<uint32_t>(batch.first_key.dictionary.size());
+          batch.first_key.dictionary.append(text);
+          it = window_dict.emplace(text, id).first;
+        }
+        batch.first_key.indices[row_idx] = it->second;
       }
-      batch.window_start.indices[row_idx] = it->second;
     }
 
     if (valueColumnIsNullAt(*key_column.buffer, row_idx)) {
-      batch.key.is_null[row_idx] = 1;
+      batch.second_key.is_null[row_idx] = 1;
     } else {
-      const std::string text = stringKeyAt(*key_column.buffer, row_idx);
-      auto it = key_dict.find(text);
-      if (it == key_dict.end()) {
-        const uint32_t id = static_cast<uint32_t>(batch.key.dictionary.size());
-        batch.key.dictionary.append(text);
-        it = key_dict.emplace(text, id).first;
+      if (second_is_int64) {
+        batch.second_key.int64_values[row_idx] = valueColumnInt64At(*key_column.buffer, row_idx);
+      } else {
+        const std::string text = stringKeyAt(*key_column.buffer, row_idx);
+        auto it = key_dict.find(text);
+        if (it == key_dict.end()) {
+          const uint32_t id = static_cast<uint32_t>(batch.second_key.dictionary.size());
+          batch.second_key.dictionary.append(text);
+          it = key_dict.emplace(text, id).first;
+        }
+        batch.second_key.indices[row_idx] = it->second;
       }
-      batch.key.indices[row_idx] = it->second;
     }
 
     if (valueColumnIsNullAt(*value_column.buffer, row_idx)) {
@@ -1066,10 +1251,12 @@ WindowKeyValueColumnarBatch buildColumnarFromTable(const Table& input) {
   return batch;
 }
 
-Table aggregatePartitionWithWork(const Table& input, const std::string& output_column,
+Table aggregatePartitionWithWork(const Table& input, const LocalGroupedAggregateSpec& aggregate,
                                  size_t cpu_spin_per_row) {
-  return aggregateVectorizedBatch(buildColumnarFromTable(input),
-                                  partialValueColumnName(output_column), cpu_spin_per_row);
+  return aggregateVectorizedBatch(buildColumnarFromTable(input, aggregate),
+                                  aggregate.group_keys[0], aggregate.group_keys[1],
+                                  partialValueColumnName(aggregate.aggregates[0].output_column),
+                                  cpu_spin_per_row);
 }
 
 void workerLoop(int fd, const LocalGroupedAggregateSpec& aggregate, uint64_t delay_ms,
@@ -1097,7 +1284,7 @@ void workerLoop(int fd, const LocalGroupedAggregateSpec& aggregate, uint64_t del
     result.task_id = request.task_id;
     try {
       const auto deserialize_started = std::chrono::steady_clock::now();
-      bool used_fast_path_request = false;
+      bool used_binary_row_request = false;
       SharedMemoryReadRegion request_region;
       const uint8_t* request_bytes = nullptr;
       std::size_t request_size = 0;
@@ -1113,19 +1300,27 @@ void workerLoop(int fd, const LocalGroupedAggregateSpec& aggregate, uint64_t del
       const auto compute_started = std::chrono::steady_clock::now();
       Table partial;
       if (isBinaryRowBatchPayload(request_bytes, request_size)) {
-        used_fast_path_request = true;
-        WindowKeyValueColumnarBatch batch;
-        const bool decoded = request.shared_memory
-                                 ? batch_codec.deserializeWindowKeyValueFromBuffer(
-                                       request_bytes, request_size, &batch)
-                                 : batch_codec.deserializeWindowKeyValue(request.table_payload,
-                                                                        &batch);
-        if (!decoded) {
-          closeSharedMemoryReadRegion(&request_region);
-          throw std::runtime_error("decode fast-path window-key batch failed");
+        used_binary_row_request = true;
+        TwoKeyValueColumnarBatch batch;
+        const bool decoded_fast =
+            request.shared_memory
+                ? batch_codec.deserializeTwoKeyValueFromBuffer(
+                      request_bytes, request_size, aggregate.group_keys[0], aggregate.group_keys[1],
+                      aggregate.aggregates[0].value_column, &batch)
+                : batch_codec.deserializeTwoKeyValue(request.table_payload, aggregate.group_keys[0],
+                                                    aggregate.group_keys[1],
+                                                    aggregate.aggregates[0].value_column, &batch);
+        if (decoded_fast) {
+          partial = aggregateVectorizedBatch(
+              batch, aggregate.group_keys[0], aggregate.group_keys[1],
+              partialValueColumnName(aggregate.aggregates[0].output_column), cpu_spin_per_row);
+        } else {
+          const Table input =
+              request.shared_memory
+                  ? batch_codec.deserializeFromBuffer(request_bytes, request_size)
+                  : batch_codec.deserialize(request.table_payload);
+          partial = aggregateInputToPartial(input, aggregate, cpu_spin_per_row);
         }
-        partial = aggregateVectorizedBatch(
-            batch, partialValueColumnName(aggregate.aggregates[0].output_column), cpu_spin_per_row);
       } else {
         const Table input =
             request.shared_memory
@@ -1141,7 +1336,7 @@ void workerLoop(int fd, const LocalGroupedAggregateSpec& aggregate, uint64_t del
       result.metrics.compute_ms = toMillis(serialize_started - compute_started);
 
       std::vector<uint8_t> table_payload;
-      if (used_fast_path_request) {
+      if (used_binary_row_request) {
         batch_codec.serialize(partial, &table_payload);
       } else {
         table_payload = serialize_nanoarrow_ipc_table(partial);
@@ -1246,14 +1441,6 @@ const char* localExecutionModeName(LocalExecutionMode mode) {
   return "single-process";
 }
 
-Table runSingleProcessWindowKeySum(const std::vector<Table>& batches, size_t cpu_spin_per_row) {
-  LocalGroupedAggregateSpec aggregate;
-  aggregate.group_keys = {"window_start", "key"};
-  aggregate.aggregates.push_back(
-      {AggregateFunction::Sum, "value", "value_sum", false});
-  return runSingleProcessGroupedAggregateImpl(batches, aggregate, cpu_spin_per_row);
-}
-
 Table runSingleProcessGroupedAggregate(const std::vector<Table>& batches,
                                       const LocalGroupedAggregateSpec& aggregate,
                                       size_t cpu_spin_per_row) {
@@ -1284,27 +1471,57 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
   const auto execution_pattern = analyzeLocalGroupedAggregateExecution(batches, aggregate);
   const bool use_binary_row_batch_transport =
       execution_pattern.transport_encoding == LocalTransportEncoding::BinaryRowBatch;
+  const size_t effective_shared_memory_min_payload_bytes =
+      execution_pattern.use_two_key_partial_merge
+          ? std::min<size_t>(options.shared_memory_min_payload_bytes, 16 * 1024)
+          : options.shared_memory_min_payload_bytes;
 
   std::vector<PendingPartition> pending;
   uint64_t task_seq = 1;
   for (const auto& batch : batches) {
     ++result.processed_batches;
     const auto split_started = std::chrono::steady_clock::now();
-    const auto ranges = splitTableRanges(batch, std::max<size_t>(1, workers.size()));
+    std::optional<PreparedBinaryRowBatch> prepared_binary_batch;
+    if (use_binary_row_batch_transport) {
+      prepared_binary_batch = batch_codec.prepare(batch, input_projection);
+    }
+    const auto ranges = splitTableRanges(
+        batch,
+        chooseLocalAggregatePartitionCount(batch.rowCount(), std::max<size_t>(1, workers.size()),
+                                           execution_pattern));
     result.split_ms += toMillis(std::chrono::steady_clock::now() - split_started);
     for (const auto& range : ranges) {
       PendingPartition pending_part;
       pending_part.task_id = task_seq++;
       const auto serialize_started = std::chrono::steady_clock::now();
       std::vector<uint8_t> payload;
+      bool wrote_shared_memory_directly = false;
       if (use_binary_row_batch_transport) {
-        batch_codec.serializeRange(batch, range.first, range.second, &payload, input_projection);
+        const size_t estimated_size = prepared_binary_batch->estimated_size;
+        if (can_use_shared_memory && estimated_size >= effective_shared_memory_min_payload_bytes) {
+          auto region = createSharedMemoryWriteRegion(estimated_size);
+          const size_t actual_size = batch_codec.serializePreparedRangeToBuffer(
+              batch, range.first, range.second, *prepared_binary_batch,
+              static_cast<uint8_t*>(region.mapped), static_cast<size_t>(region.ref.size));
+          closeSharedMemoryWriteRegion(&region);
+          region.ref.size = actual_size;
+          pending_part.shared_memory = true;
+          pending_part.shared_memory_ref = region.ref;
+          result.input_shared_memory_bytes += actual_size;
+          result.used_shared_memory = true;
+          wrote_shared_memory_directly = true;
+        } else {
+          batch_codec.serializePreparedRange(batch, range.first, range.second,
+                                            *prepared_binary_batch, &payload);
+        }
       } else {
         auto projected_range = projectAndSliceRange(batch, range.first, range.second, input_projection);
         payload = serialize_nanoarrow_ipc_table(projected_range);
       }
       const size_t payload_size = payload.size();
-      if (can_use_shared_memory && payload_size >= options.shared_memory_min_payload_bytes) {
+      if (!wrote_shared_memory_directly &&
+          can_use_shared_memory &&
+          payload_size >= effective_shared_memory_min_payload_bytes) {
         auto region = createSharedMemoryWriteRegion(payload_size);
         std::memcpy(region.mapped, payload.data(), payload_size);
         closeSharedMemoryWriteRegion(&region);
@@ -1325,6 +1542,7 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
 
   Table merged_partials;
   WindowKeySumState window_key_sum_state;
+  Int64TwoKeySumState int64_two_key_sum_state;
   size_t next_pending = 0;
   size_t inflight = 0;
   std::unordered_map<uint64_t, SharedMemoryPayload> inflight_input_shared_memory;
@@ -1442,13 +1660,29 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
           result.used_shared_memory = true;
           output_region = openSharedMemoryReadRegion(shared);
           const auto deserialize_started = std::chrono::steady_clock::now();
-          Table partial;
           const auto* output_bytes = static_cast<const uint8_t*>(output_region.mapped);
+          bool merged_directly = false;
+          Table partial;
           if (use_binary_row_batch_transport &&
-              isBinaryRowBatchPayload(output_bytes, output_region.size)) {
-            partial = batch_codec.deserializeFromBuffer(output_bytes, output_region.size);
-          } else {
-            partial = deserialize_nanoarrow_ipc_table(output_bytes, output_region.size, false);
+              isBinaryRowBatchPayload(output_bytes, output_region.size) &&
+              execution_pattern.use_two_key_partial_merge) {
+            TwoKeyValueColumnarBatch partial_batch;
+            const bool decoded = batch_codec.deserializeTwoKeyValueFromBuffer(
+                output_bytes, output_region.size, aggregate.group_keys[0], aggregate.group_keys[1],
+                partialValueColumnName(aggregate.aggregates[0].output_column), &partial_batch);
+            if (decoded) {
+              mergeTwoKeyValuePartial(partial_batch, &window_key_sum_state,
+                                      &int64_two_key_sum_state);
+              merged_directly = true;
+            }
+          }
+          if (!merged_directly) {
+            if (use_binary_row_batch_transport &&
+                isBinaryRowBatchPayload(output_bytes, output_region.size)) {
+              partial = batch_codec.deserializeFromBuffer(output_bytes, output_region.size);
+            } else {
+              partial = deserialize_nanoarrow_ipc_table(output_bytes, output_region.size, false);
+            }
           }
           result.coordinator_deserialize_ms +=
               toMillis(std::chrono::steady_clock::now() - deserialize_started);
@@ -1461,9 +1695,11 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
           result.worker_serialize_ms += msg.metrics.serialize_ms;
 
           const auto merge_started = std::chrono::steady_clock::now();
-          if (execution_pattern.use_window_key_partial_merge) {
+          if (merged_directly) {
+          } else if (execution_pattern.use_two_key_partial_merge) {
             mergeWindowKeySumPartial(
-                partial, partialValueColumnName(aggregate.aggregates[0].output_column),
+                partial, aggregate,
+                partialValueColumnName(aggregate.aggregates[0].output_column),
                 &window_key_sum_state);
           } else {
             merged_partials = concatenateTables({merged_partials, partial}, false);
@@ -1473,12 +1709,28 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
         } else {
           result.output_payload_bytes += msg.table_payload.size();
           const auto deserialize_started = std::chrono::steady_clock::now();
+          bool merged_directly = false;
           Table partial;
           if (use_binary_row_batch_transport &&
-              isBinaryRowBatchPayload(msg.table_payload.data(), msg.table_payload.size())) {
-            partial = batch_codec.deserialize(msg.table_payload);
-          } else {
-            partial = deserialize_nanoarrow_ipc_table(msg.table_payload, false);
+              isBinaryRowBatchPayload(msg.table_payload.data(), msg.table_payload.size()) &&
+              execution_pattern.use_two_key_partial_merge) {
+            TwoKeyValueColumnarBatch partial_batch;
+            const bool decoded = batch_codec.deserializeTwoKeyValue(
+                msg.table_payload, aggregate.group_keys[0], aggregate.group_keys[1],
+                partialValueColumnName(aggregate.aggregates[0].output_column), &partial_batch);
+            if (decoded) {
+              mergeTwoKeyValuePartial(partial_batch, &window_key_sum_state,
+                                      &int64_two_key_sum_state);
+              merged_directly = true;
+            }
+          }
+          if (!merged_directly) {
+            if (use_binary_row_batch_transport &&
+                isBinaryRowBatchPayload(msg.table_payload.data(), msg.table_payload.size())) {
+              partial = batch_codec.deserialize(msg.table_payload);
+            } else {
+              partial = deserialize_nanoarrow_ipc_table(msg.table_payload, false);
+            }
           }
           result.coordinator_deserialize_ms +=
               toMillis(std::chrono::steady_clock::now() - deserialize_started);
@@ -1487,9 +1739,11 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
           result.worker_serialize_ms += msg.metrics.serialize_ms;
 
           const auto merge_started = std::chrono::steady_clock::now();
-          if (execution_pattern.use_window_key_partial_merge) {
+          if (merged_directly) {
+          } else if (execution_pattern.use_two_key_partial_merge) {
             mergeWindowKeySumPartial(
-                partial, partialValueColumnName(aggregate.aggregates[0].output_column),
+                partial, aggregate,
+                partialValueColumnName(aggregate.aggregates[0].output_column),
                 &window_key_sum_state);
           } else {
             merged_partials = concatenateTables({merged_partials, partial}, false);
@@ -1513,9 +1767,12 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
   }
 
   stopWorkers(&workers);
-  if (execution_pattern.use_window_key_partial_merge) {
-    result.final_table =
-        materializeWindowKeySumState(window_key_sum_state, aggregate.aggregates[0].output_column);
+  if (execution_pattern.use_two_key_partial_merge) {
+    if (!int64_two_key_sum_state.sums.empty()) {
+      result.final_table = materializeInt64TwoKeySumState(int64_two_key_sum_state, aggregate);
+    } else {
+      result.final_table = materializeWindowKeySumState(window_key_sum_state, aggregate);
+    }
   } else {
     result.final_table = finalizeMergedPartialAggregates(merged_partials, aggregate);
   }
@@ -1526,17 +1783,9 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
   return result;
 }
 
-LocalActorStreamResult runLocalActorStreamWindowKeySum(const std::vector<Table>& batches,
-                                                       const LocalActorStreamOptions& options) {
-  LocalGroupedAggregateSpec aggregate;
-  aggregate.group_keys = {"window_start", "key"};
-  aggregate.aggregates.push_back(
-      {AggregateFunction::Sum, "value", "value_sum", false});
-  return runLocalActorStreamGroupedAggregate(batches, aggregate, options);
-}
-
-LocalActorStreamResult runAutoLocalActorStreamWindowKeySum(
-    const std::vector<Table>& batches, const LocalActorStreamOptions& actor_options,
+LocalActorStreamResult runAutoLocalActorStreamGroupedAggregate(
+    const std::vector<Table>& batches, const LocalGroupedAggregateSpec& aggregate,
+    const LocalActorStreamOptions& actor_options,
     const LocalExecutionAutoOptions& auto_options, LocalExecutionDecision* decision) {
   LocalExecutionDecision local_decision;
   local_decision.chosen_mode = LocalExecutionMode::SingleProcess;
@@ -1550,7 +1799,7 @@ LocalActorStreamResult runAutoLocalActorStreamWindowKeySum(
   if (actor_options.worker_count < 2 || actor_options.max_inflight_partitions == 0) {
     local_decision.reason = "actor workers unavailable";
     if (decision != nullptr) *decision = local_decision;
-    return measureSingleProcessWindowKeySum(batches, actor_options.cpu_spin_per_row);
+    return measureSingleProcessGroupedAggregate(batches, aggregate, actor_options.cpu_spin_per_row);
   }
 
   const size_t sampled_batches =
@@ -1558,13 +1807,10 @@ LocalActorStreamResult runAutoLocalActorStreamWindowKeySum(
   local_decision.sampled_batches = sampled_batches;
   const std::vector<Table> sample_batches_vec(batches.begin(),
                                               batches.begin() + sampled_batches);
-  LocalGroupedAggregateSpec aggregate;
-  aggregate.group_keys = {"window_start", "key"};
-  aggregate.aggregates.push_back(
-      {AggregateFunction::Sum, "value", "value_sum", false});
 
   const LocalActorStreamResult sample_single =
-      measureSingleProcessWindowKeySum(sample_batches_vec, actor_options.cpu_spin_per_row);
+      measureSingleProcessGroupedAggregate(sample_batches_vec, aggregate,
+                                           actor_options.cpu_spin_per_row);
   const LocalActorStreamResult sample_actor =
       runLocalActorStreamGroupedAggregate(sample_batches_vec, aggregate, actor_options);
 
@@ -1596,7 +1842,7 @@ LocalActorStreamResult runAutoLocalActorStreamWindowKeySum(
   if (local_decision.chosen_mode == LocalExecutionMode::ActorCredit) {
     return runLocalActorStreamGroupedAggregate(batches, aggregate, actor_options);
   }
-  return measureSingleProcessWindowKeySum(batches, actor_options.cpu_spin_per_row);
+  return measureSingleProcessGroupedAggregate(batches, aggregate, actor_options.cpu_spin_per_row);
 }
 
 }  // namespace dataflow

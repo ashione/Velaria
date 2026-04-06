@@ -288,6 +288,10 @@ int main(int argc, char** argv) {
 
   if (benchmark_case == "q1" || benchmark_case == "suite") {
     const auto batches = makeLineitemQ1ShapeBatches(scenario, batch_count, rows_per_batch);
+    dataflow::LocalGroupedAggregateSpec aggregate;
+    aggregate.group_keys = {"window_start", "key"};
+    aggregate.aggregates.push_back(
+        {dataflow::AggregateFunction::Sum, "value", "value_sum", false});
 
     dataflow::LocalActorStreamOptions actor_options;
     actor_options.worker_count = worker_count;
@@ -298,7 +302,8 @@ int main(int argc, char** argv) {
     if (mode == "single" || mode == "all") {
       const auto single_started = std::chrono::steady_clock::now();
       dataflow::LocalActorStreamResult single_result;
-      single_result.final_table = dataflow::runSingleProcessWindowKeySum(batches, cpu_spin_per_row);
+      single_result.final_table =
+          dataflow::runSingleProcessGroupedAggregate(batches, aggregate, cpu_spin_per_row);
       single_result.processed_batches = batch_count;
       single_result.processed_partitions = batch_count;
       single_result.elapsed_ms = static_cast<uint64_t>(
@@ -309,14 +314,16 @@ int main(int argc, char** argv) {
     }
 
     if (mode == "actor" || mode == "all") {
-      const auto actor_result = dataflow::runLocalActorStreamWindowKeySum(batches, actor_options);
+      const auto actor_result =
+          dataflow::runLocalActorStreamGroupedAggregate(batches, aggregate, actor_options);
       printMetrics("actor-credit", actor_result, scenario, rows_per_batch);
     }
 
     if (mode == "auto" || mode == "all") {
       dataflow::LocalExecutionDecision decision;
       const auto auto_result =
-          dataflow::runAutoLocalActorStreamWindowKeySum(batches, actor_options, {}, &decision);
+          dataflow::runAutoLocalActorStreamGroupedAggregate(batches, aggregate, actor_options, {},
+                                                            &decision);
       printDecision(decision);
       printMetrics("auto-selected", auto_result, scenario, rows_per_batch);
     }

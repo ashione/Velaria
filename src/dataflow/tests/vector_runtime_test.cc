@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <unistd.h>
@@ -199,6 +200,16 @@ int main() {
     expect(parsed_comma.size() == 3, "comma-separated vector parse should keep dimension");
     expect(parsed_comma[0] == 0.9f && parsed_comma[1] == 0.1f && parsed_comma[2] == 0.0f,
            "comma-separated vector parse content mismatch");
+
+    const double precise_double = 1837.2150610583446;
+    const auto precise_text = dataflow::Value(precise_double).toString();
+    expect(std::fabs(std::stod(precise_text) - precise_double) <=
+               std::numeric_limits<double>::epsilon() * std::fabs(precise_double) * 4.0,
+           "double toString should preserve high precision");
+    const auto precise_vector_text =
+        dataflow::Value(std::vector<float>{0.123456789f, -3.25f}).toString();
+    expect(precise_vector_text.find("0.123456") != std::string::npos,
+           "fixed vector toString should preserve more than truncated precision");
 
     char csv_path_template[] = "/tmp/velaria-vector-runtime-XXXXXX";
     const int csv_fd = mkstemp(csv_path_template);

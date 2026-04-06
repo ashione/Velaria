@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -108,7 +109,7 @@ class Value {
         return std::to_string(i64_);
       case DataType::Double: {
         std::ostringstream oss;
-        oss << std::fixed << std::setprecision(6) << d_;
+        oss << std::setprecision(std::numeric_limits<double>::max_digits10) << d_;
         return oss.str();
       }
       case DataType::String:
@@ -118,7 +119,7 @@ class Value {
         oss << "[";
         for (std::size_t i = 0; i < vec_.size(); ++i) {
           if (i > 0) oss << ",";
-          oss << std::fixed << std::setprecision(6) << vec_[i];
+          oss << std::setprecision(std::numeric_limits<float>::max_digits10) << vec_[i];
         }
         oss << "]";
         return oss.str();

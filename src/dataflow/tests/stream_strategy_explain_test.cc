@@ -227,6 +227,10 @@ void testExplainStreamSql() {
          "explain should expose the selected local-workers mode");
   expect(explain.find("shared_memory_transport=true") != std::string::npos,
          "explain should expose shared-memory knobs");
+  expect(explain.find("simd_backend=") != std::string::npos,
+         "explain should expose the active simd backend");
+  expect(explain.find("compiled_backends=") != std::string::npos,
+         "explain should expose compiled simd backends");
 
   const std::string count_explain = session.explainStreamSql(
       "INSERT INTO strategy_count_sink "

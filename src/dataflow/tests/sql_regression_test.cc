@@ -728,6 +728,19 @@ void runBatchExplainRegression() {
       "FROM batch_explain_three_keys GROUP BY tenant_id, region_name, segment_name");
   expect(explainFieldValue(three_key_explain, "selected_impl") == "hash-packed",
          "batch_explain_three_key_mixed_prefers_hash_packed");
+
+  Table mixed_bool_keys(
+      Schema({"tenant_id", "region_name", "success", "score_value"}),
+      {Row({Value(int64_t(1)), Value("apac"), Value(true), Value(int64_t(3))}),
+       Row({Value(int64_t(1)), Value("apac"), Value(false), Value(int64_t(7))}),
+       Row({Value(int64_t(1)), Value("emea"), Value(false), Value(int64_t(11))}),
+       Row({Value(int64_t(2)), Value("emea"), Value(true), Value(int64_t(13))})});
+  session.createTempView("batch_explain_bool_keys", DataFrame(mixed_bool_keys));
+  const std::string bool_key_explain = session.explainSql(
+      "SELECT tenant_id, region_name, success, SUM(score_value) AS total_value "
+      "FROM batch_explain_bool_keys GROUP BY tenant_id, region_name, success");
+  expect(explainFieldValue(bool_key_explain, "selected_impl") == "hash-packed",
+         "batch_explain_three_key_bool_prefers_hash_packed");
 }
 
 void runStreamSqlRegression() {

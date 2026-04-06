@@ -59,6 +59,8 @@ bool parseDouble(const std::string& s, double* out) {
 
 Value parseCell(std::string cell) {
   if (cell.empty()) return Value();
+  if (cell == "true" || cell == "TRUE") return Value(true);
+  if (cell == "false" || cell == "FALSE") return Value(false);
   if (cell.size() >= 2 && cell.front() == '[' && cell.back() == ']') {
     const auto vec = Value::parseFixedVector(cell);
     if (!vec.empty()) {
@@ -105,6 +107,8 @@ std::string encodeGroupKeyValue(const Value& value) {
   switch (value.type()) {
     case DataType::Nil:
       return "n:";
+    case DataType::Bool:
+      return value.asBool() ? "b:1" : "b:0";
     case DataType::Int64:
       return "i:" + std::to_string(value.asInt64());
     case DataType::Double: {
@@ -148,6 +152,43 @@ bool tryMatchesValueFilter(const Value& lhs, const Value& rhs, const std::string
   } catch (...) {
     return false;
   }
+}
+
+bool tryMatchesRawCellFilter(std::string_view cell, const Value& rhs, const std::string& op) {
+  if (rhs.type() == DataType::Bool) {
+    const bool rhs_bool = rhs.asBool();
+    if (cell == "true" || cell == "TRUE" || cell == "false" || cell == "FALSE") {
+      const bool lhs_bool = (cell == "true" || cell == "TRUE");
+      const int compare_result = lhs_bool == rhs_bool ? 0 : (lhs_bool ? 1 : -1);
+      return matchesCompareOp(compare_result, op);
+    }
+  }
+
+  if (rhs.type() == DataType::String) {
+    const int compare_result = std::string_view(rhs.asString()) == cell
+                                   ? 0
+                                   : (cell < std::string_view(rhs.asString()) ? -1 : 1);
+    return matchesCompareOp(compare_result, op);
+  }
+
+  int64_t int_value = 0;
+  switch (parseInt64(std::string(cell), &int_value)) {
+    case Int64ParseStatus::Parsed:
+      return tryMatchesValueFilter(Value(int_value), rhs, op);
+    case Int64ParseStatus::Overflow:
+    case Int64ParseStatus::NotInteger:
+      break;
+  }
+
+  double double_value = 0.0;
+  if (parseDouble(std::string(cell), &double_value)) {
+    return tryMatchesValueFilter(Value(double_value), rhs, op);
+  }
+
+  if (cell.empty()) {
+    return tryMatchesValueFilter(Value(), rhs, op);
+  }
+  return tryMatchesValueFilter(Value(std::string(cell)), rhs, op);
 }
 
 template <typename RowConsumer>
@@ -579,10 +620,11 @@ bool execute_csv_source_pushdown(const std::string& path, const Schema& schema,
         if (skip_header) {
           return true;
         }
-        Value parsed = parseCell(std::move(cell_value));
         if (pushdown.filter.enabled && column_index == pushdown.filter.column_index) {
-          filter_match = tryMatchesValueFilter(parsed, pushdown.filter.value, pushdown.filter.op);
+          filter_match =
+              tryMatchesRawCellFilter(cell_value, pushdown.filter.value, pushdown.filter.op);
         }
+        Value parsed = parseCell(std::move(cell_value));
         table.columnar_cache->columns[column_index].values.push_back(parsed);
         if (materialize_rows && (require_all_columns || projected_mask[column_index] != 0)) {
           row.push_back(std::move(parsed));
@@ -753,9 +795,8 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
         std::fill(int_values.begin(), int_values.end(), int64_t(0));
       },
       [&](std::size_t column_index, std::string&& cell) {
-        const Value parsed = parseCell(cell);
         if (filter != nullptr && column_index == filter->column_index) {
-          filter_match = tryMatchesValueFilter(parsed, filter->value, filter->op);
+          filter_match = tryMatchesRawCellFilter(cell, filter->value, filter->op);
         }
         if (column_index < key_position_by_column.size() &&
             key_position_by_column[column_index] != static_cast<std::size_t>(-1)) {

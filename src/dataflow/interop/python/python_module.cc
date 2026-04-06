@@ -219,7 +219,7 @@ df::Value valueFromPy(PyObject* obj) {
     return df::Value();
   }
   if (PyBool_Check(obj)) {
-    return df::Value(static_cast<int64_t>(PyObject_IsTrue(obj)));
+    return df::Value(PyObject_IsTrue(obj) != 0);
   }
   if (PyLong_Check(obj)) {
     return df::Value(static_cast<int64_t>(PyLong_AsLongLong(obj)));
@@ -302,7 +302,7 @@ df::Value valueFromFastArrowColumn(const FastArrowColumnSpec& spec, const ArrowA
   switch (spec.kind) {
     case FastArrowColumnKind::Bool: {
       const auto* bits = reinterpret_cast<const uint8_t*>(array->buffers[1]);
-      return df::Value(static_cast<int64_t>(((bits[offset_row >> 3] >> (offset_row & 7)) & 0x01u) != 0));
+      return df::Value(((bits[offset_row >> 3] >> (offset_row & 7)) & 0x01u) != 0);
     }
     case FastArrowColumnKind::Int32:
       return df::Value(static_cast<int64_t>(reinterpret_cast<const int32_t*>(array->buffers[1])[offset_row]));
@@ -694,6 +694,8 @@ PyObject* pyFromValue(const df::Value& value) {
   switch (value.type()) {
     case df::DataType::Nil:
       Py_RETURN_NONE;
+    case df::DataType::Bool:
+      return PyBool_FromLong(value.asBool() ? 1 : 0);
     case df::DataType::Int64:
       return PyLong_FromLongLong(value.asInt64());
     case df::DataType::Double:
@@ -741,6 +743,9 @@ PyObject* pyRowsFromTable(const df::Table& table) {
 std::string arrowFormatForValue(const df::Value& value) {
   switch (value.type()) {
     case df::DataType::Nil:
+      return df::kArrowFormatUtf8;
+    case df::DataType::Bool:
+      return df::kArrowFormatBool;
     case df::DataType::String:
       return df::kArrowFormatUtf8;
     case df::DataType::Int64:
@@ -816,7 +821,7 @@ std::pair<std::shared_ptr<void>, std::shared_ptr<void>> makeBooleanBuffers(
       continue;
     }
     validity[row / 8] |= static_cast<uint8_t>(1U << (row % 8));
-    if (value.asInt64() != 0) {
+    if (value.asBool()) {
       bits[row / 8] |= static_cast<uint8_t>(1U << (row % 8));
     }
   }

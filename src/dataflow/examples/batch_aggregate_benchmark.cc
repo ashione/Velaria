@@ -90,6 +90,19 @@ Table makeInt64TwoStringTable(std::size_t rows) {
   return table;
 }
 
+Table makeInt64StringBoolTable(std::size_t rows) {
+  Table table;
+  table.schema = Schema({"ki", "ks", "kb", "v"});
+  table.rows.reserve(rows);
+  for (std::size_t i = 0; i < rows; ++i) {
+    table.rows.push_back({Value(static_cast<int64_t>((i / 32) % 1024)),
+                          Value("seg_" + std::to_string(i % 256)),
+                          Value((i % 2) == 0),
+                          Value(static_cast<int64_t>((i % 9) + 1))});
+  }
+  return table;
+}
+
 Table makeOrderedStringTable(std::size_t rows) {
   Table table;
   table.schema = Schema({"k", "v"});
@@ -154,6 +167,8 @@ int main(int argc, char** argv) {
   runScenario("mixed-string-int64-nullable", makeMixedStringInt64NullableTable(rows), {0, 1},
               {AggregateSpec{AggregateFunction::Sum, 2, "sum_v"}}, false, rounds);
   runScenario("int64-two-string", makeInt64TwoStringTable(rows), {0, 1, 2},
+              {AggregateSpec{AggregateFunction::Sum, 3, "sum_v"}}, false, rounds);
+  runScenario("int64-string-bool", makeInt64StringBoolTable(rows), {0, 1, 2},
               {AggregateSpec{AggregateFunction::Sum, 3, "sum_v"}}, false, rounds);
   runScenario("ordered-string", makeOrderedStringTable(rows), {0},
               {AggregateSpec{AggregateFunction::Sum, 1, "sum_v"}}, true, rounds);

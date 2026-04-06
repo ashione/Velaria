@@ -9,25 +9,42 @@
 
 namespace dataflow {
 
-enum class DataType { Nil = 0, Int64 = 1, Double = 2, String = 3, FixedVector = 4 };
+enum class DataType { Nil = 0, Bool = 1, Int64 = 2, Double = 3, String = 4, FixedVector = 5 };
 
 class Value {
  public:
-  Value() : type_(DataType::Nil), i64_(0), d_(0.0), s_("") {}
-  Value(int64_t v) : type_(DataType::Int64), i64_(v), d_(static_cast<double>(v)), s_("") {}
-  Value(double v) : type_(DataType::Double), i64_(0), d_(v), s_("") {}
-  Value(const char* s) : type_(DataType::String), i64_(0), d_(0.0), s_(s) {}
-  Value(std::string s) : type_(DataType::String), i64_(0), d_(0.0), s_(std::move(s)) {}
+  Value() : type_(DataType::Nil), b_(false), i64_(0), d_(0.0), s_("") {}
+  Value(bool v) : type_(DataType::Bool), b_(v), i64_(v ? 1 : 0), d_(v ? 1.0 : 0.0), s_("") {}
+  Value(int64_t v) : type_(DataType::Int64), b_(false), i64_(v), d_(static_cast<double>(v)), s_("") {}
+  Value(double v) : type_(DataType::Double), b_(false), i64_(0), d_(v), s_("") {}
+  Value(const char* s) : type_(DataType::String), b_(false), i64_(0), d_(0.0), s_(s) {}
+  Value(std::string s) : type_(DataType::String), b_(false), i64_(0), d_(0.0), s_(std::move(s)) {}
   Value(std::vector<float> v)
-      : type_(DataType::FixedVector), i64_(0), d_(0.0), s_(""), vec_(std::move(v)) {}
+      : type_(DataType::FixedVector), b_(false), i64_(0), d_(0.0), s_(""), vec_(std::move(v)) {}
 
   DataType type() const { return type_; }
 
   bool isNull() const { return type_ == DataType::Nil; }
+  bool isBool() const { return type_ == DataType::Bool; }
   bool isNumber() const { return type_ == DataType::Int64 || type_ == DataType::Double; }
+
+  bool asBool() const {
+    switch (type_) {
+      case DataType::Bool:
+        return b_;
+      case DataType::Int64:
+        return i64_ != 0;
+      case DataType::Double:
+        return d_ != 0.0;
+      default:
+        throw std::runtime_error("value is not boolean");
+    }
+  }
 
   int64_t asInt64() const {
     switch (type_) {
+      case DataType::Bool:
+        return b_ ? 1 : 0;
       case DataType::Int64:
         return i64_;
       case DataType::Double:
@@ -39,6 +56,8 @@ class Value {
 
   double asDouble() const {
     switch (type_) {
+      case DataType::Bool:
+        return b_ ? 1.0 : 0.0;
       case DataType::Int64:
         return static_cast<double>(i64_);
       case DataType::Double:
@@ -83,6 +102,8 @@ class Value {
     switch (type_) {
       case DataType::Nil:
         return "null";
+      case DataType::Bool:
+        return b_ ? "true" : "false";
       case DataType::Int64:
         return std::to_string(i64_);
       case DataType::Double: {
@@ -113,6 +134,7 @@ class Value {
 
  private:
   DataType type_;
+  bool b_;
   int64_t i64_;
   double d_;
   std::string s_;
@@ -130,6 +152,8 @@ class Value {
     switch (type_) {
       case DataType::Nil:
         return 0;
+      case DataType::Bool:
+        return (b_ == rhs.b_) ? 0 : (b_ ? 1 : -1);
       case DataType::Int64:
         return (i64_ < rhs.i64_) ? -1 : (i64_ > rhs.i64_ ? 1 : 0);
       case DataType::Double:

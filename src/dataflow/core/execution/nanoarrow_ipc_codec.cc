@@ -19,6 +19,7 @@ namespace dataflow {
 namespace {
 
 enum class ColumnKind {
+  Bool,
   Int64,
   Double,
   String,
@@ -162,6 +163,9 @@ ColumnLayout infer_column_layout(const Table& table, std::size_t column) {
     switch (value.type()) {
       case DataType::Nil:
         continue;
+      case DataType::Bool:
+        candidate.kind = ColumnKind::Bool;
+        break;
       case DataType::Int64:
         candidate.kind = ColumnKind::Int64;
         break;
@@ -208,6 +212,8 @@ ColumnLayout infer_column_layout(const Table& table, std::size_t column) {
 
 ArrowType arrow_type_for_layout(const ColumnLayout& layout) {
   switch (layout.kind) {
+    case ColumnKind::Bool:
+      return NANOARROW_TYPE_BOOL;
     case ColumnKind::Int64:
       return NANOARROW_TYPE_INT64;
     case ColumnKind::Double:
@@ -362,6 +368,10 @@ void append_row_value(ArrowArray* child, const ColumnLayout& layout, const Value
   }
 
   switch (layout.kind) {
+    case ColumnKind::Bool:
+      throw_nanoarrow_status(ArrowArrayAppendInt(child, value.asBool() ? 1 : 0), nullptr,
+                             "append bool nanoarrow value");
+      return;
     case ColumnKind::Int64:
       throw_nanoarrow_status(ArrowArrayAppendInt(child, value.asInt64()), nullptr,
                              "append int64 nanoarrow value");

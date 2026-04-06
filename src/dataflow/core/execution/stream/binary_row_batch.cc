@@ -302,6 +302,8 @@ size_t stringEncodedSize(const std::string& value) {
 
 size_t estimateValueSize(const Value& value, const PreparedBinaryRowColumn& column) {
   switch (column.type) {
+    case DataType::Bool:
+      return 1;
     case DataType::Int64:
       return varintSize(zigZagEncode(value.asInt64()));
     case DataType::Double:
@@ -391,6 +393,8 @@ size_t serializeRangeInternal(const Table& table, size_t row_begin, size_t row_e
       const auto& value = row[column_index];
       if (columns[i].type == DataType::String && columns[i].encoding == kEncodingDictionary) {
         writeVarint(writer, columns[i].dictionary_index.at(value.toString()));
+      } else if (columns[i].type == DataType::Bool) {
+        writer->appendByte(value.asBool() ? 1 : 0);
       } else if (columns[i].type == DataType::Int64) {
         writeVarint(writer, zigZagEncode(value.asInt64()));
       } else if (columns[i].type == DataType::Double) {
@@ -417,6 +421,12 @@ size_t serializeRangeInternal(const Table& table, size_t row_begin, size_t row_e
 bool readValue(const BufferCursor& src, size_t* offset, DataType type, Value* out) {
   if (offset == nullptr || out == nullptr) return false;
   switch (type) {
+    case DataType::Bool: {
+      uint8_t raw = 0;
+      if (!readU8(src, offset, &raw)) return false;
+      *out = Value(raw != 0);
+      return true;
+    }
     case DataType::Int64: {
       uint64_t raw = 0;
       if (!readVarint(src, offset, &raw)) return false;

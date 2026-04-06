@@ -1344,6 +1344,11 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
           out_key->i64[idx] = value.asInt64();
           return true;
         }
+        if (value.type() == DataType::Bool) {
+          out_key->tag[idx] = 1;
+          out_key->i64[idx] = value.asBool() ? 1 : 0;
+          return true;
+        }
         if (value.type() == DataType::String) {
           out_key->tag[idx] = 2;
           out_key->sv[idx] = value.asString();
@@ -1374,6 +1379,11 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
       if (value.type() == DataType::Int64) {
         out_key->tag[idx] = 1;
         out_key->i64[idx] = value.asInt64();
+        return true;
+      }
+      if (value.type() == DataType::Bool) {
+        out_key->tag[idx] = 1;
+        out_key->i64[idx] = value.asBool() ? 1 : 0;
         return true;
       }
       if (value.type() == DataType::String) {

@@ -516,6 +516,8 @@ std::string serializeStateValue(const Value& value) {
   switch (value.type()) {
     case DataType::Nil:
       return "n:";
+    case DataType::Bool:
+      return value.asBool() ? "b:1" : "b:0";
     case DataType::Int64:
       return "i:" + std::to_string(value.asInt64());
     case DataType::Double:
@@ -535,6 +537,9 @@ bool parseStateValue(const std::string& raw, Value* out) {
     switch (raw[0]) {
       case 'n':
         *out = Value();
+        return true;
+      case 'b':
+        *out = Value(payload == "1");
         return true;
       case 'i':
         *out = Value(static_cast<int64_t>(std::stoll(payload)));

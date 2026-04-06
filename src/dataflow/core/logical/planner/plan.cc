@@ -96,6 +96,9 @@ std::string serializeValue(const Value& value) {
     case DataType::Nil:
       appendToken(&out, "");
       break;
+    case DataType::Bool:
+      appendToken(&out, value.asBool() ? "1" : "0");
+      break;
     case DataType::Int64:
       appendToken(&out, std::to_string(value.asInt64()));
       break;
@@ -132,6 +135,8 @@ Value deserializeValue(const std::string& payload) {
   switch (type) {
     case DataType::Nil:
       return Value();
+    case DataType::Bool:
+      return Value(raw == "1");
     case DataType::Int64:
       return Value(static_cast<int64_t>(std::stoll(raw)));
     case DataType::Double:

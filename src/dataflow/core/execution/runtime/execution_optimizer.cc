@@ -25,6 +25,9 @@ KeyColumnShape analyzeKeyColumnShape(const ValueColumnBuffer& column) {
     if (isArrowUtf8Format(format)) {
       return KeyColumnShape::String;
     }
+    if (format == kArrowFormatBool) {
+      return KeyColumnShape::Int64;
+    }
     if (isArrowIntegerLikeFormat(format)) {
       return KeyColumnShape::Int64;
     }
@@ -42,7 +45,7 @@ KeyColumnShape analyzeKeyColumnShape(const ValueColumnBuffer& column) {
     ++sampled_non_null;
     if (value.type() == DataType::String) {
       saw_string = true;
-    } else if (value.type() == DataType::Int64) {
+    } else if (value.type() == DataType::Int64 || value.type() == DataType::Bool) {
       saw_int64 = true;
     } else {
       return KeyColumnShape::Unknown;

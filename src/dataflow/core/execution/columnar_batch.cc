@@ -700,7 +700,7 @@ std::string valueColumnStringAt(const ValueColumnBuffer& buffer, std::size_t row
   }
   if (backing.format == kArrowFormatBool) {
     const auto* bits = static_cast<const uint8_t*>(backing.value_buffer.get());
-    return ((bits[row_index >> 3] >> (row_index & 7)) & 0x01u) != 0 ? "1" : "0";
+    return ((bits[row_index >> 3] >> (row_index & 7)) & 0x01u) != 0 ? "true" : "false";
   }
   if (backing.format == kArrowFormatInt32) {
     return std::to_string(static_cast<const int32_t*>(backing.value_buffer.get())[row_index]);
@@ -799,7 +799,7 @@ Value valueColumnValueAt(const ValueColumnBuffer& buffer, std::size_t row_index)
 
   if (backing.format == kArrowFormatBool) {
     const auto* bits = static_cast<const uint8_t*>(backing.value_buffer.get());
-    return Value(static_cast<int64_t>(((bits[row_index >> 3] >> (row_index & 7)) & 0x01u) != 0));
+    return Value(((bits[row_index >> 3] >> (row_index & 7)) & 0x01u) != 0);
   }
   if (backing.format == kArrowFormatNull) {
     return Value();

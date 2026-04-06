@@ -774,6 +774,7 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
   bool filter_match = (filter == nullptr);
   std::vector<std::string> key_cells(key_indices.size());
   std::vector<Value> key_values(key_indices.size());
+  std::vector<std::unordered_map<std::string, Value>> key_value_cache(key_indices.size());
   std::vector<double> numeric_values(aggs.size(), 0.0);
   std::vector<bool> numeric_present(aggs.size(), false);
   std::vector<bool> numeric_is_int(aggs.size(), false);
@@ -836,7 +837,14 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
         }
 
     for (std::size_t key_pos = 0; key_pos < key_cells.size(); ++key_pos) {
-      key_values[key_pos] = parseCell(key_cells[key_pos]);
+      auto& cache = key_value_cache[key_pos];
+      auto cache_it = cache.find(key_cells[key_pos]);
+      if (cache_it == cache.end()) {
+        key_values[key_pos] = parseCell(key_cells[key_pos]);
+        cache.emplace(key_cells[key_pos], key_values[key_pos]);
+      } else {
+        key_values[key_pos] = cache_it->second;
+      }
     }
     const auto encoded_key = encodeGroupKeyRow(key_values);
     auto it = entry_index.find(encoded_key);

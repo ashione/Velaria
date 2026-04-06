@@ -23,6 +23,7 @@
 #include "src/dataflow/core/execution/arrow_format.h"
 #include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/nanoarrow_ipc_codec.h"
+#include "src/dataflow/core/execution/runtime/aggregate_layout.h"
 #include "src/dataflow/core/execution/stream/binary_row_batch.h"
 #include "src/dataflow/experimental/stream/actor_execution_optimizer.h"
 #include "src/dataflow/experimental/transport/ipc_transport.h"
@@ -98,15 +99,7 @@ struct StringTwoKeyHash {
   }
 };
 
-struct WindowKeySumState {
-  std::unordered_map<std::string, uint32_t> first_index_by_value;
-  std::unordered_map<std::string, uint32_t> second_index_by_value;
-  std::vector<std::string> first_values;
-  std::vector<std::string> second_values;
-  std::unordered_map<StringTwoKey, std::size_t, StringTwoKeyHash> index_by_key;
-  std::vector<StringTwoKey> keys;
-  std::vector<double> sums;
-};
+using WindowKeySumState = AggregateStringKeyState;
 
 struct Int64WindowKey {
   bool window_is_null = true;
@@ -130,11 +123,7 @@ struct Int64WindowKeyHash {
   }
 };
 
-struct Int64TwoKeySumState {
-  std::unordered_map<Int64WindowKey, std::size_t, Int64WindowKeyHash> index_by_key;
-  std::vector<Int64WindowKey> keys;
-  std::vector<double> sums;
-};
+using Int64TwoKeySumState = AggregateFixedKeyState;
 
 double spinValue(double value, size_t cpu_spin_per_row);
 std::string_view stringAt(const BinaryKeyColumn& column, size_t row_idx);
@@ -155,22 +144,6 @@ std::string encodeGenericTwoKeyStateKey(const Value& first_value, const Value& s
          first_value.toString() + kKeySep +
          std::to_string(static_cast<int>(second_value.type())) + kKeySep +
          second_value.toString();
-}
-
-uint32_t internStringKey(std::string_view value, std::unordered_map<std::string, uint32_t>* index,
-                         std::vector<std::string>* values) {
-  if (index == nullptr || values == nullptr) {
-    throw std::invalid_argument("internStringKey requires state dictionaries");
-  }
-  std::string owned(value.data(), value.size());
-  auto it = index->find(owned);
-  if (it != index->end()) {
-    return it->second;
-  }
-  const uint32_t id = static_cast<uint32_t>(values->size());
-  values->push_back(owned);
-  index->emplace(std::move(owned), id);
-  return id;
 }
 
 std::vector<size_t> resolveGroupKeyIndices(const Table& input,
@@ -477,100 +450,52 @@ void mergeWindowKeySumPartial(const Table& partial, const LocalGroupedAggregateS
   const auto window_idx = materialized.schema.indexOf(aggregate.group_keys[0]);
   const auto key_idx = materialized.schema.indexOf(aggregate.group_keys[1]);
   const auto sum_idx = materialized.schema.indexOf(partial_column);
+  TwoKeyValueColumnarBatch batch;
+  batch.row_count = materialized.rows.size();
+  batch.first_key.type = BinaryKeyColumnType::String;
+  batch.second_key.type = BinaryKeyColumnType::String;
+  batch.first_key.dictionary_encoded = false;
+  batch.second_key.dictionary_encoded = false;
+  batch.first_key.is_null.assign(batch.row_count, 0);
+  batch.second_key.is_null.assign(batch.row_count, 0);
+  batch.first_key.string_values.reserve(batch.row_count, batch.row_count * 16);
+  batch.second_key.string_values.reserve(batch.row_count, batch.row_count * 16);
+  batch.value.is_null.assign(batch.row_count, 0);
+  batch.value.values.assign(batch.row_count, 0.0);
   for (const auto& row : materialized.rows) {
-    const uint32_t first_id =
-        internStringKey(row[window_idx].toString(), &state->first_index_by_value, &state->first_values);
-    const uint32_t second_id =
-        internStringKey(row[key_idx].toString(), &state->second_index_by_value, &state->second_values);
-    const StringTwoKey state_key{first_id, second_id};
-    auto it = state->index_by_key.find(state_key);
-    if (it == state->index_by_key.end()) {
-      const std::size_t index = state->sums.size();
-      state->index_by_key.emplace(state_key, index);
-      state->keys.push_back(state_key);
-      state->sums.push_back(0.0);
-      it = state->index_by_key.find(state_key);
-    }
-    state->sums[it->second] += row[sum_idx].asDouble();
+    const std::size_t row_idx = &row - materialized.rows.data();
+    if (row[window_idx].isNull()) batch.first_key.is_null[row_idx] = 1;
+    else batch.first_key.string_values.append(row[window_idx].toString());
+    if (row[key_idx].isNull()) batch.second_key.is_null[row_idx] = 1;
+    else batch.second_key.string_values.append(row[key_idx].toString());
+    if (row[sum_idx].isNull()) batch.value.is_null[row_idx] = 1;
+    else batch.value.values[row_idx] = row[sum_idx].asDouble();
   }
+  mergeAggregatePartialBatch(makeAggregatePartialBatch(
+                                 batch, {aggregate.group_keys[0], aggregate.group_keys[1]},
+                                 {partial_column}),
+                             state, nullptr);
 }
 
 void mergeTwoKeyValuePartial(const TwoKeyValueColumnarBatch& partial,
                              WindowKeySumState* string_state,
                              Int64TwoKeySumState* int64_state) {
-  const bool int64_keys = partial.first_key.type == BinaryKeyColumnType::Int64 &&
-                          partial.second_key.type == BinaryKeyColumnType::Int64;
-  for (std::size_t row_idx = 0; row_idx < partial.row_count; ++row_idx) {
-    if (partial.first_key.is_null[row_idx] || partial.second_key.is_null[row_idx] ||
-        partial.value.is_null[row_idx]) {
-      continue;
-    }
-    if (int64_keys) {
-      if (int64_state == nullptr) continue;
-      const Int64WindowKey key{false, partial.first_key.int64_values[row_idx], false,
-                               partial.second_key.int64_values[row_idx]};
-      auto it = int64_state->index_by_key.find(key);
-      if (it == int64_state->index_by_key.end()) {
-        const std::size_t index = int64_state->sums.size();
-        int64_state->index_by_key.emplace(key, index);
-        int64_state->keys.push_back(key);
-        int64_state->sums.push_back(0.0);
-        it = int64_state->index_by_key.find(key);
-      }
-      int64_state->sums[it->second] += partial.value.values[row_idx];
-      continue;
-    }
-
-    if (string_state == nullptr) continue;
-    StringTwoKey state_key;
-    {
-      const auto first_view = stringAt(partial.first_key, row_idx);
-      state_key.first_id =
-          internStringKey(first_view, &string_state->first_index_by_value, &string_state->first_values);
-      const auto second_view = stringAt(partial.second_key, row_idx);
-      state_key.second_id = internStringKey(second_view, &string_state->second_index_by_value,
-                                            &string_state->second_values);
-    }
-    auto it = string_state->index_by_key.find(state_key);
-    if (it == string_state->index_by_key.end()) {
-      const std::size_t index = string_state->sums.size();
-      string_state->index_by_key.emplace(state_key, index);
-      string_state->keys.push_back(state_key);
-      string_state->sums.push_back(0.0);
-      it = string_state->index_by_key.find(state_key);
-    }
-    string_state->sums[it->second] += partial.value.values[row_idx];
-  }
+  mergeAggregatePartialBatch(makeAggregatePartialBatch(partial, {"k0", "k1"}, {"sum"}),
+                             string_state, int64_state);
 }
 
 Table materializeWindowKeySumState(const WindowKeySumState& state,
                                    const LocalGroupedAggregateSpec& aggregate) {
-  Table out(Schema({aggregate.group_keys[0], aggregate.group_keys[1],
-                    aggregate.aggregates[0].output_column}), {});
-  out.rows.reserve(state.sums.size());
-  for (std::size_t i = 0; i < state.sums.size(); ++i) {
-    Row row;
-    row.emplace_back(state.first_values[state.keys[i].first_id]);
-    row.emplace_back(state.second_values[state.keys[i].second_id]);
-    row.emplace_back(state.sums[i]);
-    out.rows.push_back(std::move(row));
-  }
-  return out;
+  return materializeAggregateStringKeyState(
+      state, {aggregate.group_keys[0], aggregate.group_keys[1]},
+      aggregate.aggregates[0].output_column);
 }
 
 Table materializeInt64TwoKeySumState(const Int64TwoKeySumState& state,
                                      const LocalGroupedAggregateSpec& aggregate) {
-  Table out(Schema({aggregate.group_keys[0], aggregate.group_keys[1],
-                    aggregate.aggregates[0].output_column}), {});
-  out.rows.reserve(state.sums.size());
-  for (std::size_t i = 0; i < state.sums.size(); ++i) {
-    Row row;
-    row.emplace_back(state.keys[i].window_is_null ? Value() : Value(state.keys[i].window));
-    row.emplace_back(state.keys[i].key_is_null ? Value() : Value(state.keys[i].key));
-    row.emplace_back(state.sums[i]);
-    out.rows.push_back(std::move(row));
-  }
-  return out;
+  return materializeAggregateFixedKeyState(
+      state, {aggregate.group_keys[0], aggregate.group_keys[1]},
+      aggregate.aggregates[0].output_column);
 }
 
 Table runSingleProcessGroupedAggregateImpl(const std::vector<Table>& batches,
@@ -1024,13 +949,6 @@ Table projectAndSliceRange(const Table& table, size_t begin, size_t end,
     out.rows.push_back(std::move(projected));
   }
   return out;
-}
-
-std::string_view stringAt(const BinaryStringColumn& column, size_t row_idx) {
-  if (column.dictionary_encoded) {
-    return column.dictionary.view(column.indices[row_idx]);
-  }
-  return column.values.view(row_idx);
 }
 
 std::string_view stringAt(const BinaryKeyColumn& column, size_t row_idx) {

@@ -726,6 +726,72 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
     throw std::runtime_error("cannot open csv file: " + path);
   }
 
+  std::vector<uint8_t> matched_rows;
+  bool use_sparse_filter_bitmap = false;
+  if (filter != nullptr) {
+    constexpr std::size_t kFilterSampleRows = 4096;
+    std::size_t sampled_rows = 0;
+    std::size_t matched_sample_rows = 0;
+    bool skip_header = true;
+    std::ifstream sample_input(path, std::ios::binary);
+    if (!sample_input.is_open()) {
+      throw std::runtime_error("cannot open csv file: " + path);
+    }
+    std::vector<uint8_t> sample_mask(filter->column_index + 1, static_cast<uint8_t>(0));
+    sample_mask[filter->column_index] = 1;
+    scanCsvCells(
+        &sample_input, delimiter, filter->column_index, &sample_mask,
+        []() {},
+        [&](std::size_t column_index, std::string&& cell) {
+          if (skip_header) return true;
+          if (column_index == filter->column_index &&
+              tryMatchesRawCellFilter(cell, filter->value, filter->op)) {
+            ++matched_sample_rows;
+          }
+          return true;
+        },
+        [&](std::size_t) {
+          if (skip_header) {
+            skip_header = false;
+            return true;
+          }
+          ++sampled_rows;
+          return sampled_rows < kFilterSampleRows;
+        });
+    if (sampled_rows > 0 && matched_sample_rows * 10 <= sampled_rows) {
+      use_sparse_filter_bitmap = true;
+    }
+  }
+
+  if (use_sparse_filter_bitmap) {
+    bool skip_header = true;
+    std::ifstream filter_input(path, std::ios::binary);
+    if (!filter_input.is_open()) {
+      throw std::runtime_error("cannot open csv file: " + path);
+    }
+    std::vector<uint8_t> filter_mask(filter->column_index + 1, static_cast<uint8_t>(0));
+    filter_mask[filter->column_index] = 1;
+    bool current_match = false;
+    scanCsvCells(
+        &filter_input, delimiter, filter->column_index, &filter_mask,
+        [&]() { current_match = false; },
+        [&](std::size_t column_index, std::string&& cell) {
+          if (skip_header) return true;
+          if (column_index == filter->column_index) {
+            current_match = tryMatchesRawCellFilter(cell, filter->value, filter->op);
+          }
+          return true;
+        },
+        [&](std::size_t) {
+          if (skip_header) {
+            skip_header = false;
+            return true;
+          }
+          matched_rows.push_back(current_match ? 1 : 0);
+          return true;
+        });
+  }
+
   struct AggregateState {
     std::vector<double> sums;
     std::vector<std::size_t> counts;
@@ -782,6 +848,7 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
 
   bool skip_header = true;
   bool filter_match = (filter == nullptr);
+  std::size_t logical_row_index = 0;
   std::vector<std::string> key_cells(key_indices.size());
   std::vector<double> numeric_values(aggs.size(), 0.0);
   std::vector<bool> numeric_present(aggs.size(), false);
@@ -837,56 +904,64 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           skip_header = false;
           return true;
         }
+        if (!matched_rows.empty()) {
+          if (logical_row_index >= matched_rows.size() || matched_rows[logical_row_index] == 0) {
+            ++logical_row_index;
+            return true;
+          }
+        }
         if (total_columns < last_required_column + 1 || !filter_match) {
+          ++logical_row_index;
           return true;
         }
 
-    const auto encoded_key = encodeRawGroupKeyRow(key_cells);
-    auto it = entry_index.find(encoded_key);
-    if (it == entry_index.end()) {
-      AggregateEntry entry;
-      entry.key_values.reserve(key_cells.size());
-      for (const auto& key_cell : key_cells) {
-        entry.key_values.push_back(parseCell(key_cell));
-      }
-      entry.state = init_state();
-      ordered_entries.push_back(std::move(entry));
-      it = entry_index.emplace(encoded_key, ordered_entries.size() - 1).first;
-    }
-    auto& state = ordered_entries[it->second].state;
-    for (std::size_t i = 0; i < aggs.size(); ++i) {
-      const auto& agg = aggs[i];
-      switch (agg.function) {
-        case AggregateFunction::Count:
-          state.counts[i] += 1;
-          break;
-        case AggregateFunction::Sum:
-        case AggregateFunction::Avg:
-          if (numeric_present[i]) {
-            state.sums[i] += numeric_values[i];
-            state.counts[i] += 1;
+        const auto encoded_key = encodeRawGroupKeyRow(key_cells);
+        auto it = entry_index.find(encoded_key);
+        if (it == entry_index.end()) {
+          AggregateEntry entry;
+          entry.key_values.reserve(key_cells.size());
+          for (const auto& key_cell : key_cells) {
+            entry.key_values.push_back(parseCell(key_cell));
           }
-          break;
-        case AggregateFunction::Min:
-          if (numeric_present[i] &&
-              (!state.has_min[i] || numeric_values[i] < state.mins[i])) {
-            state.mins[i] = numeric_values[i];
-            state.has_min[i] = true;
-            state.min_is_int[i] = numeric_is_int[i];
-            state.min_ints[i] = int_values[i];
+          entry.state = init_state();
+          ordered_entries.push_back(std::move(entry));
+          it = entry_index.emplace(encoded_key, ordered_entries.size() - 1).first;
+        }
+        auto& state = ordered_entries[it->second].state;
+        for (std::size_t i = 0; i < aggs.size(); ++i) {
+          const auto& agg = aggs[i];
+          switch (agg.function) {
+            case AggregateFunction::Count:
+              state.counts[i] += 1;
+              break;
+            case AggregateFunction::Sum:
+            case AggregateFunction::Avg:
+              if (numeric_present[i]) {
+                state.sums[i] += numeric_values[i];
+                state.counts[i] += 1;
+              }
+              break;
+            case AggregateFunction::Min:
+              if (numeric_present[i] &&
+                  (!state.has_min[i] || numeric_values[i] < state.mins[i])) {
+                state.mins[i] = numeric_values[i];
+                state.has_min[i] = true;
+                state.min_is_int[i] = numeric_is_int[i];
+                state.min_ints[i] = int_values[i];
+              }
+              break;
+            case AggregateFunction::Max:
+              if (numeric_present[i] &&
+                  (!state.has_max[i] || numeric_values[i] > state.maxs[i])) {
+                state.maxs[i] = numeric_values[i];
+                state.has_max[i] = true;
+                state.max_is_int[i] = numeric_is_int[i];
+                state.max_ints[i] = int_values[i];
+              }
+              break;
           }
-          break;
-        case AggregateFunction::Max:
-          if (numeric_present[i] &&
-              (!state.has_max[i] || numeric_values[i] > state.maxs[i])) {
-            state.maxs[i] = numeric_values[i];
-            state.has_max[i] = true;
-            state.max_is_int[i] = numeric_is_int[i];
-            state.max_ints[i] = int_values[i];
-          }
-          break;
-      }
-    }
+        }
+        ++logical_row_index;
         return true;
       });
 

@@ -39,8 +39,8 @@ uint32_t internStringKey(std::string_view value, std::unordered_map<std::string,
 
 std::size_t AggregateStringKeyTupleHash::operator()(const AggregateStringKeyTuple& value) const {
   std::size_t seed = 0;
-  for (const auto id : value.ids) {
-    seed ^= std::hash<uint32_t>{}(id) + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+  for (uint8_t i = 0; i < value.arity; ++i) {
+    seed ^= std::hash<uint32_t>{}(value.ids[i]) + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
   }
   return seed;
 }
@@ -230,7 +230,7 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
       row_values[state_index] = partial.state_columns[state_index].values.values[row_idx];
     }
     AggregateStringKeyTuple key;
-    key.ids.reserve(partial.key_columns.size());
+    key.arity = static_cast<uint8_t>(partial.key_columns.size());
     for (std::size_t key_index = 0; key_index < partial.key_columns.size(); ++key_index) {
       const auto& key_column = partial.key_columns[key_index];
       std::string_view view = key_column.type == BinaryKeyColumnType::Int64
@@ -247,7 +247,7 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
         id = internStringKey(view, &string_state->index_by_value[key_index], key_value,
                              &string_state->values_by_key[key_index]);
       }
-      key.ids.push_back(id);
+      key.ids[key_index] = id;
     }
     auto it = string_state->index_by_key.find(key);
     if (it == string_state->index_by_key.end()) {
@@ -286,8 +286,8 @@ Table materializeAggregateStringKeyState(const AggregateStringKeyState& state,
   out.rows.reserve(state.keys.size());
   for (std::size_t i = 0; i < state.keys.size(); ++i) {
     Row row;
-    for (std::size_t key_index = 0; key_index < state.keys[i].ids.size(); ++key_index) {
-      row.push_back(state.values_by_key[key_index][state.keys[i].ids[key_index]]);
+    for (uint8_t key_index = 0; key_index < state.keys[i].arity; ++key_index) {
+      row.push_back(state.values_by_key.at(key_index).at(state.keys[i].ids[key_index]));
     }
     for (std::size_t state_index = 0; state_index < state.state_count; ++state_index) {
       row.emplace_back(state.state_values[i * state.state_count + state_index]);

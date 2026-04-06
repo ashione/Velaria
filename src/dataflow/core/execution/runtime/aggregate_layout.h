@@ -32,10 +32,17 @@ struct AggregatePartialBatch {
 };
 
 struct AggregateStringKeyTuple {
-  std::vector<uint32_t> ids;
+  uint8_t arity = 0;
+  std::array<uint32_t, 4> ids{};
 
   bool operator==(const AggregateStringKeyTuple& other) const {
-    return ids == other.ids;
+    if (arity != other.arity) return false;
+    for (uint8_t i = 0; i < arity; ++i) {
+      if (ids[i] != other.ids[i]) {
+        return false;
+      }
+    }
+    return true;
   }
 };
 

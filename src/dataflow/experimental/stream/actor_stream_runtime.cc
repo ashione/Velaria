@@ -446,51 +446,6 @@ Table finalizeMergedPartialAggregates(const Table& partials,
   return output;
 }
 
-Table finalizeMergedAggregateStates(const std::vector<Row>& merged_rows,
-                                    const std::vector<RuntimeAggregateLayout>& layouts,
-                                    const LocalGroupedAggregateSpec& aggregate,
-                                    const std::unordered_map<std::string, std::size_t>& state_index_by_name) {
-  Table output = makeAggregateOutputSkeleton(aggregate, true);
-  output.rows.reserve(merged_rows.size());
-  for (const auto& merged_row : merged_rows) {
-    Row output_row;
-    output_row.reserve(output.schema.fields.size());
-    for (std::size_t i = 0; i < aggregate.group_keys.size(); ++i) {
-      output_row.push_back(merged_row[i]);
-    }
-    for (const auto& layout : layouts) {
-      switch (layout.aggregate.function) {
-        case AggregateFunction::Sum:
-        case AggregateFunction::Min:
-        case AggregateFunction::Max: {
-          const auto idx = state_index_by_name.at(layout.partial_value_column);
-          output_row.push_back(merged_row[aggregate.group_keys.size() + idx]);
-          break;
-        }
-        case AggregateFunction::Count: {
-          const auto idx = state_index_by_name.at(layout.partial_count_column);
-          output_row.push_back(
-              Value(static_cast<int64_t>(merged_row[aggregate.group_keys.size() + idx].asDouble())));
-          break;
-        }
-        case AggregateFunction::Avg: {
-          const auto sum_idx = state_index_by_name.at(layout.partial_value_column);
-          const auto count_idx = state_index_by_name.at(layout.partial_count_column);
-          const double sum = merged_row[aggregate.group_keys.size() + sum_idx].asDouble();
-          const int64_t count = static_cast<int64_t>(
-              merged_row[aggregate.group_keys.size() + count_idx].asDouble());
-          output_row.push_back(Value(count == 0 ? 0.0 : sum / static_cast<double>(count)));
-          output_row.push_back(Value(sum));
-          output_row.push_back(Value(count));
-          break;
-        }
-      }
-    }
-    output.rows.push_back(std::move(output_row));
-  }
-  return output;
-}
-
 void mergeWindowKeySumPartial(const Table& partial, const LocalGroupedAggregateSpec& aggregate,
                               const std::string& partial_column, WindowKeySumState* state) {
   if (state == nullptr) return;
@@ -1836,47 +1791,24 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
       result.final_table = materializeWindowKeySumState(window_key_sum_state, aggregate);
     }
   } else if (generic_state_initialized) {
-    std::unordered_map<std::string, std::size_t> state_index_by_name;
-    for (std::size_t i = 0; i < generic_state_columns.size(); ++i) {
-      state_index_by_name.emplace(generic_state_columns[i].first, i);
-    }
-    std::vector<Row> merged_rows;
+    const std::vector<std::string> output_state_names = [&]() {
+      std::vector<std::string> names;
+      names.reserve(generic_state_columns.size());
+      for (const auto& state_column : generic_state_columns) {
+        names.push_back(state_column.first);
+      }
+      return names;
+    }();
     if (!generic_fixed_state.keys.empty()) {
-      merged_rows.reserve(generic_fixed_state.keys.size());
-      for (std::size_t i = 0; i < generic_fixed_state.keys.size(); ++i) {
-        Row row;
-        for (std::size_t key_index = 0; key_index < generic_fixed_state.keys[i].values.size();
-             ++key_index) {
-          row.emplace_back(generic_fixed_state.keys[i].is_null[key_index] != 0
-                               ? Value()
-                               : Value(generic_fixed_state.keys[i].values[key_index]));
-        }
-        for (std::size_t state_index = 0; state_index < generic_fixed_state.state_count;
-             ++state_index) {
-          row.emplace_back(
-              generic_fixed_state.state_values[i * generic_fixed_state.state_count + state_index]);
-        }
-        merged_rows.push_back(std::move(row));
-      }
+      result.final_table =
+          materializeAggregateFixedKeyState(generic_fixed_state, aggregate.group_keys,
+                                            output_state_names);
     } else {
-      merged_rows.reserve(generic_string_state.keys.size());
-      for (std::size_t i = 0; i < generic_string_state.keys.size(); ++i) {
-        Row row;
-        for (std::size_t key_index = 0; key_index < generic_string_state.keys[i].ids.size();
-             ++key_index) {
-          row.push_back(
-              generic_string_state.values_by_key[key_index][generic_string_state.keys[i].ids[key_index]]);
-        }
-        for (std::size_t state_index = 0; state_index < generic_string_state.state_count;
-             ++state_index) {
-          row.emplace_back(
-              generic_string_state.state_values[i * generic_string_state.state_count + state_index]);
-        }
-        merged_rows.push_back(std::move(row));
-      }
+      result.final_table =
+          materializeAggregateStringKeyState(generic_string_state, aggregate.group_keys,
+                                             output_state_names);
     }
-    result.final_table =
-        finalizeMergedAggregateStates(merged_rows, generic_layouts, aggregate, state_index_by_name);
+    result.final_table = finalizeMergedPartialAggregates(result.final_table, aggregate);
   } else {
     result.final_table = finalizeMergedPartialAggregates(merged_partials, aggregate);
   }

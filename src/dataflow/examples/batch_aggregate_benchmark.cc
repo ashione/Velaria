@@ -126,6 +126,7 @@ void runScenario(const std::string& name, const Table& input, const std::vector<
   std::cout << "[batch-aggregate-bench] scenario=" << name
             << " rows=" << input.rowCount()
             << " selected_impl=" << dataflow::aggregateExecKindName(pattern.exec_spec.impl_kind)
+            << " partial_layout=" << dataflow::aggregatePartialLayoutName(pattern.exec_spec.partial_layout)
             << " runtime_shape=" << dataflow::aggregateExecutionShapeName(pattern.shape)
             << " ordered_input=" << (ordered_input ? "true" : "false")
             << " elapsed_ms=" << best_ms

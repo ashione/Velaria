@@ -45,6 +45,7 @@ struct LimitExecutionPattern {
 FilterChainPattern analyzeFilterChain(const PlanNodePtr& plan);
 LimitExecutionPattern analyzeLimitExecution(const LimitPlan& plan);
 const char* aggregateExecKindName(AggImplKind kind);
+const char* aggregatePartialLayoutName(AggregatePartialLayoutKind kind);
 const char* aggregateExecutionShapeName(AggregateExecutionShape shape);
 AggregateExecutionPattern analyzeAggregateExecution(
     const Table& input,

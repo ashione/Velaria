@@ -75,6 +75,7 @@ std::string formatBatchAggregateStrategyExplain(
   const auto pattern = analyzeAggregateExecution(input, group_keys, aggregates);
   std::ostringstream out;
   out << "selected_impl=" << aggregateExecKindName(pattern.exec_spec.impl_kind) << "\n";
+  out << "partial_layout=" << aggregatePartialLayoutName(pattern.exec_spec.partial_layout) << "\n";
   out << "runtime_shape=" << aggregateExecutionShapeName(pattern.shape) << "\n";
   out << "key_count=" << pattern.exec_spec.properties.key_count << "\n";
   out << "ordered_input="

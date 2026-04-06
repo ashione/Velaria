@@ -63,6 +63,11 @@ enum class AggImplKind {
   LocalGlobal,
 };
 
+enum class AggregatePartialLayoutKind {
+  GenericTable,
+  TwoKeyColumnar,
+};
+
 struct KeyLayoutSpec {
   std::vector<std::size_t> normalized_key_indices;
   bool nullable_encoded = false;
@@ -99,6 +104,7 @@ struct AggregateRuntimeFeedback {
 
 struct AggregateExecSpec {
   AggImplKind impl_kind = AggImplKind::HashRef;
+  AggregatePartialLayoutKind partial_layout = AggregatePartialLayoutKind::GenericTable;
   KeyLayoutSpec key_layout;
   AggregatePropertySet properties;
   bool use_local_global = false;

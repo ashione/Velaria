@@ -429,6 +429,12 @@ DataFrame DataFrame::cache() const {
 
 DataFrame DataFrame::aggregate(const std::vector<size_t>& keys,
                               const std::vector<AggregateSpec>& aggs) const {
+  return aggregate(keys, aggs, AggregateExecSpec{});
+}
+
+DataFrame DataFrame::aggregate(const std::vector<size_t>& keys,
+                              const std::vector<AggregateSpec>& aggs,
+                              const AggregateExecSpec& exec_spec) const {
   const auto& source = schema();
   Schema output_schema;
   output_schema.fields.reserve(keys.size() + aggs.size());
@@ -443,7 +449,11 @@ DataFrame DataFrame::aggregate(const std::vector<size_t>& keys,
     output_schema.index[agg.output_name] = output_schema.fields.size();
     output_schema.fields.push_back(agg.output_name);
   }
-  auto node = std::make_shared<AggregatePlan>(plan_, keys, aggs);
+  auto node = std::make_shared<AggregatePlan>(plan_, keys, aggs, exec_spec);
+  node->has_exec_spec = !exec_spec.reason.empty() || !exec_spec.rejected_candidates.empty() ||
+                        !exec_spec.key_layout.transforms.empty() || exec_spec.expected_groups != 0 ||
+                        exec_spec.reserved_buckets != 0 || exec_spec.input_requires_sort ||
+                        exec_spec.use_local_global;
   return DataFrame(node, executor_, makeSchemaHint(output_schema));
 }
 

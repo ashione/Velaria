@@ -1638,11 +1638,14 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
       const auto input = borrowOrExecute(executor, node->child, requirements);
       const auto pattern = analyzeAggregateExecution(*input.table, node->keys, node->aggregates);
       auto* mutable_node = const_cast<AggregatePlan*>(node);
-      mutable_node->exec_spec = pattern.exec_spec;
-      mutable_node->has_exec_spec = true;
+      if (!mutable_node->has_exec_spec) {
+        mutable_node->exec_spec = pattern.exec_spec;
+        mutable_node->has_exec_spec = true;
+      }
       mutable_node->runtime_feedback = pattern.feedback;
       Table out = executeAggregateTable(*input.table, node->keys, node->aggregates,
-                                       &mutable_node->exec_spec);
+                                       mutable_node->has_exec_spec ? &mutable_node->exec_spec
+                                                                   : nullptr);
       mutable_node->runtime_feedback.input_rows = input.table->rowCount();
       mutable_node->runtime_feedback.output_groups = out.rowCount();
       mutable_node->runtime_feedback.observed_ordered_input =

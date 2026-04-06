@@ -7,6 +7,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "src/dataflow/core/execution/runtime/execution_optimizer.h"
+
 namespace dataflow {
 namespace sql {
 
@@ -1234,7 +1236,14 @@ DataFrame SqlPlanner::materializeFromPhysical(const PhysicalPlan& physical) cons
                          step.logical.join_right_column, step.logical.join_kind);
         break;
       case LogicalStepKind::Aggregate:
-        current = current.aggregate(step.logical.group_keys, step.logical.aggregates);
+        {
+          const Table aggregate_input = current.toTable();
+          const auto pattern =
+              analyzeAggregateExecution(aggregate_input, step.logical.group_keys,
+                                        step.logical.aggregates);
+          current =
+              current.aggregate(step.logical.group_keys, step.logical.aggregates, pattern.exec_spec);
+        }
         break;
       case LogicalStepKind::Having:
         {

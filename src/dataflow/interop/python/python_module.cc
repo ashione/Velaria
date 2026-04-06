@@ -765,6 +765,33 @@ bool supportsArrowExportFormat(const std::string& format) {
          df::isArrowFixedSizeListFormat(format);
 }
 
+std::string inferArrowFormatFromValues(const df::ValueColumnBuffer& column) {
+  bool seen_non_null = false;
+  std::string inferred;
+  for (const auto& value : column.values) {
+    if (value.isNull()) continue;
+    const auto candidate = arrowFormatForValue(value);
+    if (!seen_non_null) {
+      inferred = candidate;
+      seen_non_null = true;
+      continue;
+    }
+    if (inferred == candidate) {
+      continue;
+    }
+    const bool numeric_pair =
+        ((inferred == df::kArrowFormatInt64 || inferred == df::kArrowFormatFloat64) &&
+         (candidate == df::kArrowFormatInt64 || candidate == df::kArrowFormatFloat64));
+    if (numeric_pair) {
+      inferred = df::kArrowFormatFloat64;
+      continue;
+    }
+    inferred = df::kArrowFormatUtf8;
+    break;
+  }
+  return seen_non_null ? inferred : df::kArrowFormatUtf8;
+}
+
 std::string arrowFormatForColumn(const df::ValueColumnBuffer& column,
                                  const std::string* preferred_format = nullptr) {
   if (column.arrow_backing != nullptr && !column.arrow_backing->format.empty() &&
@@ -775,10 +802,8 @@ std::string arrowFormatForColumn(const df::ValueColumnBuffer& column,
       supportsArrowExportFormat(*preferred_format)) {
     return *preferred_format;
   }
-  for (const auto& value : column.values) {
-    if (!value.isNull()) {
-      return arrowFormatForValue(value);
-    }
+  if (!column.values.empty()) {
+    return inferArrowFormatFromValues(column);
   }
   return df::kArrowFormatUtf8;
 }
@@ -856,7 +881,7 @@ StringBuffers makeStringBuffers(const df::ValueColumnBuffer& column,
       continue;
     }
     validity[row / 8] |= static_cast<uint8_t>(1U << (row % 8));
-    const std::string& s = value.asString();
+    const std::string s = value.toString();
     current += static_cast<OffsetT>(s.size());
     total_bytes += s.size();
   }
@@ -868,7 +893,7 @@ StringBuffers makeStringBuffers(const df::ValueColumnBuffer& column,
     if (column.values[row].isNull()) {
       continue;
     }
-    const std::string& s = column.values[row].asString();
+    const std::string s = column.values[row].toString();
     if (!s.empty()) {
       std::memcpy(data + write_offset, s.data(), s.size());
       write_offset += s.size();

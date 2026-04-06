@@ -1,5 +1,6 @@
 #include "src/dataflow/core/execution/csv.h"
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cstdlib>
@@ -28,6 +29,14 @@ bool isIntLexically(std::string_view s) {
     if (s[pos] < '0' || s[pos] > '9') return false;
   }
   return true;
+}
+
+bool hasSignificantLeadingZero(std::string_view s) {
+  if (s.empty()) return false;
+  std::size_t pos = 0;
+  if (s[0] == '-' || s[0] == '+') pos = 1;
+  if (pos + 1 >= s.size()) return false;
+  return s[pos] == '0';
 }
 
 enum class Int64ParseStatus {
@@ -61,6 +70,7 @@ Value parseCell(std::string cell) {
   if (cell.empty()) return Value();
   if (cell == "true" || cell == "TRUE") return Value(true);
   if (cell == "false" || cell == "FALSE") return Value(false);
+  if (hasSignificantLeadingZero(cell)) return Value(std::move(cell));
   if (cell.size() >= 2 && cell.front() == '[' && cell.back() == ']') {
     const auto vec = Value::parseFixedVector(cell);
     if (!vec.empty()) {
@@ -84,6 +94,9 @@ Value parseCell(std::string cell) {
 }
 
 std::string normalizeGroupKeyCell(const std::string& cell) {
+  if (hasSignificantLeadingZero(cell)) {
+    return cell;
+  }
   int64_t int_value = 0;
   switch (parseInt64(cell, &int_value)) {
     case Int64ParseStatus::Parsed:
@@ -790,6 +803,26 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           matched_rows.push_back(current_match ? 1 : 0);
           return true;
         });
+    const bool has_match = std::any_of(matched_rows.begin(), matched_rows.end(),
+                                       [](uint8_t value) { return value != 0; });
+    if (!has_match) {
+      Table result;
+      for (const auto key_index : key_indices) {
+        result.schema.fields.push_back(schema.fields[key_index]);
+      }
+      for (const auto& agg : aggs) {
+        result.schema.fields.push_back(agg.output_name);
+      }
+      for (std::size_t i = 0; i < result.schema.fields.size(); ++i) {
+        result.schema.index[result.schema.fields[i]] = i;
+      }
+      result.columnar_cache = std::make_shared<ColumnarTable>();
+      result.columnar_cache->schema = result.schema;
+      result.columnar_cache->columns.resize(result.schema.fields.size());
+      result.columnar_cache->arrow_formats.resize(result.schema.fields.size());
+      *out = std::move(result);
+      return true;
+    }
   }
 
   struct AggregateState {
@@ -849,6 +882,7 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
   bool skip_header = true;
   bool filter_match = (filter == nullptr);
   std::size_t logical_row_index = 0;
+  bool current_row_selected = true;
   std::vector<std::string> key_cells(key_indices.size());
   std::vector<double> numeric_values(aggs.size(), 0.0);
   std::vector<bool> numeric_present(aggs.size(), false);
@@ -858,7 +892,10 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
   scanCsvCells(
       &input, delimiter, last_required_column, &capture_mask,
       [&]() {
-        filter_match = (filter == nullptr);
+        current_row_selected = matched_rows.empty() ||
+                               (logical_row_index < matched_rows.size() &&
+                                matched_rows[logical_row_index] != 0);
+        filter_match = current_row_selected && (filter == nullptr);
         for (auto& key_cell : key_cells) {
           key_cell.clear();
         }
@@ -868,6 +905,9 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
         std::fill(int_values.begin(), int_values.end(), int64_t(0));
       },
       [&](std::size_t column_index, std::string&& cell) {
+        if (!current_row_selected) {
+          return true;
+        }
         if (filter != nullptr && column_index == filter->column_index) {
           filter_match = tryMatchesRawCellFilter(cell, filter->value, filter->op);
         }
@@ -905,7 +945,7 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           return true;
         }
         if (!matched_rows.empty()) {
-          if (logical_row_index >= matched_rows.size() || matched_rows[logical_row_index] == 0) {
+          if (!current_row_selected) {
             ++logical_row_index;
             return true;
           }

@@ -741,6 +741,20 @@ void runBatchExplainRegression() {
       "FROM batch_explain_bool_keys GROUP BY tenant_id, region_name, success");
   expect(explainFieldValue(bool_key_explain, "selected_impl") == "hash-packed",
          "batch_explain_three_key_bool_prefers_hash_packed");
+
+  Table leading_zero_keys(
+      Schema({"date", "hour", "caller_psm", "score_value"}),
+      {Row({Value("2026-04-04"), Value("01"), Value("svcA"), Value(int64_t(3))}),
+       Row({Value("2026-04-04"), Value("01"), Value("svcA"), Value(int64_t(7))}),
+       Row({Value("2026-04-04"), Value("10"), Value("svcA"), Value(int64_t(11))})});
+  session.createTempView("batch_explain_leading_zero", DataFrame(leading_zero_keys));
+  auto leading_zero_rows =
+      session.sql("SELECT date, hour, caller_psm, COUNT(*) AS cnt "
+                  "FROM batch_explain_leading_zero GROUP BY date, hour, caller_psm")
+          .toTable();
+  dataflow::materializeRows(&leading_zero_rows);
+  expect(leading_zero_rows.rows.size() == 2,
+         "batch_group_by_preserves_leading_zero_hour_groups");
 }
 
 void runStreamSqlRegression() {

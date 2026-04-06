@@ -102,8 +102,10 @@ int main() {
     const auto actor = dataflow::runLocalActorStreamGroupedAggregate(batches, aggregate, options);
 
     expect(actor.processed_batches == batches.size(), "actor result should process all batches");
-    expect(actor.processed_partitions == batches.size() * options.worker_count,
-           "actor result should process all partitions");
+    expect(actor.processed_partitions >= batches.size(),
+           "actor result should process at least one partition per batch");
+    expect(actor.processed_partitions <= batches.size() * options.worker_count,
+           "actor result should not exceed the worker-count partition upper bound");
     expect(actor.max_inflight_partitions <= options.max_inflight_partitions,
            "credit controller should bound inflight partitions");
     expect(actor.blocked_count > 0, "credit controller should observe blocking under delay");

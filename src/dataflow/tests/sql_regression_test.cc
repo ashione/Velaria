@@ -702,6 +702,32 @@ void runBatchExplainRegression() {
          "batch_explain_reports_selected_impl");
   expect(explainFieldValue(explain_a, "selected_impl") == explainFieldValue(explain_b, "selected_impl"),
          "batch_explain_strategy_is_name_agnostic");
+
+  Table mixed_nullable(
+      Schema({"region_code", "segment_name", "score_value"}),
+      {Row({Value(int64_t(1)), Value("alpha"), Value(int64_t(3))}),
+       Row({Value(), Value("alpha"), Value(int64_t(7))}),
+       Row({Value(int64_t(1)), Value(), Value(int64_t(11))}),
+       Row({Value(int64_t(2)), Value("beta"), Value(int64_t(13))})});
+  session.createTempView("batch_explain_mixed_nullable", DataFrame(mixed_nullable));
+  const std::string mixed_explain = session.explainSql(
+      "SELECT region_code, segment_name, SUM(score_value) AS total_value "
+      "FROM batch_explain_mixed_nullable GROUP BY region_code, segment_name");
+  expect(explainFieldValue(mixed_explain, "selected_impl") == "hash-packed",
+         "batch_explain_mixed_nullable_prefers_hash_packed");
+
+  Table mixed_three_keys(
+      Schema({"tenant_id", "region_name", "segment_name", "score_value"}),
+      {Row({Value(int64_t(1)), Value("apac"), Value("alpha"), Value(int64_t(3))}),
+       Row({Value(int64_t(1)), Value("apac"), Value("alpha"), Value(int64_t(7))}),
+       Row({Value(int64_t(1)), Value("emea"), Value("beta"), Value(int64_t(11))}),
+       Row({Value(int64_t(2)), Value("emea"), Value("beta"), Value(int64_t(13))})});
+  session.createTempView("batch_explain_three_keys", DataFrame(mixed_three_keys));
+  const std::string three_key_explain = session.explainSql(
+      "SELECT tenant_id, region_name, segment_name, SUM(score_value) AS total_value "
+      "FROM batch_explain_three_keys GROUP BY tenant_id, region_name, segment_name");
+  expect(explainFieldValue(three_key_explain, "selected_impl") == "hash-packed",
+         "batch_explain_three_key_mixed_prefers_hash_packed");
 }
 
 void runStreamSqlRegression() {

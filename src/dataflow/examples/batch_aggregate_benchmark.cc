@@ -64,6 +64,32 @@ Table makeMixedStringInt64Table(std::size_t rows) {
   return table;
 }
 
+Table makeMixedStringInt64NullableTable(std::size_t rows) {
+  Table table;
+  table.schema = Schema({"ks", "ki", "v"});
+  table.rows.reserve(rows);
+  for (std::size_t i = 0; i < rows; ++i) {
+    Value maybe_string = (i % 17 == 0) ? Value() : Value("seg_" + std::to_string(i % 512));
+    Value maybe_int = (i % 29 == 0) ? Value() : Value(static_cast<int64_t>((i / 16) % 1024));
+    table.rows.push_back({std::move(maybe_string), std::move(maybe_int),
+                          Value(static_cast<int64_t>((i % 7) + 1))});
+  }
+  return table;
+}
+
+Table makeInt64TwoStringTable(std::size_t rows) {
+  Table table;
+  table.schema = Schema({"ki", "ks1", "ks2", "v"});
+  table.rows.reserve(rows);
+  for (std::size_t i = 0; i < rows; ++i) {
+    table.rows.push_back({Value(static_cast<int64_t>((i / 32) % 1024)),
+                          Value("seg_" + std::to_string(i % 256)),
+                          Value("bucket_" + std::to_string((i / 8) % 64)),
+                          Value(static_cast<int64_t>((i % 9) + 1))});
+  }
+  return table;
+}
+
 Table makeOrderedStringTable(std::size_t rows) {
   Table table;
   table.schema = Schema({"k", "v"});
@@ -124,6 +150,10 @@ int main(int argc, char** argv) {
               {AggregateSpec{AggregateFunction::Sum, 2, "sum_v"}}, false, rounds);
   runScenario("mixed-string-int64", makeMixedStringInt64Table(rows), {0, 1},
               {AggregateSpec{AggregateFunction::Sum, 2, "sum_v"}}, false, rounds);
+  runScenario("mixed-string-int64-nullable", makeMixedStringInt64NullableTable(rows), {0, 1},
+              {AggregateSpec{AggregateFunction::Sum, 2, "sum_v"}}, false, rounds);
+  runScenario("int64-two-string", makeInt64TwoStringTable(rows), {0, 1, 2},
+              {AggregateSpec{AggregateFunction::Sum, 3, "sum_v"}}, false, rounds);
   runScenario("ordered-string", makeOrderedStringTable(rows), {0},
               {AggregateSpec{AggregateFunction::Sum, 1, "sum_v"}}, true, rounds);
   return 0;

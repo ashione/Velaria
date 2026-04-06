@@ -82,23 +82,27 @@ struct RuntimeAggregateLayout {
 };
 
 struct StringTwoKey {
-  std::string first;
-  std::string second;
+  uint32_t first_id = 0;
+  uint32_t second_id = 0;
 
   bool operator==(const StringTwoKey& other) const {
-    return first == other.first && second == other.second;
+    return first_id == other.first_id && second_id == other.second_id;
   }
 };
 
 struct StringTwoKeyHash {
   std::size_t operator()(const StringTwoKey& value) const {
-    std::size_t seed = std::hash<std::string>{}(value.first);
-    seed ^= std::hash<std::string>{}(value.second) + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+    std::size_t seed = std::hash<uint32_t>{}(value.first_id);
+    seed ^= std::hash<uint32_t>{}(value.second_id) + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
     return seed;
   }
 };
 
 struct WindowKeySumState {
+  std::unordered_map<std::string, uint32_t> first_index_by_value;
+  std::unordered_map<std::string, uint32_t> second_index_by_value;
+  std::vector<std::string> first_values;
+  std::vector<std::string> second_values;
   std::unordered_map<StringTwoKey, std::size_t, StringTwoKeyHash> index_by_key;
   std::vector<StringTwoKey> keys;
   std::vector<double> sums;
@@ -151,6 +155,22 @@ std::string encodeGenericTwoKeyStateKey(const Value& first_value, const Value& s
          first_value.toString() + kKeySep +
          std::to_string(static_cast<int>(second_value.type())) + kKeySep +
          second_value.toString();
+}
+
+uint32_t internStringKey(std::string_view value, std::unordered_map<std::string, uint32_t>* index,
+                         std::vector<std::string>* values) {
+  if (index == nullptr || values == nullptr) {
+    throw std::invalid_argument("internStringKey requires state dictionaries");
+  }
+  std::string owned(value.data(), value.size());
+  auto it = index->find(owned);
+  if (it != index->end()) {
+    return it->second;
+  }
+  const uint32_t id = static_cast<uint32_t>(values->size());
+  values->push_back(owned);
+  index->emplace(std::move(owned), id);
+  return id;
 }
 
 std::vector<size_t> resolveGroupKeyIndices(const Table& input,
@@ -458,7 +478,11 @@ void mergeWindowKeySumPartial(const Table& partial, const LocalGroupedAggregateS
   const auto key_idx = materialized.schema.indexOf(aggregate.group_keys[1]);
   const auto sum_idx = materialized.schema.indexOf(partial_column);
   for (const auto& row : materialized.rows) {
-    const StringTwoKey state_key{row[window_idx].toString(), row[key_idx].toString()};
+    const uint32_t first_id =
+        internStringKey(row[window_idx].toString(), &state->first_index_by_value, &state->first_values);
+    const uint32_t second_id =
+        internStringKey(row[key_idx].toString(), &state->second_index_by_value, &state->second_values);
+    const StringTwoKey state_key{first_id, second_id};
     auto it = state->index_by_key.find(state_key);
     if (it == state->index_by_key.end()) {
       const std::size_t index = state->sums.size();
@@ -501,9 +525,11 @@ void mergeTwoKeyValuePartial(const TwoKeyValueColumnarBatch& partial,
     StringTwoKey state_key;
     {
       const auto first_view = stringAt(partial.first_key, row_idx);
-      state_key.first.assign(first_view.data(), first_view.size());
+      state_key.first_id =
+          internStringKey(first_view, &string_state->first_index_by_value, &string_state->first_values);
       const auto second_view = stringAt(partial.second_key, row_idx);
-      state_key.second.assign(second_view.data(), second_view.size());
+      state_key.second_id = internStringKey(second_view, &string_state->second_index_by_value,
+                                            &string_state->second_values);
     }
     auto it = string_state->index_by_key.find(state_key);
     if (it == string_state->index_by_key.end()) {
@@ -524,8 +550,8 @@ Table materializeWindowKeySumState(const WindowKeySumState& state,
   out.rows.reserve(state.sums.size());
   for (std::size_t i = 0; i < state.sums.size(); ++i) {
     Row row;
-    row.emplace_back(state.keys[i].first);
-    row.emplace_back(state.keys[i].second);
+    row.emplace_back(state.first_values[state.keys[i].first_id]);
+    row.emplace_back(state.second_values[state.keys[i].second_id]);
     row.emplace_back(state.sums[i]);
     out.rows.push_back(std::move(row));
   }

@@ -43,6 +43,7 @@ struct SimdKernelDispatch {
                                           std::size_t max_selected) = nullptr;
   double (*sum_double)(const double* values, const uint8_t* is_null,
                        std::size_t row_count) = nullptr;
+  void (*accumulate_double)(double* dst, const double* src, std::size_t count) = nullptr;
   double (*dot_f32)(const float* lhs, const float* rhs, std::size_t size) = nullptr;
   double (*squared_l2_f32)(const float* lhs, const float* rhs, std::size_t size) = nullptr;
 };

@@ -61,6 +61,12 @@ double scalarSumDouble(const double* values, const uint8_t* is_null, std::size_t
   return sum;
 }
 
+void scalarAccumulateDouble(double* dst, const double* src, std::size_t count) {
+  for (std::size_t i = 0; i < count; ++i) {
+    dst[i] += src[i];
+  }
+}
+
 double scalarDotF32(const float* lhs, const float* rhs, std::size_t size) {
   double dot = 0.0;
   for (std::size_t i = 0; i < size; ++i) {
@@ -83,6 +89,7 @@ const SimdKernelDispatch kScalarDispatch = {
     simdBackendName(SimdBackendKind::Scalar),
     &scalarSelectDouble,
     &scalarSumDouble,
+    &scalarAccumulateDouble,
     &scalarDotF32,
     &scalarSquaredL2F32,
 };

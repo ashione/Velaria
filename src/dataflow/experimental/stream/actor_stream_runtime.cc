@@ -1695,7 +1695,7 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
 
   stopWorkers(&workers);
   if (execution_pattern.use_two_key_partial_merge) {
-    if (!int64_two_key_sum_state.sums.empty()) {
+    if (!int64_two_key_sum_state.keys.empty()) {
       result.final_table = materializeInt64TwoKeySumState(int64_two_key_sum_state, aggregate);
     } else {
       result.final_table = materializeWindowKeySumState(window_key_sum_state, aggregate);

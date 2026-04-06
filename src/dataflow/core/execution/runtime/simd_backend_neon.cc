@@ -21,6 +21,10 @@ double neonSumDouble(const double* values, const uint8_t* is_null, std::size_t r
   return scalarDispatch().sum_double(values, is_null, row_count);
 }
 
+void neonAccumulateDouble(double* dst, const double* src, std::size_t count) {
+  scalarDispatch().accumulate_double(dst, src, count);
+}
+
 double neonDotF32(const float* lhs, const float* rhs, std::size_t size) {
 #if defined(__ARM_NEON) || defined(__aarch64__)
   std::size_t i = 0;
@@ -68,6 +72,7 @@ const SimdKernelDispatch kNeonDispatch = {
     simdBackendName(SimdBackendKind::Neon),
     &neonSelectDouble,
     &neonSumDouble,
+    &neonAccumulateDouble,
     &neonDotF32,
     &neonSquaredL2F32,
 };

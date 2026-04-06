@@ -1,5 +1,7 @@
 #include "src/dataflow/core/execution/runtime/aggregate_layout.h"
 
+#include "src/dataflow/core/execution/runtime/simd_dispatch.h"
+
 #include <stdexcept>
 #include <string_view>
 
@@ -57,15 +59,17 @@ AggregatePartialBatch makeAggregatePartialBatch(const TwoKeyValueColumnarBatch& 
   out.key_names = key_names;
   out.key_columns.push_back(batch.first_key);
   out.key_columns.push_back(batch.second_key);
-  out.state_names = state_names;
-  out.sum_state_columns.push_back(batch.value);
+  AggregatePartialBatch::StateColumn state;
+  state.name = state_names.empty() ? "sum" : state_names.front();
+  state.values = batch.value;
+  out.state_columns.push_back(std::move(state));
   return out;
 }
 
 void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
                                 AggregateStringKeyState* string_state,
                                 AggregateFixedKeyState* fixed_state) {
-  if (partial.key_columns.empty() || partial.sum_state_columns.empty()) {
+  if (partial.key_columns.empty() || partial.state_columns.empty()) {
     return;
   }
   bool all_fixed = true;
@@ -75,9 +79,15 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
       break;
     }
   }
-  const auto& values = partial.sum_state_columns.front();
+  const std::size_t state_count = partial.state_columns.size();
   for (std::size_t row_idx = 0; row_idx < partial.row_count; ++row_idx) {
-    bool skip = values.is_null[row_idx] != 0;
+    bool skip = false;
+    for (const auto& state_column : partial.state_columns) {
+      if (state_column.values.is_null[row_idx] != 0) {
+        skip = true;
+        break;
+      }
+    }
     if (!skip) {
       for (const auto& key_column : partial.key_columns) {
         if (key_column.is_null[row_idx] != 0) {
@@ -91,6 +101,7 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
     if (all_fixed) {
       if (fixed_state == nullptr) continue;
       fixed_state->key_count = partial.key_columns.size();
+      fixed_state->state_count = state_count;
       AggregateFixedKeyTuple key;
       key.values.reserve(partial.key_columns.size());
       key.is_null.reserve(partial.key_columns.size());
@@ -100,13 +111,19 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
       }
       auto it = fixed_state->index_by_key.find(key);
       if (it == fixed_state->index_by_key.end()) {
-        const std::size_t index = fixed_state->sums.size();
+        const std::size_t index = fixed_state->keys.size();
         fixed_state->index_by_key.emplace(key, index);
         fixed_state->keys.push_back(key);
-        fixed_state->sums.push_back(0.0);
+        fixed_state->state_values.resize((index + 1) * state_count, 0.0);
         it = fixed_state->index_by_key.find(key);
       }
-      fixed_state->sums[it->second] += values.values[row_idx];
+      std::vector<double> row_values(state_count, 0.0);
+      for (std::size_t state_index = 0; state_index < state_count; ++state_index) {
+        row_values[state_index] = partial.state_columns[state_index].values.values[row_idx];
+      }
+      simdDispatch().accumulate_double(
+          fixed_state->state_values.data() + (it->second * state_count), row_values.data(),
+          state_count);
       continue;
     }
 
@@ -115,6 +132,7 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
       string_state->index_by_value.resize(partial.key_columns.size());
       string_state->values_by_key.resize(partial.key_columns.size());
     }
+    string_state->state_count = state_count;
     AggregateStringKeyTuple key;
     key.ids.reserve(partial.key_columns.size());
     for (std::size_t key_index = 0; key_index < partial.key_columns.size(); ++key_index) {
@@ -135,13 +153,19 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
     }
     auto it = string_state->index_by_key.find(key);
     if (it == string_state->index_by_key.end()) {
-      const std::size_t index = string_state->sums.size();
+      const std::size_t index = string_state->keys.size();
       string_state->index_by_key.emplace(key, index);
       string_state->keys.push_back(key);
-      string_state->sums.push_back(0.0);
+      string_state->state_values.resize((index + 1) * state_count, 0.0);
       it = string_state->index_by_key.find(key);
     }
-    string_state->sums[it->second] += values.values[row_idx];
+    std::vector<double> row_values(state_count, 0.0);
+    for (std::size_t state_index = 0; state_index < state_count; ++state_index) {
+      row_values[state_index] = partial.state_columns[state_index].values.values[row_idx];
+    }
+    simdDispatch().accumulate_double(
+        string_state->state_values.data() + (it->second * state_count), row_values.data(),
+        state_count);
   }
 }
 
@@ -151,13 +175,13 @@ Table materializeAggregateStringKeyState(const AggregateStringKeyState& state,
   std::vector<std::string> fields = key_names;
   fields.push_back(output_column);
   Table out(Schema(fields), {});
-  out.rows.reserve(state.sums.size());
-  for (std::size_t i = 0; i < state.sums.size(); ++i) {
+  out.rows.reserve(state.keys.size());
+  for (std::size_t i = 0; i < state.keys.size(); ++i) {
     Row row;
     for (std::size_t key_index = 0; key_index < state.keys[i].ids.size(); ++key_index) {
       row.emplace_back(state.values_by_key[key_index][state.keys[i].ids[key_index]]);
     }
-    row.emplace_back(state.sums[i]);
+    row.emplace_back(state.state_values[i * state.state_count]);
     out.rows.push_back(std::move(row));
   }
   return out;
@@ -169,14 +193,14 @@ Table materializeAggregateFixedKeyState(const AggregateFixedKeyState& state,
   std::vector<std::string> fields = key_names;
   fields.push_back(output_column);
   Table out(Schema(fields), {});
-  out.rows.reserve(state.sums.size());
-  for (std::size_t i = 0; i < state.sums.size(); ++i) {
+  out.rows.reserve(state.keys.size());
+  for (std::size_t i = 0; i < state.keys.size(); ++i) {
     Row row;
     for (std::size_t key_index = 0; key_index < state.keys[i].values.size(); ++key_index) {
       row.emplace_back(state.keys[i].is_null[key_index] != 0 ? Value()
                                                              : Value(state.keys[i].values[key_index]));
     }
-    row.emplace_back(state.sums[i]);
+    row.emplace_back(state.state_values[i * state.state_count]);
     out.rows.push_back(std::move(row));
   }
   return out;

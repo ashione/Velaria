@@ -115,6 +115,14 @@ struct TwoKeyValueColumnarBatch {
   BinaryDoubleColumn value;
 };
 
+struct KeyStateColumnarBatch {
+  size_t row_count = 0;
+  std::vector<std::string> key_names;
+  std::vector<BinaryKeyColumn> key_columns;
+  std::vector<std::string> state_names;
+  std::vector<BinaryDoubleColumn> state_columns;
+};
+
 struct WindowKeyValueColumnarBatch {
   size_t row_count = 0;
   BinaryStringColumn window_start;
@@ -176,6 +184,14 @@ class BinaryRowBatchCodec {
                                         const std::string& second_key_name,
                                         const std::string& value_name,
                                         TwoKeyValueColumnarBatch* out) const;
+  bool deserializeKeyStateBatch(const std::vector<uint8_t>& payload,
+                                const std::vector<std::string>& key_names,
+                                const std::vector<std::string>& state_names,
+                                KeyStateColumnarBatch* out) const;
+  bool deserializeKeyStateBatchFromBuffer(const uint8_t* payload, size_t size,
+                                          const std::vector<std::string>& key_names,
+                                          const std::vector<std::string>& state_names,
+                                          KeyStateColumnarBatch* out) const;
 };
 
 class ByteBufferPool {

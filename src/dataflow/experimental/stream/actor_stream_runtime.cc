@@ -250,6 +250,32 @@ std::vector<std::pair<std::string, AggregateStateMergeOp>> buildRuntimeMergeStat
   return columns;
 }
 
+std::vector<RuntimeAggregateLayout> buildRuntimeAggregateLayouts(
+    const LocalGroupedAggregateSpec& aggregate) {
+  std::vector<RuntimeAggregateLayout> layouts;
+  layouts.reserve(aggregate.aggregates.size());
+  for (const auto& aggregate_spec : aggregate.aggregates) {
+    RuntimeAggregateLayout layout;
+    layout.aggregate = aggregate_spec;
+    switch (aggregate_spec.function) {
+      case AggregateFunction::Sum:
+      case AggregateFunction::Min:
+      case AggregateFunction::Max:
+        layout.partial_value_column = partialValueColumnName(aggregate_spec.output_column);
+        break;
+      case AggregateFunction::Count:
+        layout.partial_count_column = partialValueColumnName(aggregate_spec.output_column);
+        break;
+      case AggregateFunction::Avg:
+        layout.partial_value_column = partialAverageSumColumnName(aggregate_spec.output_column);
+        layout.partial_count_column = partialAverageCountColumnName(aggregate_spec.output_column);
+        break;
+    }
+    layouts.push_back(std::move(layout));
+  }
+  return layouts;
+}
+
 Table makeAggregateOutputSkeleton(const LocalGroupedAggregateSpec& aggregate,
                                   bool include_avg_state_helpers) {
   Table table;
@@ -306,15 +332,20 @@ Table appendTables(const std::vector<Table>& tables) {
   return concatenateTables(tables, false);
 }
 
+bool usesSpecializedColumnarSumShape(LocalGroupedAggregateShape shape) {
+  return shape == LocalGroupedAggregateShape::KeyColumnarStringSum ||
+         shape == LocalGroupedAggregateShape::KeyColumnarFixedSum;
+}
+
 Table aggregateInputToPartial(const Table& input, const LocalGroupedAggregateSpec& aggregate,
                               size_t cpu_spin_per_row) {
   if (aggregate.group_keys.empty() || aggregate.aggregates.empty()) {
     return makeAggregateOutputSkeleton(aggregate, false);
   }
   switch (analyzeLocalGroupedAggregateExecution(input, aggregate).aggregate_shape) {
-    case LocalGroupedAggregateShape::TwoKeyStringSum:
+    case LocalGroupedAggregateShape::KeyColumnarStringSum:
       return aggregatePartitionWithWork(input, aggregate, cpu_spin_per_row);
-    case LocalGroupedAggregateShape::TwoKeyInt64Sum:
+    case LocalGroupedAggregateShape::KeyColumnarFixedSum:
       return aggregateInt64WindowKeySumPartial(input, aggregate, cpu_spin_per_row);
     case LocalGroupedAggregateShape::Generic:
       break;
@@ -512,7 +543,7 @@ Table runSingleProcessGroupedAggregateImpl(const std::vector<Table>& batches,
                                            const LocalGroupedAggregateSpec& aggregate,
                                            size_t cpu_spin_per_row) {
   const auto execution_pattern = analyzeLocalGroupedAggregateExecution(batches, aggregate);
-  if (execution_pattern.use_two_key_partial_merge) {
+  if (usesSpecializedColumnarSumShape(execution_pattern.aggregate_shape)) {
     WindowKeySumState state;
     const auto partial_column = partialValueColumnName(aggregate.aggregates[0].output_column);
     for (const auto& batch : batches) {
@@ -876,7 +907,7 @@ size_t chooseLocalAggregatePartitionCount(
     return 1;
   }
   size_t target_rows_per_partition = 2048;
-  if (execution_pattern.use_two_key_partial_merge) {
+  if (execution_pattern.use_direct_partial_merge) {
     target_rows_per_partition = 8192;
   } else if (execution_pattern.transport_encoding == LocalTransportEncoding::ArrowIpc) {
     target_rows_per_partition = 4096;
@@ -1213,6 +1244,13 @@ Table aggregatePartitionWithWork(const Table& input, const LocalGroupedAggregate
                                   cpu_spin_per_row);
 }
 
+bool canUseSpecializedBinaryRequestKernel(const LocalGroupedAggregateSpec& aggregate) {
+  return aggregate.group_keys.size() == 2 &&
+         aggregate.aggregates.size() == 1 &&
+         aggregate.aggregates[0].function == AggregateFunction::Sum &&
+         !aggregate.aggregates[0].is_count_star;
+}
+
 void workerLoop(int fd, const LocalGroupedAggregateSpec& aggregate, uint64_t delay_ms,
                 size_t cpu_spin_per_row, size_t shared_memory_min_payload_bytes) {
   LengthPrefixedFrameCodec codec;
@@ -1257,13 +1295,14 @@ void workerLoop(int fd, const LocalGroupedAggregateSpec& aggregate, uint64_t del
         used_binary_row_request = true;
         TwoKeyValueColumnarBatch batch;
         const bool decoded_fast =
-            request.shared_memory
-                ? batch_codec.deserializeTwoKeyValueFromBuffer(
-                      request_bytes, request_size, aggregate.group_keys[0], aggregate.group_keys[1],
-                      aggregate.aggregates[0].value_column, &batch)
-                : batch_codec.deserializeTwoKeyValue(request.table_payload, aggregate.group_keys[0],
-                                                    aggregate.group_keys[1],
-                                                    aggregate.aggregates[0].value_column, &batch);
+            canUseSpecializedBinaryRequestKernel(aggregate) &&
+            (request.shared_memory
+                 ? batch_codec.deserializeTwoKeyValueFromBuffer(
+                       request_bytes, request_size, aggregate.group_keys[0], aggregate.group_keys[1],
+                       aggregate.aggregates[0].value_column, &batch)
+                 : batch_codec.deserializeTwoKeyValue(request.table_payload, aggregate.group_keys[0],
+                                                     aggregate.group_keys[1],
+                                                     aggregate.aggregates[0].value_column, &batch));
         if (decoded_fast) {
           partial = aggregateVectorizedBatch(
               batch, aggregate.group_keys[0], aggregate.group_keys[1],
@@ -1423,12 +1462,31 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
 
   const bool can_use_shared_memory = options.shared_memory_transport;
   const auto execution_pattern = analyzeLocalGroupedAggregateExecution(batches, aggregate);
+  const bool use_specialized_direct_partial_merge =
+      usesSpecializedColumnarSumShape(execution_pattern.aggregate_shape);
+  const bool use_generic_direct_partial_merge =
+      execution_pattern.use_direct_partial_merge && !use_specialized_direct_partial_merge;
   const bool use_binary_row_batch_transport =
       execution_pattern.transport_encoding == LocalTransportEncoding::BinaryRowBatch;
   const size_t effective_shared_memory_min_payload_bytes =
-      execution_pattern.use_two_key_partial_merge
+      execution_pattern.use_direct_partial_merge
           ? std::min<size_t>(options.shared_memory_min_payload_bytes, 16 * 1024)
           : options.shared_memory_min_payload_bytes;
+
+  const std::vector<RuntimeAggregateLayout> generic_layouts =
+      use_generic_direct_partial_merge ? buildRuntimeAggregateLayouts(aggregate)
+                                       : std::vector<RuntimeAggregateLayout>{};
+  const std::vector<std::pair<std::string, AggregateStateMergeOp>> generic_state_columns =
+      use_generic_direct_partial_merge ? buildRuntimeMergeStateColumns(generic_layouts)
+                                       : std::vector<std::pair<std::string, AggregateStateMergeOp>>{};
+  const std::vector<std::string> generic_output_state_names = [&]() {
+    std::vector<std::string> names;
+    names.reserve(generic_state_columns.size());
+    for (const auto& state_column : generic_state_columns) {
+      names.push_back(state_column.first);
+    }
+    return names;
+  }();
 
   std::vector<PendingPartition> pending;
   uint64_t task_seq = 1;
@@ -1500,8 +1558,6 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
   AggregateStringKeyState generic_string_state;
   AggregateFixedKeyState generic_fixed_state;
   bool generic_state_initialized = false;
-  std::vector<RuntimeAggregateLayout> generic_layouts;
-  std::vector<std::pair<std::string, AggregateStateMergeOp>> generic_state_columns;
   size_t next_pending = 0;
   size_t inflight = 0;
   std::unordered_map<uint64_t, SharedMemoryPayload> inflight_input_shared_memory;
@@ -1624,15 +1680,29 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
           Table partial;
           if (use_binary_row_batch_transport &&
               isBinaryRowBatchPayload(output_bytes, output_region.size) &&
-              execution_pattern.use_two_key_partial_merge) {
-            TwoKeyValueColumnarBatch partial_batch;
-            const bool decoded = batch_codec.deserializeTwoKeyValueFromBuffer(
-                output_bytes, output_region.size, aggregate.group_keys[0], aggregate.group_keys[1],
-                partialValueColumnName(aggregate.aggregates[0].output_column), &partial_batch);
-            if (decoded) {
-              mergeTwoKeyValuePartial(partial_batch, &window_key_sum_state,
-                                      &int64_two_key_sum_state);
-              merged_directly = true;
+              execution_pattern.use_direct_partial_merge) {
+            if (use_specialized_direct_partial_merge) {
+              TwoKeyValueColumnarBatch partial_batch;
+              const bool decoded = batch_codec.deserializeTwoKeyValueFromBuffer(
+                  output_bytes, output_region.size, aggregate.group_keys[0], aggregate.group_keys[1],
+                  partialValueColumnName(aggregate.aggregates[0].output_column), &partial_batch);
+              if (decoded) {
+                mergeTwoKeyValuePartial(partial_batch, &window_key_sum_state,
+                                        &int64_two_key_sum_state);
+                merged_directly = true;
+              }
+            } else if (use_generic_direct_partial_merge) {
+              KeyStateColumnarBatch partial_batch;
+              const bool decoded = batch_codec.deserializeKeyStateBatchFromBuffer(
+                  output_bytes, output_region.size, aggregate.group_keys, generic_output_state_names,
+                  &partial_batch);
+              if (decoded) {
+                mergeAggregatePartialBatch(
+                    makeAggregatePartialBatch(partial_batch, generic_state_columns),
+                    &generic_string_state, &generic_fixed_state);
+                generic_state_initialized = true;
+                merged_directly = true;
+              }
             }
           }
           if (!merged_directly) {
@@ -1655,42 +1725,20 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
 
           const auto merge_started = std::chrono::steady_clock::now();
           if (merged_directly) {
-          } else if (execution_pattern.use_two_key_partial_merge) {
+          } else if (use_specialized_direct_partial_merge) {
             mergeWindowKeySumPartial(
                 partial, aggregate,
                 partialValueColumnName(aggregate.aggregates[0].output_column),
                 &window_key_sum_state);
-          } else {
-            if (!generic_state_initialized && partial.rowCount() > 0) {
-              for (const auto& aggregate_spec : aggregate.aggregates) {
-                RuntimeAggregateLayout layout;
-                layout.aggregate = aggregate_spec;
-                switch (aggregate_spec.function) {
-                  case AggregateFunction::Sum:
-                  case AggregateFunction::Min:
-                  case AggregateFunction::Max:
-                    layout.partial_value_column = partialValueColumnName(aggregate_spec.output_column);
-                    break;
-                  case AggregateFunction::Count:
-                    layout.partial_count_column = partialValueColumnName(aggregate_spec.output_column);
-                    break;
-                  case AggregateFunction::Avg:
-                    layout.partial_value_column = partialAverageSumColumnName(aggregate_spec.output_column);
-                    layout.partial_count_column = partialAverageCountColumnName(aggregate_spec.output_column);
-                    break;
-                }
-                generic_layouts.push_back(std::move(layout));
-              }
-              generic_state_columns = buildRuntimeMergeStateColumns(generic_layouts);
-              generic_state_initialized = true;
-            }
-            if (generic_state_initialized && partial.rowCount() > 0) {
+          } else if (use_generic_direct_partial_merge) {
+            if (partial.rowCount() > 0) {
               mergeAggregatePartialBatch(
                   makeAggregatePartialBatchFromTable(partial, aggregate.group_keys, generic_state_columns),
                   &generic_string_state, &generic_fixed_state);
-            } else {
-              merged_partials = concatenateTables({merged_partials, partial}, false);
+              generic_state_initialized = true;
             }
+          } else {
+            merged_partials = concatenateTables({merged_partials, partial}, false);
           }
           result.coordinator_merge_ms += toMillis(std::chrono::steady_clock::now() - merge_started);
           ++result.processed_partitions;
@@ -1701,15 +1749,28 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
           Table partial;
           if (use_binary_row_batch_transport &&
               isBinaryRowBatchPayload(msg.table_payload.data(), msg.table_payload.size()) &&
-              execution_pattern.use_two_key_partial_merge) {
-            TwoKeyValueColumnarBatch partial_batch;
-            const bool decoded = batch_codec.deserializeTwoKeyValue(
-                msg.table_payload, aggregate.group_keys[0], aggregate.group_keys[1],
-                partialValueColumnName(aggregate.aggregates[0].output_column), &partial_batch);
-            if (decoded) {
-              mergeTwoKeyValuePartial(partial_batch, &window_key_sum_state,
-                                      &int64_two_key_sum_state);
-              merged_directly = true;
+              execution_pattern.use_direct_partial_merge) {
+            if (use_specialized_direct_partial_merge) {
+              TwoKeyValueColumnarBatch partial_batch;
+              const bool decoded = batch_codec.deserializeTwoKeyValue(
+                  msg.table_payload, aggregate.group_keys[0], aggregate.group_keys[1],
+                  partialValueColumnName(aggregate.aggregates[0].output_column), &partial_batch);
+              if (decoded) {
+                mergeTwoKeyValuePartial(partial_batch, &window_key_sum_state,
+                                        &int64_two_key_sum_state);
+                merged_directly = true;
+              }
+            } else if (use_generic_direct_partial_merge) {
+              KeyStateColumnarBatch partial_batch;
+              const bool decoded = batch_codec.deserializeKeyStateBatch(
+                  msg.table_payload, aggregate.group_keys, generic_output_state_names, &partial_batch);
+              if (decoded) {
+                mergeAggregatePartialBatch(
+                    makeAggregatePartialBatch(partial_batch, generic_state_columns),
+                    &generic_string_state, &generic_fixed_state);
+                generic_state_initialized = true;
+                merged_directly = true;
+              }
             }
           }
           if (!merged_directly) {
@@ -1728,42 +1789,20 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
 
           const auto merge_started = std::chrono::steady_clock::now();
           if (merged_directly) {
-          } else if (execution_pattern.use_two_key_partial_merge) {
+          } else if (use_specialized_direct_partial_merge) {
             mergeWindowKeySumPartial(
                 partial, aggregate,
                 partialValueColumnName(aggregate.aggregates[0].output_column),
                 &window_key_sum_state);
-          } else {
-            if (!generic_state_initialized && partial.rowCount() > 0) {
-              for (const auto& aggregate_spec : aggregate.aggregates) {
-                RuntimeAggregateLayout layout;
-                layout.aggregate = aggregate_spec;
-                switch (aggregate_spec.function) {
-                  case AggregateFunction::Sum:
-                  case AggregateFunction::Min:
-                  case AggregateFunction::Max:
-                    layout.partial_value_column = partialValueColumnName(aggregate_spec.output_column);
-                    break;
-                  case AggregateFunction::Count:
-                    layout.partial_count_column = partialValueColumnName(aggregate_spec.output_column);
-                    break;
-                  case AggregateFunction::Avg:
-                    layout.partial_value_column = partialAverageSumColumnName(aggregate_spec.output_column);
-                    layout.partial_count_column = partialAverageCountColumnName(aggregate_spec.output_column);
-                    break;
-                }
-                generic_layouts.push_back(std::move(layout));
-              }
-              generic_state_columns = buildRuntimeMergeStateColumns(generic_layouts);
-              generic_state_initialized = true;
-            }
-            if (generic_state_initialized && partial.rowCount() > 0) {
+          } else if (use_generic_direct_partial_merge) {
+            if (partial.rowCount() > 0) {
               mergeAggregatePartialBatch(
                   makeAggregatePartialBatchFromTable(partial, aggregate.group_keys, generic_state_columns),
                   &generic_string_state, &generic_fixed_state);
-            } else {
-              merged_partials = concatenateTables({merged_partials, partial}, false);
+              generic_state_initialized = true;
             }
+          } else {
+            merged_partials = concatenateTables({merged_partials, partial}, false);
           }
           result.coordinator_merge_ms += toMillis(std::chrono::steady_clock::now() - merge_started);
           ++result.processed_partitions;
@@ -1784,29 +1823,21 @@ LocalActorStreamResult runLocalActorStreamGroupedAggregate(
   }
 
   stopWorkers(&workers);
-  if (execution_pattern.use_two_key_partial_merge) {
+  if (use_specialized_direct_partial_merge) {
     if (!int64_two_key_sum_state.keys.empty()) {
       result.final_table = materializeInt64TwoKeySumState(int64_two_key_sum_state, aggregate);
     } else {
       result.final_table = materializeWindowKeySumState(window_key_sum_state, aggregate);
     }
   } else if (generic_state_initialized) {
-    const std::vector<std::string> output_state_names = [&]() {
-      std::vector<std::string> names;
-      names.reserve(generic_state_columns.size());
-      for (const auto& state_column : generic_state_columns) {
-        names.push_back(state_column.first);
-      }
-      return names;
-    }();
     if (!generic_fixed_state.keys.empty()) {
       result.final_table =
           materializeAggregateFixedKeyState(generic_fixed_state, aggregate.group_keys,
-                                            output_state_names);
+                                            generic_output_state_names);
     } else {
       result.final_table =
           materializeAggregateStringKeyState(generic_string_state, aggregate.group_keys,
-                                             output_state_names);
+                                             generic_output_state_names);
     }
     result.final_table = finalizeMergedPartialAggregates(result.final_table, aggregate);
   } else {

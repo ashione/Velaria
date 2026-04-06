@@ -12,6 +12,7 @@
 #include "src/dataflow/core/contract/api/session.h"
 #include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/nanoarrow_ipc_codec.h"
+#include "src/dataflow/core/execution/runtime/aggregate_layout.h"
 #include "src/dataflow/core/execution/source_materialization.h"
 #include "src/dataflow/core/execution/stream/binary_row_batch.h"
 
@@ -228,6 +229,91 @@ int main() {
     dataflow::materializeRows(&pushed_group_multi_filtered);
     expect(pushed_group_multi_filtered.rows.size() == 2,
            "source pushdown filtered multi-key aggregate row count mismatch");
+
+    dataflow::Table mixed_key_partials;
+    mixed_key_partials.schema = dataflow::Schema({"group_key", "sum_value"});
+    mixed_key_partials.rows = {
+        {dataflow::Value(int64_t(1)), dataflow::Value(10.0)},
+        {dataflow::Value("1"), dataflow::Value(20.0)},
+    };
+    dataflow::AggregateStringKeyState mixed_key_state;
+    dataflow::mergeAggregatePartialBatch(
+        dataflow::makeAggregatePartialBatchFromTable(
+            mixed_key_partials, {"group_key"},
+            {{"sum_value", dataflow::AggregateStateMergeOp::Sum}}),
+        &mixed_key_state, nullptr);
+    auto mixed_key_out = dataflow::materializeAggregateStringKeyState(
+        mixed_key_state, {"group_key"}, {"sum_value"});
+    dataflow::materializeRows(&mixed_key_out);
+    expect(mixed_key_out.rows.size() == 2,
+           "generic partial merge should keep string and int keys distinct");
+    bool saw_int_key = false;
+    bool saw_string_key = false;
+    for (const auto& row : mixed_key_out.rows) {
+      if (row[0].type() == dataflow::DataType::Int64 && row[0].asInt64() == 1 &&
+          row[1].asDouble() == 10.0) {
+        saw_int_key = true;
+      }
+      if (row[0].type() == dataflow::DataType::String && row[0].asString() == "1" &&
+          row[1].asDouble() == 20.0) {
+        saw_string_key = true;
+      }
+    }
+    expect(saw_int_key, "generic partial merge should preserve int key type");
+    expect(saw_string_key, "generic partial merge should preserve string key type");
+
+    dataflow::Table wide_fixed_partials;
+    wide_fixed_partials.schema =
+        dataflow::Schema({"k1", "k2", "k3", "k4", "k5", "sum_value", "max_value"});
+    wide_fixed_partials.rows = {
+        {dataflow::Value(int64_t(1)), dataflow::Value(int64_t(2)), dataflow::Value(int64_t(3)),
+         dataflow::Value(int64_t(4)), dataflow::Value(int64_t(5)), dataflow::Value(10.0),
+         dataflow::Value(10.0)},
+        {dataflow::Value(int64_t(1)), dataflow::Value(int64_t(2)), dataflow::Value(int64_t(3)),
+         dataflow::Value(int64_t(4)), dataflow::Value(int64_t(5)), dataflow::Value(7.0),
+         dataflow::Value(12.0)},
+        {dataflow::Value(int64_t(9)), dataflow::Value(int64_t(8)), dataflow::Value(int64_t(7)),
+         dataflow::Value(int64_t(6)), dataflow::Value(int64_t(5)), dataflow::Value(4.0),
+         dataflow::Value(4.0)},
+    };
+    std::vector<uint8_t> wide_fixed_payload;
+    codec.serialize(wide_fixed_partials, &wide_fixed_payload);
+    dataflow::KeyStateColumnarBatch wide_fixed_batch;
+    expect(codec.deserializeKeyStateBatch(
+               wide_fixed_payload, {"k1", "k2", "k3", "k4", "k5"}, {"sum_value", "max_value"},
+               &wide_fixed_batch),
+           "generic key-state decode should succeed for wide fixed keys");
+    dataflow::AggregateFixedKeyState wide_fixed_state;
+    dataflow::mergeAggregatePartialBatch(
+        dataflow::makeAggregatePartialBatch(
+            wide_fixed_batch,
+            {{"sum_value", dataflow::AggregateStateMergeOp::Sum},
+             {"max_value", dataflow::AggregateStateMergeOp::Max}}),
+        nullptr, &wide_fixed_state);
+    auto wide_fixed_out = dataflow::materializeAggregateFixedKeyState(
+        wide_fixed_state, {"k1", "k2", "k3", "k4", "k5"}, {"sum_value", "max_value"});
+    dataflow::materializeRows(&wide_fixed_out);
+    expect(wide_fixed_out.rows.size() == 2,
+           "wide fixed-key partial merge should preserve distinct groups beyond 4 keys");
+    bool saw_first_fixed_group = false;
+    bool saw_second_fixed_group = false;
+    for (const auto& row : wide_fixed_out.rows) {
+      if (row[0].asInt64() == 1 && row[1].asInt64() == 2 && row[2].asInt64() == 3 &&
+          row[3].asInt64() == 4 && row[4].asInt64() == 5) {
+        expect(row[5].asDouble() == 17.0, "wide fixed-key sum merge mismatch");
+        expect(row[6].asDouble() == 12.0, "wide fixed-key max merge mismatch");
+        saw_first_fixed_group = true;
+      }
+      if (row[0].asInt64() == 9 && row[1].asInt64() == 8 && row[2].asInt64() == 7 &&
+          row[3].asInt64() == 6 && row[4].asInt64() == 5) {
+        expect(row[5].asDouble() == 4.0, "wide fixed-key second sum mismatch");
+        expect(row[6].asDouble() == 4.0, "wide fixed-key second max mismatch");
+        saw_second_fixed_group = true;
+      }
+    }
+    expect(saw_first_fixed_group, "wide fixed-key partial merge should materialize first group");
+    expect(saw_second_fixed_group, "wide fixed-key partial merge should materialize second group");
+
     auto async_handle =
         session.submitAsync(session.read_csv(csv_path, binary_options).select({"name"}).limit(1));
     const auto async_wait = async_handle.wait(std::chrono::seconds(5));

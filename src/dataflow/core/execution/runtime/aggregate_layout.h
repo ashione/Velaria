@@ -1,6 +1,5 @@
 #pragma once
 
-#include <array>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -32,17 +31,10 @@ struct AggregatePartialBatch {
 };
 
 struct AggregateStringKeyTuple {
-  uint8_t arity = 0;
-  std::array<uint32_t, 4> ids{};
+  std::vector<uint32_t> ids;
 
   bool operator==(const AggregateStringKeyTuple& other) const {
-    if (arity != other.arity) return false;
-    for (uint8_t i = 0; i < arity; ++i) {
-      if (ids[i] != other.ids[i]) {
-        return false;
-      }
-    }
-    return true;
+    return ids == other.ids;
   }
 };
 
@@ -60,18 +52,11 @@ struct AggregateStringKeyState {
 };
 
 struct AggregateFixedKeyTuple {
-  uint8_t arity = 0;
-  std::array<int64_t, 4> values{};
-  std::array<uint8_t, 4> is_null{};
+  std::vector<int64_t> values;
+  std::vector<uint8_t> is_null;
 
   bool operator==(const AggregateFixedKeyTuple& other) const {
-    if (arity != other.arity) return false;
-    for (uint8_t i = 0; i < arity; ++i) {
-      if (values[i] != other.values[i] || is_null[i] != other.is_null[i]) {
-        return false;
-      }
-    }
-    return true;
+    return values == other.values && is_null == other.is_null;
   }
 };
 
@@ -90,6 +75,9 @@ struct AggregateFixedKeyState {
 AggregatePartialBatch makeAggregatePartialBatch(const TwoKeyValueColumnarBatch& batch,
                                                 const std::vector<std::string>& key_names,
                                                 const std::vector<std::string>& state_names);
+AggregatePartialBatch makeAggregatePartialBatch(
+    const KeyStateColumnarBatch& batch,
+    const std::vector<std::pair<std::string, AggregateStateMergeOp>>& state_columns);
 AggregatePartialBatch makeAggregatePartialBatchFromTable(
     const Table& partials, const std::vector<std::string>& key_names,
     const std::vector<std::pair<std::string, AggregateStateMergeOp>>& state_columns);

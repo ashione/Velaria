@@ -12,6 +12,9 @@ namespace dataflow {
 
 namespace {
 
+constexpr char kTypedKeyPrefix[] = {'\0', 'V', 'K'};
+constexpr std::size_t kTypedKeyPrefixSize = sizeof(kTypedKeyPrefix);
+
 std::string_view keyStringAt(const BinaryKeyColumn& column, std::size_t row_idx) {
   if (column.dictionary_encoded) {
     return column.dictionary.view(column.indices[row_idx]);
@@ -19,19 +22,86 @@ std::string_view keyStringAt(const BinaryKeyColumn& column, std::size_t row_idx)
   return column.string_values.view(row_idx);
 }
 
-uint32_t internStringKey(std::string_view value, std::unordered_map<std::string, uint32_t>* index,
+std::string encodeTaggedKeyValue(const Value& value) {
+  std::string out(kTypedKeyPrefix, kTypedKeyPrefixSize);
+  out.push_back(static_cast<char>(value.type()));
+  switch (value.type()) {
+    case DataType::Nil:
+      return out;
+    case DataType::Bool:
+      out.push_back(value.asBool() ? '1' : '0');
+      return out;
+    case DataType::Int64:
+      out += std::to_string(value.asInt64());
+      return out;
+    case DataType::Double:
+      out += value.toString();
+      return out;
+    case DataType::String:
+      out += value.asString();
+      return out;
+    case DataType::FixedVector:
+      out += value.toString();
+      return out;
+  }
+  return out;
+}
+
+Value decodeTaggedKeyValue(std::string_view encoded) {
+  if (encoded.size() < kTypedKeyPrefixSize + 1 ||
+      !std::equal(std::begin(kTypedKeyPrefix), std::end(kTypedKeyPrefix), encoded.begin())) {
+    return Value(std::string(encoded));
+  }
+  const auto type = static_cast<DataType>(static_cast<uint8_t>(encoded[kTypedKeyPrefixSize]));
+  const std::string payload(encoded.substr(kTypedKeyPrefixSize + 1));
+  switch (type) {
+    case DataType::Nil:
+      return Value();
+    case DataType::Bool:
+      return Value(!payload.empty() && payload[0] == '1');
+    case DataType::Int64:
+      return Value(payload.empty() ? int64_t(0) : std::stoll(payload));
+    case DataType::Double:
+      return Value(payload.empty() ? 0.0 : std::stod(payload));
+    case DataType::String:
+      return Value(payload);
+    case DataType::FixedVector:
+      return Value(Value::parseFixedVector(payload));
+  }
+  return Value(payload);
+}
+
+std::string typedLookupKey(const Value& value) {
+  switch (value.type()) {
+    case DataType::Nil:
+      return "n:";
+    case DataType::Bool:
+      return value.asBool() ? "b:1" : "b:0";
+    case DataType::Int64:
+      return "i:" + std::to_string(value.asInt64());
+    case DataType::Double:
+      return "d:" + value.toString();
+    case DataType::String:
+      return "s:" + value.asString();
+    case DataType::FixedVector:
+      return "v:" + value.toString();
+  }
+  return "";
+}
+
+uint32_t internStringKey(const std::string& lookup_key,
+                         std::unordered_map<std::string, uint32_t>* index,
                          const Value& stored_value, std::vector<Value>* values) {
   if (index == nullptr || values == nullptr) {
     throw std::invalid_argument("internStringKey requires state dictionaries");
   }
-  std::string owned(value.data(), value.size());
-  auto it = index->find(owned);
+  auto it = index->find(lookup_key);
   if (it != index->end()) {
     return it->second;
   }
   const uint32_t id = static_cast<uint32_t>(values->size());
   values->push_back(stored_value);
-  index->emplace(std::move(owned), id);
+  index->emplace(lookup_key, id);
   return id;
 }
 
@@ -39,7 +109,7 @@ uint32_t internStringKey(std::string_view value, std::unordered_map<std::string,
 
 std::size_t AggregateStringKeyTupleHash::operator()(const AggregateStringKeyTuple& value) const {
   std::size_t seed = 0;
-  for (uint8_t i = 0; i < value.arity; ++i) {
+  for (std::size_t i = 0; i < value.ids.size(); ++i) {
     seed ^= std::hash<uint32_t>{}(value.ids[i]) + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
   }
   return seed;
@@ -67,6 +137,27 @@ AggregatePartialBatch makeAggregatePartialBatch(const TwoKeyValueColumnarBatch& 
   state.merge_op = AggregateStateMergeOp::Sum;
   state.values = batch.value;
   out.state_columns.push_back(std::move(state));
+  return out;
+}
+
+AggregatePartialBatch makeAggregatePartialBatch(
+    const KeyStateColumnarBatch& batch,
+    const std::vector<std::pair<std::string, AggregateStateMergeOp>>& state_columns) {
+  if (batch.state_columns.size() != state_columns.size()) {
+    throw std::invalid_argument("key-state columnar batch state arity mismatch");
+  }
+  AggregatePartialBatch out;
+  out.row_count = batch.row_count;
+  out.key_names = batch.key_names;
+  out.key_columns = batch.key_columns;
+  out.state_columns.reserve(state_columns.size());
+  for (std::size_t i = 0; i < state_columns.size(); ++i) {
+    AggregatePartialBatch::StateColumn state;
+    state.name = state_columns[i].first;
+    state.merge_op = state_columns[i].second;
+    state.values = batch.state_columns[i];
+    out.state_columns.push_back(std::move(state));
+  }
   return out;
 }
 
@@ -116,7 +207,7 @@ AggregatePartialBatch makeAggregatePartialBatchFromTable(
         key_column.int64_values[row_idx] =
             value.type() == DataType::Bool ? (value.asBool() ? 1 : 0) : value.asInt64();
       } else {
-        key_column.string_values.append(value.toString());
+        key_column.string_values.append(encodeTaggedKeyValue(value));
       }
     }
     out.key_columns.push_back(std::move(key_column));
@@ -124,7 +215,14 @@ AggregatePartialBatch makeAggregatePartialBatchFromTable(
 
   for (const auto& state_spec : state_columns) {
     if (!partials.schema.has(state_spec.first)) {
-      throw std::runtime_error("partial batch state column not found: " + state_spec.first);
+      std::string available = "[";
+      for (std::size_t i = 0; i < partials.schema.fields.size(); ++i) {
+        if (i > 0) available += ", ";
+        available += partials.schema.fields[i];
+      }
+      available += "]";
+      throw std::runtime_error("partial batch state column not found: " + state_spec.first +
+                               ", available=" + available);
     }
     const auto column = viewValueColumn(partials, partials.schema.indexOf(state_spec.first));
     AggregatePartialBatch::StateColumn state;
@@ -150,7 +248,7 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
   if (partial.key_columns.empty() || partial.state_columns.empty()) {
     return;
   }
-  bool all_fixed = partial.key_columns.size() <= 4;
+  bool all_fixed = true;
   for (const auto& key_column : partial.key_columns) {
     if (key_column.type != BinaryKeyColumnType::Int64) {
       all_fixed = false;
@@ -185,7 +283,8 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
         row_values[state_index] = partial.state_columns[state_index].values.values[row_idx];
       }
       AggregateFixedKeyTuple key;
-      key.arity = static_cast<uint8_t>(partial.key_columns.size());
+      key.values.resize(partial.key_columns.size(), 0);
+      key.is_null.resize(partial.key_columns.size(), 0);
       for (std::size_t key_index = 0; key_index < partial.key_columns.size(); ++key_index) {
         const auto& key_column = partial.key_columns[key_index];
         key.values[key_index] = key_column.int64_values[row_idx];
@@ -230,7 +329,7 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
       row_values[state_index] = partial.state_columns[state_index].values.values[row_idx];
     }
     AggregateStringKeyTuple key;
-    key.arity = static_cast<uint8_t>(partial.key_columns.size());
+    key.ids.resize(partial.key_columns.size(), 0);
     for (std::size_t key_index = 0; key_index < partial.key_columns.size(); ++key_index) {
       const auto& key_column = partial.key_columns[key_index];
       std::string_view view = key_column.type == BinaryKeyColumnType::Int64
@@ -239,12 +338,11 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
       uint32_t id = 0;
       if (key_column.type == BinaryKeyColumnType::Int64) {
         const Value key_value(key_column.int64_values[row_idx]);
-        const std::string encoded = key_value.toString();
-        id = internStringKey(encoded, &string_state->index_by_value[key_index], key_value,
+        id = internStringKey(typedLookupKey(key_value), &string_state->index_by_value[key_index], key_value,
                              &string_state->values_by_key[key_index]);
       } else {
-        const Value key_value(std::string(view.data(), view.size()));
-        id = internStringKey(view, &string_state->index_by_value[key_index], key_value,
+        const Value key_value = decodeTaggedKeyValue(view);
+        id = internStringKey(typedLookupKey(key_value), &string_state->index_by_value[key_index], key_value,
                              &string_state->values_by_key[key_index]);
       }
       key.ids[key_index] = id;
@@ -286,7 +384,7 @@ Table materializeAggregateStringKeyState(const AggregateStringKeyState& state,
   out.rows.reserve(state.keys.size());
   for (std::size_t i = 0; i < state.keys.size(); ++i) {
     Row row;
-    for (uint8_t key_index = 0; key_index < state.keys[i].arity; ++key_index) {
+    for (std::size_t key_index = 0; key_index < state.keys[i].ids.size(); ++key_index) {
       row.push_back(state.values_by_key.at(key_index).at(state.keys[i].ids[key_index]));
     }
     for (std::size_t state_index = 0; state_index < state.state_count; ++state_index) {
@@ -306,7 +404,7 @@ Table materializeAggregateFixedKeyState(const AggregateFixedKeyState& state,
   out.rows.reserve(state.keys.size());
   for (std::size_t i = 0; i < state.keys.size(); ++i) {
     Row row;
-    for (uint8_t key_index = 0; key_index < state.keys[i].arity; ++key_index) {
+    for (std::size_t key_index = 0; key_index < state.keys[i].values.size(); ++key_index) {
       row.emplace_back(state.keys[i].is_null[key_index] != 0 ? Value()
                                                              : Value(state.keys[i].values[key_index]));
     }

@@ -10,8 +10,8 @@ namespace dataflow {
 
 enum class LocalGroupedAggregateShape {
   Generic = 0,
-  TwoKeyStringSum = 1,
-  TwoKeyInt64Sum = 2,
+  KeyColumnarStringSum = 1,
+  KeyColumnarFixedSum = 2,
 };
 
 enum class LocalTransportEncoding {
@@ -22,7 +22,7 @@ enum class LocalTransportEncoding {
 struct LocalGroupedAggregateExecutionPattern {
   LocalGroupedAggregateShape aggregate_shape = LocalGroupedAggregateShape::Generic;
   LocalTransportEncoding transport_encoding = LocalTransportEncoding::ArrowIpc;
-  bool use_two_key_partial_merge = false;
+  bool use_direct_partial_merge = false;
 };
 
 struct LocalExecutionDecisionInputs {

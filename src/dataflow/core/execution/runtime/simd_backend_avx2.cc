@@ -2,6 +2,7 @@
 
 #include "src/dataflow/core/execution/runtime/simd_backend_internal.h"
 
+#include <algorithm>
 #if defined(__AVX2__)
 #include <immintrin.h>
 #endif
@@ -33,6 +34,29 @@ void avx2AccumulateDouble(double* dst, const double* src, std::size_t count) {
   }
 #else
   scalarDispatch().accumulate_double(dst, src, count);
+#endif
+}
+
+void avx2CombineDouble(double* dst, const double* src, std::size_t count, NumericCombineOp op) {
+#if defined(__AVX2__)
+  if (op == NumericCombineOp::Sum) {
+    avx2AccumulateDouble(dst, src, count);
+    return;
+  }
+  std::size_t i = 0;
+  constexpr std::size_t kLaneCount = 4;
+  for (; i + kLaneCount <= count; i += kLaneCount) {
+    const __m256d lhs = _mm256_loadu_pd(dst + i);
+    const __m256d rhs = _mm256_loadu_pd(src + i);
+    const __m256d combined = op == NumericCombineOp::Min ? _mm256_min_pd(lhs, rhs)
+                                                         : _mm256_max_pd(lhs, rhs);
+    _mm256_storeu_pd(dst + i, combined);
+  }
+  for (; i < count; ++i) {
+    dst[i] = op == NumericCombineOp::Min ? std::min(dst[i], src[i]) : std::max(dst[i], src[i]);
+  }
+#else
+  scalarDispatch().combine_double(dst, src, count, op);
 #endif
 }
 
@@ -96,6 +120,7 @@ const SimdKernelDispatch kAvx2Dispatch = {
     &avx2SelectDouble,
     &avx2SumDouble,
     &avx2AccumulateDouble,
+    &avx2CombineDouble,
     &avx2DotF32,
     &avx2SquaredL2F32,
 };

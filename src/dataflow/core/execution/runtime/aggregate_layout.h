@@ -45,7 +45,7 @@ struct AggregateStringKeyTupleHash {
 struct AggregateStringKeyState {
   std::size_t state_count = 0;
   std::vector<std::unordered_map<std::string, uint32_t>> index_by_value;
-  std::vector<std::vector<std::string>> values_by_key;
+  std::vector<std::vector<Value>> values_by_key;
   std::unordered_map<AggregateStringKeyTuple, std::size_t, AggregateStringKeyTupleHash> index_by_key;
   std::vector<AggregateStringKeyTuple> keys;
   std::vector<double> state_values;

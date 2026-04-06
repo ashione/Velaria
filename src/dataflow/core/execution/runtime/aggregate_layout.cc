@@ -20,7 +20,7 @@ std::string_view keyStringAt(const BinaryKeyColumn& column, std::size_t row_idx)
 }
 
 uint32_t internStringKey(std::string_view value, std::unordered_map<std::string, uint32_t>* index,
-                         std::vector<std::string>* values) {
+                         const Value& stored_value, std::vector<Value>* values) {
   if (index == nullptr || values == nullptr) {
     throw std::invalid_argument("internStringKey requires state dictionaries");
   }
@@ -30,7 +30,7 @@ uint32_t internStringKey(std::string_view value, std::unordered_map<std::string,
     return it->second;
   }
   const uint32_t id = static_cast<uint32_t>(values->size());
-  values->push_back(owned);
+  values->push_back(stored_value);
   index->emplace(std::move(owned), id);
   return id;
 }
@@ -180,6 +180,10 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
       if (fixed_state == nullptr) continue;
       fixed_state->key_count = partial.key_columns.size();
       fixed_state->state_count = state_count;
+      std::vector<double> row_values(state_count, 0.0);
+      for (std::size_t state_index = 0; state_index < state_count; ++state_index) {
+        row_values[state_index] = partial.state_columns[state_index].values.values[row_idx];
+      }
       AggregateFixedKeyTuple key;
       key.values.reserve(partial.key_columns.size());
       key.is_null.reserve(partial.key_columns.size());
@@ -193,25 +197,24 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
         fixed_state->index_by_key.emplace(key, index);
         fixed_state->keys.push_back(key);
         fixed_state->state_values.resize((index + 1) * state_count, 0.0);
+        auto* dst_init = fixed_state->state_values.data() + (index * state_count);
+        for (std::size_t state_index = 0; state_index < state_count; ++state_index) {
+          dst_init[state_index] = row_values[state_index];
+        }
         it = fixed_state->index_by_key.find(key);
+        continue;
       }
       auto* dst = fixed_state->state_values.data() + (it->second * state_count);
-      std::vector<double> row_values(state_count, 0.0);
-      for (std::size_t state_index = 0; state_index < state_count; ++state_index) {
-        row_values[state_index] = partial.state_columns[state_index].values.values[row_idx];
-      }
-      for (std::size_t state_index = 0; state_index < state_count; ++state_index) {
-        switch (partial.state_columns[state_index].merge_op) {
-          case AggregateStateMergeOp::Sum:
-            simdDispatch().accumulate_double(dst + state_index, row_values.data() + state_index, 1);
-            break;
-          case AggregateStateMergeOp::Min:
-            dst[state_index] = std::min(dst[state_index], row_values[state_index]);
-            break;
-          case AggregateStateMergeOp::Max:
-            dst[state_index] = std::max(dst[state_index], row_values[state_index]);
-            break;
+      std::size_t begin = 0;
+      while (begin < state_count) {
+        const auto op = partial.state_columns[begin].merge_op;
+        std::size_t end = begin + 1;
+        while (end < state_count && partial.state_columns[end].merge_op == op) {
+          ++end;
         }
+        simdDispatch().combine_double(dst + begin, row_values.data() + begin, end - begin,
+                                      static_cast<NumericCombineOp>(op));
+        begin = end;
       }
       continue;
     }
@@ -222,6 +225,10 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
       string_state->values_by_key.resize(partial.key_columns.size());
     }
     string_state->state_count = state_count;
+    std::vector<double> row_values(state_count, 0.0);
+    for (std::size_t state_index = 0; state_index < state_count; ++state_index) {
+      row_values[state_index] = partial.state_columns[state_index].values.values[row_idx];
+    }
     AggregateStringKeyTuple key;
     key.ids.reserve(partial.key_columns.size());
     for (std::size_t key_index = 0; key_index < partial.key_columns.size(); ++key_index) {
@@ -231,11 +238,13 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
                                   : keyStringAt(key_column, row_idx);
       uint32_t id = 0;
       if (key_column.type == BinaryKeyColumnType::Int64) {
-        const std::string encoded = std::to_string(key_column.int64_values[row_idx]);
-        id = internStringKey(encoded, &string_state->index_by_value[key_index],
+        const Value key_value(key_column.int64_values[row_idx]);
+        const std::string encoded = key_value.toString();
+        id = internStringKey(encoded, &string_state->index_by_value[key_index], key_value,
                              &string_state->values_by_key[key_index]);
       } else {
-        id = internStringKey(view, &string_state->index_by_value[key_index],
+        const Value key_value(std::string(view.data(), view.size()));
+        id = internStringKey(view, &string_state->index_by_value[key_index], key_value,
                              &string_state->values_by_key[key_index]);
       }
       key.ids.push_back(id);
@@ -246,25 +255,24 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
       string_state->index_by_key.emplace(key, index);
       string_state->keys.push_back(key);
       string_state->state_values.resize((index + 1) * state_count, 0.0);
+      auto* dst_init = string_state->state_values.data() + (index * state_count);
+      for (std::size_t state_index = 0; state_index < state_count; ++state_index) {
+        dst_init[state_index] = row_values[state_index];
+      }
       it = string_state->index_by_key.find(key);
+      continue;
     }
     auto* dst = string_state->state_values.data() + (it->second * state_count);
-    std::vector<double> row_values(state_count, 0.0);
-    for (std::size_t state_index = 0; state_index < state_count; ++state_index) {
-      row_values[state_index] = partial.state_columns[state_index].values.values[row_idx];
-    }
-    for (std::size_t state_index = 0; state_index < state_count; ++state_index) {
-      switch (partial.state_columns[state_index].merge_op) {
-        case AggregateStateMergeOp::Sum:
-          simdDispatch().accumulate_double(dst + state_index, row_values.data() + state_index, 1);
-          break;
-        case AggregateStateMergeOp::Min:
-          dst[state_index] = std::min(dst[state_index], row_values[state_index]);
-          break;
-        case AggregateStateMergeOp::Max:
-          dst[state_index] = std::max(dst[state_index], row_values[state_index]);
-          break;
+    std::size_t begin = 0;
+    while (begin < state_count) {
+      const auto op = partial.state_columns[begin].merge_op;
+      std::size_t end = begin + 1;
+      while (end < state_count && partial.state_columns[end].merge_op == op) {
+        ++end;
       }
+      simdDispatch().combine_double(dst + begin, row_values.data() + begin, end - begin,
+                                    static_cast<NumericCombineOp>(op));
+      begin = end;
     }
   }
 }
@@ -279,7 +287,7 @@ Table materializeAggregateStringKeyState(const AggregateStringKeyState& state,
   for (std::size_t i = 0; i < state.keys.size(); ++i) {
     Row row;
     for (std::size_t key_index = 0; key_index < state.keys[i].ids.size(); ++key_index) {
-      row.emplace_back(state.values_by_key[key_index][state.keys[i].ids[key_index]]);
+      row.push_back(state.values_by_key[key_index][state.keys[i].ids[key_index]]);
     }
     for (std::size_t state_index = 0; state_index < state.state_count; ++state_index) {
       row.emplace_back(state.state_values[i * state.state_count + state_index]);

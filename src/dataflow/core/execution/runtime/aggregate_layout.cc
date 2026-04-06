@@ -150,7 +150,7 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
   if (partial.key_columns.empty() || partial.state_columns.empty()) {
     return;
   }
-  bool all_fixed = true;
+  bool all_fixed = partial.key_columns.size() <= 4;
   for (const auto& key_column : partial.key_columns) {
     if (key_column.type != BinaryKeyColumnType::Int64) {
       all_fixed = false;
@@ -185,11 +185,11 @@ void mergeAggregatePartialBatch(const AggregatePartialBatch& partial,
         row_values[state_index] = partial.state_columns[state_index].values.values[row_idx];
       }
       AggregateFixedKeyTuple key;
-      key.values.reserve(partial.key_columns.size());
-      key.is_null.reserve(partial.key_columns.size());
-      for (const auto& key_column : partial.key_columns) {
-        key.values.push_back(key_column.int64_values[row_idx]);
-        key.is_null.push_back(0);
+      key.arity = static_cast<uint8_t>(partial.key_columns.size());
+      for (std::size_t key_index = 0; key_index < partial.key_columns.size(); ++key_index) {
+        const auto& key_column = partial.key_columns[key_index];
+        key.values[key_index] = key_column.int64_values[row_idx];
+        key.is_null[key_index] = 0;
       }
       auto it = fixed_state->index_by_key.find(key);
       if (it == fixed_state->index_by_key.end()) {
@@ -306,7 +306,7 @@ Table materializeAggregateFixedKeyState(const AggregateFixedKeyState& state,
   out.rows.reserve(state.keys.size());
   for (std::size_t i = 0; i < state.keys.size(); ++i) {
     Row row;
-    for (std::size_t key_index = 0; key_index < state.keys[i].values.size(); ++key_index) {
+    for (uint8_t key_index = 0; key_index < state.keys[i].arity; ++key_index) {
       row.emplace_back(state.keys[i].is_null[key_index] != 0 ? Value()
                                                              : Value(state.keys[i].values[key_index]));
     }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -52,11 +53,18 @@ struct AggregateStringKeyState {
 };
 
 struct AggregateFixedKeyTuple {
-  std::vector<int64_t> values;
-  std::vector<uint8_t> is_null;
+  uint8_t arity = 0;
+  std::array<int64_t, 4> values{};
+  std::array<uint8_t, 4> is_null{};
 
   bool operator==(const AggregateFixedKeyTuple& other) const {
-    return values == other.values && is_null == other.is_null;
+    if (arity != other.arity) return false;
+    for (uint8_t i = 0; i < arity; ++i) {
+      if (values[i] != other.values[i] || is_null[i] != other.is_null[i]) {
+        return false;
+      }
+    }
+    return true;
   }
 };
 

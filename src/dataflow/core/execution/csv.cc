@@ -125,6 +125,16 @@ std::string encodeGroupKeyValue(const Value& value) {
   return "n:";
 }
 
+std::string encodeRawGroupKeyRow(const std::vector<std::string>& key_cells) {
+  std::string out;
+  for (const auto& cell : key_cells) {
+    out.append(std::to_string(cell.size()));
+    out.push_back(':');
+    out.append(cell);
+  }
+  return out;
+}
+
 std::string encodeGroupKeyRow(const std::vector<Value>& key_values) {
   std::string out;
   for (const auto& value : key_values) {
@@ -773,8 +783,6 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
   bool skip_header = true;
   bool filter_match = (filter == nullptr);
   std::vector<std::string> key_cells(key_indices.size());
-  std::vector<Value> key_values(key_indices.size());
-  std::vector<std::unordered_map<std::string, Value>> key_value_cache(key_indices.size());
   std::vector<double> numeric_values(aggs.size(), 0.0);
   std::vector<bool> numeric_present(aggs.size(), false);
   std::vector<bool> numeric_is_int(aggs.size(), false);
@@ -786,9 +794,6 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
         filter_match = (filter == nullptr);
         for (auto& key_cell : key_cells) {
           key_cell.clear();
-        }
-        for (auto& key_value : key_values) {
-          key_value = Value();
         }
         std::fill(numeric_values.begin(), numeric_values.end(), 0.0);
         std::fill(numeric_present.begin(), numeric_present.end(), false);
@@ -836,21 +841,14 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           return true;
         }
 
-    for (std::size_t key_pos = 0; key_pos < key_cells.size(); ++key_pos) {
-      auto& cache = key_value_cache[key_pos];
-      auto cache_it = cache.find(key_cells[key_pos]);
-      if (cache_it == cache.end()) {
-        key_values[key_pos] = parseCell(key_cells[key_pos]);
-        cache.emplace(key_cells[key_pos], key_values[key_pos]);
-      } else {
-        key_values[key_pos] = cache_it->second;
-      }
-    }
-    const auto encoded_key = encodeGroupKeyRow(key_values);
+    const auto encoded_key = encodeRawGroupKeyRow(key_cells);
     auto it = entry_index.find(encoded_key);
     if (it == entry_index.end()) {
       AggregateEntry entry;
-      entry.key_values = key_values;
+      entry.key_values.reserve(key_cells.size());
+      for (const auto& key_cell : key_cells) {
+        entry.key_values.push_back(parseCell(key_cell));
+      }
       entry.state = init_state();
       ordered_entries.push_back(std::move(entry));
       it = entry_index.emplace(encoded_key, ordered_entries.size() - 1).first;

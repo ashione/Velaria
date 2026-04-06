@@ -1,3 +1,5 @@
+#include <algorithm>
+
 #include "src/dataflow/core/execution/stream/binary_row_batch.h"
 
 #include <cstring>

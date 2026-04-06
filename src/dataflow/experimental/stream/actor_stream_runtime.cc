@@ -82,23 +82,6 @@ struct RuntimeAggregateLayout {
   std::string partial_count_column;
 };
 
-struct StringTwoKey {
-  uint32_t first_id = 0;
-  uint32_t second_id = 0;
-
-  bool operator==(const StringTwoKey& other) const {
-    return first_id == other.first_id && second_id == other.second_id;
-  }
-};
-
-struct StringTwoKeyHash {
-  std::size_t operator()(const StringTwoKey& value) const {
-    std::size_t seed = std::hash<uint32_t>{}(value.first_id);
-    seed ^= std::hash<uint32_t>{}(value.second_id) + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
-    return seed;
-  }
-};
-
 using WindowKeySumState = AggregateStringKeyState;
 
 struct Int64WindowKey {

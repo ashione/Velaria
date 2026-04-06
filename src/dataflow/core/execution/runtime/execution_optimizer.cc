@@ -225,8 +225,8 @@ const char* aggregatePartialLayoutName(AggregatePartialLayoutKind kind) {
   switch (kind) {
     case AggregatePartialLayoutKind::GenericTable:
       return "generic-table";
-    case AggregatePartialLayoutKind::TwoKeyColumnar:
-      return "two-key-columnar";
+    case AggregatePartialLayoutKind::KeyColumnar:
+      return "key-columnar";
   }
   return "generic-table";
 }
@@ -271,7 +271,7 @@ AggregateExecutionPattern analyzeAggregateExecution(
       buildAggregateProperties(input, key_indices, ordered_input, partition_local, &dense_groups);
   pattern.exec_spec.key_layout.normalized_key_indices = key_indices;
   pattern.exec_spec.partial_layout =
-      key_indices.size() == 2 ? AggregatePartialLayoutKind::TwoKeyColumnar
+      key_indices.size() == 2 ? AggregatePartialLayoutKind::KeyColumnar
                               : AggregatePartialLayoutKind::GenericTable;
   pattern.exec_spec.key_layout.nullable_encoded = pattern.exec_spec.properties.has_nullable_keys;
   pattern.exec_spec.key_layout.fixed_width = pattern.exec_spec.properties.all_fixed_width;

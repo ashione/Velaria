@@ -59,52 +59,6 @@ struct AggregateFixedKeyState {
   std::vector<double> sums;
 };
 
-struct TwoKeyStringStateKey {
-  uint32_t first_id = 0;
-  uint32_t second_id = 0;
-
-  bool operator==(const TwoKeyStringStateKey& other) const {
-    return first_id == other.first_id && second_id == other.second_id;
-  }
-};
-
-struct TwoKeyStringStateKeyHash {
-  std::size_t operator()(const TwoKeyStringStateKey& value) const;
-};
-
-struct TwoKeyStringState {
-  std::unordered_map<std::string, uint32_t> first_index_by_value;
-  std::unordered_map<std::string, uint32_t> second_index_by_value;
-  std::vector<std::string> first_values;
-  std::vector<std::string> second_values;
-  std::unordered_map<TwoKeyStringStateKey, std::size_t, TwoKeyStringStateKeyHash> index_by_key;
-  std::vector<TwoKeyStringStateKey> keys;
-  std::vector<double> sums;
-};
-
-struct TwoKeyInt64Key {
-  bool first_is_null = true;
-  int64_t first = 0;
-  bool second_is_null = true;
-  int64_t second = 0;
-
-  bool operator==(const TwoKeyInt64Key& other) const {
-    return first_is_null == other.first_is_null && first == other.first &&
-           second_is_null == other.second_is_null && second == other.second;
-  }
-};
-
-struct TwoKeyInt64KeyHash {
-  std::size_t operator()(const TwoKeyInt64Key& value) const;
-};
-
-struct TwoKeyInt64State {
-  std::unordered_map<TwoKeyInt64Key, std::size_t, TwoKeyInt64KeyHash> index_by_key;
-  std::vector<TwoKeyInt64Key> keys;
-  std::vector<double> sums;
-};
-
-bool usesTwoKeyColumnarLayout(const AggregateExecSpec& spec);
 AggregatePartialBatch makeAggregatePartialBatch(const TwoKeyValueColumnarBatch& batch,
                                                 const std::vector<std::string>& key_names,
                                                 const std::vector<std::string>& state_names);
@@ -117,17 +71,5 @@ Table materializeAggregateStringKeyState(const AggregateStringKeyState& state,
 Table materializeAggregateFixedKeyState(const AggregateFixedKeyState& state,
                                         const std::vector<std::string>& key_names,
                                         const std::string& output_column);
-
-void mergeTwoKeyPartialBatch(const TwoKeyValueColumnarBatch& partial,
-                             TwoKeyStringState* string_state,
-                             TwoKeyInt64State* int64_state);
-Table materializeTwoKeyStringState(const TwoKeyStringState& state,
-                                   const std::string& first_key_name,
-                                   const std::string& second_key_name,
-                                   const std::string& output_column);
-Table materializeTwoKeyInt64State(const TwoKeyInt64State& state,
-                                  const std::string& first_key_name,
-                                  const std::string& second_key_name,
-                                  const std::string& output_column);
 
 }  // namespace dataflow

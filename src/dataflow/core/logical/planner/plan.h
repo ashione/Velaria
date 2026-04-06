@@ -65,7 +65,7 @@ enum class AggImplKind {
 
 enum class AggregatePartialLayoutKind {
   GenericTable,
-  TwoKeyColumnar,
+  KeyColumnar,
 };
 
 struct KeyLayoutSpec {

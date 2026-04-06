@@ -480,6 +480,12 @@ def _execute_csv_sql(
             details={"csv": str(csv_path), "table": table},
             run_id=run_id,
         ) from exc
+    batch_explain = ""
+    if hasattr(session, "explain_sql"):
+        try:
+            batch_explain = session.explain_sql(query)
+        except Exception:
+            batch_explain = ""
     try:
         result_df = session.sql(query)
     except Exception as exc:
@@ -503,7 +509,12 @@ def _execute_csv_sql(
     if output_path is not None:
         artifacts.append(_table_artifact(output_path, result, ["result", "csv-sql"]))
         if run_id is not None:
-            write_explain(run_id, _build_batch_explain(logical, output_path))
+            write_explain(
+                run_id,
+                _parse_explain_sections(batch_explain)
+                if batch_explain
+                else _build_batch_explain(logical, output_path),
+            )
     return {
         "payload": {
             "table": table,

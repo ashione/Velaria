@@ -661,6 +661,102 @@ void runPlannerPlanRegression() {
   expect(df.schema().fields[1] == "total_score", "planner_output_col_total_score");
 }
 
+std::string explainFieldValue(const std::string& explain, const std::string& key) {
+  const std::string prefix = key + "=";
+  const auto pos = explain.find(prefix);
+  if (pos == std::string::npos) {
+    return "";
+  }
+  const auto start = pos + prefix.size();
+  const auto end = explain.find('\n', start);
+  return explain.substr(start, end == std::string::npos ? std::string::npos : end - start);
+}
+
+void runBatchExplainRegression() {
+  DataflowSession& session = DataflowSession::builder();
+  Table left(Schema({"alpha", "beta", "gamma"}),
+             {Row({Value(int64_t(1)), Value(int64_t(10)), Value(int64_t(3))}),
+              Row({Value(int64_t(1)), Value(int64_t(10)), Value(int64_t(7))}),
+              Row({Value(int64_t(2)), Value(int64_t(20)), Value(int64_t(11))})});
+  Table right(Schema({"window_start", "key", "value"}),
+              {Row({Value(int64_t(1)), Value(int64_t(10)), Value(int64_t(3))}),
+               Row({Value(int64_t(1)), Value(int64_t(10)), Value(int64_t(7))}),
+               Row({Value(int64_t(2)), Value(int64_t(20)), Value(int64_t(11))})});
+  session.createTempView("batch_explain_generic_a", DataFrame(left));
+  session.createTempView("batch_explain_generic_b", DataFrame(right));
+
+  const std::string explain_a = session.explainSql(
+      "SELECT alpha, beta, SUM(gamma) AS total_value "
+      "FROM batch_explain_generic_a GROUP BY alpha, beta");
+  const std::string explain_b = session.explainSql(
+      "SELECT window_start, key, SUM(value) AS total_value "
+      "FROM batch_explain_generic_b GROUP BY window_start, key");
+
+  expect(explain_a.find("logical\n") != std::string::npos,
+         "batch_explain_contains_logical_section");
+  expect(explain_a.find("physical\n") != std::string::npos,
+         "batch_explain_contains_physical_section");
+  expect(explain_a.find("strategy\n") != std::string::npos,
+         "batch_explain_contains_strategy_section");
+  expect(!explainFieldValue(explain_a, "selected_impl").empty(),
+         "batch_explain_reports_selected_impl");
+  expect(explainFieldValue(explain_a, "selected_impl") == explainFieldValue(explain_b, "selected_impl"),
+         "batch_explain_strategy_is_name_agnostic");
+
+  Table mixed_nullable(
+      Schema({"region_code", "segment_name", "score_value"}),
+      {Row({Value(int64_t(1)), Value("alpha"), Value(int64_t(3))}),
+       Row({Value(), Value("alpha"), Value(int64_t(7))}),
+       Row({Value(int64_t(1)), Value(), Value(int64_t(11))}),
+       Row({Value(int64_t(2)), Value("beta"), Value(int64_t(13))})});
+  session.createTempView("batch_explain_mixed_nullable", DataFrame(mixed_nullable));
+  const std::string mixed_explain = session.explainSql(
+      "SELECT region_code, segment_name, SUM(score_value) AS total_value "
+      "FROM batch_explain_mixed_nullable GROUP BY region_code, segment_name");
+  expect(explainFieldValue(mixed_explain, "selected_impl") == "hash-packed",
+         "batch_explain_mixed_nullable_prefers_hash_packed");
+
+  Table mixed_three_keys(
+      Schema({"tenant_id", "region_name", "segment_name", "score_value"}),
+      {Row({Value(int64_t(1)), Value("apac"), Value("alpha"), Value(int64_t(3))}),
+       Row({Value(int64_t(1)), Value("apac"), Value("alpha"), Value(int64_t(7))}),
+       Row({Value(int64_t(1)), Value("emea"), Value("beta"), Value(int64_t(11))}),
+       Row({Value(int64_t(2)), Value("emea"), Value("beta"), Value(int64_t(13))})});
+  session.createTempView("batch_explain_three_keys", DataFrame(mixed_three_keys));
+  const std::string three_key_explain = session.explainSql(
+      "SELECT tenant_id, region_name, segment_name, SUM(score_value) AS total_value "
+      "FROM batch_explain_three_keys GROUP BY tenant_id, region_name, segment_name");
+  expect(explainFieldValue(three_key_explain, "selected_impl") == "hash-packed",
+         "batch_explain_three_key_mixed_prefers_hash_packed");
+
+  Table mixed_bool_keys(
+      Schema({"tenant_id", "region_name", "success", "score_value"}),
+      {Row({Value(int64_t(1)), Value("apac"), Value(true), Value(int64_t(3))}),
+       Row({Value(int64_t(1)), Value("apac"), Value(false), Value(int64_t(7))}),
+       Row({Value(int64_t(1)), Value("emea"), Value(false), Value(int64_t(11))}),
+       Row({Value(int64_t(2)), Value("emea"), Value(true), Value(int64_t(13))})});
+  session.createTempView("batch_explain_bool_keys", DataFrame(mixed_bool_keys));
+  const std::string bool_key_explain = session.explainSql(
+      "SELECT tenant_id, region_name, success, SUM(score_value) AS total_value "
+      "FROM batch_explain_bool_keys GROUP BY tenant_id, region_name, success");
+  expect(explainFieldValue(bool_key_explain, "selected_impl") == "hash-packed",
+         "batch_explain_three_key_bool_prefers_hash_packed");
+
+  Table leading_zero_keys(
+      Schema({"date", "hour", "caller_psm", "score_value"}),
+      {Row({Value("2026-04-04"), Value("01"), Value("svcA"), Value(int64_t(3))}),
+       Row({Value("2026-04-04"), Value("01"), Value("svcA"), Value(int64_t(7))}),
+       Row({Value("2026-04-04"), Value("10"), Value("svcA"), Value(int64_t(11))})});
+  session.createTempView("batch_explain_leading_zero", DataFrame(leading_zero_keys));
+  auto leading_zero_rows =
+      session.sql("SELECT date, hour, caller_psm, COUNT(*) AS cnt "
+                  "FROM batch_explain_leading_zero GROUP BY date, hour, caller_psm")
+          .toTable();
+  dataflow::materializeRows(&leading_zero_rows);
+  expect(leading_zero_rows.rows.size() == 2,
+         "batch_group_by_preserves_leading_zero_hour_groups");
+}
+
 void runStreamSqlRegression() {
   namespace fs = std::filesystem;
 
@@ -1207,6 +1303,7 @@ int main() {
   runSemanticRegression();
   runComplexDmlRegression();
   runPlannerPlanRegression();
+  runBatchExplainRegression();
   runStreamSqlRegression();
 
   if (g_failed == 0) {

@@ -12,6 +12,9 @@ class RpcRunner;
 
 Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_indices,
                             const std::vector<AggregateSpec>& aggs);
+Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_indices,
+                            const std::vector<AggregateSpec>& aggs,
+                            const AggregateExecSpec* preferred_exec_spec);
 
 class Executor {
  public:

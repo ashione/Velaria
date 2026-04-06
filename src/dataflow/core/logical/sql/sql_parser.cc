@@ -200,8 +200,8 @@ Value parseValueToken(const Token& token) {
   }
   if (token.is_string) return Value(token.text);
   if (isKeyword(token.text, "NULL")) return Value();
-  if (isKeyword(token.text, "TRUE")) return Value(static_cast<int64_t>(1));
-  if (isKeyword(token.text, "FALSE")) return Value(static_cast<int64_t>(0));
+  if (isKeyword(token.text, "TRUE")) return Value(true);
+  if (isKeyword(token.text, "FALSE")) return Value(false);
   return Value(token.text);
 }
 

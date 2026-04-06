@@ -19,6 +19,7 @@ bool execute_csv_source_pushdown(const std::string& path, const Schema& schema,
 bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
                                const std::vector<std::size_t>& key_indices,
                                const std::vector<AggregateSpec>& aggs,
+                               const SourceFilterPushdownSpec* filter,
                                char delimiter, Table* out);
 void save_csv(const Table& table, const std::string& path);
 

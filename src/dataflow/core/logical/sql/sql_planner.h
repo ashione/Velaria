@@ -116,6 +116,8 @@ class SqlPlanner {
   DataFrame plan(const SqlQuery& query, const ViewCatalog& catalog) const;
   LogicalPlan buildLogicalPlan(const SqlQuery& query, const ViewCatalog& catalog) const;
   PhysicalPlan buildPhysicalPlan(const LogicalPlan& logical) const;
+  std::string explainLogicalPlan(const LogicalPlan& logical) const;
+  std::string explainPhysicalPlan(const PhysicalPlan& physical) const;
   DataFrame materializeFromPhysical(const PhysicalPlan& physical) const;
   StreamLogicalPlan buildStreamLogicalPlan(const SqlQuery& query,
                                            const std::string& sink_name = "") const;

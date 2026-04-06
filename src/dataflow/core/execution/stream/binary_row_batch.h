@@ -88,9 +88,39 @@ struct BinaryStringColumn {
   CacheAlignedVector<uint8_t> is_null;
 };
 
+enum class BinaryKeyColumnType {
+  String = 0,
+  Int64 = 1,
+};
+
+struct BinaryKeyColumn {
+  BinaryKeyColumnType type = BinaryKeyColumnType::String;
+  bool dictionary_encoded = false;
+  StringBlobStorage dictionary;
+  CacheAlignedVector<uint32_t> indices;
+  StringBlobStorage string_values;
+  CacheAlignedVector<int64_t> int64_values;
+  CacheAlignedVector<uint8_t> is_null;
+};
+
 struct BinaryDoubleColumn {
   CacheAlignedVector<double> values;
   CacheAlignedVector<uint8_t> is_null;
+};
+
+struct TwoKeyValueColumnarBatch {
+  size_t row_count = 0;
+  BinaryKeyColumn first_key;
+  BinaryKeyColumn second_key;
+  BinaryDoubleColumn value;
+};
+
+struct KeyStateColumnarBatch {
+  size_t row_count = 0;
+  std::vector<std::string> key_names;
+  std::vector<BinaryKeyColumn> key_columns;
+  std::vector<std::string> state_names;
+  std::vector<BinaryDoubleColumn> state_columns;
 };
 
 struct WindowKeyValueColumnarBatch {
@@ -144,6 +174,24 @@ class BinaryRowBatchCodec {
                                  WindowKeyValueColumnarBatch* out) const;
   bool deserializeWindowKeyValueFromBuffer(const uint8_t* payload, size_t size,
                                            WindowKeyValueColumnarBatch* out) const;
+  bool deserializeTwoKeyValue(const std::vector<uint8_t>& payload,
+                              const std::string& first_key_name,
+                              const std::string& second_key_name,
+                              const std::string& value_name,
+                              TwoKeyValueColumnarBatch* out) const;
+  bool deserializeTwoKeyValueFromBuffer(const uint8_t* payload, size_t size,
+                                        const std::string& first_key_name,
+                                        const std::string& second_key_name,
+                                        const std::string& value_name,
+                                        TwoKeyValueColumnarBatch* out) const;
+  bool deserializeKeyStateBatch(const std::vector<uint8_t>& payload,
+                                const std::vector<std::string>& key_names,
+                                const std::vector<std::string>& state_names,
+                                KeyStateColumnarBatch* out) const;
+  bool deserializeKeyStateBatchFromBuffer(const uint8_t* payload, size_t size,
+                                          const std::vector<std::string>& key_names,
+                                          const std::vector<std::string>& state_names,
+                                          KeyStateColumnarBatch* out) const;
 };
 
 class ByteBufferPool {

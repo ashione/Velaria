@@ -24,6 +24,8 @@ std::string encodeValuePayload(const Value& value) {
   switch (value.type()) {
     case DataType::Nil:
       return "";
+    case DataType::Bool:
+      return value.asBool() ? "1" : "0";
     case DataType::Int64:
       return std::to_string(value.asInt64());
     case DataType::Double:
@@ -50,6 +52,8 @@ Value decodeValuePayload(DataType type, const std::string& payload) {
   switch (type) {
     case DataType::Nil:
       return Value();
+    case DataType::Bool:
+      return Value(payload == "1");
     case DataType::Int64:
       return Value(static_cast<int64_t>(std::stoll(payload)));
     case DataType::Double:

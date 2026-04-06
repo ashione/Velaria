@@ -96,6 +96,9 @@ std::string serializeValue(const Value& value) {
     case DataType::Nil:
       appendToken(&out, "");
       break;
+    case DataType::Bool:
+      appendToken(&out, value.asBool() ? "1" : "0");
+      break;
     case DataType::Int64:
       appendToken(&out, std::to_string(value.asInt64()));
       break;
@@ -132,6 +135,8 @@ Value deserializeValue(const std::string& payload) {
   switch (type) {
     case DataType::Nil:
       return Value();
+    case DataType::Bool:
+      return Value(raw == "1");
     case DataType::Int64:
       return Value(static_cast<int64_t>(std::stoll(raw)));
     case DataType::Double:
@@ -245,14 +250,6 @@ void serializeNode(const PlanNodePtr& plan, std::string* out) {
       appendSize(out, node->time_column_index);
       appendSize(out, static_cast<std::size_t>(node->window_ms));
       appendToken(out, node->output_column);
-      return;
-    }
-    case PlanKind::GroupBySum: {
-      const auto* node = static_cast<const GroupBySumPlan*>(plan.get());
-      serializeNode(node->child, out);
-      appendSize(out, node->keys.size());
-      for (auto key : node->keys) appendSize(out, key);
-      appendSize(out, node->value_index);
       return;
     }
     case PlanKind::Aggregate: {
@@ -381,15 +378,6 @@ PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset) {
       const auto output_column = readToken(payload, offset);
       return std::make_shared<WindowAssignPlan>(std::move(child), time_column_index, window_ms,
                                                 output_column);
-    }
-    case PlanKind::GroupBySum: {
-      auto child = deserializeNode(payload, offset);
-      std::vector<std::size_t> keys;
-      const auto key_count = readSize(payload, offset);
-      keys.reserve(key_count);
-      for (std::size_t i = 0; i < key_count; ++i) keys.push_back(readSize(payload, offset));
-      const auto value_index = readSize(payload, offset);
-      return std::make_shared<GroupBySumPlan>(std::move(child), std::move(keys), value_index);
     }
     case PlanKind::Aggregate: {
       auto child = deserializeNode(payload, offset);

@@ -227,6 +227,10 @@ void testExplainStreamSql() {
          "explain should expose the selected local-workers mode");
   expect(explain.find("shared_memory_transport=true") != std::string::npos,
          "explain should expose shared-memory knobs");
+  expect(explain.find("simd_backend=") != std::string::npos,
+         "explain should expose the active simd backend");
+  expect(explain.find("compiled_backends=") != std::string::npos,
+         "explain should expose compiled simd backends");
 
   const std::string count_explain = session.explainStreamSql(
       "INSERT INTO strategy_count_sink "
@@ -257,7 +261,7 @@ void testExplainStreamSql() {
       "FROM strategy_hot_events GROUP BY window_start, key HAVING value_sum > 0",
       options);
   const std::string final_transform_reason =
-      "actor acceleration requires the aggregate hot path to be the final stream transform";
+      "actor acceleration requires the eligible grouped aggregate to be the final stream transform";
   expect(having_explain.find("actor_eligible=false") != std::string::npos,
          "having explain should disable actor eligibility after aggregate");
   expect(having_explain.find("actor_eligibility_reason=" + final_transform_reason) !=

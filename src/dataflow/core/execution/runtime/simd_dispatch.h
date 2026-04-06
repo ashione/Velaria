@@ -28,6 +28,12 @@ enum class NumericCompareOp : uint8_t {
   Ge = 5,
 };
 
+enum class NumericCombineOp : uint8_t {
+  Sum = 0,
+  Min = 1,
+  Max = 2,
+};
+
 struct NumericSelectionResult {
   std::vector<uint8_t> selected;
   std::vector<std::size_t> indices;
@@ -43,6 +49,9 @@ struct SimdKernelDispatch {
                                           std::size_t max_selected) = nullptr;
   double (*sum_double)(const double* values, const uint8_t* is_null,
                        std::size_t row_count) = nullptr;
+  void (*accumulate_double)(double* dst, const double* src, std::size_t count) = nullptr;
+  void (*combine_double)(double* dst, const double* src, std::size_t count,
+                         NumericCombineOp op) = nullptr;
   double (*dot_f32)(const float* lhs, const float* rhs, std::size_t size) = nullptr;
   double (*squared_l2_f32)(const float* lhs, const float* rhs, std::size_t size) = nullptr;
 };
@@ -50,6 +59,7 @@ struct SimdKernelDispatch {
 const char* simdBackendName(SimdBackendKind kind);
 const SimdKernelDispatch& simdDispatch();
 std::string activeSimdBackendName();
+std::vector<std::string> compiledSimdBackendNames();
 void resetSimdDispatchForTest();
 
 }  // namespace dataflow

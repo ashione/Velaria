@@ -219,7 +219,7 @@ df::Value valueFromPy(PyObject* obj) {
     return df::Value();
   }
   if (PyBool_Check(obj)) {
-    return df::Value(static_cast<int64_t>(PyObject_IsTrue(obj)));
+    return df::Value(PyObject_IsTrue(obj) != 0);
   }
   if (PyLong_Check(obj)) {
     return df::Value(static_cast<int64_t>(PyLong_AsLongLong(obj)));
@@ -302,7 +302,7 @@ df::Value valueFromFastArrowColumn(const FastArrowColumnSpec& spec, const ArrowA
   switch (spec.kind) {
     case FastArrowColumnKind::Bool: {
       const auto* bits = reinterpret_cast<const uint8_t*>(array->buffers[1]);
-      return df::Value(static_cast<int64_t>(((bits[offset_row >> 3] >> (offset_row & 7)) & 0x01u) != 0));
+      return df::Value(((bits[offset_row >> 3] >> (offset_row & 7)) & 0x01u) != 0);
     }
     case FastArrowColumnKind::Int32:
       return df::Value(static_cast<int64_t>(reinterpret_cast<const int32_t*>(array->buffers[1])[offset_row]));
@@ -694,6 +694,8 @@ PyObject* pyFromValue(const df::Value& value) {
   switch (value.type()) {
     case df::DataType::Nil:
       Py_RETURN_NONE;
+    case df::DataType::Bool:
+      return PyBool_FromLong(value.asBool() ? 1 : 0);
     case df::DataType::Int64:
       return PyLong_FromLongLong(value.asInt64());
     case df::DataType::Double:
@@ -741,6 +743,9 @@ PyObject* pyRowsFromTable(const df::Table& table) {
 std::string arrowFormatForValue(const df::Value& value) {
   switch (value.type()) {
     case df::DataType::Nil:
+      return df::kArrowFormatUtf8;
+    case df::DataType::Bool:
+      return df::kArrowFormatBool;
     case df::DataType::String:
       return df::kArrowFormatUtf8;
     case df::DataType::Int64:
@@ -760,6 +765,33 @@ bool supportsArrowExportFormat(const std::string& format) {
          df::isArrowFixedSizeListFormat(format);
 }
 
+std::string inferArrowFormatFromValues(const df::ValueColumnBuffer& column) {
+  bool seen_non_null = false;
+  std::string inferred;
+  for (const auto& value : column.values) {
+    if (value.isNull()) continue;
+    const auto candidate = arrowFormatForValue(value);
+    if (!seen_non_null) {
+      inferred = candidate;
+      seen_non_null = true;
+      continue;
+    }
+    if (inferred == candidate) {
+      continue;
+    }
+    const bool numeric_pair =
+        ((inferred == df::kArrowFormatInt64 || inferred == df::kArrowFormatFloat64) &&
+         (candidate == df::kArrowFormatInt64 || candidate == df::kArrowFormatFloat64));
+    if (numeric_pair) {
+      inferred = df::kArrowFormatFloat64;
+      continue;
+    }
+    inferred = df::kArrowFormatUtf8;
+    break;
+  }
+  return seen_non_null ? inferred : df::kArrowFormatUtf8;
+}
+
 std::string arrowFormatForColumn(const df::ValueColumnBuffer& column,
                                  const std::string* preferred_format = nullptr) {
   if (column.arrow_backing != nullptr && !column.arrow_backing->format.empty() &&
@@ -770,10 +802,8 @@ std::string arrowFormatForColumn(const df::ValueColumnBuffer& column,
       supportsArrowExportFormat(*preferred_format)) {
     return *preferred_format;
   }
-  for (const auto& value : column.values) {
-    if (!value.isNull()) {
-      return arrowFormatForValue(value);
-    }
+  if (!column.values.empty()) {
+    return inferArrowFormatFromValues(column);
   }
   return df::kArrowFormatUtf8;
 }
@@ -816,7 +846,7 @@ std::pair<std::shared_ptr<void>, std::shared_ptr<void>> makeBooleanBuffers(
       continue;
     }
     validity[row / 8] |= static_cast<uint8_t>(1U << (row % 8));
-    if (value.asInt64() != 0) {
+    if (value.asBool()) {
       bits[row / 8] |= static_cast<uint8_t>(1U << (row % 8));
     }
   }
@@ -851,7 +881,7 @@ StringBuffers makeStringBuffers(const df::ValueColumnBuffer& column,
       continue;
     }
     validity[row / 8] |= static_cast<uint8_t>(1U << (row % 8));
-    const std::string& s = value.asString();
+    const std::string s = value.toString();
     current += static_cast<OffsetT>(s.size());
     total_bytes += s.size();
   }
@@ -863,7 +893,7 @@ StringBuffers makeStringBuffers(const df::ValueColumnBuffer& column,
     if (column.values[row].isNull()) {
       continue;
     }
-    const std::string& s = column.values[row].asString();
+    const std::string s = column.values[row].toString();
     if (!s.empty()) {
       std::memcpy(data + write_offset, s.data(), s.size());
       write_offset += s.size();
@@ -1403,6 +1433,21 @@ PyObject* sessionSql(PyVelariaSession* self, PyObject* args) {
   });
 }
 
+PyObject* sessionExplainSql(PyVelariaSession* self, PyObject* args) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    const char* sql = nullptr;
+    if (!PyArg_ParseTuple(args, "s", &sql)) {
+      return nullptr;
+    }
+    std::string explain;
+    {
+      AllowThreads allow;
+      explain = self->session->explainSql(sql);
+    }
+    return PyUnicode_FromStringAndSize(explain.c_str(), static_cast<Py_ssize_t>(explain.size()));
+  });
+}
+
 PyObject* sessionCreateTempView(PyVelariaSession* self, PyObject* args) {
   return withExceptionTranslation([&]() -> PyObject* {
     const char* name = nullptr;
@@ -1669,14 +1714,35 @@ PyObject* dataFrameToArrow(PyVelariaDataFrame* self, PyObject*) {
       PyErr_SetString(PyExc_ImportError, "pyarrow is required for DataFrame.to_arrow()");
       return nullptr;
     }
-    PyObject* record_batch_fn = PyObject_GetAttrString(pyarrow, "record_batch");
-    if (record_batch_fn == nullptr) {
+    const df::Table* native_table = nullptr;
+    {
+      AllowThreads allow;
+      native_table = &self->df_ptr->materializedTable();
+    }
+    PyObject* capsules = exportArrowCapsules(*native_table);
+    if (capsules == nullptr) {
       Py_DECREF(pyarrow);
       return nullptr;
     }
-    PyObject* batch = PyObject_CallFunctionObjArgs(record_batch_fn,
-                                                   reinterpret_cast<PyObject*>(self), nullptr);
-    Py_DECREF(record_batch_fn);
+    PyObject* record_batch_type = PyObject_GetAttrString(pyarrow, "RecordBatch");
+    if (record_batch_type == nullptr) {
+      Py_DECREF(capsules);
+      Py_DECREF(pyarrow);
+      return nullptr;
+    }
+    PyObject* import_from_capsule =
+        PyObject_GetAttrString(record_batch_type, "_import_from_c_capsule");
+    Py_DECREF(record_batch_type);
+    if (import_from_capsule == nullptr) {
+      Py_DECREF(capsules);
+      Py_DECREF(pyarrow);
+      return nullptr;
+    }
+    PyObject* batch =
+        PyObject_CallFunctionObjArgs(import_from_capsule, PyTuple_GET_ITEM(capsules, 0),
+                                     PyTuple_GET_ITEM(capsules, 1), nullptr);
+    Py_DECREF(import_from_capsule);
+    Py_DECREF(capsules);
     if (batch == nullptr) {
       Py_DECREF(pyarrow);
       return nullptr;
@@ -1897,6 +1963,8 @@ PyMethodDef sessionMethods[] = {
     {"read_csv", reinterpret_cast<PyCFunction>(sessionReadCsv), METH_VARARGS | METH_KEYWORDS,
      "Read a CSV file into a DataFrame."},
     {"sql", reinterpret_cast<PyCFunction>(sessionSql), METH_VARARGS, "Run batch SQL or SQL DDL."},
+    {"explain_sql", reinterpret_cast<PyCFunction>(sessionExplainSql), METH_VARARGS,
+     "Explain a batch SELECT query with logical/physical/strategy sections."},
     {"create_dataframe_from_arrow", reinterpret_cast<PyCFunction>(sessionCreateDataFrameFromArrow),
      METH_VARARGS, "Create a DataFrame from a pyarrow.Table-compatible object."},
     {"create_stream_from_arrow", reinterpret_cast<PyCFunction>(sessionCreateStreamFromArrow),

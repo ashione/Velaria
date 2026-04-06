@@ -63,6 +63,9 @@ class DataFrame {
   DataFrame cache() const;
   DataFrame aggregate(const std::vector<size_t>& keys,
                      const std::vector<AggregateSpec>& aggs) const;
+  DataFrame aggregate(const std::vector<size_t>& keys,
+                     const std::vector<AggregateSpec>& aggs,
+                     const AggregateExecSpec& exec_spec) const;
   DataFrame vectorQuery(const std::string& vectorColumn,
                         const std::vector<float>& queryVector,
                         size_t top_k,

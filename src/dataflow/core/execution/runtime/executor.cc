@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <span>
@@ -448,6 +449,109 @@ Table executeSingleSumDoubleInt64KeyTable(const Table& input, std::size_t first_
   return out;
 }
 
+bool aggregateKeysEqualAt(const Table& input, const std::vector<size_t>& key_indices,
+                          std::size_t lhs_row, std::size_t rhs_row) {
+  for (const auto key_index : key_indices) {
+    const auto key_column = viewValueColumn(input, key_index);
+    const auto lhs = valueColumnValueAt(*key_column.buffer, lhs_row);
+    const auto rhs = valueColumnValueAt(*key_column.buffer, rhs_row);
+    if (!(lhs == rhs)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+Row buildAggregateOutputRow(const Table& input, const std::vector<size_t>& key_indices,
+                            std::size_t row_index, const AggregateAccumulator& acc,
+                            const std::vector<AggregateSpec>& aggs) {
+  Row row;
+  row.reserve(key_indices.size() + aggs.size());
+  for (const auto key_index : key_indices) {
+    const auto key_column = viewValueColumn(input, key_index);
+    row.push_back(valueColumnValueAt(*key_column.buffer, row_index));
+  }
+  for (std::size_t i = 0; i < aggs.size(); ++i) {
+    row.push_back(finalizeAggregateValue(acc, aggs[i], i));
+  }
+  return row;
+}
+
+Table executeOrderedAggregateTable(const Table& input, const std::vector<size_t>& key_indices,
+                                   const std::vector<AggregateSpec>& aggs,
+                                   const std::vector<const ValueColumnView*>& aggregate_columns) {
+  Table out = makeAggregateOutputSchema(input, key_indices, aggs);
+  if (input.rowCount() == 0) {
+    return out;
+  }
+
+  AggregateAccumulator accumulator = initAccumulator(aggs);
+  std::size_t group_start = 0;
+  for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
+    if (row_index > group_start && !aggregateKeysEqualAt(input, key_indices, group_start, row_index)) {
+      out.rows.push_back(buildAggregateOutputRow(input, key_indices, group_start, accumulator, aggs));
+      accumulator = initAccumulator(aggs);
+      group_start = row_index;
+    }
+    updateAccumulator(&accumulator, aggs, aggregate_columns, row_index);
+  }
+  out.rows.push_back(buildAggregateOutputRow(input, key_indices, group_start, accumulator, aggs));
+  return out;
+}
+
+Table executeDenseSingleInt64KeyAggregateTable(
+    const Table& input, std::size_t key_index, const std::vector<AggregateSpec>& aggs,
+    const std::vector<const ValueColumnView*>& aggregate_columns) {
+  Table out = makeAggregateOutputSchema(input, {key_index}, aggs);
+  if (input.rowCount() == 0) {
+    return out;
+  }
+
+  const auto key_column = viewValueColumn(input, key_index);
+  int64_t min_value = std::numeric_limits<int64_t>::max();
+  int64_t max_value = std::numeric_limits<int64_t>::min();
+  bool saw_value = false;
+  for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
+    if (valueColumnIsNullAt(*key_column.buffer, row_index)) {
+      return Table();
+    }
+    const auto value = valueColumnInt64At(*key_column.buffer, row_index);
+    min_value = std::min(min_value, value);
+    max_value = std::max(max_value, value);
+    saw_value = true;
+  }
+  if (!saw_value) {
+    return out;
+  }
+
+  const uint64_t domain_size = static_cast<uint64_t>(max_value - min_value) + 1;
+  if (domain_size > (1u << 16)) {
+    return Table();
+  }
+
+  std::vector<AggregateAccumulator> slots(static_cast<std::size_t>(domain_size), initAccumulator(aggs));
+  std::vector<uint8_t> seen(static_cast<std::size_t>(domain_size), 0);
+  for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
+    const auto value = valueColumnInt64At(*key_column.buffer, row_index);
+    const auto slot = static_cast<std::size_t>(value - min_value);
+    seen[slot] = 1;
+    updateAccumulator(&slots[slot], aggs, aggregate_columns, row_index);
+  }
+
+  out.rows.reserve(input.rowCount());
+  for (std::size_t slot = 0; slot < seen.size(); ++slot) {
+    if (!seen[slot]) continue;
+    Row row;
+    row.reserve(1 + aggs.size());
+    row.emplace_back(static_cast<int64_t>(min_value + static_cast<int64_t>(slot)));
+    for (std::size_t i = 0; i < aggs.size(); ++i) {
+      row.push_back(finalizeAggregateValue(slots[slot], aggs[i], i));
+    }
+    out.rows.push_back(std::move(row));
+  }
+  return out;
+}
+
 RowSelection combinedFilterSelection(const Table& input, const std::vector<const FilterPlan*>& filters,
                                      std::size_t max_selected = 0) {
   RowSelection out;
@@ -558,10 +662,6 @@ std::size_t planOutputWidth(const PlanNodePtr& plan) {
       return planOutputWidth(static_cast<const OrderByPlan*>(plan.get())->child);
     case PlanKind::WindowAssign:
       return planOutputWidth(static_cast<const WindowAssignPlan*>(plan.get())->child) + 1;
-    case PlanKind::GroupBySum: {
-      const auto* node = static_cast<const GroupBySumPlan*>(plan.get());
-      return node->keys.size() + 1;
-    }
     case PlanKind::Aggregate: {
       const auto* node = static_cast<const AggregatePlan*>(plan.get());
       return node->keys.size() + node->aggregates.size();
@@ -680,14 +780,6 @@ void collectSourceRequirements(const PlanNodePtr& plan, const std::vector<std::s
       if (needs_window_output) {
         appendRequiredColumn(&child_required, node->time_column_index);
       }
-      collectSourceRequirements(node->child, normalizeRequiredColumns(std::move(child_required)),
-                                requirements);
-      return;
-    }
-    case PlanKind::GroupBySum: {
-      const auto* node = static_cast<const GroupBySumPlan*>(plan.get());
-      std::vector<std::size_t> child_required = node->keys;
-      appendRequiredColumn(&child_required, node->value_index);
       collectSourceRequirements(node->child, normalizeRequiredColumns(std::move(child_required)),
                                 requirements);
       return;
@@ -819,33 +911,12 @@ bool buildSourcePushdownSpec(const PlanNodePtr& plan, const SourceRequirementMap
       if (!buildSourcePushdownSpec(node->child, requirements, &source, &spec)) {
         return false;
       }
-      if (spec.filter.enabled || spec.limit != 0 || spec.has_aggregate) {
+      if (spec.limit != 0 || spec.has_aggregate) {
         return false;
       }
       spec.has_aggregate = true;
       spec.aggregate.keys = node->keys;
       spec.aggregate.aggregates = node->aggregates;
-      *source_out = source;
-      *pushdown_out = std::move(spec);
-      return true;
-    }
-    case PlanKind::GroupBySum: {
-      const auto* node = static_cast<const GroupBySumPlan*>(plan.get());
-      SourcePushdownSpec spec;
-      const SourcePlan* source = nullptr;
-      if (!buildSourcePushdownSpec(node->child, requirements, &source, &spec)) {
-        return false;
-      }
-      if (spec.filter.enabled || spec.limit != 0 || spec.has_aggregate) {
-        return false;
-      }
-      spec.has_aggregate = true;
-      spec.aggregate.keys = node->keys;
-      AggregateSpec sum_spec;
-      sum_spec.function = AggregateFunction::Sum;
-      sum_spec.value_index = node->value_index;
-      sum_spec.output_name = "sum";
-      spec.aggregate.aggregates = {std::move(sum_spec)};
       *source_out = source;
       *pushdown_out = std::move(spec);
       return true;
@@ -960,7 +1031,22 @@ BorrowedOrOwnedTable borrowOrExecute(const LocalExecutor& executor, const PlanNo
 
 Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_indices,
                             const std::vector<AggregateSpec>& aggs) {
-  const auto aggregate_pattern = analyzeAggregateExecution(input, key_indices, aggs);
+  return executeAggregateTable(input, key_indices, aggs, nullptr);
+}
+
+Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_indices,
+                            const std::vector<AggregateSpec>& aggs,
+                            const AggregateExecSpec* preferred_exec_spec) {
+  auto aggregate_pattern = analyzeAggregateExecution(input, key_indices, aggs);
+  if (preferred_exec_spec != nullptr) {
+    aggregate_pattern.exec_spec = *preferred_exec_spec;
+    if (preferred_exec_spec->impl_kind == AggImplKind::SortStreaming && !key_indices.empty()) {
+      aggregate_pattern.shape = AggregateExecutionShape::GenericSerializedKeys;
+    } else if (preferred_exec_spec->impl_kind == AggImplKind::Dense &&
+               key_indices.size() == 1) {
+      aggregate_pattern.shape = AggregateExecutionShape::GenericSingleInt64Key;
+    }
+  }
   switch (aggregate_pattern.shape) {
     case AggregateExecutionShape::SumNoKey:
       return executeSingleSumNoKeyTable(input, aggs.front());
@@ -973,6 +1059,8 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
     case AggregateExecutionShape::GenericSingleStringKey:
     case AggregateExecutionShape::GenericSingleInt64Key:
     case AggregateExecutionShape::GenericDoubleInt64Key:
+    case AggregateExecutionShape::GenericPackedKeys2:
+    case AggregateExecutionShape::GenericPackedKeys3:
     case AggregateExecutionShape::GenericSerializedKeys:
       break;
   }
@@ -993,6 +1081,18 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
       aggregate_columns.push_back(nullptr);
     } else {
       aggregate_columns.push_back(&aggregate_inputs[aggregate_input_index++]);
+    }
+  }
+
+  if (aggregate_pattern.exec_spec.impl_kind == AggImplKind::SortStreaming && !key_indices.empty()) {
+    return executeOrderedAggregateTable(input, key_indices, aggs, aggregate_columns);
+  }
+
+  if (aggregate_pattern.exec_spec.impl_kind == AggImplKind::Dense && key_indices.size() == 1) {
+    Table dense = executeDenseSingleInt64KeyAggregateTable(input, key_indices.front(), aggs,
+                                                           aggregate_columns);
+    if (!dense.schema.fields.empty() && (dense.rowCount() != 0 || input.rowCount() == 0)) {
+      return dense;
     }
   }
 
@@ -1149,6 +1249,225 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
     }
     out.columnar_cache = std::move(cache);
     return out;
+  }
+
+  struct PackedAggregateKey {
+    // Up to 3 components; only first (arity) elements are meaningful.
+    uint8_t arity = 0;
+    std::array<uint8_t, 3> tag{};  // 0=null, 1=int64, 2=string
+    std::array<int64_t, 3> i64{};
+    std::array<std::string, 3> sv{};
+
+    bool operator==(const PackedAggregateKey& other) const {
+      if (arity != other.arity) return false;
+      for (uint8_t i = 0; i < arity; ++i) {
+        if (tag[i] != other.tag[i]) return false;
+        switch (tag[i]) {
+          case 0:
+            break;
+          case 1:
+            if (i64[i] != other.i64[i]) return false;
+            break;
+          case 2:
+            if (sv[i] != other.sv[i]) return false;
+            break;
+          default:
+            return false;
+        }
+      }
+      return true;
+    }
+  };
+
+  struct PackedAggregateKeyHash {
+    std::size_t operator()(const PackedAggregateKey& key) const noexcept {
+      std::size_t h = 1469598103934665603ull;  // FNV offset
+      auto mix = [&](uint64_t v) {
+        h ^= static_cast<std::size_t>(v);
+        h *= 1099511628211ull;
+      };
+      mix(key.arity);
+      for (uint8_t i = 0; i < key.arity; ++i) {
+        mix(key.tag[i]);
+        switch (key.tag[i]) {
+          case 0:
+            break;
+          case 1:
+            mix(static_cast<uint64_t>(key.i64[i]));
+            break;
+          case 2: {
+            const auto& sv = key.sv[i];
+            mix(std::hash<std::string>{}(sv));
+            break;
+          }
+          default:
+            break;
+        }
+      }
+      return h;
+    }
+  };
+
+  auto executePackedKeys = [&](uint8_t arity) -> Table {
+    const auto k0 = viewValueColumn(input, key_indices[0]);
+    const auto k1 = viewValueColumn(input, key_indices[1]);
+    ValueColumnView k2;
+    bool has_k2 = false;
+    if (arity == 3) {
+      k2 = viewValueColumn(input, key_indices[2]);
+      has_k2 = true;
+    }
+
+    std::unordered_map<PackedAggregateKey, std::size_t, PackedAggregateKeyHash> key_to_index;
+    std::vector<AggregateAccumulator> ordered_states;
+    std::vector<PackedAggregateKey> ordered_keys;
+    key_to_index.reserve(input.rowCount());
+    ordered_states.reserve(input.rowCount());
+    ordered_keys.reserve(input.rowCount());
+
+    auto packAt = [&](const ValueColumnView& col, std::size_t row, uint8_t idx,
+                      PackedAggregateKey* out_key) -> bool {
+      if (valueColumnIsNullAt(*col.buffer, row)) {
+        out_key->tag[idx] = 0;
+        return true;
+      }
+
+      const auto& buffer = *col.buffer;
+      if (!buffer.values.empty()) {
+        const Value value = valueColumnValueAt(buffer, row);
+        if (value.isNull()) {
+          out_key->tag[idx] = 0;
+          return true;
+        }
+        if (value.type() == DataType::Int64) {
+          out_key->tag[idx] = 1;
+          out_key->i64[idx] = value.asInt64();
+          return true;
+        }
+        if (value.type() == DataType::Bool) {
+          out_key->tag[idx] = 1;
+          out_key->i64[idx] = value.asBool() ? 1 : 0;
+          return true;
+        }
+        if (value.type() == DataType::String) {
+          out_key->tag[idx] = 2;
+          out_key->sv[idx] = value.asString();
+          return true;
+        }
+        return false;
+      }
+
+      if (buffer.arrow_backing != nullptr) {
+        const auto& format = buffer.arrow_backing->format;
+        if (isArrowUtf8Format(format)) {
+          out_key->tag[idx] = 2;
+          out_key->sv[idx] = std::string(valueColumnStringViewAt(buffer, row));
+          return true;
+        }
+        if (isArrowIntegerLikeFormat(format)) {
+          out_key->tag[idx] = 1;
+          out_key->i64[idx] = valueColumnInt64At(buffer, row);
+          return true;
+        }
+      }
+
+      const Value value = valueColumnValueAt(buffer, row);
+      if (value.isNull()) {
+        out_key->tag[idx] = 0;
+        return true;
+      }
+      if (value.type() == DataType::Int64) {
+        out_key->tag[idx] = 1;
+        out_key->i64[idx] = value.asInt64();
+        return true;
+      }
+      if (value.type() == DataType::Bool) {
+        out_key->tag[idx] = 1;
+        out_key->i64[idx] = value.asBool() ? 1 : 0;
+        return true;
+      }
+      if (value.type() == DataType::String) {
+        out_key->tag[idx] = 2;
+        out_key->sv[idx] = value.asString();
+        return true;
+      }
+      return false;
+    };
+
+    for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
+      PackedAggregateKey key;
+      key.arity = arity;
+      if (!packAt(k0, row_index, 0, &key) || !packAt(k1, row_index, 1, &key) ||
+          (arity == 3 && (!has_k2 || !packAt(k2, row_index, 2, &key)))) {
+        // Fallback to safe slow path if we hit an unsupported value type.
+        return Table();
+      }
+
+      auto it = key_to_index.find(key);
+      if (it == key_to_index.end()) {
+        ordered_keys.push_back(key);
+        ordered_states.push_back(initAccumulator(aggs));
+        const auto index = ordered_states.size() - 1;
+        it = key_to_index.emplace(key, index).first;
+      }
+      updateAccumulator(&ordered_states[it->second], aggs, aggregate_columns, row_index);
+    }
+
+    Table out = makeAggregateOutputSchema(input, key_indices, aggs);
+    auto cache = std::make_shared<ColumnarTable>();
+    cache->schema = out.schema;
+    cache->columns.resize(out.schema.fields.size());
+    cache->arrow_formats.resize(out.schema.fields.size());
+    cache->row_count = ordered_keys.size();
+    for (auto& column : cache->columns) {
+      column.values.reserve(ordered_keys.size());
+    }
+
+    for (std::size_t index = 0; index < ordered_keys.size(); ++index) {
+      const auto& key = ordered_keys[index];
+      const auto& acc = ordered_states[index];
+      std::size_t out_column_index = 0;
+      for (uint8_t i = 0; i < arity; ++i) {
+        switch (key.tag[i]) {
+          case 0:
+            cache->columns[out_column_index++].values.push_back(Value());
+            break;
+          case 1:
+            cache->columns[out_column_index++].values.push_back(Value(key.i64[i]));
+            break;
+          case 2:
+            cache->columns[out_column_index++].values.push_back(Value(key.sv[i]));
+            break;
+          default:
+            cache->columns[out_column_index++].values.push_back(Value());
+            break;
+        }
+      }
+      appendAggregateValues(cache.get(), &out_column_index, acc, aggs);
+    }
+    out.columnar_cache = std::move(cache);
+    return out;
+  };
+
+  if (aggregate_pattern.shape == AggregateExecutionShape::GenericPackedKeys2) {
+    Table packed = executePackedKeys(2);
+    if (packed.rowCount() != 0 || input.rowCount() == 0) {
+      // If packed succeeded or input empty, return it.
+      // executePackedKeys returns empty table only on fallback; empty input is OK.
+      if (packed.schema.fields.size() != 0 || input.rowCount() == 0) {
+        return packed;
+      }
+    }
+    // else fall through to serialized key path
+  }
+
+  if (aggregate_pattern.shape == AggregateExecutionShape::GenericPackedKeys3) {
+    Table packed = executePackedKeys(3);
+    if (packed.rowCount() != 0 || input.rowCount() == 0) {
+      if (packed.schema.fields.size() != 0 || input.rowCount() == 0) {
+        return packed;
+      }
+    }
   }
 
   std::vector<std::string> ordered_keys;
@@ -1315,8 +1634,7 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
                         vectorizedWindowStart(input, node->window_ms), false);
       return out;
     }
-    case PlanKind::Aggregate:
-    case PlanKind::GroupBySum: {
+    case PlanKind::Aggregate: {
       const SourcePlan* pushed_source = nullptr;
       SourcePushdownSpec pushed_spec;
       if (buildSourcePushdownSpec(plan, requirements, &pushed_source, &pushed_spec) &&
@@ -1326,27 +1644,24 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
           return pushed;
         }
       }
-
-      std::vector<size_t> key_indices;
-      std::vector<AggregateSpec> aggregates;
-      const PlanNodePtr* child = nullptr;
-      if (plan->kind == PlanKind::Aggregate) {
-        const auto* node = static_cast<const AggregatePlan*>(plan.get());
-        key_indices = node->keys;
-        aggregates = node->aggregates;
-        child = &node->child;
-      } else {
-        const auto* node = static_cast<const GroupBySumPlan*>(plan.get());
-        key_indices = node->keys;
-        AggregateSpec sum_spec;
-        sum_spec.function = AggregateFunction::Sum;
-        sum_spec.value_index = node->value_index;
-        sum_spec.output_name = "sum";
-        aggregates.push_back(std::move(sum_spec));
-        child = &node->child;
+      const auto* node = static_cast<const AggregatePlan*>(plan.get());
+      const auto input = borrowOrExecute(executor, node->child, requirements);
+      const auto pattern = analyzeAggregateExecution(*input.table, node->keys, node->aggregates);
+      auto* mutable_node = const_cast<AggregatePlan*>(node);
+      if (!mutable_node->has_exec_spec) {
+        mutable_node->exec_spec = pattern.exec_spec;
+        mutable_node->has_exec_spec = true;
       }
-      const auto input = borrowOrExecute(executor, *child, requirements);
-      return executeAggregateTable(*input.table, key_indices, aggregates);
+      mutable_node->runtime_feedback = pattern.feedback;
+      Table out = executeAggregateTable(*input.table, node->keys, node->aggregates,
+                                       mutable_node->has_exec_spec ? &mutable_node->exec_spec
+                                                                   : nullptr);
+      mutable_node->runtime_feedback.input_rows = input.table->rowCount();
+      mutable_node->runtime_feedback.output_groups = out.rowCount();
+      mutable_node->runtime_feedback.observed_ordered_input =
+          pattern.exec_spec.properties.ordered_input;
+      mutable_node->has_runtime_feedback = true;
+      return out;
     }
     case PlanKind::Join: {
       const auto* node = static_cast<const JoinPlan*>(plan.get());

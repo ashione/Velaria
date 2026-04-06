@@ -8,14 +8,12 @@ description: How to use a locally installed Velaria Python package for local ana
 这个 Skill 用于说明如何把 `velaria` 的 Python 包作为本地分析工具使用，不涉及仓库实现代码或编译/构建逻辑。  
 核心思路：**把数据先加载为临时视图，再用 `session.sql(...)` 写 SQL 处理。**
 
-本 Skill 默认只使用 `uv` 执行。推荐路径是：先在本地环境中安装 `velaria`，再执行 CLI 或 Python 脚本。
+本 Skill 默认只使用 `uv` 执行。仓库内可直接使用的入口只有两类：
 
-安装 `velaria` wheel 或 package 后，默认 CLI 命令是：
+- 源码入口：`uv run --project python_api python python_api/velaria_cli.py ...`
+- 打包产物：`./dist/velaria-cli ...`
 
-- `velaria-cli`
-- `velaria_cli`
-
-下文统一用 `velaria-cli` 举例；如果你的环境只暴露了 `velaria_cli`，可直接等价替换。
+如果你已经把 wheel 安装到了独立环境，也可以使用安装后的 `velaria-cli` / `velaria_cli`，但下面的示例统一使用仓库内可见入口。
 
 ## 1. 环境准备
 
@@ -30,7 +28,7 @@ uv pip install velaria
 # 或
 uv pip install /path/to/velaria-<version>-<python_tag>-<abi_tag>-<platform_tag>.whl
 
-velaria-cli --help
+uv run --project python_api python python_api/velaria_cli.py --help
 uv run python -c "import velaria; print(velaria.__version__)"
 ```
 
@@ -62,13 +60,14 @@ print(result.to_pylist())
 
 如果你更适合用 CLI 而不是临时 Python 片段，在已安装 `velaria` 的环境里也可以直接使用 workspace/run store。
 
-所有 CLI 顶层命令和子命令都支持 `--help`，例如 `velaria-cli run diff --help`。
-`velaria-cli -i` 可以进入交互式模式。
+所有 CLI 顶层命令和子命令都支持 `--help`，例如
+`uv run --project python_api python python_api/velaria_cli.py run diff --help`。
+`uv run --project python_api python python_api/velaria_cli.py -i` 可以进入交互式模式。
 
 ```bash
-velaria-cli -i
+uv run --project python_api python python_api/velaria_cli.py -i
 
-velaria-cli run start -- csv-sql \
+uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
   --run-name "regional_row_count" \
   --description "regional row count for the current CSV snapshot" \
   --tag regional \
@@ -76,11 +75,11 @@ velaria-cli run start -- csv-sql \
   --csv path/to/file.csv \
   --query "SELECT region, COUNT(*) AS cnt FROM input_table GROUP BY region"
 
-velaria-cli run list --tag regional --query "row count" --limit 20
-velaria-cli run result --run-id <run_id>
-velaria-cli run diff --run-id <run_id> --other-run-id <other_run_id>
-velaria-cli run show --run-id <run_id>
-velaria-cli artifacts list --run-id <run_id>
+uv run --project python_api python python_api/velaria_cli.py run list --tag regional --query "row count" --limit 20
+uv run --project python_api python python_api/velaria_cli.py run result --run-id <run_id>
+uv run --project python_api python python_api/velaria_cli.py run diff --run-id <run_id> --other-run-id <other_run_id>
+uv run --project python_api python python_api/velaria_cli.py run show --run-id <run_id>
+uv run --project python_api python python_api/velaria_cli.py artifacts list --run-id <run_id>
 ```
 
 ## 3.1 当前 SQL v1 边界
@@ -111,7 +110,7 @@ stream SQL 当前边界：
 
 ## 4. 新增功能与参数说明
 
-### 4.1 `velaria-cli run start`
+### 4.1 `velaria_cli.py run start`
 
 用途：
 
@@ -123,7 +122,7 @@ stream SQL 当前边界：
 基础语法：
 
 ```bash
-velaria-cli run start -- <action> ...
+uv run --project python_api python python_api/velaria_cli.py run start -- <action> ...
 ```
 
 公共参数：
@@ -231,7 +230,8 @@ velaria-cli run start -- <action> ...
 基础语法：
 
 ```bash
-velaria-cli run list [--status succeeded] [--action csv-sql] [--tag slow-query] [--query triage] [--limit 20]
+uv run --project python_api python python_api/velaria_cli.py run list \
+  [--status succeeded] [--action csv-sql] [--tag slow-query] [--query triage] [--limit 20]
 ```
 
 关键参数：
@@ -398,4 +398,7 @@ uv run --with velaria --with "pyarrow==23.0.1" \\
 1. 先创建或激活一个本地环境，并安装 `velaria`
 2. 选一个脚本加载数据，确保 `session.create_temp_view(...)` 成功
 3. 用 `session.sql(...)`/脚本 `--query` 将你的业务分析逻辑落到 SQL
-4. 若需可追踪执行、状态查看和 artifact 预览，优先使用 `velaria-cli run ...` 与 `velaria-cli artifacts ...`
+4. 若需可追踪执行、状态查看和 artifact 预览，优先使用
+   `uv run --project python_api python python_api/velaria_cli.py run ...`
+   与
+   `uv run --project python_api python python_api/velaria_cli.py artifacts ...`

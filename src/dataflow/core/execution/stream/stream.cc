@@ -516,6 +516,8 @@ std::string serializeStateValue(const Value& value) {
   switch (value.type()) {
     case DataType::Nil:
       return "n:";
+    case DataType::Bool:
+      return value.asBool() ? "b:1" : "b:0";
     case DataType::Int64:
       return "i:" + std::to_string(value.asInt64());
     case DataType::Double:
@@ -535,6 +537,9 @@ bool parseStateValue(const std::string& raw, Value* out) {
     switch (raw[0]) {
       case 'n':
         *out = Value();
+        return true;
+      case 'b':
+        *out = Value(payload == "1");
         return true;
       case 'i':
         *out = Value(static_cast<int64_t>(std::stoll(payload)));
@@ -961,6 +966,13 @@ StreamingStrategyDecision describeStreamingStrategy(const StreamingDataFrame& ro
 
   const auto actor = analyzeActorAcceleration(root.transforms_);
   decision.actor_eligible = actor.eligible;
+  if (decision.has_stateful_ops) {
+    decision.aggregate_impl = actor.eligible ? "local-global" : "hash-ref";
+    decision.aggregate_reason =
+        actor.eligible
+            ? "stateful grouped aggregate can be partitioned and merged through local workers"
+            : "stateful grouped aggregate falls back to the generic hash-oriented path";
+  }
   decision.reason = actor.eligible ? "configured single-process execution"
                                    : actor.reason;
 
@@ -969,7 +981,7 @@ StreamingStrategyDecision describeStreamingStrategy(const StreamingDataFrame& ro
   } else if (options.execution_mode == StreamingExecutionMode::LocalWorkers) {
     if (actor.eligible && options.effectiveLocalWorkers() > 1) {
       decision.reason =
-          "configured local-workers execution; credit-based scheduling is available for the eligible hot path";
+          "configured local-workers execution; credit-based scheduling is available for the eligible grouped aggregate";
     } else if (actor.eligible) {
       decision.reason =
           "configured local-workers execution; credit acceleration requires local_workers > 1";
@@ -2255,7 +2267,7 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
         execution_decided_ = true;
         resolved_execution_mode_ = StreamingExecutionMode::LocalWorkers;
         execution_reason_ =
-            "configured local-workers execution; using credit-based scheduling for the eligible grouped aggregate hot path";
+            "configured local-workers execution; using credit-based scheduling for the eligible grouped aggregate";
         strategy_decision_.resolved_execution_mode =
             streamingExecutionModeName(resolved_execution_mode_);
         strategy_decision_.reason = execution_reason_;
@@ -2271,7 +2283,7 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
         execution_decided_ = true;
         resolved_execution_mode_ = StreamingExecutionMode::LocalWorkers;
         execution_reason_ =
-            "configured local-workers execution; using generic partition workers because credit scheduling requires a final stateful grouped aggregate with supported SUM/COUNT/MIN/MAX/AVG outputs";
+            "configured local-workers execution; using generic partition workers because credit scheduling requires a final eligible stateful grouped aggregate with supported SUM/COUNT/MIN/MAX/AVG outputs";
         strategy_decision_.resolved_execution_mode =
             streamingExecutionModeName(resolved_execution_mode_);
         strategy_decision_.reason = execution_reason_;
@@ -2406,6 +2418,8 @@ void StreamingQuery::applyStrategyDecision(const StreamingStrategyDecision& deci
     progress.execution_mode = decision.resolved_execution_mode;
     progress.execution_reason = decision.reason;
     progress.transport_mode = decision.transport_mode;
+    progress.aggregate_impl = decision.aggregate_impl;
+    progress.aggregate_reason = decision.aggregate_reason;
     progress.actor_eligible = decision.actor_eligible;
     progress.used_actor_runtime = decision.used_actor_runtime;
     progress.used_shared_memory = decision.used_shared_memory;
@@ -2439,6 +2453,8 @@ std::string StreamingQuery::snapshotJson() const {
       << "\"execution_mode\":\"" << jsonEscape(current.execution_mode) << "\","
       << "\"execution_reason\":\"" << jsonEscape(current.execution_reason) << "\","
       << "\"transport_mode\":\"" << jsonEscape(current.transport_mode) << "\","
+      << "\"aggregate_impl\":\"" << jsonEscape(current.aggregate_impl) << "\","
+      << "\"aggregate_reason\":\"" << jsonEscape(current.aggregate_reason) << "\","
       << "\"batches_pulled\":" << current.batches_pulled << ","
       << "\"batches_processed\":" << current.batches_processed << ","
       << "\"blocked_count\":" << current.blocked_count << ","
@@ -2505,6 +2521,8 @@ bool StreamingQuery::loadCheckpoint() {
     if (key == "execution_mode") restored.execution_mode = value;
     if (key == "execution_reason") restored.execution_reason = value;
     if (key == "transport_mode") restored.transport_mode = value;
+    if (key == "aggregate_impl") restored.aggregate_impl = value;
+    if (key == "aggregate_reason") restored.aggregate_reason = value;
     if (key == "estimated_state_size_bytes") restored.estimated_state_size_bytes = std::stoull(value);
     if (key == "estimated_batch_cost") restored.estimated_batch_cost = std::stoull(value);
     if (key == "backpressure_max_queue_batches")
@@ -2550,6 +2568,8 @@ void StreamingQuery::persistCheckpoint(const StreamingQueryProgress& progress) c
   out << "execution_mode=" << progress.execution_mode << "\n";
   out << "execution_reason=" << progress.execution_reason << "\n";
   out << "transport_mode=" << progress.transport_mode << "\n";
+  out << "aggregate_impl=" << progress.aggregate_impl << "\n";
+  out << "aggregate_reason=" << progress.aggregate_reason << "\n";
   out << "estimated_state_size_bytes=" << progress.estimated_state_size_bytes << "\n";
   out << "estimated_batch_cost=" << progress.estimated_batch_cost << "\n";
   out << "backpressure_max_queue_batches=" << progress.backpressure_max_queue_batches << "\n";

@@ -203,6 +203,8 @@ struct StreamingStrategyDecision {
   std::string requested_execution_mode = "single-process";
   std::string resolved_execution_mode = "single-process";
   std::string transport_mode = "inproc";
+  std::string aggregate_impl = "not-applicable";
+  std::string aggregate_reason;
   std::string reason;
   bool actor_eligible = false;
   bool used_actor_runtime = false;
@@ -239,6 +241,8 @@ struct StreamingQueryProgress {
   std::string execution_mode = "single-process";
   std::string execution_reason;
   std::string transport_mode = "inproc";
+  std::string aggregate_impl = "not-applicable";
+  std::string aggregate_reason;
   size_t batches_pulled = 0;
   size_t batches_processed = 0;
   // `blocked_count` counts distinct producer-side waits caused by bounded

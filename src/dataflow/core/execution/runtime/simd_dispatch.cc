@@ -112,6 +112,18 @@ std::string activeSimdBackendName() {
   return simdDispatch().backend_name;
 }
 
+std::vector<std::string> compiledSimdBackendNames() {
+  std::vector<std::string> out;
+  out.push_back(kSimdBackendNameScalar);
+  if (avx2DispatchCompiled()) {
+    out.push_back(kSimdBackendNameAvx2);
+  }
+  if (neonDispatchCompiled()) {
+    out.push_back(kSimdBackendNameNeon);
+  }
+  return out;
+}
+
 void resetSimdDispatchForTest() {
   std::lock_guard<std::mutex> lock(stateMutex());
   stateDispatch().store(nullptr, std::memory_order_release);

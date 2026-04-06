@@ -21,7 +21,6 @@ enum class PlanKind {
   Drop,
   Limit,
   WindowAssign,
-  GroupBySum,
   Aggregate,
   Join,
   Sink,
@@ -53,6 +52,67 @@ enum class ComputedColumnKind {
   DateYear,
   DateMonth,
   DateDay
+};
+
+enum class AggImplKind {
+  Dense,
+  HashPacked,
+  HashFixed,
+  HashRef,
+  SortStreaming,
+  LocalGlobal,
+};
+
+enum class AggregatePartialLayoutKind {
+  GenericTable,
+  KeyColumnar,
+};
+
+struct KeyLayoutSpec {
+  std::vector<std::size_t> normalized_key_indices;
+  bool nullable_encoded = false;
+  bool fixed_width = false;
+  bool packed = false;
+  bool ordered_input = false;
+  bool low_cardinality = false;
+  std::vector<std::string> transforms;
+};
+
+struct AggregatePropertySet {
+  std::size_t key_count = 0;
+  bool has_nullable_keys = false;
+  bool all_fixed_width = false;
+  bool all_int64_like = false;
+  bool all_string_like = false;
+  bool packable = false;
+  bool ordered_input = false;
+  bool partition_local = false;
+  bool low_cardinality = false;
+};
+
+struct AggregateRuntimeFeedback {
+  std::size_t input_rows = 0;
+  std::size_t output_groups = 0;
+  std::size_t rehash_count = 0;
+  std::size_t collision_count = 0;
+  double dense_fill_ratio = 0.0;
+  double local_compression_ratio = 0.0;
+  bool fallback_used = false;
+  bool observed_ordered_input = false;
+  std::string fallback_reason;
+};
+
+struct AggregateExecSpec {
+  AggImplKind impl_kind = AggImplKind::HashRef;
+  AggregatePartialLayoutKind partial_layout = AggregatePartialLayoutKind::GenericTable;
+  KeyLayoutSpec key_layout;
+  AggregatePropertySet properties;
+  bool use_local_global = false;
+  bool input_requires_sort = false;
+  std::size_t expected_groups = 0;
+  std::size_t reserved_buckets = 0;
+  std::string reason;
+  std::vector<std::string> rejected_candidates;
 };
 
 struct AggregateSpec {
@@ -208,23 +268,21 @@ struct WindowAssignPlan : PlanNode {
         output_column(std::move(output)) {}
 };
 
-struct GroupBySumPlan : PlanNode {
-  PlanNodePtr child;
-  std::vector<size_t> keys;
-  size_t value_index;
-  GroupBySumPlan(PlanNodePtr p, std::vector<size_t> ks, size_t vid)
-      : PlanNode(PlanKind::GroupBySum), child(std::move(p)), keys(std::move(ks)), value_index(vid) {}
-};
-
 struct AggregatePlan : PlanNode {
   PlanNodePtr child;
   std::vector<size_t> keys;
   std::vector<AggregateSpec> aggregates;
-  AggregatePlan(PlanNodePtr p, std::vector<size_t> ks, std::vector<AggregateSpec> aggs)
+  AggregateExecSpec exec_spec;
+  AggregateRuntimeFeedback runtime_feedback;
+  bool has_exec_spec = false;
+  bool has_runtime_feedback = false;
+  AggregatePlan(PlanNodePtr p, std::vector<size_t> ks, std::vector<AggregateSpec> aggs,
+                AggregateExecSpec spec = {})
       : PlanNode(PlanKind::Aggregate),
         child(std::move(p)),
         keys(std::move(ks)),
-        aggregates(std::move(aggs)) {}
+        aggregates(std::move(aggs)),
+        exec_spec(std::move(spec)) {}
 };
 
 struct JoinPlan : PlanNode {

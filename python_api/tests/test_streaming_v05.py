@@ -374,7 +374,7 @@ class StreamingV05Test(unittest.TestCase):
         )
 
         reason = (
-            "actor acceleration requires the aggregate hot path to be the final stream transform"
+            "actor acceleration requires the eligible grouped aggregate to be the final stream transform"
         )
         self.assertIn("actor_eligible=false", explain)
         self.assertIn(f"actor_eligibility_reason={reason}", explain)

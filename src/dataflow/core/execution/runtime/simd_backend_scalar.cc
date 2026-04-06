@@ -2,6 +2,7 @@
 
 #include "src/dataflow/core/execution/runtime/simd_backend_internal.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace dataflow {
@@ -61,6 +62,30 @@ double scalarSumDouble(const double* values, const uint8_t* is_null, std::size_t
   return sum;
 }
 
+void scalarAccumulateDouble(double* dst, const double* src, std::size_t count) {
+  for (std::size_t i = 0; i < count; ++i) {
+    dst[i] += src[i];
+  }
+}
+
+void scalarCombineDouble(double* dst, const double* src, std::size_t count, NumericCombineOp op) {
+  switch (op) {
+    case NumericCombineOp::Sum:
+      scalarAccumulateDouble(dst, src, count);
+      return;
+    case NumericCombineOp::Min:
+      for (std::size_t i = 0; i < count; ++i) {
+        dst[i] = std::min(dst[i], src[i]);
+      }
+      return;
+    case NumericCombineOp::Max:
+      for (std::size_t i = 0; i < count; ++i) {
+        dst[i] = std::max(dst[i], src[i]);
+      }
+      return;
+  }
+}
+
 double scalarDotF32(const float* lhs, const float* rhs, std::size_t size) {
   double dot = 0.0;
   for (std::size_t i = 0; i < size; ++i) {
@@ -83,6 +108,8 @@ const SimdKernelDispatch kScalarDispatch = {
     simdBackendName(SimdBackendKind::Scalar),
     &scalarSelectDouble,
     &scalarSumDouble,
+    &scalarAccumulateDouble,
+    &scalarCombineDouble,
     &scalarDotF32,
     &scalarSquaredL2F32,
 };

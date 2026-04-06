@@ -204,6 +204,30 @@ int main() {
     dataflow::materializeRows(&pushed_group_limit);
     expect(pushed_group_limit.rows.size() == 1,
            "source pushdown aggregate/limit row count mismatch");
+    const auto csv_multi_path = make_temp_file("velaria-materialized-source-multi");
+    std::ofstream csv_multi(csv_multi_path, std::ios::trunc);
+    csv_multi << "region,service,score,failed\n";
+    csv_multi << "apac,svcA,10,0\n";
+    csv_multi << "apac,svcA,20,1\n";
+    csv_multi << "apac,svcB,30,1\n";
+    csv_multi << "emea,svcA,40,0\n";
+    csv_multi.close();
+    session.createTempView("csv_group_multi_input", session.read_csv(csv_multi_path));
+    auto pushed_group_multi =
+        session.sql("SELECT region, service, COUNT(*) AS cnt, AVG(score) AS avg_score, "
+                    "MAX(score) AS max_score FROM csv_group_multi_input "
+                    "GROUP BY region, service LIMIT 10")
+            .toTable();
+    dataflow::materializeRows(&pushed_group_multi);
+    expect(pushed_group_multi.rows.size() == 3,
+           "source pushdown multi-key aggregate row count mismatch");
+    auto pushed_group_multi_filtered =
+        session.sql("SELECT region, service, COUNT(*) AS cnt FROM csv_group_multi_input "
+                    "WHERE failed > 0 GROUP BY region, service LIMIT 10")
+            .toTable();
+    dataflow::materializeRows(&pushed_group_multi_filtered);
+    expect(pushed_group_multi_filtered.rows.size() == 2,
+           "source pushdown filtered multi-key aggregate row count mismatch");
     auto async_handle =
         session.submitAsync(session.read_csv(csv_path, binary_options).select({"name"}).limit(1));
     const auto async_wait = async_handle.wait(std::chrono::seconds(5));

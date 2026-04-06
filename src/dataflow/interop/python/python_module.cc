@@ -1684,14 +1684,35 @@ PyObject* dataFrameToArrow(PyVelariaDataFrame* self, PyObject*) {
       PyErr_SetString(PyExc_ImportError, "pyarrow is required for DataFrame.to_arrow()");
       return nullptr;
     }
-    PyObject* record_batch_fn = PyObject_GetAttrString(pyarrow, "record_batch");
-    if (record_batch_fn == nullptr) {
+    const df::Table* native_table = nullptr;
+    {
+      AllowThreads allow;
+      native_table = &self->df_ptr->materializedTable();
+    }
+    PyObject* capsules = exportArrowCapsules(*native_table);
+    if (capsules == nullptr) {
       Py_DECREF(pyarrow);
       return nullptr;
     }
-    PyObject* batch = PyObject_CallFunctionObjArgs(record_batch_fn,
-                                                   reinterpret_cast<PyObject*>(self), nullptr);
-    Py_DECREF(record_batch_fn);
+    PyObject* record_batch_type = PyObject_GetAttrString(pyarrow, "RecordBatch");
+    if (record_batch_type == nullptr) {
+      Py_DECREF(capsules);
+      Py_DECREF(pyarrow);
+      return nullptr;
+    }
+    PyObject* import_from_capsule =
+        PyObject_GetAttrString(record_batch_type, "_import_from_c_capsule");
+    Py_DECREF(record_batch_type);
+    if (import_from_capsule == nullptr) {
+      Py_DECREF(capsules);
+      Py_DECREF(pyarrow);
+      return nullptr;
+    }
+    PyObject* batch =
+        PyObject_CallFunctionObjArgs(import_from_capsule, PyTuple_GET_ITEM(capsules, 0),
+                                     PyTuple_GET_ITEM(capsules, 1), nullptr);
+    Py_DECREF(import_from_capsule);
+    Py_DECREF(capsules);
     if (batch == nullptr) {
       Py_DECREF(pyarrow);
       return nullptr;

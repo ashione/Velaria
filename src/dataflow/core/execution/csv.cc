@@ -101,6 +101,37 @@ std::string normalizeGroupKeyCell(const std::string& cell) {
   return cell;
 }
 
+std::string encodeGroupKeyValue(const Value& value) {
+  switch (value.type()) {
+    case DataType::Nil:
+      return "n:";
+    case DataType::Int64:
+      return "i:" + std::to_string(value.asInt64());
+    case DataType::Double: {
+      std::ostringstream out;
+      out.precision(17);
+      out << value.asDouble();
+      return "d:" + out.str();
+    }
+    case DataType::String:
+      return "s:" + value.asString();
+    case DataType::FixedVector:
+      return "v:" + value.toString();
+  }
+  return "n:";
+}
+
+std::string encodeGroupKeyRow(const std::vector<Value>& key_values) {
+  std::string out;
+  for (const auto& value : key_values) {
+    const auto encoded = encodeGroupKeyValue(value);
+    out.append(std::to_string(encoded.size()));
+    out.push_back(':');
+    out.append(encoded);
+  }
+  return out;
+}
+
 bool matchesCompareOp(int compare_result, const std::string& op) {
   if (op == "=" || op == "==") return compare_result == 0;
   if (op == "!=") return compare_result != 0;
@@ -612,14 +643,16 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
   if (out == nullptr) {
     throw std::invalid_argument("csv aggregate output is null");
   }
-  if (key_indices.size() != 1 || aggs.empty()) {
+  if (key_indices.empty() || aggs.empty()) {
     return false;
   }
-  const auto key_index = key_indices[0];
-  if (key_index >= schema.fields.size()) {
-    return false;
+  std::size_t last_required_column = 0;
+  for (const auto key_index : key_indices) {
+    if (key_index >= schema.fields.size()) {
+      return false;
+    }
+    last_required_column = std::max(last_required_column, key_index);
   }
-  std::size_t last_required_column = key_index;
   if (filter != nullptr) {
     if (filter->column_index >= schema.fields.size()) {
       return false;
@@ -669,10 +702,20 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
     return state;
   };
 
-  std::unordered_map<std::string, AggregateState> states;
-  std::vector<std::string> ordered_keys;
+  struct AggregateEntry {
+    std::vector<Value> key_values;
+    AggregateState state;
+  };
+
+  std::unordered_map<std::string, std::size_t> entry_index;
+  std::vector<AggregateEntry> ordered_entries;
   std::vector<uint8_t> capture_mask(last_required_column + 1, static_cast<uint8_t>(0));
-  capture_mask[key_index] = 1;
+  std::vector<std::size_t> key_position_by_column(last_required_column + 1,
+                                                  static_cast<std::size_t>(-1));
+  for (std::size_t i = 0; i < key_indices.size(); ++i) {
+    capture_mask[key_indices[i]] = 1;
+    key_position_by_column[key_indices[i]] = i;
+  }
   if (filter != nullptr) {
     capture_mask[filter->column_index] = 1;
   }
@@ -686,9 +729,9 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
   }
 
   bool skip_header = true;
-  bool have_key = false;
   bool filter_match = (filter == nullptr);
-  std::string key_value;
+  std::vector<std::string> key_cells(key_indices.size());
+  std::vector<Value> key_values(key_indices.size());
   std::vector<double> numeric_values(aggs.size(), 0.0);
   std::vector<bool> numeric_present(aggs.size(), false);
   std::vector<bool> numeric_is_int(aggs.size(), false);
@@ -697,22 +740,26 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
   scanCsvCells(
       &input, delimiter, last_required_column, &capture_mask,
       [&]() {
-        have_key = false;
         filter_match = (filter == nullptr);
-        key_value.clear();
+        for (auto& key_cell : key_cells) {
+          key_cell.clear();
+        }
+        for (auto& key_value : key_values) {
+          key_value = Value();
+        }
         std::fill(numeric_values.begin(), numeric_values.end(), 0.0);
         std::fill(numeric_present.begin(), numeric_present.end(), false);
         std::fill(numeric_is_int.begin(), numeric_is_int.end(), false);
         std::fill(int_values.begin(), int_values.end(), int64_t(0));
       },
       [&](std::size_t column_index, std::string&& cell) {
+        const Value parsed = parseCell(cell);
         if (filter != nullptr && column_index == filter->column_index) {
-          const Value parsed = parseCell(cell);
           filter_match = tryMatchesValueFilter(parsed, filter->value, filter->op);
         }
-        if (column_index == key_index) {
-          key_value = normalizeGroupKeyCell(cell);
-          have_key = true;
+        if (column_index < key_position_by_column.size() &&
+            key_position_by_column[column_index] != static_cast<std::size_t>(-1)) {
+          key_cells[key_position_by_column[column_index]] = cell;
         }
         if (column_index < agg_positions_by_column.size()) {
           for (const auto agg_index : agg_positions_by_column[column_index]) {
@@ -743,16 +790,23 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           skip_header = false;
           return true;
         }
-        if (total_columns < last_required_column + 1 || !have_key || !filter_match) {
+        if (total_columns < last_required_column + 1 || !filter_match) {
           return true;
         }
 
-    auto it = states.find(key_value);
-    if (it == states.end()) {
-      ordered_keys.push_back(key_value);
-      it = states.emplace(key_value, init_state()).first;
+    for (std::size_t key_pos = 0; key_pos < key_cells.size(); ++key_pos) {
+      key_values[key_pos] = parseCell(key_cells[key_pos]);
     }
-    auto& state = it->second;
+    const auto encoded_key = encodeGroupKeyRow(key_values);
+    auto it = entry_index.find(encoded_key);
+    if (it == entry_index.end()) {
+      AggregateEntry entry;
+      entry.key_values = key_values;
+      entry.state = init_state();
+      ordered_entries.push_back(std::move(entry));
+      it = entry_index.emplace(encoded_key, ordered_entries.size() - 1).first;
+    }
+    auto& state = ordered_entries[it->second].state;
     for (std::size_t i = 0; i < aggs.size(); ++i) {
       const auto& agg = aggs[i];
       switch (agg.function) {
@@ -790,7 +844,9 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
       });
 
   Table result;
-  result.schema.fields.push_back(schema.fields[key_index]);
+  for (const auto key_index : key_indices) {
+    result.schema.fields.push_back(schema.fields[key_index]);
+  }
   for (const auto& agg : aggs) {
     result.schema.fields.push_back(agg.output_name);
   }
@@ -801,13 +857,15 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
   cache->schema = result.schema;
   cache->columns.resize(result.schema.fields.size());
   cache->arrow_formats.resize(result.schema.fields.size());
-  cache->row_count = ordered_keys.size();
+  cache->row_count = ordered_entries.size();
   for (auto& column : cache->columns) {
-    column.values.reserve(ordered_keys.size());
+    column.values.reserve(ordered_entries.size());
   }
-  for (const auto& key : ordered_keys) {
-    const auto& state = states.at(key);
-    cache->columns[0].values.push_back(Value(key));
+  for (const auto& entry : ordered_entries) {
+    const auto& state = entry.state;
+    for (std::size_t key_pos = 0; key_pos < entry.key_values.size(); ++key_pos) {
+      cache->columns[key_pos].values.push_back(entry.key_values[key_pos]);
+    }
     for (std::size_t i = 0; i < aggs.size(); ++i) {
       Value value;
       switch (aggs[i].function) {
@@ -833,7 +891,7 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
                       : (state.max_is_int[i] ? Value(state.max_ints[i]) : Value(state.maxs[i]));
           break;
       }
-      cache->columns[i + 1].values.push_back(std::move(value));
+      cache->columns[key_indices.size() + i].values.push_back(std::move(value));
     }
   }
   result.columnar_cache = std::move(cache);

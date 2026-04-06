@@ -1236,14 +1236,7 @@ DataFrame SqlPlanner::materializeFromPhysical(const PhysicalPlan& physical) cons
                          step.logical.join_right_column, step.logical.join_kind);
         break;
       case LogicalStepKind::Aggregate:
-        {
-          const Table aggregate_input = current.toTable();
-          const auto pattern =
-              analyzeAggregateExecution(aggregate_input, step.logical.group_keys,
-                                        step.logical.aggregates);
-          current =
-              current.aggregate(step.logical.group_keys, step.logical.aggregates, pattern.exec_spec);
-        }
+        current = current.aggregate(step.logical.group_keys, step.logical.aggregates);
         break;
       case LogicalStepKind::Having:
         {

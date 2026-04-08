@@ -1,5 +1,6 @@
 #include "src/dataflow/core/execution/file_source.h"
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cctype>
@@ -21,17 +22,18 @@
 namespace dataflow {
 namespace {
 
-Value parseScalarCell(std::string raw) {
-  if (raw.empty() || raw == "null" || raw == "NULL") return Value();
-  if (raw == "true" || raw == "TRUE") return Value(true);
-  if (raw == "false" || raw == "FALSE") return Value(false);
+Value parseScalarCell(std::string_view raw_view) {
+  if (raw_view.empty() || raw_view == "null" || raw_view == "NULL") return Value();
+  if (raw_view == "true" || raw_view == "TRUE") return Value(true);
+  if (raw_view == "false" || raw_view == "FALSE") return Value(false);
 
   int64_t int_value = 0;
-  auto int_result = std::from_chars(raw.data(), raw.data() + raw.size(), int_value);
-  if (int_result.ec == std::errc() && int_result.ptr == raw.data() + raw.size()) {
+  auto int_result = std::from_chars(raw_view.data(), raw_view.data() + raw_view.size(), int_value);
+  if (int_result.ec == std::errc() && int_result.ptr == raw_view.data() + raw_view.size()) {
     return Value(int_value);
   }
 
+  const std::string raw(raw_view);
   char* end = nullptr;
   const double double_value = std::strtod(raw.c_str(), &end);
   if (end != raw.c_str() && *end == '\0') {
@@ -83,6 +85,61 @@ std::vector<std::string_view> splitByDelimiter(std::string_view line, char delim
     start = pos + 1;
   }
   return tokens;
+}
+
+struct LineCapturePlan {
+  std::size_t max_source_index = 0;
+  std::vector<std::vector<std::size_t>> targets_by_source;
+};
+
+LineCapturePlan buildLineCapturePlan(const LineFileOptions& options) {
+  LineCapturePlan plan;
+  for (std::size_t column_index = 0; column_index < options.mappings.size(); ++column_index) {
+    plan.max_source_index = std::max(plan.max_source_index, options.mappings[column_index].source_index);
+  }
+  plan.targets_by_source.resize(plan.max_source_index + 1);
+  for (std::size_t column_index = 0; column_index < options.mappings.size(); ++column_index) {
+    plan.targets_by_source[options.mappings[column_index].source_index].push_back(column_index);
+  }
+  return plan;
+}
+
+LineCapturePlan buildLineCapturePlan(const LineFileOptions& options,
+                                     const std::vector<std::size_t>& schema_indices) {
+  LineCapturePlan plan;
+  for (const auto schema_index : schema_indices) {
+    const auto& mapping = options.mappings[schema_index];
+    plan.max_source_index = std::max(plan.max_source_index, mapping.source_index);
+  }
+  plan.targets_by_source.resize(plan.max_source_index + 1);
+  for (std::size_t local_index = 0; local_index < schema_indices.size(); ++local_index) {
+    const auto schema_index = schema_indices[local_index];
+    plan.targets_by_source[options.mappings[schema_index].source_index].push_back(local_index);
+  }
+  return plan;
+}
+
+void fillLineSplitValues(std::string_view line, const LineCapturePlan& plan,
+                         std::vector<Value>* values, char delimiter) {
+  if (values == nullptr) {
+    throw std::invalid_argument("line split values output cannot be null");
+  }
+  std::size_t source_index = 0;
+  std::size_t start = 0;
+  while (source_index <= plan.max_source_index && start <= line.size()) {
+    const auto pos = line.find(delimiter, start);
+    const auto token = pos == std::string_view::npos ? line.substr(start) : line.substr(start, pos - start);
+    if (source_index < plan.targets_by_source.size()) {
+      for (const auto target_index : plan.targets_by_source[source_index]) {
+        (*values)[target_index] = parseScalarCell(token);
+      }
+    }
+    if (pos == std::string_view::npos) {
+      break;
+    }
+    start = pos + 1;
+    ++source_index;
+  }
 }
 
 class JsonCursor {
@@ -183,21 +240,21 @@ class JsonCursor {
     throw std::runtime_error("unsupported json value kind");
   }
 
-  std::vector<std::pair<std::string, Value>> parseObjectEntries() {
+  template <typename Fn>
+  void forEachObjectEntry(Fn&& on_entry) {
     if (!consume('{')) {
       throw std::runtime_error("json object expected");
     }
-    std::vector<std::pair<std::string, Value>> out;
     skipWhitespace();
     if (consume('}')) {
-      return out;
+      return;
     }
     while (true) {
       const std::string key = parseString();
       if (!consume(':')) {
         throw std::runtime_error("json object missing ':'");
       }
-      out.push_back({key, parseValue()});
+      on_entry(key, parseValue());
       skipWhitespace();
       if (consume('}')) {
         break;
@@ -206,6 +263,13 @@ class JsonCursor {
         throw std::runtime_error("json object missing ','");
       }
     }
+  }
+
+  std::vector<std::pair<std::string, Value>> parseObjectEntries() {
+    std::vector<std::pair<std::string, Value>> out;
+    forEachObjectEntry([&](std::string key, Value value) {
+      out.push_back({std::move(key), std::move(value)});
+    });
     return out;
   }
 
@@ -400,6 +464,169 @@ std::optional<char> chooseDelimitedFormat(const std::vector<std::string>& lines,
   return best_delimiter;
 }
 
+std::string delimiterFormatName(char delimiter, bool csv_header) {
+  if (csv_header) {
+    if (delimiter == '\t') return "tsv";
+    return "csv";
+  }
+  return "line_split";
+}
+
+std::string delimiterReason(char delimiter, std::size_t columns, bool csv_header) {
+  std::ostringstream out;
+  out << "delimiter=";
+  if (delimiter == '\t') {
+    out << "\\t";
+  } else if (delimiter == ' ') {
+    out << "space";
+  } else {
+    out << delimiter;
+  }
+  out << ";columns=" << columns;
+  out << ";header=" << (csv_header ? "true" : "false");
+  return out.str();
+}
+
+std::string joinStrings(const std::vector<std::string>& values, const std::string& delimiter) {
+  std::ostringstream out;
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    if (i > 0) {
+      out << delimiter;
+    }
+    out << values[i];
+  }
+  return out.str();
+}
+
+FileSourceProbeCandidate makeCandidate(std::string format_name, FileSourceKind kind, int score,
+                                       std::vector<std::string> evidence) {
+  FileSourceProbeCandidate candidate;
+  candidate.format_name = std::move(format_name);
+  candidate.kind = kind;
+  candidate.score = score;
+  candidate.evidence = std::move(evidence);
+  candidate.reason = joinStrings(candidate.evidence, "; ");
+  return candidate;
+}
+
+std::vector<FileSourceProbeCandidate> buildProbeCandidates(
+    const std::string& path, const std::vector<std::string>& lines) {
+  std::vector<FileSourceProbeCandidate> candidates;
+  const auto lower_path = toLowerCopy(path);
+
+  const bool csv_ext = lower_path.ends_with(".csv");
+  const bool tsv_ext = lower_path.ends_with(".tsv");
+  const bool json_ext = lower_path.ends_with(".json");
+  const bool jsonl_ext = lower_path.ends_with(".jsonl") || lower_path.ends_with(".ndjson");
+
+  if (!lines.empty()) {
+    const char first = lines.front().empty() ? '\0' : lines.front().front();
+    if (first == '{') {
+      candidates.push_back(makeCandidate(
+          "json_lines", FileSourceKind::Json, 92 + (json_ext || jsonl_ext ? 8 : 0),
+          jsonl_ext
+              ? std::vector<std::string>{"content starts with object", "newline-delimited objects",
+                                         "jsonl/ndjson extension"}
+              : std::vector<std::string>{"content starts with object",
+                                         "newline-delimited objects"}));
+    } else if (first == '[') {
+      candidates.push_back(makeCandidate(
+          "json_array", FileSourceKind::Json, 94 + (json_ext ? 8 : 0),
+          json_ext ? std::vector<std::string>{"content starts with array", "json extension"}
+                   : std::vector<std::string>{"content starts with array"}));
+    }
+
+    bool csv_header = false;
+    const auto delimiter = chooseDelimitedFormat(lines, &csv_header);
+    if (delimiter.has_value()) {
+      const auto columns = splitByDelimiter(lines.front(), *delimiter).size();
+      const int base_score = static_cast<int>(40 + std::min<std::size_t>(columns, 12) * 3);
+      const int header_bonus = csv_header ? 25 : 0;
+      const int line_bonus = csv_header ? -10 : 15;
+      const int ext_bonus =
+          ((*delimiter == ',' && csv_ext) || (*delimiter == '\t' && tsv_ext)) ? 20 : 0;
+      if (csv_header) {
+        candidates.push_back(makeCandidate(delimiterFormatName(*delimiter, true),
+                                           FileSourceKind::Csv,
+                                           base_score + header_bonus + ext_bonus,
+                                           {delimiterReason(*delimiter, columns, true),
+                                            ext_bonus > 0 ? "matching delimited extension"
+                                                          : "header-shaped first row"}));
+      }
+      candidates.push_back(makeCandidate(delimiterFormatName(*delimiter, false),
+                                         FileSourceKind::Line,
+                                         base_score + line_bonus + (csv_header ? 0 : ext_bonus / 2),
+                                         {delimiterReason(*delimiter, columns, false),
+                                          csv_header ? "header not trusted for line fallback"
+                                                     : "stable split columns without header"}));
+    } else {
+      candidates.push_back(makeCandidate("line_split", FileSourceKind::Line, 15,
+                                         {"no stable delimiter match",
+                                          "fallback line split candidate"}));
+    }
+  }
+
+  if (csv_ext) {
+    candidates.push_back(
+        makeCandidate("csv", FileSourceKind::Csv, 55, {"csv extension fallback"}));
+  }
+  if (tsv_ext) {
+    candidates.push_back(
+        makeCandidate("tsv", FileSourceKind::Csv, 55, {"tsv extension fallback"}));
+  }
+  if (json_ext && std::none_of(candidates.begin(), candidates.end(), [](const auto& candidate) {
+        return candidate.kind == FileSourceKind::Json;
+      })) {
+    candidates.push_back(
+        makeCandidate("json_lines", FileSourceKind::Json, 58, {"json extension fallback"}));
+  }
+  if (jsonl_ext && std::none_of(candidates.begin(), candidates.end(), [](const auto& candidate) {
+        return candidate.format_name == "json_lines";
+      })) {
+    candidates.push_back(makeCandidate("json_lines", FileSourceKind::Json, 60,
+                                       {"jsonl/ndjson extension fallback"}));
+  }
+
+  std::sort(candidates.begin(), candidates.end(),
+            [](const auto& lhs, const auto& rhs) { return lhs.score > rhs.score; });
+  return candidates;
+}
+
+std::string probeConfidence(const std::vector<FileSourceProbeCandidate>& candidates) {
+  if (candidates.empty()) {
+    return "low";
+  }
+  const int top = candidates.front().score;
+  const int second = candidates.size() >= 2 ? candidates[1].score : 0;
+  const int gap = top - second;
+  if (top >= 90 && gap >= 15) {
+    return "high";
+  }
+  if (top >= 65 && gap >= 8) {
+    return "medium";
+  }
+  return "low";
+}
+
+std::vector<std::string> probeWarnings(const std::vector<FileSourceProbeCandidate>& candidates,
+                                       const std::string& confidence) {
+  std::vector<std::string> warnings;
+  if (candidates.empty()) {
+    warnings.push_back("probe found no candidates");
+    return warnings;
+  }
+  if (confidence == "low") {
+    warnings.push_back("probe confidence is low; consider explicit USING ... OPTIONS(...)");
+  }
+  if (candidates.size() >= 2 && (candidates[0].score - candidates[1].score) < 8) {
+    warnings.push_back("top probe candidates are close in score");
+  }
+  if (candidates.front().score < 40) {
+    warnings.push_back("probe selected a weak fallback candidate");
+  }
+  return warnings;
+}
+
 JsonFileOptions probeJsonOptions(const std::string& path) {
   JsonFileOptions options;
   const auto payload = readFilePayload(path);
@@ -419,9 +646,7 @@ JsonFileOptions probeJsonOptions(const std::string& path) {
     if (cursor.consume(']')) {
       return options;
     }
-    for (const auto& [key, _] : cursor.parseObjectEntries()) {
-      options.columns.push_back(key);
-    }
+    cursor.forEachObjectEntry([&](std::string key, Value) { options.columns.push_back(std::move(key)); });
     return options;
   }
   options.format = JsonFileFormat::JsonLines;
@@ -430,10 +655,195 @@ JsonFileOptions probeJsonOptions(const std::string& path) {
     throw std::runtime_error("json probe found no objects: " + path);
   }
   JsonCursor cursor(lines.front());
-  for (const auto& [key, _] : cursor.parseObjectEntries()) {
-    options.columns.push_back(key);
-  }
+  cursor.forEachObjectEntry([&](std::string key, Value) { options.columns.push_back(std::move(key)); });
   return options;
+}
+
+struct AggState {
+  bool initialized = false;
+  Value value;
+  double sum = 0.0;
+  std::size_t count = 0;
+};
+
+struct GroupState {
+  std::vector<AggState> agg_states;
+};
+
+struct GroupKey {
+  Row values;
+};
+
+struct AggregateAccessPlan {
+  std::vector<std::size_t> schema_indices;
+  std::vector<int> local_by_schema;
+  std::vector<std::size_t> local_key_indices;
+  std::vector<int> local_value_by_aggregate;
+};
+
+struct GroupKeyHash {
+  std::size_t operator()(const GroupKey& key) const;
+};
+
+struct GroupKeyEq {
+  bool operator()(const GroupKey& lhs, const GroupKey& rhs) const;
+};
+
+using AggregateGroupMap = std::unordered_map<GroupKey, GroupState, GroupKeyHash, GroupKeyEq>;
+
+bool validateAggregatePushdown(const Schema& schema, const SourcePushdownSpec& pushdown);
+AggregateAccessPlan buildAggregateAccessPlan(const Schema& schema, const SourcePushdownSpec& pushdown);
+bool includeRowForAggregate(const std::vector<Value>& values, const AggregateAccessPlan& access_plan,
+                            const SourcePushdownSpec& pushdown);
+void accumulateAggregateRow(const std::vector<Value>& values, const AggregateAccessPlan& access_plan,
+                            const SourcePushdownSpec& pushdown,
+                            AggregateGroupMap* groups);
+Table finalizeAggregatedGroups(const Schema& schema, const SourcePushdownSpec& pushdown,
+                               AggregateGroupMap& groups, bool materialize_rows);
+
+void resetValues(std::vector<Value>* values) {
+  if (values == nullptr) {
+    throw std::invalid_argument("values buffer cannot be null");
+  }
+  std::fill(values->begin(), values->end(), Value());
+}
+std::unordered_map<std::string, std::size_t> buildJsonColumnIndex(const JsonFileOptions& options);
+std::unordered_map<std::string, std::size_t> buildJsonColumnIndex(
+    const JsonFileOptions& options, const std::vector<std::size_t>& schema_indices);
+
+bool try_execute_line_aggregate(const std::string& path, const Schema& schema,
+                                const LineFileOptions& options,
+                                const SourcePushdownSpec& pushdown, Table* out) {
+  if (out == nullptr) {
+    throw std::invalid_argument("line aggregate output cannot be null");
+  }
+  if (!validateAggregatePushdown(schema, pushdown)) {
+    return false;
+  }
+  const auto access_plan = buildAggregateAccessPlan(schema, pushdown);
+  std::ifstream input(path);
+  if (!input.is_open()) {
+    throw std::runtime_error("cannot open line file: " + path);
+  }
+
+  std::regex line_regex;
+  if (options.mode == LineParseMode::Regex) {
+    if (options.regex_pattern.empty()) {
+      return false;
+    }
+    line_regex = std::regex(options.regex_pattern);
+  }
+  const auto capture_plan = options.mode == LineParseMode::Split
+                                ? buildLineCapturePlan(options, access_plan.schema_indices)
+                                : LineCapturePlan{};
+
+  AggregateGroupMap groups;
+  std::string line;
+  std::vector<Value> values(access_plan.schema_indices.size());
+  while (std::getline(input, line)) {
+    if (options.skip_empty_lines && line.empty()) {
+      continue;
+    }
+    resetValues(&values);
+    if (options.mode == LineParseMode::Split) {
+      fillLineSplitValues(line, capture_plan, &values, options.split_delimiter);
+    } else {
+      std::smatch matched;
+      if (!std::regex_match(line, matched, line_regex)) {
+        continue;
+      }
+      for (std::size_t local_index = 0; local_index < access_plan.schema_indices.size(); ++local_index) {
+        const auto schema_index = access_plan.schema_indices[local_index];
+        const auto& mapping = options.mappings[schema_index];
+        if (mapping.source_index < matched.size()) {
+          values[local_index] = parseScalarCell(matched[mapping.source_index].str());
+        }
+      }
+    }
+    if (!includeRowForAggregate(values, access_plan, pushdown)) {
+      continue;
+    }
+    accumulateAggregateRow(values, access_plan, pushdown, &groups);
+  }
+  *out = finalizeAggregatedGroups(schema, pushdown, groups, false);
+  if (pushdown.limit != 0 && out->rowCount() > pushdown.limit) {
+    *out = limitTable(*out, pushdown.limit, false);
+  }
+  return true;
+}
+
+bool try_execute_json_aggregate(const std::string& path, const Schema& schema,
+                                const JsonFileOptions& options,
+                                const SourcePushdownSpec& pushdown, Table* out) {
+  if (out == nullptr) {
+    throw std::invalid_argument("json aggregate output cannot be null");
+  }
+  if (!validateAggregatePushdown(schema, pushdown)) {
+    return false;
+  }
+  const auto access_plan = buildAggregateAccessPlan(schema, pushdown);
+  std::ifstream input(path);
+  if (!input.is_open()) {
+    throw std::runtime_error("cannot open json file: " + path);
+  }
+
+  const auto json_index = buildJsonColumnIndex(options, access_plan.schema_indices);
+  AggregateGroupMap groups;
+  std::vector<Value> values(access_plan.schema_indices.size());
+
+  if (options.format == JsonFileFormat::JsonLines) {
+    std::string line;
+    while (std::getline(input, line)) {
+      if (line.empty()) {
+        continue;
+      }
+      JsonCursor cursor(line);
+      resetValues(&values);
+      cursor.forEachObjectEntry([&](std::string key, Value value) {
+        const auto it = json_index.find(key);
+        if (it != json_index.end()) {
+          values[it->second] = std::move(value);
+        }
+      });
+      if (!includeRowForAggregate(values, access_plan, pushdown)) {
+        continue;
+      }
+      accumulateAggregateRow(values, access_plan, pushdown, &groups);
+    }
+  } else {
+    std::string payload((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    JsonCursor cursor(payload);
+    if (!cursor.consume('[')) {
+      throw std::runtime_error("json array source should start with '['");
+    }
+    while (true) {
+      if (cursor.consume(']')) {
+        break;
+      }
+      resetValues(&values);
+      cursor.forEachObjectEntry([&](std::string key, Value value) {
+        const auto it = json_index.find(key);
+        if (it != json_index.end()) {
+          values[it->second] = std::move(value);
+        }
+      });
+      if (includeRowForAggregate(values, access_plan, pushdown)) {
+        accumulateAggregateRow(values, access_plan, pushdown, &groups);
+      }
+      if (cursor.consume(']')) {
+        break;
+      }
+      if (!cursor.consume(',')) {
+        throw std::runtime_error("json array source missing ',' between objects");
+      }
+    }
+  }
+
+  *out = finalizeAggregatedGroups(schema, pushdown, groups, false);
+  if (pushdown.limit != 0 && out->rowCount() > pushdown.limit) {
+    *out = limitTable(*out, pushdown.limit, false);
+  }
+  return true;
 }
 
 LineFileOptions probeLineOptions(const std::string& path) {
@@ -454,19 +864,23 @@ LineFileOptions probeLineOptions(const std::string& path) {
   return options;
 }
 
-Row mapJsonObjectToRow(const std::unordered_map<std::string, Value>& object,
-                       const JsonFileOptions& options) {
-  Row row;
-  row.reserve(options.columns.size());
-  for (const auto& column : options.columns) {
-    const auto it = object.find(column);
-    if (it == object.end()) {
-      row.emplace_back(Value());
-    } else {
-      row.emplace_back(it->second);
-    }
+std::unordered_map<std::string, std::size_t> buildJsonColumnIndex(const JsonFileOptions& options) {
+  std::unordered_map<std::string, std::size_t> index;
+  index.reserve(options.columns.size());
+  for (std::size_t i = 0; i < options.columns.size(); ++i) {
+    index.emplace(options.columns[i], i);
   }
-  return row;
+  return index;
+}
+
+std::unordered_map<std::string, std::size_t> buildJsonColumnIndex(
+    const JsonFileOptions& options, const std::vector<std::size_t>& schema_indices) {
+  std::unordered_map<std::string, std::size_t> index;
+  index.reserve(schema_indices.size());
+  for (std::size_t local_index = 0; local_index < schema_indices.size(); ++local_index) {
+    index.emplace(options.columns[schema_indices[local_index]], local_index);
+  }
+  return index;
 }
 
 Table projectTable(const Table& input, const std::vector<std::size_t>& projected_columns,
@@ -584,110 +998,196 @@ Table applyFilterAndLimit(const Table& input, const SourcePushdownSpec& pushdown
   return filtered;
 }
 
-std::string encodeGroupKey(const Row& key_row) {
-  std::string out;
-  for (const auto& value : key_row) {
-    const auto encoded = std::to_string(static_cast<int>(value.type())) + ":" + value.toString();
-    out.append(std::to_string(encoded.size()));
-    out.push_back('#');
-    out.append(encoded);
-  }
-  return out;
+std::size_t hashCombine(std::size_t seed, std::size_t value) {
+  return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
 }
 
-bool applyAggregatePushdown(const Table& input, const SourcePushdownSpec& pushdown, Table* out) {
-  if (out == nullptr) {
-    throw std::invalid_argument("aggregate pushdown output cannot be null");
+bool valuesEqualForKey(const Value& lhs, const Value& rhs) {
+  if (lhs.type() == rhs.type()) {
+    return lhs == rhs;
   }
+  if (lhs.isNumber() && rhs.isNumber()) {
+    return lhs.asDouble() == rhs.asDouble();
+  }
+  return false;
+}
+
+std::size_t hashValueForKey(const Value& value) {
+  std::size_t seed = static_cast<std::size_t>(value.type());
+  switch (value.type()) {
+    case DataType::Nil:
+      return hashCombine(seed, 0);
+    case DataType::Bool:
+      return hashCombine(seed, std::hash<bool>{}(value.asBool()));
+    case DataType::Int64:
+    case DataType::Double:
+      return hashCombine(seed, std::hash<double>{}(value.asDouble()));
+    case DataType::String:
+      return hashCombine(seed, std::hash<std::string>{}(value.asString()));
+    case DataType::FixedVector: {
+      std::size_t vec_seed = seed;
+      for (const auto item : value.asFixedVector()) {
+        vec_seed = hashCombine(vec_seed, std::hash<float>{}(item));
+      }
+      return vec_seed;
+    }
+  }
+  return seed;
+}
+
+std::size_t GroupKeyHash::operator()(const GroupKey& key) const {
+  std::size_t seed = 0;
+  for (const auto& value : key.values) {
+    seed = hashCombine(seed, hashValueForKey(value));
+  }
+  return seed;
+}
+
+bool GroupKeyEq::operator()(const GroupKey& lhs, const GroupKey& rhs) const {
+  if (lhs.values.size() != rhs.values.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < lhs.values.size(); ++i) {
+    if (!valuesEqualForKey(lhs.values[i], rhs.values[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+GroupKey makeGroupKey(const std::vector<Value>& values, const std::vector<std::size_t>& key_indices) {
+  GroupKey key;
+  key.values.reserve(key_indices.size());
+  for (const auto key_idx : key_indices) {
+    key.values.push_back(values[key_idx]);
+  }
+  return key;
+}
+
+bool validateAggregatePushdown(const Schema& schema, const SourcePushdownSpec& pushdown) {
   if (!pushdown.has_aggregate || pushdown.aggregate.keys.empty() || pushdown.aggregate.aggregates.empty()) {
     return false;
   }
   for (const auto key_index : pushdown.aggregate.keys) {
-    if (key_index >= input.schema.fields.size()) return false;
+    if (key_index >= schema.fields.size()) return false;
+  }
+  if (pushdown.filter.enabled && pushdown.filter.column_index >= schema.fields.size()) {
+    return false;
   }
   for (const auto& agg : pushdown.aggregate.aggregates) {
-    if (agg.function != AggregateFunction::Count && agg.value_index >= input.schema.fields.size()) {
+    if (agg.function != AggregateFunction::Count && agg.value_index >= schema.fields.size()) {
       return false;
     }
   }
+  return true;
+}
 
-  struct AggState {
-    bool initialized = false;
-    Value value;
-    double sum = 0.0;
-    std::size_t count = 0;
-  };
-  struct GroupState {
-    Row key_values;
-    std::vector<AggState> agg_states;
-  };
-
-  std::unordered_map<std::string, GroupState> groups;
-  const std::size_t row_count =
-      input.columnar_cache ? input.columnar_cache->row_count : input.rowCount();
-  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
-    Row keys;
-    keys.reserve(pushdown.aggregate.keys.size());
-    for (const auto key_idx : pushdown.aggregate.keys) {
-      keys.push_back(input.columnar_cache->columns[key_idx].values[row_index]);
+AggregateAccessPlan buildAggregateAccessPlan(const Schema& schema, const SourcePushdownSpec& pushdown) {
+  AggregateAccessPlan plan;
+  plan.local_by_schema.assign(schema.fields.size(), -1);
+  auto add_schema_index = [&](std::size_t schema_index) {
+    if (plan.local_by_schema[schema_index] >= 0) {
+      return;
     }
-    const auto key = encodeGroupKey(keys);
-    auto it = groups.find(key);
-    if (it == groups.end()) {
-      GroupState state;
-      state.key_values = keys;
-      state.agg_states.resize(pushdown.aggregate.aggregates.size());
-      it = groups.emplace(key, std::move(state)).first;
-    }
-    for (std::size_t agg_index = 0; agg_index < pushdown.aggregate.aggregates.size(); ++agg_index) {
-      const auto& agg = pushdown.aggregate.aggregates[agg_index];
-      auto& state = it->second.agg_states[agg_index];
-      Value cell;
-      if (agg.function != AggregateFunction::Count) {
-        cell = input.columnar_cache->columns[agg.value_index].values[row_index];
-      }
-      switch (agg.function) {
-        case AggregateFunction::Count:
-          state.count += 1;
-          break;
-        case AggregateFunction::Sum:
-          if (cell.isNumber()) {
-            state.sum += cell.asDouble();
-          }
-          break;
-        case AggregateFunction::Avg:
-          if (cell.isNumber()) {
-            state.sum += cell.asDouble();
-            state.count += 1;
-          }
-          break;
-        case AggregateFunction::Min:
-          if (!state.initialized || cell < state.value) {
-            state.value = cell;
-            state.initialized = true;
-          }
-          break;
-        case AggregateFunction::Max:
-          if (!state.initialized || cell > state.value) {
-            state.value = cell;
-            state.initialized = true;
-          }
-          break;
-      }
+    plan.local_by_schema[schema_index] = static_cast<int>(plan.schema_indices.size());
+    plan.schema_indices.push_back(schema_index);
+  };
+  if (pushdown.filter.enabled) {
+    add_schema_index(pushdown.filter.column_index);
+  }
+  for (const auto key_index : pushdown.aggregate.keys) {
+    add_schema_index(key_index);
+  }
+  for (const auto& agg : pushdown.aggregate.aggregates) {
+    if (agg.function != AggregateFunction::Count) {
+      add_schema_index(agg.value_index);
     }
   }
+  plan.local_key_indices.reserve(pushdown.aggregate.keys.size());
+  for (const auto key_index : pushdown.aggregate.keys) {
+    plan.local_key_indices.push_back(static_cast<std::size_t>(plan.local_by_schema[key_index]));
+  }
+  plan.local_value_by_aggregate.reserve(pushdown.aggregate.aggregates.size());
+  for (const auto& agg : pushdown.aggregate.aggregates) {
+    plan.local_value_by_aggregate.push_back(
+        agg.function == AggregateFunction::Count ? -1 : plan.local_by_schema[agg.value_index]);
+  }
+  return plan;
+}
 
+bool includeRowForAggregate(const std::vector<Value>& values, const AggregateAccessPlan& access_plan,
+                            const SourcePushdownSpec& pushdown) {
+  if (!pushdown.filter.enabled) {
+    return true;
+  }
+  const auto local_index = access_plan.local_by_schema[pushdown.filter.column_index];
+  return compareValueSafe(values[static_cast<std::size_t>(local_index)], pushdown.filter.value,
+                          pushdown.filter.op);
+}
+
+void accumulateAggregateRow(const std::vector<Value>& values, const AggregateAccessPlan& access_plan,
+                            const SourcePushdownSpec& pushdown, AggregateGroupMap* groups) {
+  if (groups == nullptr) {
+    throw std::invalid_argument("aggregate groups cannot be null");
+  }
+  auto key = makeGroupKey(values, access_plan.local_key_indices);
+  auto it = groups->find(key);
+  if (it == groups->end()) {
+    GroupState state;
+    state.agg_states.resize(pushdown.aggregate.aggregates.size());
+    it = groups->emplace(std::move(key), std::move(state)).first;
+  }
+  for (std::size_t agg_index = 0; agg_index < pushdown.aggregate.aggregates.size(); ++agg_index) {
+    const auto& agg = pushdown.aggregate.aggregates[agg_index];
+    auto& state = it->second.agg_states[agg_index];
+    Value cell;
+    if (agg.function != AggregateFunction::Count) {
+      cell = values[static_cast<std::size_t>(access_plan.local_value_by_aggregate[agg_index])];
+    }
+    switch (agg.function) {
+      case AggregateFunction::Count:
+        state.count += 1;
+        break;
+      case AggregateFunction::Sum:
+        if (cell.isNumber()) {
+          state.sum += cell.asDouble();
+        }
+        break;
+      case AggregateFunction::Avg:
+        if (cell.isNumber()) {
+          state.sum += cell.asDouble();
+          state.count += 1;
+        }
+        break;
+      case AggregateFunction::Min:
+        if (!state.initialized || cell < state.value) {
+          state.value = cell;
+          state.initialized = true;
+        }
+        break;
+      case AggregateFunction::Max:
+        if (!state.initialized || cell > state.value) {
+          state.value = cell;
+          state.initialized = true;
+        }
+        break;
+    }
+  }
+}
+
+Table finalizeAggregatedGroups(const Schema& schema, const SourcePushdownSpec& pushdown,
+                               AggregateGroupMap& groups, bool materialize_rows) {
   std::vector<std::string> out_fields;
   out_fields.reserve(pushdown.aggregate.keys.size() + pushdown.aggregate.aggregates.size());
   for (const auto key_idx : pushdown.aggregate.keys) {
-    out_fields.push_back(input.schema.fields[key_idx]);
+    out_fields.push_back(schema.fields[key_idx]);
   }
   for (const auto& agg : pushdown.aggregate.aggregates) {
     out_fields.push_back(agg.output_name);
   }
   Table aggregated = makeColumnFirstTable(out_fields);
   for (auto& entry : groups) {
-    Row row = entry.second.key_values;
+    Row row = entry.first.values;
     row.reserve(out_fields.size());
     for (std::size_t agg_index = 0; agg_index < pushdown.aggregate.aggregates.size(); ++agg_index) {
       const auto& agg = pushdown.aggregate.aggregates[agg_index];
@@ -700,7 +1200,8 @@ bool applyAggregatePushdown(const Table& input, const SourcePushdownSpec& pushdo
           row.emplace_back(state.sum);
           break;
         case AggregateFunction::Avg:
-          row.emplace_back(state.count == 0 ? Value() : Value(state.sum / static_cast<double>(state.count)));
+          row.emplace_back(state.count == 0 ? Value()
+                                            : Value(state.sum / static_cast<double>(state.count)));
           break;
         case AggregateFunction::Min:
         case AggregateFunction::Max:
@@ -708,11 +1209,43 @@ bool applyAggregatePushdown(const Table& input, const SourcePushdownSpec& pushdo
           break;
       }
     }
-    appendRow(&aggregated, std::move(row));
+    if (materialize_rows) {
+      aggregated.rows.push_back(row);
+    }
+    for (std::size_t i = 0; i < row.size(); ++i) {
+      aggregated.columnar_cache->columns[i].values.push_back(row[i]);
+    }
+    aggregated.columnar_cache->row_count += 1;
   }
   if (aggregated.columnar_cache->row_count > 0) {
     aggregated.columnar_cache->batch_row_counts.push_back(aggregated.columnar_cache->row_count);
   }
+  return aggregated;
+}
+
+bool applyAggregatePushdown(const Table& input, const SourcePushdownSpec& pushdown, Table* out) {
+  if (out == nullptr) {
+    throw std::invalid_argument("aggregate pushdown output cannot be null");
+  }
+  if (!validateAggregatePushdown(input.schema, pushdown)) {
+    return false;
+  }
+  const auto access_plan = buildAggregateAccessPlan(input.schema, pushdown);
+  AggregateGroupMap groups;
+  const std::size_t row_count =
+      input.columnar_cache ? input.columnar_cache->row_count : input.rowCount();
+  std::vector<Value> values(access_plan.schema_indices.size());
+  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+    for (std::size_t local_index = 0; local_index < access_plan.schema_indices.size(); ++local_index) {
+      values[local_index] =
+          input.columnar_cache->columns[access_plan.schema_indices[local_index]].values[row_index];
+    }
+    if (!includeRowForAggregate(values, access_plan, pushdown)) {
+      continue;
+    }
+    accumulateAggregateRow(values, access_plan, pushdown, &groups);
+  }
+  Table aggregated = finalizeAggregatedGroups(input.schema, pushdown, groups, false);
   *out = std::move(aggregated);
   return true;
 }
@@ -723,46 +1256,35 @@ FileSourceProbeResult probe_file_source(const std::string& path) {
   FileSourceProbeResult result;
   result.path = path;
   result.suggested_table_name = defaultTableNameFromPath(path);
-  const auto lower_path = toLowerCopy(path);
-  if (lower_path.size() >= 4 &&
-      (lower_path.ends_with(".csv") || lower_path.ends_with(".tsv"))) {
-    result.kind = FileSourceKind::Csv;
-    result.csv_delimiter = lower_path.ends_with(".tsv") ? '\t' : ',';
-    result.schema = read_csv_schema(path, result.csv_delimiter);
-    return result;
-  }
-  if (lower_path.ends_with(".json") || lower_path.ends_with(".jsonl") ||
-      lower_path.ends_with(".ndjson")) {
-    result.kind = FileSourceKind::Json;
-    result.json_options = probeJsonOptions(path);
-    result.schema = infer_json_file_schema(result.json_options);
-    return result;
-  }
-
-  const auto lines = readSampleLines(path, 2);
+  const auto lines = readSampleLines(path, 4);
   if (lines.empty()) {
     throw std::runtime_error("probe found empty input: " + path);
   }
-  const char first = lines.front().empty() ? '\0' : lines.front().front();
-  if (first == '{' || first == '[') {
-    result.kind = FileSourceKind::Json;
+  result.candidates = buildProbeCandidates(path, lines);
+  if (result.candidates.empty()) {
+    throw std::runtime_error("probe could not score any candidate formats: " + path);
+  }
+  const auto& best = result.candidates.front();
+  result.kind = best.kind;
+  result.format_name = best.format_name;
+  result.score = best.score;
+  result.confidence = probeConfidence(result.candidates);
+  result.warnings = probeWarnings(result.candidates, result.confidence);
+  if (best.kind == FileSourceKind::Json) {
     result.json_options = probeJsonOptions(path);
     result.schema = infer_json_file_schema(result.json_options);
-    return result;
-  }
-
-  bool csv_header = false;
-  const auto delimiter = chooseDelimitedFormat(lines, &csv_header);
-  if (delimiter.has_value() && csv_header) {
-    result.kind = FileSourceKind::Csv;
-    result.csv_delimiter = *delimiter;
+  } else if (best.kind == FileSourceKind::Csv) {
+    result.csv_delimiter = best.format_name == "tsv" ? '\t' : ',';
+    bool csv_header = false;
+    const auto delimiter = chooseDelimitedFormat(lines, &csv_header);
+    if (delimiter.has_value()) {
+      result.csv_delimiter = *delimiter;
+    }
     result.schema = read_csv_schema(path, result.csv_delimiter);
-    return result;
+  } else {
+    result.line_options = probeLineOptions(path);
+    result.schema = infer_line_file_schema(result.line_options);
   }
-
-  result.kind = FileSourceKind::Line;
-  result.line_options = probeLineOptions(path);
-  result.schema = infer_line_file_schema(result.line_options);
   return result;
 }
 
@@ -803,6 +1325,8 @@ Table load_line_file(const std::string& path, const LineFileOptions& options) {
   if (options.mode == LineParseMode::Regex) {
     line_regex = std::regex(options.regex_pattern);
   }
+  const auto capture_plan =
+      options.mode == LineParseMode::Split ? buildLineCapturePlan(options) : LineCapturePlan{};
 
   std::string line;
   while (std::getline(input, line)) {
@@ -812,14 +1336,8 @@ Table load_line_file(const std::string& path, const LineFileOptions& options) {
     Row row;
     row.reserve(options.mappings.size());
     if (options.mode == LineParseMode::Split) {
-      const auto tokens = splitByDelimiter(line, options.split_delimiter);
-      for (const auto& mapping : options.mappings) {
-        if (mapping.source_index < tokens.size()) {
-          row.push_back(parseScalarCell(std::string(tokens[mapping.source_index])));
-        } else {
-          row.emplace_back(Value());
-        }
-      }
+      row.resize(options.mappings.size());
+      fillLineSplitValues(line, capture_plan, &row, options.split_delimiter);
     } else {
       std::smatch matched;
       if (!std::regex_match(line, matched, line_regex)) {
@@ -852,6 +1370,7 @@ Table load_json_file(const std::string& path, const JsonFileOptions& options) {
   if (!input.is_open()) {
     throw std::runtime_error("cannot open json file: " + path);
   }
+  const auto json_index = buildJsonColumnIndex(options);
 
   if (options.format == JsonFileFormat::JsonLines) {
     std::string line;
@@ -860,7 +1379,14 @@ Table load_json_file(const std::string& path, const JsonFileOptions& options) {
         continue;
       }
       JsonCursor cursor(line);
-      appendRow(&table, mapJsonObjectToRow(cursor.parseObject(), options));
+      Row row(options.columns.size());
+      cursor.forEachObjectEntry([&](std::string key, Value value) {
+        const auto it = json_index.find(key);
+        if (it != json_index.end()) {
+          row[it->second] = std::move(value);
+        }
+      });
+      appendRow(&table, std::move(row));
     }
   } else {
     std::string payload((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
@@ -872,7 +1398,14 @@ Table load_json_file(const std::string& path, const JsonFileOptions& options) {
       if (cursor.consume(']')) {
         break;
       }
-      appendRow(&table, mapJsonObjectToRow(cursor.parseObject(), options));
+      Row row(options.columns.size());
+      cursor.forEachObjectEntry([&](std::string key, Value value) {
+        const auto it = json_index.find(key);
+        if (it != json_index.end()) {
+          row[it->second] = std::move(value);
+        }
+      });
+      appendRow(&table, std::move(row));
       if (cursor.consume(']')) {
         break;
       }
@@ -897,6 +1430,17 @@ bool execute_file_source_pushdown(const FileSourceConnectorSpec& spec, const Sch
   if (spec.kind == FileSourceKind::Csv) {
     return execute_csv_source_pushdown(spec.path, schema, pushdown, spec.csv_delimiter,
                                        materialize_rows, out);
+  }
+  if (pushdown.has_aggregate) {
+    if (spec.kind == FileSourceKind::Line) {
+      if (try_execute_line_aggregate(spec.path, schema, spec.line_options, pushdown, out)) {
+        return true;
+      }
+    } else {
+      if (try_execute_json_aggregate(spec.path, schema, spec.json_options, pushdown, out)) {
+        return true;
+      }
+    }
   }
   Table loaded = (spec.kind == FileSourceKind::Line)
                      ? load_line_file(spec.path, spec.line_options)

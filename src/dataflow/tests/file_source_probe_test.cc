@@ -45,6 +45,11 @@ int main() {
     write_file(csv_path, "user_id,name\n1,alice\n2,bob\n");
     const auto csv_probe = session.probe(csv_path);
     expect(csv_probe.kind == dataflow::FileSourceKind::Csv, "csv probe kind mismatch");
+    expect(csv_probe.format_name == "csv", "csv probe format mismatch");
+    expect(csv_probe.confidence == "high", "csv probe confidence mismatch");
+    expect(!csv_probe.candidates.empty(), "csv probe candidates missing");
+    expect(csv_probe.candidates.front().format_name == "csv", "csv top candidate mismatch");
+    expect(!csv_probe.candidates.front().evidence.empty(), "csv probe evidence missing");
     expect(csv_probe.csv_delimiter == ',', "csv probe delimiter mismatch");
     expect(csv_probe.schema.fields.size() == 2, "csv probe schema width mismatch");
     expect(csv_probe.schema.fields[0] == "user_id", "csv probe first column mismatch");
@@ -62,6 +67,10 @@ int main() {
     write_file(jsonl_path, "{\"user_id\":1,\"name\":\"alice\"}\n{\"user_id\":2,\"name\":\"bob\"}\n");
     const auto jsonl_probe = session.probe(jsonl_path);
     expect(jsonl_probe.kind == dataflow::FileSourceKind::Json, "jsonl probe kind mismatch");
+    expect(jsonl_probe.format_name == "json_lines", "jsonl probe format name mismatch");
+    expect(jsonl_probe.score >= 90, "jsonl probe score too low");
+    expect(jsonl_probe.confidence == "high", "jsonl probe confidence mismatch");
+    expect(jsonl_probe.warnings.empty(), "jsonl probe warnings mismatch");
     expect(jsonl_probe.json_options.format == dataflow::JsonFileFormat::JsonLines,
            "jsonl probe format mismatch");
     expect(jsonl_probe.schema.fields.size() == 2, "jsonl probe schema width mismatch");
@@ -74,6 +83,7 @@ int main() {
     const auto json_array_probe = session.probe(json_array_path);
     expect(json_array_probe.kind == dataflow::FileSourceKind::Json,
            "json array probe kind mismatch");
+    expect(json_array_probe.format_name == "json_array", "json array probe format name mismatch");
     expect(json_array_probe.json_options.format == dataflow::JsonFileFormat::JsonArray,
            "json array probe format mismatch");
     auto json_array_table = session.read(json_array_path).toTable();
@@ -84,6 +94,10 @@ int main() {
     write_file(line_path, "1001|ok|12.5\n1002|fail|9.5\n");
     const auto line_probe = session.probe(line_path);
     expect(line_probe.kind == dataflow::FileSourceKind::Line, "line probe kind mismatch");
+    expect(line_probe.format_name == "line_split", "line probe format mismatch");
+    expect(line_probe.confidence == "low", "line probe confidence mismatch");
+    expect(line_probe.candidates.size() >= 1, "line probe candidate count mismatch");
+    expect(!line_probe.warnings.empty(), "line probe warnings missing");
     expect(line_probe.line_options.mode == dataflow::LineParseMode::Split,
            "line probe mode mismatch");
     expect(line_probe.line_options.split_delimiter == '|', "line probe delimiter mismatch");

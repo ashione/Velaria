@@ -364,9 +364,31 @@ PyObject* pyProbeFromNative(const df::FileSourceProbeResult& probe) {
   }
   setDictItem(out, "path", PyUnicode_FromString(probe.path.c_str()));
   setDictItem(out, "kind", PyUnicode_FromString(kind));
+  setDictItem(out, "final_format", PyUnicode_FromString(probe.format_name.c_str()));
+  setDictItem(out, "score", PyLong_FromLong(probe.score));
+  setDictItem(out, "confidence", PyUnicode_FromString(probe.confidence.c_str()));
   setDictItem(out, "schema", pyStringList(probe.schema.fields));
   setDictItem(out, "suggested_table_name",
               PyUnicode_FromString(probe.suggested_table_name.c_str()));
+  setDictItem(out, "warnings", pyStringList(probe.warnings));
+  PyObject* candidates = PyList_New(static_cast<Py_ssize_t>(probe.candidates.size()));
+  for (Py_ssize_t i = 0; i < static_cast<Py_ssize_t>(probe.candidates.size()); ++i) {
+    const auto& candidate = probe.candidates[static_cast<std::size_t>(i)];
+    PyObject* item = PyDict_New();
+    const char* candidate_kind = "csv";
+    if (candidate.kind == df::FileSourceKind::Line) {
+      candidate_kind = "line";
+    } else if (candidate.kind == df::FileSourceKind::Json) {
+      candidate_kind = "json";
+    }
+    setDictItem(item, "format", PyUnicode_FromString(candidate.format_name.c_str()));
+    setDictItem(item, "kind", PyUnicode_FromString(candidate_kind));
+    setDictItem(item, "score", PyLong_FromLong(candidate.score));
+    setDictItem(item, "reason", PyUnicode_FromString(candidate.reason.c_str()));
+    setDictItem(item, "evidence", pyStringList(candidate.evidence));
+    PyList_SET_ITEM(candidates, i, item);
+  }
+  setDictItem(out, "candidates", candidates);
   if (probe.kind == df::FileSourceKind::Csv) {
     char buffer[2] = {probe.csv_delimiter, '\0'};
     setDictItem(out, "delimiter", PyUnicode_FromString(buffer));

@@ -18,8 +18,15 @@ class FileSourcePythonApiTest(unittest.TestCase):
 
             probe = session.probe(str(json_path))
             self.assertEqual(probe["kind"], "json")
+            self.assertEqual(probe["final_format"], "json_lines")
+            self.assertGreaterEqual(probe["score"], 90)
+            self.assertEqual(probe["confidence"], "high")
             self.assertEqual(probe["schema"], ["user_id", "name", "score"])
             self.assertEqual(probe["suggested_table_name"], "events")
+            self.assertGreaterEqual(len(probe["candidates"]), 1)
+            self.assertEqual(probe["candidates"][0]["format"], "json_lines")
+            self.assertGreaterEqual(len(probe["candidates"][0]["evidence"]), 1)
+            self.assertEqual(probe["warnings"], [])
 
             auto_df = session.read(str(json_path))
             session.create_temp_view("events_auto", auto_df)

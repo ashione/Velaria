@@ -45,14 +45,27 @@ struct JsonFileOptions {
   std::vector<std::string> columns;
 };
 
+struct FileSourceProbeCandidate {
+  std::string format_name;
+  FileSourceKind kind = FileSourceKind::Csv;
+  int score = 0;
+  std::string reason;
+  std::vector<std::string> evidence;
+};
+
 struct FileSourceProbeResult {
   FileSourceKind kind = FileSourceKind::Csv;
+  std::string format_name;
+  int score = 0;
+  std::string confidence;
   std::string path;
   Schema schema;
   char csv_delimiter = ',';
   LineFileOptions line_options;
   JsonFileOptions json_options;
   std::string suggested_table_name;
+  std::vector<FileSourceProbeCandidate> candidates;
+  std::vector<std::string> warnings;
 };
 
 struct FileSourceConnectorSpec {

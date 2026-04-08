@@ -906,9 +906,16 @@ def _execute_action_for_run(spec: dict[str, Any]) -> dict[str, Any]:
             pathlib.Path(args["output_path"]) if args.get("output_path") else artifacts_dir / "result.parquet"
         )
         return _execute_csv_sql(
-            csv_path=pathlib.Path(args["csv"]),
+            input_path=pathlib.Path(args["input_path"]),
             table=args["table"],
             query=args["query"],
+            input_type=args["input_type"],
+            delimiter=args["delimiter"],
+            line_mode=args["line_mode"],
+            regex_pattern=args.get("regex_pattern"),
+            mappings=args.get("mappings"),
+            columns=args.get("columns"),
+            json_format=args["json_format"],
             output_path=output_path,
             run_id=run_id,
         )

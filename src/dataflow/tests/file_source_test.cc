@@ -68,6 +68,24 @@ int main() {
     expect(split_table.rows[0][1].asString() == "ok", "split state mismatch");
     expect(split_table.rows[0][2].asDouble() == 12.5, "split score mismatch");
 
+    const auto split_complex_path = make_temp_file("velaria-line-split-complex");
+    write_file(split_complex_path, "1003|true|null|C:\\\\logs\\\\app\n1004|false|7|hello\\tworld\n");
+    dataflow::LineFileOptions split_complex_options;
+    split_complex_options.mode = dataflow::LineParseMode::Split;
+    split_complex_options.split_delimiter = '|';
+    split_complex_options.mappings = {
+        {"user_id", 0},
+        {"ok", 1},
+        {"score", 2},
+        {"note", 3},
+    };
+    auto split_complex_table = session.read_line_file(split_complex_path, split_complex_options).toTable();
+    expect(split_complex_table.rowCount() == 2, "split complex row count mismatch");
+    expect(split_complex_table.rows[0][1].asBool(), "split complex bool mismatch");
+    expect(split_complex_table.rows[0][2].isNull(), "split complex null mismatch");
+    expect(split_complex_table.rows[0][3].asString() == "C:\\\\logs\\\\app",
+           "split complex escaped path mismatch");
+
     const auto regex_path = make_temp_file("velaria-line-regex");
     write_file(regex_path, "uid=7 action=click latency=11\nuid=8 action=view latency=13\n");
     dataflow::LineFileOptions regex_options;
@@ -89,6 +107,29 @@ int main() {
     expect(regex_pushdown.rowCount() == 1, "regex pushdown row count mismatch");
     expect(regex_pushdown.rows[0][1].asString() == "view", "regex pushdown row mismatch");
 
+    const auto regex_complex_path = make_temp_file("velaria-line-regex-complex");
+    write_file(regex_complex_path,
+               "uid=9 action=\"open file\" latency=17 ok=true note=C:\\\\logs\\\\app\n"
+               "uid=10 action=\"sync job\" latency=21 ok=false note=hello\\\\nworld\n");
+    dataflow::LineFileOptions regex_complex_options;
+    regex_complex_options.mode = dataflow::LineParseMode::Regex;
+    regex_complex_options.regex_pattern =
+        R"(^uid=(\d+) action=\"([^\"]+)\" latency=(\d+) ok=(true|false) note=(.+)$)";
+    regex_complex_options.mappings = {
+        {"uid", 1},
+        {"action", 2},
+        {"latency", 3},
+        {"ok", 4},
+        {"note", 5},
+    };
+    auto regex_complex_table = session.read_line_file(regex_complex_path, regex_complex_options).toTable();
+    expect(regex_complex_table.rowCount() == 2, "regex complex row count mismatch");
+    expect(regex_complex_table.rows[0][1].asString() == "open file",
+           "regex complex quoted action mismatch");
+    expect(regex_complex_table.rows[0][3].asBool(), "regex complex bool mismatch");
+    expect(regex_complex_table.rows[1][4].asString() == "hello\\\\nworld",
+           "regex complex escaped note mismatch");
+
     const auto jsonl_path = make_temp_file("velaria-jsonl");
     write_file(jsonl_path,
                "{\"user_id\":1,\"name\":\"alice\",\"vec\":[1,2]}\n"
@@ -105,6 +146,22 @@ int main() {
     expect(jsonl_table.rowCount() == 2, "jsonl row count mismatch");
     expect(jsonl_table.rows[0][1].asString() == "alice", "jsonl name mismatch");
     expect(jsonl_table.rows[0][2].asFixedVector().size() == 2, "jsonl vec width mismatch");
+
+    const auto jsonl_complex_path = make_temp_file("velaria-jsonl-complex");
+    write_file(jsonl_complex_path,
+               "{\"user_id\":3,\"name\":\"al\\\"ice\",\"ok\":true,\"note\":\"line\\nnext\",\"score\":null}\n"
+               "{\"user_id\":4,\"name\":\"tab\\tuser\",\"ok\":false,\"note\":\"C:\\\\logs\",\"score\":7}\n");
+    dataflow::JsonFileOptions jsonl_complex_options;
+    jsonl_complex_options.format = dataflow::JsonFileFormat::JsonLines;
+    jsonl_complex_options.columns = {"user_id", "name", "ok", "note", "score"};
+    auto jsonl_complex_table = session.read_json(jsonl_complex_path, jsonl_complex_options).toTable();
+    expect(jsonl_complex_table.rowCount() == 2, "jsonl complex row count mismatch");
+    expect(jsonl_complex_table.rows[0][1].asString() == "al\"ice",
+           "jsonl complex escaped quote mismatch");
+    expect(jsonl_complex_table.rows[0][2].asBool(), "jsonl complex bool mismatch");
+    expect(jsonl_complex_table.rows[0][3].asString() == "line\nnext",
+           "jsonl complex escaped newline mismatch");
+    expect(jsonl_complex_table.rows[0][4].isNull(), "jsonl complex null mismatch");
 
     const auto json_array_path = make_temp_file("velaria-json-array");
     write_file(json_array_path,

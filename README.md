@@ -94,6 +94,12 @@ Available today:
 - one native kernel for batch + streaming
 - a performance-first execution direction on the native path
 - column-first execution direction with lazy row materialization at compatibility boundaries
+- batch file ingress through explicit and probed readers:
+  - `session.read_csv(...)`, `session.read_line_file(...)`, `session.read_json(...)`
+  - `session.probe(...)` and `session.read(...)` for generic file input
+- batch SQL file registration:
+  - `CREATE TABLE ... USING csv|line|json OPTIONS(...)`
+  - `CREATE TABLE ... OPTIONS(path: '...')` with source probing
 - batch SQL v1:
   - `CREATE TABLE`, `CREATE SOURCE TABLE`, `CREATE SINK TABLE`
   - `INSERT INTO ... VALUES`
@@ -145,16 +151,70 @@ For more detail, use:
 - current maintained plan: [plans/core-runtime-columnar-plan.md](./plans/core-runtime-columnar-plan.md)
 - plan directory guide: [plans/README.md](./plans/README.md)
 
-## 4. Development
+## 4. Usage Examples
 
-Repository baseline:
+Batch SQL on an auto-probed file source:
 
-- language baseline: `C++20`
-- build system: `Bazel`
-- keep `DataflowSession` as the public session entry
-- do not break `sql_demo / df_demo / stream_demo`
-- keep example source files as `.cc`
-- use `uv` for Python commands in this repository
+```sql
+CREATE TABLE rpc_input OPTIONS(path: '/tmp/input.jsonl');
+SELECT * FROM rpc_input LIMIT 5;
+```
+
+Batch SQL on an explicit CSV source:
+
+```sql
+CREATE TABLE csv_input USING csv OPTIONS(path: '/tmp/input.csv', delimiter: ',');
+SELECT * FROM csv_input LIMIT 5;
+```
+
+Python batch file input:
+
+```python
+import velaria
+
+session = velaria.Session()
+probe = session.probe("/tmp/input.jsonl")
+df = session.read("/tmp/input.jsonl")
+```
+
+Explicit CSV reader:
+
+```python
+csv_df = session.read_csv("/tmp/input.csv")
+```
+
+Regex line input:
+
+```python
+regex_df = session.read_line_file(
+    "/tmp/events.log",
+    mappings=[("uid", 1), ("action", 2), ("latency", 3), ("ok", 4), ("note", 5)],
+    mode="regex",
+    regex_pattern=r'^uid=(\d+) action="([^"]+)" latency=(\d+) ok=(true|false) note=(.+)$',
+)
+```
+
+CLI examples:
+
+```bash
+uv run --project python_api python python_api/velaria_cli.py file-sql \
+  --csv /tmp/input.csv \
+  --input-type csv \
+  --query "SELECT * FROM input_table LIMIT 5"
+
+uv run --project python_api python python_api/velaria_cli.py file-sql \
+  --input-path /tmp/input.jsonl \
+  --input-type auto \
+  --query "SELECT * FROM input_table LIMIT 5"
+
+uv run --project python_api python python_api/velaria_cli.py file-sql \
+  --input-path /tmp/events.log \
+  --input-type line \
+  --line-mode regex \
+  --regex-pattern '^uid=(\\d+) action=\"([^\"]+)\" latency=(\\d+) ok=(true|false) note=(.+)$' \
+  --mappings 'uid:1,action:2,latency:3,ok:4,note:5' \
+  --query "SELECT * FROM input_table LIMIT 5"
+```
 
 Real entry points:
 
@@ -162,26 +222,12 @@ Real entry points:
 bazel run //:sql_demo
 bazel run //:df_demo
 bazel run //:stream_demo
-bazel run //:actor_rpc_smoke
+bazel run //:file_source_benchmark -- 200000 3
 uv run --project python_api python python_api/velaria_cli.py --help
 ./dist/velaria-cli --help
 ```
 
-Minimal validation:
-
-```bash
-bazel build //:sql_demo //:df_demo //:stream_demo \
-  //:actor_rpc_scheduler //:actor_rpc_worker //:actor_rpc_client //:actor_rpc_smoke
-
-bazel run //:sql_demo
-bazel run //:df_demo
-bazel run //:stream_demo
-bazel run //:actor_rpc_smoke
-
-./scripts/run_python_ecosystem_regression.sh
-```
-
-Development docs:
+## 5. Development Docs
 
 - English: [docs/development.md](./docs/development.md)
 - Chinese: [docs/development-zh.md](./docs/development-zh.md)

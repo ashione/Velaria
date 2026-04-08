@@ -595,7 +595,7 @@ def _execute_csv_sql(
         ) from exc
     artifacts: list[dict[str, Any]] = []
     if output_path is not None:
-        artifacts.append(_table_artifact(output_path, result, ["result", "csv-sql"]))
+        artifacts.append(_table_artifact(output_path, result, ["result", "file-sql"]))
         if run_id is not None:
             write_explain(
                 run_id,
@@ -901,7 +901,7 @@ def _execute_action_for_run(spec: dict[str, Any]) -> dict[str, Any]:
     run_id = spec["run_id"]
     run_dir = pathlib.Path(spec["run_dir"])
     artifacts_dir = run_dir / "artifacts"
-    if action == "csv-sql":
+    if action == "file-sql":
         output_path = (
             pathlib.Path(args["output_path"]) if args.get("output_path") else artifacts_dir / "result.parquet"
         )
@@ -1112,7 +1112,7 @@ def _add_stream_sql_once_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _parse_action_args(action: str, argv: list[str]) -> dict[str, Any]:
     parser = JsonArgumentParser(prog=f"velaria-cli {action}")
-    if action == "csv-sql":
+    if action == "file-sql":
         _add_csv_sql_arguments(parser)
         parser.add_argument("--output-path")
     elif action == "vector-search":
@@ -1548,7 +1548,7 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     csv_sql = subparsers.add_parser(
-        "csv-sql",
+        "file-sql",
         help="Register a batch file source and run a SQL query through DataflowSession.",
     )
     _add_csv_sql_arguments(csv_sql)
@@ -1667,7 +1667,7 @@ def main(argv: list[str] | None = None) -> int:
         parser = _build_parser()
         args = parser.parse_args(argv)
 
-        if args.command == "csv-sql":
+        if args.command == "file-sql":
             return _run_csv_sql(
                 pathlib.Path(args.input_path),
                 args.table,

@@ -59,6 +59,18 @@ class FileSourcePythonApiTest(unittest.TestCase):
             self.assertEqual(split_rows["schema"], ["user_id", "state", "score"])
             self.assertEqual(split_rows["rows"], [[1001, "ok", 12.5], [1002, "fail", 9.5]])
 
+            complex_split_path = root / "split_complex.log"
+            complex_split_path.write_text(
+                "1003|true|null|C:\\\\logs\\\\app\n1004|false|7|hello\\tworld\n",
+                encoding="utf-8",
+            )
+            complex_split_rows = session.read_line_file(
+                str(complex_split_path),
+                mappings=[("user_id", 0), ("ok", 1), ("score", 2), ("note", 3)],
+                split_delimiter="|",
+            ).to_rows()
+            self.assertEqual(complex_split_rows["rows"][0], [1003, True, None, r"C:\\logs\\app"])
+
             regex_rows = session.read_line_file(
                 str(regex_path),
                 mappings=[("uid", 1), ("action", 2), ("latency", 3)],
@@ -67,6 +79,21 @@ class FileSourcePythonApiTest(unittest.TestCase):
             ).to_rows()
             self.assertEqual(regex_rows["schema"], ["uid", "action", "latency"])
             self.assertEqual(regex_rows["rows"], [[7, "click", 11], [8, "view", 13]])
+
+            regex_complex_path = root / "regex_complex.log"
+            regex_complex_path.write_text(
+                'uid=9 action="open file" latency=17 ok=true note=C:\\\\logs\\\\app\n'
+                'uid=10 action="sync job" latency=21 ok=false note=hello\\\\nworld\n',
+                encoding="utf-8",
+            )
+            regex_complex_rows = session.read_line_file(
+                str(regex_complex_path),
+                mappings=[("uid", 1), ("action", 2), ("latency", 3), ("ok", 4), ("note", 5)],
+                mode="regex",
+                regex_pattern=r'^uid=(\d+) action="([^"]+)" latency=(\d+) ok=(true|false) note=(.+)$',
+            ).to_rows()
+            self.assertEqual(regex_complex_rows["rows"][0], [9, "open file", 17, True, r"C:\\logs\\app"])
+            self.assertEqual(regex_complex_rows["rows"][1][4], r"hello\\nworld")
 
     def test_read_json_supports_json_lines_json_array_and_materialization(self):
         session = velaria.Session()
@@ -103,6 +130,19 @@ class FileSourcePythonApiTest(unittest.TestCase):
             ).to_rows()
             self.assertEqual(json_array_rows["schema"], ["event", "cost"])
             self.assertEqual(json_array_rows["rows"], [["open", 1.5], ["close", 2]])
+
+            json_complex_path = root / "events_complex.jsonl"
+            json_complex_path.write_text(
+                '{"user_id":3,"name":"al\\"ice","ok":true,"note":"line\\nnext","score":null}\n'
+                '{"user_id":4,"name":"tab\\tuser","ok":false,"note":"C:\\\\logs","score":7}\n',
+                encoding="utf-8",
+            )
+            json_complex_rows = session.read_json(
+                str(json_complex_path),
+                columns=["user_id", "name", "ok", "note", "score"],
+            ).to_rows()
+            self.assertEqual(json_complex_rows["rows"][0], [3, 'al"ice', True, "line\nnext", None])
+            self.assertEqual(json_complex_rows["rows"][1], [4, "tab\tuser", False, r"C:\logs", 7])
 
 
 if __name__ == "__main__":

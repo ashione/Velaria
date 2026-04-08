@@ -104,7 +104,7 @@ class PythonCliContractTest(unittest.TestCase):
             ["artifacts"],
             ["artifacts", "list"],
             ["artifacts", "preview"],
-            ["csv-sql"],
+            ["file-sql"],
             ["vector-search"],
         ]
         for argv in cases:
@@ -141,7 +141,7 @@ class PythonCliContractTest(unittest.TestCase):
                                 "--tag",
                                 "slow-query,cache",
                                 "--",
-                                "csv-sql",
+                                "file-sql",
                                 "--csv",
                                 "/tmp/input.csv",
                                 "--query",
@@ -212,7 +212,7 @@ class PythonCliContractTest(unittest.TestCase):
                                 "--tag",
                                 "slow-query",
                                 "--",
-                                "csv-sql",
+                                "file-sql",
                                 "--csv",
                                 "/tmp/input.csv",
                                 "--query",
@@ -293,7 +293,7 @@ class PythonCliContractTest(unittest.TestCase):
                                 "--description",
                                 "failure case",
                                 "--",
-                                "csv-sql",
+                                "file-sql",
                                 "--csv",
                                 "/tmp/missing.csv",
                                 "--query",
@@ -321,8 +321,8 @@ class PythonCliContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="velaria-cli-missing-result-") as tmp:
             with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
                 index = workspace.ArtifactIndex()
-                run_one_id, run_one_dir = workspace.create_run("csv-sql", {"query": "SELECT 1"}, "0.0.test")
-                run_two_id, run_two_dir = workspace.create_run("csv-sql", {"query": "SELECT 2"}, "0.0.test")
+                run_one_id, run_one_dir = workspace.create_run("file-sql", {"query": "SELECT 1"}, "0.0.test")
+                run_two_id, run_two_dir = workspace.create_run("file-sql", {"query": "SELECT 2"}, "0.0.test")
                 index.upsert_run(workspace.read_run(run_one_id))
                 index.upsert_run(workspace.read_run(run_two_id))
                 pathlib.Path(run_two_dir, "artifacts", "explain.txt").write_text("logical", encoding="utf-8")
@@ -366,7 +366,7 @@ class PythonCliContractTest(unittest.TestCase):
                 with redirect_stdout(stdout):
                     exit_code = velaria_cli.main(
                         [
-                            "csv-sql",
+                            "file-sql",
                             "--csv",
                             str(csv_path),
                             "--table",
@@ -393,7 +393,7 @@ class PythonCliContractTest(unittest.TestCase):
                 with redirect_stdout(stdout):
                     exit_code = velaria_cli.main(
                         [
-                            "csv-sql",
+                            "file-sql",
                             "--input-path",
                             str(json_path),
                             "--input-type",
@@ -484,7 +484,7 @@ class PythonCliContractTest(unittest.TestCase):
                         "created_at": "2026-04-01T10:00:00Z",
                         "finished_at": "2026-04-01T10:00:01Z",
                         "status": "succeeded",
-                        "action": "csv-sql",
+                        "action": "file-sql",
                         "cli_args": {},
                         "velaria_version": "0.0.test",
                         "run_dir": str(run_dir),
@@ -529,7 +529,7 @@ class PythonCliContractTest(unittest.TestCase):
                         "created_at": "2026-04-01T10:00:00Z",
                         "finished_at": "2026-04-01T10:00:01Z",
                         "status": "succeeded",
-                        "action": "csv-sql",
+                        "action": "file-sql",
                         "cli_args": {},
                         "velaria_version": "0.0.test",
                         "run_dir": str(run_dir),

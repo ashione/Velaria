@@ -28,11 +28,13 @@ std::string make_temp_file(const std::string& pattern) {
 }
 
 void write_fixtures(const std::string& csv_path, const std::string& line_path,
-                    const std::string& jsonl_path, std::size_t rows) {
+                    const std::string& line_regex_path, const std::string& jsonl_path,
+                    std::size_t rows) {
   std::ofstream csv(csv_path);
   std::ofstream line(line_path);
+  std::ofstream line_regex(line_regex_path);
   std::ofstream jsonl(jsonl_path);
-  if (!csv.is_open() || !line.is_open() || !jsonl.is_open()) {
+  if (!csv.is_open() || !line.is_open() || !line_regex.is_open() || !jsonl.is_open()) {
     throw std::runtime_error("cannot open benchmark fixture file");
   }
   csv << "id,grp,val\n";
@@ -45,6 +47,9 @@ void write_fixtures(const std::string& csv_path, const std::string& line_path,
     } else {
       line << i << "|g" << grp << "|" << val << "\n";
     }
+    line_regex << "uid=" << i << " grp=g" << grp << " val=" << val << " ok="
+               << ((i % 2) == 0 ? "true" : "false")
+               << " note=path_" << (i % 128) << "\\\\segment" << "\n";
     jsonl << "{\"id\":" << i << ",\"grp\":\"g" << grp << "\",\"val\":" << val << "}\n";
   }
 }
@@ -208,6 +213,42 @@ std::size_t hardcode_group_sum_jsonl(const std::string& path) {
   return groups;
 }
 
+std::size_t hardcode_group_sum_regex_like(const std::string& path) {
+  const auto payload = read_all(path);
+  const char* ptr = payload.data();
+  const char* end = ptr + payload.size();
+  std::array<long long, 16> sums{};
+  std::array<uint8_t, 16> seen{};
+  constexpr const char* kGrpKey = " grp=g";
+  constexpr const char* kValKey = " val=";
+  while (ptr < end) {
+    const char* grp = std::search(ptr, end, kGrpKey, kGrpKey + 6);
+    if (grp == end) {
+      break;
+    }
+    grp += 6;
+    const int bucket = parse_int_fast(grp, end);
+    const char* val = std::search(grp, end, kValKey, kValKey + 5);
+    if (val == end) {
+      break;
+    }
+    val += 5;
+    const int parsed_val = parse_int_fast(val, end);
+    ptr = val;
+    skip_to_next_line(ptr, end);
+    if (bucket < 0 || bucket >= 16 || parsed_val <= 500) {
+      continue;
+    }
+    sums[static_cast<std::size_t>(bucket)] += parsed_val;
+    seen[static_cast<std::size_t>(bucket)] = 1;
+  }
+  std::size_t groups = 0;
+  for (const auto flag : seen) {
+    groups += flag != 0 ? 1U : 0U;
+  }
+  return groups;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -224,8 +265,9 @@ int main(int argc, char** argv) {
 
     const auto csv_path = make_temp_file("velaria-bench-csv");
     const auto line_path = make_temp_file("velaria-bench-line");
+    const auto line_regex_path = make_temp_file("velaria-bench-line-regex");
     const auto jsonl_path = make_temp_file("velaria-bench-jsonl");
-    write_fixtures(csv_path, line_path, jsonl_path, rows);
+    write_fixtures(csv_path, line_path, line_regex_path, jsonl_path, rows);
 
     dataflow::LineFileOptions line_options;
     line_options.mode = dataflow::LineParseMode::Split;
@@ -235,6 +277,11 @@ int main(int argc, char** argv) {
     dataflow::JsonFileOptions json_options;
     json_options.format = dataflow::JsonFileFormat::JsonLines;
     json_options.columns = {"id", "grp", "val"};
+    dataflow::LineFileOptions line_regex_options;
+    line_regex_options.mode = dataflow::LineParseMode::Regex;
+    line_regex_options.regex_pattern =
+        R"(^uid=(\d+) grp=(g\d+) val=(\d+) ok=(true|false) note=(.+)$)";
+    line_regex_options.mappings = {{"id", 1}, {"grp", 2}, {"val", 3}, {"ok", 4}, {"note", 5}};
 
     const auto csv_probe = session.probe(csv_path);
     const auto line_probe = session.probe(line_path);
@@ -297,6 +344,26 @@ int main(int argc, char** argv) {
       expect(out.rowCount() == 16, "line auto benchmark row count mismatch");
     }, rounds);
     emit_bench("read_line_auto_group_sum", rows, rounds, line_auto_us, 16, "probe+read");
+
+    const auto line_regex_parse_us = run_bench_us([&](int) {
+      auto out = session.read_line_file(line_regex_path, line_regex_options).limit(1).toTable();
+      expect(out.rowCount() == 1, "line regex parse benchmark row count mismatch");
+    }, rounds);
+    emit_bench("read_line_regex_parse", rows, rounds, line_regex_parse_us, 1,
+               "explicit-regex-parse");
+
+    const auto line_regex_explicit_us = run_bench_us([&](int) {
+      auto out = run_group_sum(session.read_line_file(line_regex_path, line_regex_options), "grp", "val");
+      expect(out.rowCount() == 16, "line regex explicit benchmark row count mismatch");
+    }, rounds);
+    const auto line_regex_hardcode_us = run_bench_us([&](int) {
+      expect(hardcode_group_sum_regex_like(line_regex_path) == 16,
+             "line regex hardcode benchmark row count mismatch");
+    }, rounds);
+    emit_bench("read_line_regex_hardcode_group_sum", rows, rounds, line_regex_hardcode_us, 16,
+               "hardcode");
+    emit_bench("read_line_regex_explicit_group_sum", rows, rounds, line_regex_explicit_us, 16,
+               "explicit");
 
     const auto json_explicit_us = run_bench_us([&](int) {
       auto out = run_group_sum(session.read_json(jsonl_path, json_options), "grp", "val");

@@ -67,7 +67,7 @@ print(result.to_pylist())
 ```bash
 uv run --project python_api python python_api/velaria_cli.py -i
 
-uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
+uv run --project python_api python python_api/velaria_cli.py run start -- file-sql \
   --run-name "regional_row_count" \
   --description "regional row count for the current CSV snapshot" \
   --tag regional \
@@ -134,23 +134,30 @@ uv run --project python_api python python_api/velaria_cli.py run start -- <actio
 
 当前支持的 action：
 
-- `csv-sql`
+- `file-sql`
 - `vector-search`
 - `stream-sql-once`
 
-### 4.2 `csv-sql`（tracked run 模式）
+### 4.2 `file-sql`（tracked run 模式）
 
 用途：
 
-- 读取本地 CSV
-- 注册成临时视图
+- 读取本地文件输入
+- 按 `--input-type` 或自动探测注册成临时视图
 - 执行 `session.sql(...)`
 - 把结果落到 artifact 文件，并生成 preview
 
 关键参数：
 
-- `--csv`：输入 CSV 路径
+- `--csv` / `--input-path`：输入文件路径
 - `--table`：临时视图名，默认 `input_table`
+- `--input-type`：输入类型，可选 `auto`、`csv`、`line`、`json`
+- `--delimiter`：CSV 或 line split 的分隔符
+- `--line-mode`：line 模式，可选 `split`、`regex`
+- `--regex-pattern`：line regex 模式下的正则
+- `--mappings`：line 的列映射，例如 `uid:1,action:2`
+- `--columns`：json 或顺序 line 的列名列表，例如 `id,name,score`
+- `--json-format`：json 输入格式，可选 `json_lines`、`json_array`
 - `--query`：要执行的 SQL
 - `--output-path`：结果文件路径；不传时默认写到 `run_dir/artifacts/result.parquet`
 
@@ -231,13 +238,13 @@ uv run --project python_api python python_api/velaria_cli.py run start -- <actio
 
 ```bash
 uv run --project python_api python python_api/velaria_cli.py run list \
-  [--status succeeded] [--action csv-sql] [--tag slow-query] [--query triage] [--limit 20]
+  [--status succeeded] [--action file-sql] [--tag slow-query] [--query triage] [--limit 20]
 ```
 
 关键参数：
 
 - `--status`：只看指定状态，例如 `running`、`succeeded`、`failed`
-- `--action`：只看指定 action，例如 `csv-sql`
+- `--action`：只看指定 action，例如 `file-sql`
 - `--tag`：只看带指定标签的 run
 - `--query`：按 `run_name`、`description`、`tags`、`action` 做关键词过滤
 - `--limit`：最多返回多少条

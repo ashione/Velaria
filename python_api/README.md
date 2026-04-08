@@ -94,13 +94,33 @@ Mapping rule:
 
 File reader mapping:
 
-- `Session.probe(path)` returns inferred source kind, schema, and normalized options
+- `Session.probe(path)` returns inferred source kind, schema, normalized options, the final selected format, scored candidates, confidence, and warnings
 - `Session.read(path, ...)` is the preferred batch file front door and probes the source automatically
 - `Session.read_csv(...)` remains the explicit CSV override
 - `Session.read_line_file(path, mappings=[...], ...)` maps to the native line/regex source connector
 - `Session.read_json(path, columns=[...], ...)` maps to the native JSON lines / JSON array source connector
 - all four file readers share the same source materialization knobs:
   `materialization`, `materialization_dir`, and `materialization_format`
+- `velaria-cli file-sql` defaults to `--input-type auto` and registers batch sources through `CREATE TABLE ... OPTIONS(path: '...')`
+
+Regex line usage:
+
+- regex is an explicit line-reader mode; it is not auto-probed
+- `mappings` source indexes follow regex capture-group numbering:
+  - `0` is the full match
+  - `1..n` are capture groups
+- unmatched lines are skipped
+
+Regex example:
+
+```python
+regex_df = session.read_line_file(
+    "events.log",
+    mappings=[("uid", 1), ("action", 2), ("latency", 3), ("ok", 4), ("note", 5)],
+    mode="regex",
+    regex_pattern=r'^uid=(\d+) action="([^"]+)" latency=(\d+) ok=(true|false) note=(.+)$',
+)
+```
 
 Minimal examples:
 
@@ -109,14 +129,41 @@ import velaria
 
 session = velaria.Session()
 
+csv_df = session.read_csv("input.csv")
+
 probe = session.probe("events.jsonl")
 auto_df = session.read("events.jsonl")
+
+# probe includes:
+# kind / final_format / score / confidence / schema / candidates / warnings
 
 json_df = session.read_json(
     "events.jsonl",
     columns=["user_id", "action", "latency"],
     format="json_lines",
 )
+```
+
+CLI examples:
+
+```bash
+uv run --project python_api python python_api/velaria_cli.py file-sql \
+  --csv /tmp/input.csv \
+  --input-type csv \
+  --query "SELECT * FROM input_table LIMIT 5"
+
+uv run --project python_api python python_api/velaria_cli.py file-sql \
+  --input-path /tmp/input.jsonl \
+  --input-type auto \
+  --query "SELECT * FROM input_table LIMIT 5"
+
+uv run --project python_api python python_api/velaria_cli.py file-sql \
+  --input-path /tmp/events.log \
+  --input-type line \
+  --line-mode regex \
+  --regex-pattern '^uid=(\\d+) action=\"([^\"]+)\" latency=(\\d+) ok=(true|false) note=(.+)$' \
+  --mappings 'uid:1,action:2,latency:3,ok:4,note:5' \
+  --query "SELECT * FROM input_table LIMIT 5"
 ```
 
 Current SQL mapping carried by Python:
@@ -231,6 +278,20 @@ Benchmark regression entrypoint:
 ./scripts/run_python_stage_benchmark.sh
 ```
 
+Core file-input benchmark entrypoint:
+
+```bash
+bazel run //:file_source_benchmark -- 200000 3
+```
+
+That benchmark currently reports:
+
+- CSV hardcode / explicit / auto-probed paths
+- line split hardcode / explicit / auto-probed paths
+- line regex parse and grouped-aggregate paths
+- JSON lines hardcode / explicit / auto-probed paths
+- SQL `CREATE TABLE ... OPTIONS(path: '...')` registration costs
+
 By default that script generates benchmark input at runtime.
 To use a local anonymized CSV instead, set `VELARIA_STAGE_BENCH_CSV=/path/to/file.csv`.
 The default scenario is `groupby_count_max`.
@@ -266,7 +327,7 @@ Single-file CLI packaging:
 
 ```bash
 ./scripts/build_py_cli_executable.sh
-./dist/velaria-cli csv-sql \
+./dist/velaria-cli file-sql \
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
 ```
@@ -306,7 +367,7 @@ export VELARIA_HOME=/tmp/velaria-home
 Tracked run commands:
 
 ```bash
-uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
+uv run --project python_api python python_api/velaria_cli.py run start -- file-sql \
   --run-name "cn_slow_query_24h_2026-04-03" \
   --description "score filter result for demo input" \
   --tag cn \
@@ -314,7 +375,7 @@ uv run --project python_api python python_api/velaria_cli.py run start -- csv-sq
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
 
-./dist/velaria-cli run start -- csv-sql \
+./dist/velaria-cli run start -- file-sql \
   --run-name "cn_slow_query_24h_2026-04-03" \
   --description "score filter result for demo input" \
   --tag cn \
@@ -349,7 +410,7 @@ End-to-end examples:
 CSV SQL to parquet plus preview:
 
 ```bash
-uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
+uv run --project python_api python python_api/velaria_cli.py run start -- file-sql \
   --run-name "high_score_rows" \
   --description "high score rows for local inspection" \
   --tag local-demo \

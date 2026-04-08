@@ -21,7 +21,7 @@ Velaria is organized around one kernel and two non-kernel layers:
 The only golden path is:
 
 ```text
-Arrow / CSV / Python ingress
+Arrow / CSV / line / JSON / Python ingress
   -> DataflowSession / DataFrame / StreamingDataFrame
   -> local runtime kernel
   -> sink
@@ -36,6 +36,7 @@ Core owns the semantics that must stay stable across C++, Python, demos, and fut
 
 - logical planning and minimal SQL mapping
 - table/value model
+- batch file probing and file-reader semantics
 - local execution and streaming runtime
 - vector search as a local index capability
 - `DataflowSession`, `DataFrame`, `StreamingDataFrame`
@@ -60,6 +61,7 @@ Python ecosystem owns:
 - native binding surface in `python_api`
 - supported library modules in `python_api/velaria`
 - supported CLI tooling in `python_api/velaria_cli.py`
+- Python projections of `Session.probe(...)`, `Session.read(...)`, and explicit file readers
 - Arrow ingestion/output
 - `uv`-based development and test workflow
 - wheel, native wheel, and CLI packaging
@@ -71,6 +73,7 @@ Python ecosystem owns:
 Python ecosystem must not:
 
 - redefine runtime contract semantics
+- invent a second file-format inference contract that conflicts with the core probe result
 - introduce a Python hot path for core execution
 - become the source of truth for progress/checkpoint/explain behavior
 - require experimental runtime components for normal operation
@@ -137,6 +140,7 @@ Repository view:
 
 - `DataflowSession` remains the only public session entry.
 - SQL stays an ingress surface. It does not back-drive runtime design.
+- batch file probing and file registration semantics remain owned by the core kernel even when projected through Python CLI/API
 - Python remains supported, but cannot become the execution core.
 - Vector search remains a core local capability, not a new subsystem.
 - Same-host actor/rpc stays experimental, even when it is featureful.

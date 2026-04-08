@@ -26,7 +26,7 @@ Tracked run examples:
 ```bash
 uv run --project python_api python python_api/velaria_cli.py -i
 
-uv run --project python_api python python_api/velaria_cli.py run start -- csv-sql \
+uv run --project python_api python python_api/velaria_cli.py run start -- file-sql \
   --run-name "score_demo" \
   --description "score filter result for demo input" \
   --tag demo \

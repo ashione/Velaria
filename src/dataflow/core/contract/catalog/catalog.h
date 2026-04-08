@@ -14,7 +14,8 @@ namespace dataflow {
 
 class ViewCatalog {
  public:
-  void createView(const std::string& name, const DataFrame& df);
+  void createView(const std::string& name, const DataFrame& df,
+                  sql::TableKind kind = sql::TableKind::Regular);
   void createTable(const std::string& name, const std::vector<std::string>& columns,
                   sql::TableKind kind = sql::TableKind::Regular);
   sql::TableKind tableKind(const std::string& name) const;

@@ -30,8 +30,20 @@ Core C++ surfaces:
 - `StreamingQueryProgress`
 - source/sink ABI in `stream/source_sink_abi.h`
 
+Stable batch file-input surfaces:
+
+- `DataflowSession::probe(...)`
+- `DataflowSession::read(...)`
+- `DataflowSession::read_csv(...)`
+- `DataflowSession::read_line_file(...)`
+- `DataflowSession::read_json(...)`
+- `CREATE TABLE ... USING csv|line|json OPTIONS(...)`
+- `CREATE TABLE ... OPTIONS(path: '...')` with source probing
+
 Python ecosystem projections:
 
+- `Session.probe(...)`
+- `Session.read(...)`
 - `Session.stream_sql(...)`
 - `Session.explain_stream_sql(...)`
 - `Session.start_stream_sql(...)`
@@ -42,6 +54,27 @@ Python ecosystem projections:
 - `read_excel(...)`
 
 Python-facing APIs may keep Pythonic naming, but their behavior must project the same semantics as the C++ kernel.
+
+## Batch File Input Contract
+
+Stable file-input behavior:
+
+- explicit file readers and probed file readers must project the same schema and row semantics for the same source
+- `probe(...)` may expose scoring, confidence, warnings, and candidate formats, but those fields are advisory and must not silently change the selected format semantics
+- explicit `USING csv|line|json` overrides source-kind probing
+- `CREATE TABLE ... OPTIONS(path: '...')` resolves the source kind through probing when `USING ...` is omitted
+- `OPTIONS(...)` uses `key: value` syntax
+
+Current probed result shape exposed through Python:
+
+- `kind`
+- `final_format`
+- `score`
+- `confidence`
+- `schema`
+- `suggested_table_name`
+- `candidates`
+- `warnings`
 
 ## StreamingQueryProgress
 
@@ -209,6 +242,7 @@ Python is allowed to:
 - wrap core APIs
 - package and distribute bindings
 - offer ecosystem-friendly names
+- expose explicit and probed batch file readers
 - provide Arrow/Excel/Bitable/custom source entrypoints
 - compose demos and helper scripts
 
@@ -240,6 +274,8 @@ The following targets anchor this contract:
 
 - core
   - `//:sql_regression_test`
+  - `//:file_source_test`
+  - `//:file_source_probe_test`
   - `//:stream_runtime_test`
   - `//:source_sink_abi_test`
   - `//:stream_strategy_explain_test`
@@ -247,7 +283,9 @@ The following targets anchor this contract:
 - python ecosystem
   - `//python_api:streaming_v05_test`
   - `//python_api:arrow_stream_ingestion_test`
+  - `//python_api:file_source_api_test`
   - `//python_api:python_cli_contract_test`
+  - `//python_api:workspace_runs_test`
   - `//python_api:vector_search_test`
   - `//python_api:read_excel_test`
   - `//python_api:custom_stream_source_test`

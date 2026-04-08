@@ -37,7 +37,7 @@ printf 'id,embedding\n1,[1 0 0]\n2,[0.9 0.1 0]\n3,[0 1 0]\n' >"$tmp_vec_csv"
 
 PYTHONPATH="${PYTHONPATH:-${ROOT}/python_api}" \
   uv run --project python_api python python_api/velaria_cli.py \
-    csv-sql \
+  file-sql \
     --csv "$tmp_csv" \
     --query "SELECT * FROM input_table LIMIT 1"
 

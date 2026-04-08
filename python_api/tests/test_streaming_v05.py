@@ -117,7 +117,7 @@ class StreamingV05Test(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="velaria-py-sink-") as tmp:
             sink_path = str(pathlib.Path(tmp) / "sink.csv")
             session.sql(
-                f"CREATE SINK TABLE sink_out (key STRING, value_sum INT) USING csv OPTIONS(path '{sink_path}', delimiter ',')"
+                f"CREATE SINK TABLE sink_out (key STRING, value_sum INT) USING csv OPTIONS(path: '{sink_path}', delimiter: ',')"
             )
             query = session.start_stream_sql(
                 "INSERT INTO sink_out SELECT key, SUM(value) AS value_sum FROM events_stream GROUP BY key",
@@ -169,7 +169,7 @@ class StreamingV05Test(unittest.TestCase):
                 "CREATE SINK TABLE sink_multi "
                 "(window_start STRING, key STRING, event_count INT, value_sum INT, "
                 "min_value INT, max_value INT, avg_value DOUBLE) "
-                f"USING csv OPTIONS(path '{sink_path}', delimiter ',')"
+                f"USING csv OPTIONS(path: '{sink_path}', delimiter: ',')"
             )
             query = session.start_stream_sql(
                 "INSERT INTO sink_multi "
@@ -215,7 +215,7 @@ class StreamingV05Test(unittest.TestCase):
                 "CREATE SINK TABLE sink_local_workers "
                 "(segment STRING, bucket INT, value_sum INT, event_count INT, "
                 "min_value INT, max_value INT, avg_value DOUBLE) "
-                f"USING csv OPTIONS(path '{sink_path}', delimiter ',')"
+                f"USING csv OPTIONS(path: '{sink_path}', delimiter: ',')"
             )
             query = session.start_stream_sql(
                 "INSERT INTO sink_local_workers "
@@ -268,7 +268,7 @@ class StreamingV05Test(unittest.TestCase):
             session.sql(
                 "CREATE SINK TABLE sink_zero_workers "
                 "(window_start STRING, key STRING, value_sum INT) "
-                f"USING csv OPTIONS(path '{sink_path}', delimiter ',')"
+                f"USING csv OPTIONS(path: '{sink_path}', delimiter: ',')"
             )
             query = session.start_stream_sql(
                 "INSERT INTO sink_zero_workers "
@@ -403,7 +403,7 @@ class StreamingV05Test(unittest.TestCase):
             session.sql(
                 "CREATE SINK TABLE stream_function_out "
                 "(id INT, abs_value DOUBLE, year INT, month INT, day INT, lower_name STRING) "
-                f"USING csv OPTIONS(path '{sink_path}', delimiter ',')"
+                f"USING csv OPTIONS(path: '{sink_path}', delimiter: ',')"
             )
             query = self._run_stream_sql(
                 session,
@@ -465,7 +465,7 @@ class StreamingV05Test(unittest.TestCase):
             session.sql(
                 "CREATE SINK TABLE stream_order_out "
                 "(id INT, abs_value DOUBLE, lower_name STRING) "
-                f"USING csv OPTIONS(path '{sink_path}', delimiter ',')"
+                f"USING csv OPTIONS(path: '{sink_path}', delimiter: ',')"
             )
             query = self._run_stream_sql(
                 session,

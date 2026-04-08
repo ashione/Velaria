@@ -140,6 +140,52 @@ DataFrame DataflowSession::read_csv(const std::string& path, char delimiter) {
   return read_csv(path, delimiter, options);
 }
 
+FileSourceProbeResult DataflowSession::probe(const std::string& path) const {
+  return probe_file_source(path);
+}
+
+DataFrame DataflowSession::read(const std::string& path, const SourceOptions& options) {
+  const auto probe_result = probe(path);
+  switch (probe_result.kind) {
+    case FileSourceKind::Csv:
+      return read_csv(path, probe_result.csv_delimiter, options);
+    case FileSourceKind::Line:
+      return read_line_file(path, probe_result.line_options, options);
+    case FileSourceKind::Json:
+      return read_json(path, probe_result.json_options, options);
+  }
+  throw std::runtime_error("unsupported probed file source");
+}
+
+DataFrame DataflowSession::read(const std::string& path) {
+  SourceOptions options;
+  return read(path, options);
+}
+
+DataFrame DataflowSession::read_line_file(const std::string& path, const LineFileOptions& options,
+                                          const SourceOptions& source_options) {
+  auto schema = infer_line_file_schema(options);
+  auto plan = std::make_shared<SourcePlan>("line", path, std::move(schema), options, source_options);
+  return DataFrame(plan, nullptr, std::make_shared<Schema>(plan->schema));
+}
+
+DataFrame DataflowSession::read_line_file(const std::string& path, const LineFileOptions& options) {
+  SourceOptions source_options;
+  return read_line_file(path, options, source_options);
+}
+
+DataFrame DataflowSession::read_json(const std::string& path, const JsonFileOptions& options,
+                                     const SourceOptions& source_options) {
+  auto schema = infer_json_file_schema(options);
+  auto plan = std::make_shared<SourcePlan>("json", path, std::move(schema), options, source_options);
+  return DataFrame(plan, nullptr, std::make_shared<Schema>(plan->schema));
+}
+
+DataFrame DataflowSession::read_json(const std::string& path, const JsonFileOptions& options) {
+  SourceOptions source_options;
+  return read_json(path, options, source_options);
+}
+
 StreamingDataFrame DataflowSession::readStream(std::shared_ptr<StreamSource> source) {
   return StreamingDataFrame(std::move(source));
 }
@@ -178,9 +224,13 @@ DataFrame dmlResult(const std::string& message, std::size_t affected_rows = 0) {
   return DataFrame(Table(std::move(statusSchema), {row}));
 }
 
-std::vector<std::string> validateCreateColumns(const sql::CreateTableStmt& stmt) {
+std::vector<std::string> collectCreateColumns(const sql::CreateTableStmt& stmt,
+                                             bool require_columns = true) {
   if (stmt.columns.empty()) {
-    throw SQLSemanticError("CREATE TABLE requires at least one column");
+    if (require_columns) {
+      throw SQLSemanticError("CREATE TABLE requires at least one column");
+    }
+    return {};
   }
   std::vector<std::string> fields;
   fields.reserve(stmt.columns.size());
@@ -198,7 +248,7 @@ std::vector<std::string> validateCreateColumns(const sql::CreateTableStmt& stmt)
 }
 
 DataFrame executeCreateTable(ViewCatalog& catalog, const sql::CreateTableStmt& stmt) {
-  const auto fields = validateCreateColumns(stmt);
+  const auto fields = collectCreateColumns(stmt);
   catalog.createTable(stmt.table, fields, stmt.kind);
   return dmlResult("create table done", 0);
 }
@@ -210,23 +260,258 @@ std::string toLower(std::string value) {
   return value;
 }
 
-char csvDelimiter(const sql::CreateTableStmt& stmt) {
-  auto it = stmt.options.find("delimiter");
-  if (it == stmt.options.end()) {
-    return ',';
+std::string trim(std::string value) {
+  const auto start = value.find_first_not_of(" \t\r\n");
+  if (start == std::string::npos) {
+    return "";
   }
-  if (it->second.empty()) {
-    throw SQLSemanticError("csv delimiter cannot be empty");
+  const auto end = value.find_last_not_of(" \t\r\n");
+  return value.substr(start, end - start + 1);
+}
+
+std::optional<std::string> findCreateOption(const sql::CreateTableStmt& stmt,
+                                            const std::string& key) {
+  const auto expected = toLower(key);
+  for (const auto& [name, value] : stmt.options) {
+    if (toLower(name) == expected) {
+      return value;
+    }
   }
-  return it->second[0];
+  return std::nullopt;
 }
 
 std::string requireCreateOption(const sql::CreateTableStmt& stmt, const std::string& key) {
-  auto it = stmt.options.find(key);
-  if (it == stmt.options.end() || it->second.empty()) {
+  const auto value = findCreateOption(stmt, key);
+  if (!value.has_value() || value->empty()) {
     throw SQLSemanticError("CREATE TABLE missing option: " + key);
   }
-  return it->second;
+  return *value;
+}
+
+char csvDelimiter(const sql::CreateTableStmt& stmt, const std::string& option_key = "delimiter") {
+  const auto value = findCreateOption(stmt, option_key);
+  if (!value.has_value()) {
+    return ',';
+  }
+  if (value->empty()) {
+    throw SQLSemanticError(option_key + " cannot be empty");
+  }
+  return (*value)[0];
+}
+
+std::vector<std::string> splitOptionList(const std::string& value, const std::string& key) {
+  std::vector<std::string> items;
+  std::size_t start = 0;
+  while (start <= value.size()) {
+    const auto comma = value.find(',', start);
+    const auto piece =
+        trim(value.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
+    if (!piece.empty()) {
+      items.push_back(piece);
+    }
+    if (comma == std::string::npos) {
+      break;
+    }
+    start = comma + 1;
+  }
+  if (items.empty()) {
+    throw SQLSemanticError("CREATE TABLE option " + key + " cannot be empty");
+  }
+  return items;
+}
+
+FileSourceKind parseCreateFileSourceType(const std::string& raw_value) {
+  const auto value = toLower(trim(raw_value));
+  if (value == "csv") {
+    return FileSourceKind::Csv;
+  }
+  if (value == "line") {
+    return FileSourceKind::Line;
+  }
+  if (value == "json") {
+    return FileSourceKind::Json;
+  }
+  throw SQLSemanticError("CREATE TABLE type/provider must be csv, line, or json");
+}
+
+std::optional<FileSourceKind> resolveCreateFileSourceType(const sql::CreateTableStmt& stmt) {
+  const auto provider = stmt.provider.empty()
+                            ? std::optional<std::string>{}
+                            : std::optional<std::string>{stmt.provider};
+  if (!provider.has_value()) {
+    return std::nullopt;
+  }
+  return parseCreateFileSourceType(*provider);
+}
+
+void validateDeclaredSchema(const sql::CreateTableStmt& stmt, const Schema& actual_schema) {
+  const auto declared = collectCreateColumns(stmt, false);
+  if (declared.empty()) {
+    return;
+  }
+  if (declared.size() != actual_schema.fields.size()) {
+    throw SQLSemanticError("CREATE TABLE column count does not match source schema");
+  }
+  for (std::size_t i = 0; i < declared.size(); ++i) {
+    if (declared[i] != actual_schema.fields[i]) {
+      throw SQLSemanticError("CREATE TABLE column mismatch: expected " + declared[i] + ", got " +
+                             actual_schema.fields[i]);
+    }
+  }
+}
+
+LineFileOptions buildLineFileOptions(const sql::CreateTableStmt& stmt,
+                                     const std::optional<FileSourceProbeResult>& probe) {
+  LineFileOptions options = probe.has_value() ? probe->line_options : LineFileOptions{};
+  const auto mode = findCreateOption(stmt, "mode");
+  if (mode.has_value()) {
+    const auto normalized = toLower(trim(*mode));
+    if (normalized == "split") {
+      options.mode = LineParseMode::Split;
+    } else if (normalized == "regex") {
+      options.mode = LineParseMode::Regex;
+    } else {
+      throw SQLSemanticError("CREATE TABLE option mode must be split or regex");
+    }
+  }
+  if (findCreateOption(stmt, "split_delimiter").has_value()) {
+    options.split_delimiter = csvDelimiter(stmt, "split_delimiter");
+  } else if (findCreateOption(stmt, "delimiter").has_value()) {
+    options.split_delimiter = csvDelimiter(stmt, "delimiter");
+  }
+  if (const auto regex = findCreateOption(stmt, "regex_pattern"); regex.has_value()) {
+    options.regex_pattern = *regex;
+  } else if (const auto regex = findCreateOption(stmt, "regex"); regex.has_value()) {
+    options.regex_pattern = *regex;
+  }
+
+  if (const auto mappings = findCreateOption(stmt, "mappings"); mappings.has_value()) {
+    for (const auto& mapping : splitOptionList(*mappings, "mappings")) {
+      const auto sep = mapping.find(':');
+      if (sep == std::string::npos) {
+        throw SQLSemanticError("CREATE TABLE option mappings must use column:index pairs");
+      }
+      const auto column = trim(mapping.substr(0, sep));
+      const auto index_text = trim(mapping.substr(sep + 1));
+      if (column.empty() || index_text.empty()) {
+        throw SQLSemanticError("CREATE TABLE option mappings must use column:index pairs");
+      }
+      try {
+        options.mappings.push_back(LineColumnMapping{
+            column,
+            static_cast<std::size_t>(std::stoull(index_text)),
+        });
+      } catch (...) {
+        throw SQLSemanticError("CREATE TABLE option mappings contains invalid source index: " +
+                               index_text);
+      }
+    }
+  } else {
+    std::vector<std::string> columns;
+    if (const auto raw_columns = findCreateOption(stmt, "columns"); raw_columns.has_value()) {
+      columns = splitOptionList(*raw_columns, "columns");
+    } else {
+      columns = collectCreateColumns(stmt, false);
+    }
+    if (!columns.empty()) {
+      options.mappings.clear();
+      options.mappings.reserve(columns.size());
+      for (std::size_t i = 0; i < columns.size(); ++i) {
+        options.mappings.push_back(LineColumnMapping{columns[i], i});
+      }
+    } else if (options.mappings.empty()) {
+      throw SQLSemanticError(
+          "CREATE TABLE line source requires columns, OPTIONS(columns: 'name1,name2,...'), "
+          "or OPTIONS(mappings: 'name:0,...')");
+    }
+  }
+
+  if (options.mode == LineParseMode::Regex && options.regex_pattern.empty()) {
+    throw SQLSemanticError("CREATE TABLE regex line source requires OPTIONS(regex_pattern: '...')");
+  }
+  return options;
+}
+
+JsonFileOptions buildJsonFileOptions(const sql::CreateTableStmt& stmt,
+                                     const std::optional<FileSourceProbeResult>& probe) {
+  JsonFileOptions options = probe.has_value() ? probe->json_options : JsonFileOptions{};
+  if (const auto format = findCreateOption(stmt, "format"); format.has_value()) {
+    const auto normalized = toLower(trim(*format));
+    if (normalized == "json_lines" || normalized == "jsonl" || normalized == "lines") {
+      options.format = JsonFileFormat::JsonLines;
+    } else if (normalized == "json_array" || normalized == "array") {
+      options.format = JsonFileFormat::JsonArray;
+    } else {
+      throw SQLSemanticError("CREATE TABLE option format must be json_lines or json_array");
+    }
+  }
+  if (const auto columns = findCreateOption(stmt, "columns"); columns.has_value()) {
+    options.columns = splitOptionList(*columns, "columns");
+  } else {
+    const auto declared = collectCreateColumns(stmt, false);
+    if (!declared.empty()) {
+      options.columns = declared;
+    }
+  }
+  if (options.columns.empty()) {
+    throw SQLSemanticError(
+        "CREATE TABLE json source requires columns or OPTIONS(columns: 'name1,name2,...')");
+  }
+  return options;
+}
+
+DataFrame executeCreateExternalTable(DataflowSession* session, ViewCatalog& catalog,
+                                     const sql::CreateTableStmt& stmt, FileSourceKind kind,
+                                     const std::optional<FileSourceProbeResult>& probe) {
+  if (session == nullptr) {
+    throw std::invalid_argument("executeCreateExternalTable session is null");
+  }
+  if (stmt.kind == sql::TableKind::Sink) {
+    if (kind != FileSourceKind::Csv) {
+      throwUnsupportedSqlV1("CREATE SINK TABLE only supports csv");
+    }
+    collectCreateColumns(stmt);
+    const auto path = requireCreateOption(stmt, "path");
+    const auto delimiter = findCreateOption(stmt, "delimiter").has_value()
+                               ? csvDelimiter(stmt)
+                               : (probe.has_value() ? probe->csv_delimiter : ',');
+    session->registerStreamSink(stmt.table,
+                                std::make_shared<FileAppendStreamSink>(path, delimiter));
+    return dmlResult("create sink table done", 0);
+  }
+
+  if (stmt.kind == sql::TableKind::Source) {
+    if (kind != FileSourceKind::Csv) {
+      throwUnsupportedSqlV1("CREATE SOURCE TABLE only supports csv");
+    }
+    collectCreateColumns(stmt);
+    const auto path = requireCreateOption(stmt, "path");
+    const auto delimiter = findCreateOption(stmt, "delimiter").has_value()
+                               ? csvDelimiter(stmt)
+                               : (probe.has_value() ? probe->csv_delimiter : ',');
+    session->createTempView(stmt.table, session->readStreamCsvDir(path, delimiter));
+    return dmlResult("create source table done", 0);
+  }
+
+  const auto path = requireCreateOption(stmt, "path");
+  DataFrame source;
+  switch (kind) {
+    case FileSourceKind::Csv:
+      source = session->read_csv(
+          path, findCreateOption(stmt, "delimiter").has_value()
+                    ? csvDelimiter(stmt)
+                    : (probe.has_value() ? probe->csv_delimiter : ','));
+      break;
+    case FileSourceKind::Line:
+      source = session->read_line_file(path, buildLineFileOptions(stmt, probe));
+      break;
+    case FileSourceKind::Json:
+      source = session->read_json(path, buildJsonFileOptions(stmt, probe));
+      break;
+  }
+  validateDeclaredSchema(stmt, source.schema());
+  session->createTempView(stmt.table, source);
+  return dmlResult("create table done", 0);
 }
 
 std::size_t findNameIndex(const Schema& schema, const std::string& name) {
@@ -799,24 +1084,17 @@ DataFrame DataflowSession::sql(const std::string& sql) {
 
   if (statement.kind == sql::SqlStatementKind::CreateTable) {
     DataFrame result;
-    if (!statement.create.provider.empty()) {
-      const auto provider = toLower(statement.create.provider);
-      if (provider != "csv") {
-        throwUnsupportedSqlV1("stream CREATE TABLE only supports USING csv");
+    const auto path_option = findCreateOption(statement.create, "path");
+    const auto explicit_kind = resolveCreateFileSourceType(statement.create);
+    if (path_option.has_value()) {
+      std::optional<FileSourceProbeResult> probe_result;
+      if (statement.create.kind == sql::TableKind::Regular || !explicit_kind.has_value()) {
+        probe_result = probe(*path_option);
       }
-      validateCreateColumns(statement.create);
-      const auto path = requireCreateOption(statement.create, "path");
-      const auto delimiter = csvDelimiter(statement.create);
-      if (statement.create.kind == sql::TableKind::Source) {
-        createTempView(statement.create.table, readStreamCsvDir(path, delimiter));
-        result = dmlResult("create source table done", 0);
-      } else if (statement.create.kind == sql::TableKind::Sink) {
-        registerStreamSink(statement.create.table,
-                           std::make_shared<FileAppendStreamSink>(path, delimiter));
-        result = dmlResult("create sink table done", 0);
-      } else {
-        throwUnsupportedSqlV1("USING csv requires CREATE SOURCE TABLE or CREATE SINK TABLE");
-      }
+      const auto file_source_kind =
+          explicit_kind.value_or(probe_result.has_value() ? probe_result->kind : FileSourceKind::Csv);
+      result = executeCreateExternalTable(this, catalog_, statement.create, file_source_kind,
+                                          probe_result);
     } else {
       result = executeCreateTable(catalog_, statement.create);
     }

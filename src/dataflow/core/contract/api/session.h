@@ -2,6 +2,7 @@
 
 #include "src/dataflow/core/contract/api/dataframe.h"
 #include "src/dataflow/core/contract/catalog/catalog.h"
+#include "src/dataflow/core/execution/file_source.h"
 #include "src/dataflow/core/execution/source_materialization.h"
 #include "src/dataflow/core/execution/stream/stream.h"
 #include "src/dataflow/core/logical/sql/sql_parser.h"
@@ -17,6 +18,15 @@ class DataflowSession {
   DataFrame read_csv(const std::string& path, const SourceOptions& options);
   DataFrame read_csv(const std::string& path, char delimiter, const SourceOptions& options);
   DataFrame read_csv(const std::string& path, char delimiter = ',');
+  FileSourceProbeResult probe(const std::string& path) const;
+  DataFrame read(const std::string& path, const SourceOptions& options);
+  DataFrame read(const std::string& path);
+  DataFrame read_line_file(const std::string& path, const LineFileOptions& options,
+                           const SourceOptions& source_options);
+  DataFrame read_line_file(const std::string& path, const LineFileOptions& options);
+  DataFrame read_json(const std::string& path, const JsonFileOptions& options,
+                      const SourceOptions& source_options);
+  DataFrame read_json(const std::string& path, const JsonFileOptions& options);
   StreamingDataFrame readStream(std::shared_ptr<StreamSource> source);
   StreamingDataFrame readStreamCsvDir(const std::string& directory, char delimiter = ',');
   DataFrame createDataFrame(Table table);

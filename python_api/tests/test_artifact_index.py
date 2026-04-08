@@ -21,7 +21,7 @@ class ArtifactIndexTest(unittest.TestCase):
                         "created_at": "2026-04-01T10:00:00Z",
                         "finished_at": "2026-04-01T10:00:02Z",
                         "status": "succeeded",
-                        "action": "csv-sql",
+                        "action": "file-sql",
                         "cli_args": {"query": "SELECT 1"},
                         "velaria_version": "0.0.test",
                         "run_dir": str(run_dir),
@@ -77,8 +77,8 @@ class ArtifactIndexTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
                 index = ArtifactIndex()
                 for run_id, status, action, tags in [
-                    ("run-1", "succeeded", "csv-sql", ["cn", "slow-query"]),
-                    ("run-2", "failed", "csv-sql", ["my", "slow-query"]),
+                    ("run-1", "succeeded", "file-sql", ["cn", "slow-query"]),
+                    ("run-2", "failed", "file-sql", ["my", "slow-query"]),
                     ("run-3", "succeeded", "vector-search", ["cn", "embedding"]),
                 ]:
                     run_dir = pathlib.Path(tmp) / "runs" / run_id
@@ -119,7 +119,7 @@ class ArtifactIndexTest(unittest.TestCase):
                 self.assertEqual(runs[0]["artifact_count"], 1)
                 self.assertEqual(runs[0]["duration_ms"], 1000)
 
-                csv_runs = index.list_runs(limit=10, action="csv-sql")
+                csv_runs = index.list_runs(limit=10, action="file-sql")
                 self.assertEqual([run["run_id"] for run in csv_runs], ["run-2", "run-1"])
 
                 searched = index.list_runs(limit=10, query="embedding")
@@ -174,7 +174,7 @@ class ArtifactIndexTest(unittest.TestCase):
                         "2026-04-01T10:00:00Z",
                         "2026-04-01T10:00:01Z",
                         "succeeded",
-                        "csv-sql",
+                        "file-sql",
                         "{}",
                         "0.0.test",
                         str(pathlib.Path(tmp) / "runs" / "run-legacy"),
@@ -199,7 +199,7 @@ class ArtifactIndexTest(unittest.TestCase):
                         "created_at": "2026-04-02T10:00:00Z",
                         "finished_at": "2026-04-02T10:00:01Z",
                         "status": "succeeded",
-                        "action": "csv-sql",
+                        "action": "file-sql",
                         "cli_args": {},
                         "velaria_version": "0.0.test",
                         "run_dir": str(run_dir),
@@ -246,7 +246,7 @@ class ArtifactIndexTest(unittest.TestCase):
                             "created_at": f"2026-04-0{offset}T10:00:00Z",
                             "finished_at": None,
                             "status": "succeeded",
-                            "action": "csv-sql",
+                            "action": "file-sql",
                             "cli_args": {},
                             "velaria_version": "0.0.test",
                             "run_dir": str(run_dir),

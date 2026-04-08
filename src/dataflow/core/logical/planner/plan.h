@@ -5,8 +5,9 @@
 #include <string>
 #include <vector>
 
-#include "src/dataflow/core/execution/table.h"
+#include "src/dataflow/core/execution/file_source.h"
 #include "src/dataflow/core/execution/source_materialization.h"
+#include "src/dataflow/core/execution/table.h"
 
 namespace dataflow {
 
@@ -161,6 +162,9 @@ struct SourcePlan : PlanNode {
   Table table;
   std::string csv_path;
   char csv_delimiter = ',';
+  FileSourceKind file_source_kind = FileSourceKind::Csv;
+  LineFileOptions line_options;
+  JsonFileOptions json_options;
   SourceOptions options;
   mutable std::mutex cached_table_mu;
   mutable std::shared_ptr<Table> cached_table;
@@ -181,6 +185,30 @@ struct SourcePlan : PlanNode {
         schema(std::move(source_schema)),
         csv_path(std::move(path)),
         csv_delimiter(delimiter),
+        options(std::move(source_options)) {}
+
+  SourcePlan(std::string name, std::string path, Schema source_schema,
+             LineFileOptions source_line_options, SourceOptions source_options = {})
+      : PlanNode(PlanKind::Source),
+        source_name(std::move(name)),
+        storage_kind(SourceStorageKind::CsvFile),
+        schema(std::move(source_schema)),
+        csv_path(std::move(path)),
+        csv_delimiter(','),
+        file_source_kind(FileSourceKind::Line),
+        line_options(std::move(source_line_options)),
+        options(std::move(source_options)) {}
+
+  SourcePlan(std::string name, std::string path, Schema source_schema,
+             JsonFileOptions source_json_options, SourceOptions source_options = {})
+      : PlanNode(PlanKind::Source),
+        source_name(std::move(name)),
+        storage_kind(SourceStorageKind::CsvFile),
+        schema(std::move(source_schema)),
+        csv_path(std::move(path)),
+        csv_delimiter(','),
+        file_source_kind(FileSourceKind::Json),
+        json_options(std::move(source_json_options)),
         options(std::move(source_options)) {}
 };
 

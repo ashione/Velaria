@@ -238,6 +238,16 @@ py_test(
 )
 
 py_test(
+    name = "file_source_api_test",
+    srcs = ["tests/test_file_sources.py"],
+    main = "tests/test_file_sources.py",
+    imports = ["."],
+    deps = [
+        ":velaria_py_pkg",
+    ],
+)
+
+py_test(
     name = "bitable_stream_source_test",
     srcs = ["tests/test_bitable_stream_source.py"],
     main = "tests/test_bitable_stream_source.py",
@@ -309,6 +319,7 @@ test_suite(
         ":bitable_group_by_owner_integration_test",
         ":bitable_stream_source_test",
         ":custom_stream_source_test",
+        ":file_source_api_test",
         ":python_cli_contract_test",
         ":read_excel_test",
         ":streaming_v05_test",

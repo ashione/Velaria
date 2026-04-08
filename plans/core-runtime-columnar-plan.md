@@ -87,8 +87,26 @@ The following pieces are already in place in the current repository state.
   - window bucket assignment helper
   - serialized group/join key materialization
   - hash bucket construction
-  - shared string kernels
+- shared string kernels
 - some helper APIs still materialize full `ValueColumnBuffer` copies today; reducing those copies is part of the next-phase work rather than a completed item
+
+### File-input pushdown and probed batch registration
+
+- explicit file readers now cover:
+  - `read_csv(...)`
+  - `read_line_file(...)`
+  - `read_json(...)`
+- probed batch file ingress now covers:
+  - `probe(...)`
+  - `read(...)`
+  - `CREATE TABLE ... OPTIONS(path: '...')`
+- file-source probing now returns a scored final format plus candidate list and confidence
+- `line/json` aggregate pushdown has been moved from full-table load then aggregate into scan-time aggregation on the same generic reducer path
+- file-input benchmark coverage now compares:
+  - hardcode baseline
+  - explicit reader path
+  - probed reader path
+  - SQL registration path
 
 ### Retained columnar cache on `Table`
 
@@ -211,6 +229,7 @@ rematerializing the same columns again in the middle of the pipeline.
 Required benchmark targets:
 
 - hardcode vs native kernel batch comparison on shared inputs
+- explicit vs probed file input on shared CSV / line / JSON sources
 - string builtin execution
 - stream local-workers execution
 - Arrow import/export
@@ -225,6 +244,19 @@ Additional builtin functions are acceptable only when:
 - executor semantics are stable
 - unsupported shapes still fail clearly
 - the implementation stays on the same batch-oriented helper path instead of introducing a second ad hoc execution path
+
+### 6. Typed source pushdown and reducer path
+
+This is the next meaningful optimization layer after the current generic fast paths.
+
+Target shape:
+
+- source scanners emit only typed slots needed by filter / key / aggregate
+- common reducers such as `COUNT` and numeric `SUM` use typed aggregate state instead of general `Value` state
+- common grouped-key layouts avoid `Row<Value>` keys in hot loops
+- optimizer selects the typed path explicitly and falls back to the existing generic path when the shape is not supported
+
+This should be treated as a new execution-layer design task, not as another small local cleanup.
 
 ## Related Historical Notes
 

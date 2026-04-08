@@ -116,7 +116,7 @@ std::vector<Token> tokenize(const std::string& sql) {
         continue;
       }
     }
-    if (c == ',' || c == '(' || c == ')' || c == '.' || c == '*' || c == '=' || c == '>' ||
+    if (c == ',' || c == '(' || c == ')' || c == '.' || c == '*' || c == '=' || c == ':' || c == '>' ||
         c == '<') {
       out.push_back(Token(std::string(1, c), false, false));
       ++i;
@@ -638,7 +638,7 @@ void parseCreateOptions(ParseState& state, SqlStatement& out) {
     if (!state.consumeSymbol(")")) {
       while (true) {
         const auto key = state.expectToken().text;
-        state.consumeSymbol("=");
+        state.expectSymbol(":");
         const auto value = state.expectToken().text;
         out.create.options[key] = value;
         if (state.consumeSymbol(")")) {
@@ -660,14 +660,15 @@ SqlStatement parseCreateTable(ParseState& state) {
   }
   state.expectWord("TABLE");
   out.create.table = state.expectToken().text;
-  state.expectSymbol("(");
-  if (state.consumeSymbol(")")) {
-    throw SQLSyntaxError("CREATE TABLE requires at least one column");
-  }
-  while (true) {
-    out.create.columns.push_back(parseCreateColumn(state));
-    if (state.consumeSymbol(")")) break;
-    state.expectSymbol(",");
+  if (state.consumeSymbol("(")) {
+    if (state.consumeSymbol(")")) {
+      throw SQLSyntaxError("CREATE TABLE requires at least one column");
+    }
+    while (true) {
+      out.create.columns.push_back(parseCreateColumn(state));
+      if (state.consumeSymbol(")")) break;
+      state.expectSymbol(",");
+    }
   }
   parseCreateOptions(state, out);
   return out;

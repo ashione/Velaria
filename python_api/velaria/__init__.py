@@ -27,7 +27,7 @@ def _load_from_path(ext_path: pathlib.Path):
 
 def _find_repo_root(start: pathlib.Path):
     for path in [start, *start.parents]:
-        if (path / "MODULE.bazel").exists() or (path / "WORKSPACE").exists():
+        if (path / "MODULE.bazel").exists():
             return path
     return None
 

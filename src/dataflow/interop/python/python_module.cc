@@ -146,6 +146,14 @@ void setDictItem(PyObject* dict, const char* key, PyObject* value) {
   Py_DECREF(value);
 }
 
+PyObject* pyStringList(const std::vector<std::string>& values) {
+  PyObject* out = PyList_New(static_cast<Py_ssize_t>(values.size()));
+  for (Py_ssize_t i = 0; i < static_cast<Py_ssize_t>(values.size()); ++i) {
+    PyList_SET_ITEM(out, i, PyUnicode_FromString(values[static_cast<std::size_t>(i)].c_str()));
+  }
+  return out;
+}
+
 char parseDelimiter(const char* text) {
   if (text == nullptr || text[0] == '\0' || text[1] != '\0') {
     throw std::runtime_error("delimiter must be a single character");
@@ -166,6 +174,21 @@ df::MaterializationDataFormat parseMaterializationDataFormat(const char* text) {
   }
   throw std::runtime_error(
       "materialization_format must be one of: binary_row_batch, nanoarrow_ipc");
+}
+
+df::SourceOptions parseSourceOptions(int materialization_enabled, const char* materialization_dir,
+                                     const char* materialization_format) {
+  df::SourceOptions options;
+  options.materialization.enabled =
+      materialization_enabled != 0 || materialization_dir != nullptr ||
+      materialization_format != nullptr;
+  if (materialization_dir != nullptr) {
+    options.materialization.root = materialization_dir;
+  }
+  if (materialization_format != nullptr) {
+    options.materialization.data_format = parseMaterializationDataFormat(materialization_format);
+  }
+  return options;
 }
 
 std::vector<std::string> parseStringList(PyObject* obj, const char* arg_name) {
@@ -189,6 +212,101 @@ std::vector<std::string> parseStringList(PyObject* obj, const char* arg_name) {
   }
   Py_DECREF(seq);
   return values;
+}
+
+std::string parseUnicode(PyObject* obj, const char* arg_name) {
+  if (!PyUnicode_Check(obj)) {
+    throw std::runtime_error(std::string(arg_name) + " must be a string");
+  }
+  return PyUnicode_AsUTF8(obj);
+}
+
+std::size_t parseNonNegativeIndex(PyObject* obj, const char* arg_name) {
+  if (!PyLong_Check(obj)) {
+    throw std::runtime_error(std::string(arg_name) + " must be an integer");
+  }
+  const long long value = PyLong_AsLongLong(obj);
+  if (PyErr_Occurred() != nullptr) {
+    throw std::runtime_error(std::string("failed to parse ") + arg_name);
+  }
+  if (value < 0) {
+    throw std::runtime_error(std::string(arg_name) + " must be non-negative");
+  }
+  return static_cast<std::size_t>(value);
+}
+
+df::LineParseMode parseLineParseMode(const char* text) {
+  const std::string mode = text == nullptr ? "split" : text;
+  if (mode == "split") {
+    return df::LineParseMode::Split;
+  }
+  if (mode == "regex") {
+    return df::LineParseMode::Regex;
+  }
+  throw std::runtime_error("mode must be one of: split, regex");
+}
+
+df::JsonFileFormat parseJsonFileFormat(const char* text) {
+  const std::string format = text == nullptr ? "json_lines" : text;
+  if (format == "json_lines" || format == "jsonl" || format == "lines") {
+    return df::JsonFileFormat::JsonLines;
+  }
+  if (format == "json_array" || format == "array") {
+    return df::JsonFileFormat::JsonArray;
+  }
+  throw std::runtime_error("format must be one of: json_lines, json_array");
+}
+
+df::LineColumnMapping parseLineMapping(PyObject* obj, std::size_t mapping_index) {
+  const std::string mapping_name = "mappings[" + std::to_string(mapping_index) + "]";
+  if (PyDict_Check(obj)) {
+    PyObject* column = PyDict_GetItemString(obj, "column");
+    PyObject* source_index = PyDict_GetItemString(obj, "source_index");
+    if (column == nullptr || source_index == nullptr) {
+      throw std::runtime_error(mapping_name + " dict mapping requires column and source_index");
+    }
+    return df::LineColumnMapping{
+        parseUnicode(column, (mapping_name + ".column").c_str()),
+        parseNonNegativeIndex(source_index, (mapping_name + ".source_index").c_str()),
+    };
+  }
+  if (!PySequence_Check(obj) || PyUnicode_Check(obj)) {
+    throw std::runtime_error(mapping_name + " must be a (column, source_index) pair");
+  }
+  PyObject* seq = PySequence_Fast(obj, mapping_name.c_str());
+  if (seq == nullptr) {
+    throw std::runtime_error("failed to read " + mapping_name);
+  }
+  if (PySequence_Fast_GET_SIZE(seq) != 2) {
+    Py_DECREF(seq);
+    throw std::runtime_error(mapping_name + " must have exactly 2 items");
+  }
+  PyObject** items = PySequence_Fast_ITEMS(seq);
+  df::LineColumnMapping mapping{
+      parseUnicode(items[0], (mapping_name + "[0]").c_str()),
+      parseNonNegativeIndex(items[1], (mapping_name + "[1]").c_str()),
+  };
+  Py_DECREF(seq);
+  return mapping;
+}
+
+std::vector<df::LineColumnMapping> parseLineMappings(PyObject* obj) {
+  if (PyUnicode_Check(obj) || !PySequence_Check(obj)) {
+    throw std::runtime_error("mappings must be a sequence of (column, source_index) pairs");
+  }
+  PyObject* seq = PySequence_Fast(obj, "mappings");
+  if (seq == nullptr) {
+    throw std::runtime_error("failed to read mappings");
+  }
+  std::vector<df::LineColumnMapping> mappings;
+  const Py_ssize_t count = PySequence_Fast_GET_SIZE(seq);
+  mappings.reserve(static_cast<std::size_t>(count));
+  PyObject** items = PySequence_Fast_ITEMS(seq);
+  for (Py_ssize_t i = 0; i < count; ++i) {
+    mappings.push_back(parseLineMapping(items[i], static_cast<std::size_t>(i)));
+  }
+  Py_DECREF(seq);
+  return mappings;
 }
 
 std::vector<float> parseFloatVector(PyObject* obj, const char* arg_name) {
@@ -234,6 +352,74 @@ df::Value valueFromPy(PyObject* obj) {
     return df::Value(parseFloatVector(obj, "value"));
   }
   throw std::runtime_error("value must be None, int, float, bool, or string");
+}
+
+PyObject* pyProbeFromNative(const df::FileSourceProbeResult& probe) {
+  PyObject* out = PyDict_New();
+  const char* kind = "csv";
+  if (probe.kind == df::FileSourceKind::Line) {
+    kind = "line";
+  } else if (probe.kind == df::FileSourceKind::Json) {
+    kind = "json";
+  }
+  setDictItem(out, "path", PyUnicode_FromString(probe.path.c_str()));
+  setDictItem(out, "kind", PyUnicode_FromString(kind));
+  setDictItem(out, "final_format", PyUnicode_FromString(probe.format_name.c_str()));
+  setDictItem(out, "score", PyLong_FromLong(probe.score));
+  setDictItem(out, "confidence", PyUnicode_FromString(probe.confidence.c_str()));
+  setDictItem(out, "schema", pyStringList(probe.schema.fields));
+  setDictItem(out, "suggested_table_name",
+              PyUnicode_FromString(probe.suggested_table_name.c_str()));
+  setDictItem(out, "warnings", pyStringList(probe.warnings));
+  PyObject* candidates = PyList_New(static_cast<Py_ssize_t>(probe.candidates.size()));
+  for (Py_ssize_t i = 0; i < static_cast<Py_ssize_t>(probe.candidates.size()); ++i) {
+    const auto& candidate = probe.candidates[static_cast<std::size_t>(i)];
+    PyObject* item = PyDict_New();
+    const char* candidate_kind = "csv";
+    if (candidate.kind == df::FileSourceKind::Line) {
+      candidate_kind = "line";
+    } else if (candidate.kind == df::FileSourceKind::Json) {
+      candidate_kind = "json";
+    }
+    setDictItem(item, "format", PyUnicode_FromString(candidate.format_name.c_str()));
+    setDictItem(item, "kind", PyUnicode_FromString(candidate_kind));
+    setDictItem(item, "score", PyLong_FromLong(candidate.score));
+    setDictItem(item, "reason", PyUnicode_FromString(candidate.reason.c_str()));
+    setDictItem(item, "evidence", pyStringList(candidate.evidence));
+    PyList_SET_ITEM(candidates, i, item);
+  }
+  setDictItem(out, "candidates", candidates);
+  if (probe.kind == df::FileSourceKind::Csv) {
+    char buffer[2] = {probe.csv_delimiter, '\0'};
+    setDictItem(out, "delimiter", PyUnicode_FromString(buffer));
+  } else if (probe.kind == df::FileSourceKind::Line) {
+    PyObject* mappings = PyList_New(
+        static_cast<Py_ssize_t>(probe.line_options.mappings.size()));
+    for (Py_ssize_t i = 0;
+         i < static_cast<Py_ssize_t>(probe.line_options.mappings.size()); ++i) {
+      const auto& mapping = probe.line_options.mappings[static_cast<std::size_t>(i)];
+      PyObject* item = PyDict_New();
+      setDictItem(item, "column", PyUnicode_FromString(mapping.column.c_str()));
+      setDictItem(item, "source_index",
+                  PyLong_FromUnsignedLongLong(
+                      static_cast<unsigned long long>(mapping.source_index)));
+      PyList_SET_ITEM(mappings, i, item);
+    }
+    char buffer[2] = {probe.line_options.split_delimiter, '\0'};
+    setDictItem(out, "mode",
+                PyUnicode_FromString(probe.line_options.mode == df::LineParseMode::Split
+                                         ? "split"
+                                         : "regex"));
+    setDictItem(out, "delimiter", PyUnicode_FromString(buffer));
+    setDictItem(out, "mappings", mappings);
+  } else {
+    setDictItem(out, "format",
+                PyUnicode_FromString(probe.json_options.format == df::JsonFileFormat::JsonLines
+                                         ? "json_lines"
+                                         : "json_array"));
+    setDictItem(out, "columns", pyStringList(probe.json_options.columns));
+  }
+  return out;
 }
 
 enum class FastArrowColumnKind {
@@ -1398,21 +1584,123 @@ PyObject* sessionReadCsv(PyVelariaSession* self, PyObject* args, PyObject* kwarg
                                      &materialization_dir, &materialization_format)) {
       return nullptr;
     }
-    df::SourceOptions options;
     const auto delimiter = parseDelimiter(delimiter_text);
-    options.materialization.enabled =
-        materialization_enabled != 0 || materialization_dir != nullptr ||
-        materialization_format != nullptr;
-    if (materialization_dir != nullptr) {
-      options.materialization.root = materialization_dir;
-    }
-    if (materialization_format != nullptr) {
-      options.materialization.data_format = parseMaterializationDataFormat(materialization_format);
-    }
+    df::SourceOptions options = parseSourceOptions(materialization_enabled, materialization_dir,
+                                                   materialization_format);
     std::unique_ptr<df::DataFrame> out;
     {
       AllowThreads allow;
       out = std::make_unique<df::DataFrame>(self->session->read_csv(path, delimiter, options));
+    }
+    return wrapDataFrame(std::move(*out));
+  });
+}
+
+PyObject* sessionProbe(PyVelariaSession* self, PyObject* args, PyObject* kwargs) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    const char* path = nullptr;
+    static const char* kwlist[] = {"path", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s", const_cast<char**>(kwlist), &path)) {
+      return nullptr;
+    }
+    df::FileSourceProbeResult probe;
+    {
+      AllowThreads allow;
+      probe = self->session->probe(path);
+    }
+    return pyProbeFromNative(probe);
+  });
+}
+
+PyObject* sessionReadAuto(PyVelariaSession* self, PyObject* args, PyObject* kwargs) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    const char* path = nullptr;
+    int materialization_enabled = 0;
+    const char* materialization_dir = nullptr;
+    const char* materialization_format = nullptr;
+    static const char* kwlist[] = {"path", "materialization", "materialization_dir",
+                                   "materialization_format", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|pzz", const_cast<char**>(kwlist), &path,
+                                     &materialization_enabled, &materialization_dir,
+                                     &materialization_format)) {
+      return nullptr;
+    }
+    df::SourceOptions options = parseSourceOptions(materialization_enabled, materialization_dir,
+                                                   materialization_format);
+    std::unique_ptr<df::DataFrame> out;
+    {
+      AllowThreads allow;
+      out = std::make_unique<df::DataFrame>(self->session->read(path, options));
+    }
+    return wrapDataFrame(std::move(*out));
+  });
+}
+
+PyObject* sessionReadLineFile(PyVelariaSession* self, PyObject* args, PyObject* kwargs) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    const char* path = nullptr;
+    PyObject* mappings = nullptr;
+    const char* mode = "split";
+    const char* split_delimiter = ",";
+    const char* regex_pattern = "";
+    int skip_empty_lines = 1;
+    int materialization_enabled = 0;
+    const char* materialization_dir = nullptr;
+    const char* materialization_format = nullptr;
+    static const char* kwlist[] = {"path",       "mappings",
+                                   "mode",       "split_delimiter",
+                                   "regex_pattern", "skip_empty_lines",
+                                   "materialization", "materialization_dir",
+                                   "materialization_format", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "sO|sssppzz",
+                                     const_cast<char**>(kwlist), &path, &mappings, &mode,
+                                     &split_delimiter, &regex_pattern, &skip_empty_lines,
+                                     &materialization_enabled, &materialization_dir,
+                                     &materialization_format)) {
+      return nullptr;
+    }
+    df::LineFileOptions options;
+    options.mode = parseLineParseMode(mode);
+    options.split_delimiter = parseDelimiter(split_delimiter);
+    options.regex_pattern = regex_pattern == nullptr ? "" : regex_pattern;
+    options.mappings = parseLineMappings(mappings);
+    options.skip_empty_lines = skip_empty_lines != 0;
+    df::SourceOptions source_options = parseSourceOptions(
+        materialization_enabled, materialization_dir, materialization_format);
+    std::unique_ptr<df::DataFrame> out;
+    {
+      AllowThreads allow;
+      out = std::make_unique<df::DataFrame>(
+          self->session->read_line_file(path, options, source_options));
+    }
+    return wrapDataFrame(std::move(*out));
+  });
+}
+
+PyObject* sessionReadJson(PyVelariaSession* self, PyObject* args, PyObject* kwargs) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    const char* path = nullptr;
+    PyObject* columns = nullptr;
+    const char* format = "json_lines";
+    int materialization_enabled = 0;
+    const char* materialization_dir = nullptr;
+    const char* materialization_format = nullptr;
+    static const char* kwlist[] = {"path", "columns", "format", "materialization",
+                                   "materialization_dir", "materialization_format", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "sO|spzz", const_cast<char**>(kwlist), &path,
+                                     &columns, &format, &materialization_enabled,
+                                     &materialization_dir, &materialization_format)) {
+      return nullptr;
+    }
+    df::JsonFileOptions options;
+    options.format = parseJsonFileFormat(format);
+    options.columns = parseStringList(columns, "columns");
+    df::SourceOptions source_options = parseSourceOptions(
+        materialization_enabled, materialization_dir, materialization_format);
+    std::unique_ptr<df::DataFrame> out;
+    {
+      AllowThreads allow;
+      out = std::make_unique<df::DataFrame>(self->session->read_json(path, options, source_options));
     }
     return wrapDataFrame(std::move(*out));
   });
@@ -1960,8 +2248,16 @@ PyObject* querySnapshotJson(PyVelariaStreamingQuery* self, PyObject*) {
 }
 
 PyMethodDef sessionMethods[] = {
+    {"probe", reinterpret_cast<PyCFunction>(sessionProbe), METH_VARARGS | METH_KEYWORDS,
+     "Probe a file source and return inferred kind/options/schema."},
+    {"read", reinterpret_cast<PyCFunction>(sessionReadAuto), METH_VARARGS | METH_KEYWORDS,
+     "Read a file source by probing its format and schema."},
     {"read_csv", reinterpret_cast<PyCFunction>(sessionReadCsv), METH_VARARGS | METH_KEYWORDS,
      "Read a CSV file into a DataFrame."},
+    {"read_line_file", reinterpret_cast<PyCFunction>(sessionReadLineFile),
+     METH_VARARGS | METH_KEYWORDS, "Read a delimited or regex line file into a DataFrame."},
+    {"read_json", reinterpret_cast<PyCFunction>(sessionReadJson), METH_VARARGS | METH_KEYWORDS,
+     "Read a JSON lines or JSON array file into a DataFrame."},
     {"sql", reinterpret_cast<PyCFunction>(sessionSql), METH_VARARGS, "Run batch SQL or SQL DDL."},
     {"explain_sql", reinterpret_cast<PyCFunction>(sessionExplainSql), METH_VARARGS,
      "Explain a batch SELECT query with logical/physical/strategy sections."},

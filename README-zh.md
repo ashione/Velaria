@@ -94,6 +94,12 @@ Arrow / CSV / Python ingress
 - 一个 native kernel 同时支持 batch + streaming
 - native 路径明确以性能优先为导向
 - 明确朝 column-first 执行推进，并在兼容边界上采用 lazy row materialization
+- batch 文件输入已经支持显式与自动探测两条入口：
+  - `session.read_csv(...)`、`session.read_line_file(...)`、`session.read_json(...)`
+  - `session.probe(...)` 与 `session.read(...)` 用于通用 file input
+- batch SQL 文件注册已支持：
+  - `CREATE TABLE ... USING csv|line|json OPTIONS(...)`
+  - `CREATE TABLE ... OPTIONS(path: '...')` 通过 source probing 自动建表
 - batch SQL v1：
   - `CREATE TABLE`、`CREATE SOURCE TABLE`、`CREATE SINK TABLE`
   - `INSERT INTO ... VALUES`
@@ -145,16 +151,70 @@ Arrow / CSV / Python ingress
 - 当前维护中的主 plan：[plans/core-runtime-columnar-plan.md](./plans/core-runtime-columnar-plan.md)
 - `plans/` 目录索引：[plans/README-zh.md](./plans/README-zh.md)
 
-## 4. 如果要加入开发
+## 4. Usage 示例
 
-仓库基线：
+自动探测文件源的 batch SQL：
 
-- 语言基线：`C++20`
-- 构建系统：`Bazel`
-- 对外 session 入口保持为 `DataflowSession`
-- 不要破坏 `sql_demo / df_demo / stream_demo`
-- 示例源码统一使用 `.cc`
-- 本仓库中的 Python 命令统一使用 `uv`
+```sql
+CREATE TABLE rpc_input OPTIONS(path: '/tmp/input.jsonl');
+SELECT * FROM rpc_input LIMIT 5;
+```
+
+显式 CSV 源的 batch SQL：
+
+```sql
+CREATE TABLE csv_input USING csv OPTIONS(path: '/tmp/input.csv', delimiter: ',');
+SELECT * FROM csv_input LIMIT 5;
+```
+
+Python batch 文件输入：
+
+```python
+import velaria
+
+session = velaria.Session()
+probe = session.probe("/tmp/input.jsonl")
+df = session.read("/tmp/input.jsonl")
+```
+
+显式 CSV reader：
+
+```python
+csv_df = session.read_csv("/tmp/input.csv")
+```
+
+Regex line 输入：
+
+```python
+regex_df = session.read_line_file(
+    "/tmp/events.log",
+    mappings=[("uid", 1), ("action", 2), ("latency", 3), ("ok", 4), ("note", 5)],
+    mode="regex",
+    regex_pattern=r'^uid=(\d+) action="([^"]+)" latency=(\d+) ok=(true|false) note=(.+)$',
+)
+```
+
+CLI 示例：
+
+```bash
+uv run --project python_api python python_api/velaria_cli.py file-sql \
+  --csv /tmp/input.csv \
+  --input-type csv \
+  --query "SELECT * FROM input_table LIMIT 5"
+
+uv run --project python_api python python_api/velaria_cli.py file-sql \
+  --input-path /tmp/input.jsonl \
+  --input-type auto \
+  --query "SELECT * FROM input_table LIMIT 5"
+
+uv run --project python_api python python_api/velaria_cli.py file-sql \
+  --input-path /tmp/events.log \
+  --input-type line \
+  --line-mode regex \
+  --regex-pattern '^uid=(\\d+) action=\"([^\"]+)\" latency=(\\d+) ok=(true|false) note=(.+)$' \
+  --mappings 'uid:1,action:2,latency:3,ok:4,note:5' \
+  --query "SELECT * FROM input_table LIMIT 5"
+```
 
 真实入口：
 
@@ -162,26 +222,12 @@ Arrow / CSV / Python ingress
 bazel run //:sql_demo
 bazel run //:df_demo
 bazel run //:stream_demo
-bazel run //:actor_rpc_smoke
+bazel run //:file_source_benchmark -- 200000 3
 uv run --project python_api python python_api/velaria_cli.py --help
 ./dist/velaria-cli --help
 ```
 
-最小验证：
-
-```bash
-bazel build //:sql_demo //:df_demo //:stream_demo \
-  //:actor_rpc_scheduler //:actor_rpc_worker //:actor_rpc_client //:actor_rpc_smoke
-
-bazel run //:sql_demo
-bazel run //:df_demo
-bazel run //:stream_demo
-bazel run //:actor_rpc_smoke
-
-./scripts/run_python_ecosystem_regression.sh
-```
-
-开发文档：
+## 5. 开发文档
 
 - 英文：[docs/development.md](./docs/development.md)
 - 中文：[docs/development-zh.md](./docs/development-zh.md)

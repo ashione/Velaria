@@ -121,6 +121,26 @@ void runParserRegression() {
       });
 
   expectNoThrow(
+      "parser_create_table_using_json_without_columns",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "CREATE TABLE rpc_input USING json OPTIONS(path: '/tmp/input.jsonl', "
+            "columns: 'user_id,name', format: 'json_lines')");
+        expect(st.kind == dataflow::sql::SqlStatementKind::CreateTable, "parser_create_kind");
+        expect(st.create.columns.empty(), "parser_create_columns_optional");
+        expect(st.create.provider == "json", "parser_create_provider");
+      });
+
+  expectNoThrow(
+      "parser_create_table_probe_only_path",
+      []() {
+        const auto st =
+            dataflow::sql::SqlParser::parse("CREATE TABLE rpc_auto OPTIONS(path: '/tmp/input.jsonl')");
+        expect(st.create.table == "rpc_auto", "parser_create_probe_table_name");
+        expect(st.create.options.at("path") == "/tmp/input.jsonl", "parser_create_probe_path");
+      });
+
+  expectNoThrow(
       "parser_string_function_projection_parsed",
       []() {
         const auto st = dataflow::sql::SqlParser::parse(
@@ -240,7 +260,7 @@ void runParserRegression() {
       []() {
         const auto st = dataflow::sql::SqlParser::parse(
             "CREATE SOURCE TABLE stream_events (key STRING, value INT) "
-            "USING csv OPTIONS(path '/tmp/stream-input', delimiter ',')");
+            "USING csv OPTIONS(path: '/tmp/stream-input', delimiter: ',')");
         expect(st.kind == dataflow::sql::SqlStatementKind::CreateTable, "parser_create_csv_kind");
         expect(st.create.kind == dataflow::sql::TableKind::Source, "parser_create_csv_source_kind");
         expect(st.create.provider == "csv", "parser_create_csv_provider");
@@ -788,7 +808,7 @@ void runStreamSqlRegression() {
       [&]() {
         s.sql(
             "CREATE SOURCE TABLE stream_events_csv_v1 (key STRING, value INT) "
-            "USING csv OPTIONS(path '" + input_dir + "', delimiter ',')");
+            "USING csv OPTIONS(path: '" + input_dir + "', delimiter: ',')");
       });
 
   expectNoThrow(
@@ -796,7 +816,7 @@ void runStreamSqlRegression() {
       [&]() {
         s.sql(
             "CREATE SINK TABLE stream_summary_csv_v1 (key STRING, value_sum INT) "
-            "USING csv OPTIONS(path '" + sink_path + "', delimiter ',')");
+            "USING csv OPTIONS(path: '" + sink_path + "', delimiter: ',')");
       });
 
   dataflow::StreamingQueryOptions options;
@@ -895,8 +915,8 @@ void runStreamSqlRegression() {
   s.sql(
       "CREATE SINK TABLE stream_function_summary_v1 "
       "(key_lower STRING, key_upper STRING, key_head STRING, value_abs INT, year INT, month INT, day INT) "
-      "USING csv OPTIONS(path '" +
-      function_sink_path + "', delimiter ',')");
+      "USING csv OPTIONS(path: '" +
+      function_sink_path + "', delimiter: ',')");
 
   const auto function_explain = s.explainStreamSql(
       "INSERT INTO stream_function_summary_v1 "
@@ -965,8 +985,8 @@ void runStreamSqlRegression() {
       s.readStream(std::make_shared<dataflow::MemoryStreamSource>(std::vector<Table>{order_batch})));
   s.sql(
       "CREATE SINK TABLE stream_order_summary_v1 (id INT, key STRING, value INT) "
-      "USING csv OPTIONS(path '" +
-      order_sink_path + "', delimiter ',')");
+      "USING csv OPTIONS(path: '" +
+      order_sink_path + "', delimiter: ',')");
   auto order_query = s.startStreamSql(
       "INSERT INTO stream_order_summary_v1 "
       "SELECT id, key, value FROM stream_order_events_v1 ORDER BY value DESC, key ASC",
@@ -1020,15 +1040,15 @@ void runStreamSqlRegression() {
   s.sql(
       "CREATE SINK TABLE stream_multi_summary_v1 "
       "(key STRING, value_sum INT, event_count INT, min_value INT, max_value INT, avg_value DOUBLE) "
-      "USING csv OPTIONS(path '" +
-      multi_sink_path + "', delimiter ',')");
+      "USING csv OPTIONS(path: '" +
+      multi_sink_path + "', delimiter: ',')");
   const std::string multi_hot_sink_path = "/tmp/velaria-stream-sql-multi-aggregate-hot-output.csv";
   fs::remove(multi_hot_sink_path);
   s.sql(
       "CREATE SINK TABLE stream_multi_hot_summary_v1 "
       "(key STRING, value_sum INT, event_count INT, min_value INT, max_value INT, avg_value DOUBLE) "
-      "USING csv OPTIONS(path '" +
-      multi_hot_sink_path + "', delimiter ',')");
+      "USING csv OPTIONS(path: '" +
+      multi_hot_sink_path + "', delimiter: ',')");
 
   dataflow::StreamingQueryOptions multi_options;
   multi_options.trigger_interval_ms = 0;
@@ -1091,14 +1111,66 @@ void runStreamSqlRegression() {
   expect(has_multi_user_a, "stream_sql_multi_aggregate_user_a");
   expect(has_multi_user_b, "stream_sql_multi_aggregate_user_b");
 
-  expectThrows(
-      "stream_sql_regular_csv_rejected",
+  const std::string batch_csv_path = "/tmp/velaria-sql-create-table-batch.csv";
+  {
+    std::ofstream out(batch_csv_path);
+    out << "key,value\nuserA,10\nuserB,20\n";
+  }
+  expectNoThrow(
+      "sql_create_table_regular_csv_using_provider",
       [&]() {
-        s.sql(
-            "CREATE TABLE regular_csv_v1 (key STRING, value INT) "
-            "USING csv OPTIONS(path '" + input_dir + "')");
-      },
-      "requires CREATE SOURCE TABLE or CREATE SINK TABLE");
+        s.sql("CREATE TABLE regular_csv_v1 USING csv OPTIONS(path: '" + batch_csv_path + "')");
+      });
+  auto regular_csv_table =
+      s.sql("SELECT key, value FROM regular_csv_v1 ORDER BY key").toTable();
+  expect(regular_csv_table.rowCount() == 2, "sql_create_table_regular_csv_row_count");
+  expect(regular_csv_table.rows[0][0].asString() == "userA",
+         "sql_create_table_regular_csv_first_key");
+
+  const std::string batch_line_path = "/tmp/velaria-sql-create-table-batch.log";
+  {
+    std::ofstream out(batch_line_path);
+    out << "1001|ok|12.5\n1002|fail|9.5\n";
+  }
+  expectNoThrow(
+      "sql_create_table_regular_line_using_provider",
+      [&]() {
+        s.sql("CREATE TABLE regular_line_v1 USING line OPTIONS(path: '" + batch_line_path +
+              "', mode: 'split', delimiter: '|', "
+              "columns: 'user_id,state,score')");
+      });
+  auto regular_line_table =
+      s.sql("SELECT user_id, state FROM regular_line_v1 ORDER BY user_id").toTable();
+  expect(regular_line_table.rowCount() == 2, "sql_create_table_regular_line_row_count");
+  expect(regular_line_table.rows[1][1].asString() == "fail",
+         "sql_create_table_regular_line_second_state");
+
+  const std::string batch_json_path = "/tmp/velaria-sql-create-table-batch.jsonl";
+  {
+    std::ofstream out(batch_json_path);
+    out << "{\"user_id\":1,\"name\":\"alice\"}\n";
+    out << "{\"user_id\":2,\"name\":\"bob\"}\n";
+  }
+  expectNoThrow(
+      "sql_create_table_regular_json_using_provider",
+      [&]() {
+        s.sql("CREATE TABLE regular_json_v1 USING json OPTIONS(path: '" + batch_json_path +
+              "', columns: 'user_id,name', format: 'json_lines')");
+      });
+  auto regular_json_table =
+      s.sql("SELECT name FROM regular_json_v1 WHERE user_id > 1").toTable();
+  expect(regular_json_table.rowCount() == 1, "sql_create_table_regular_json_row_count");
+  expect(regular_json_table.rows[0][0].asString() == "bob",
+         "sql_create_table_regular_json_filter");
+
+  expectNoThrow(
+      "sql_create_table_probe_only_path",
+      [&]() {
+        s.sql("CREATE TABLE regular_json_auto_v1 OPTIONS(path: '" + batch_json_path + "')");
+      });
+  auto regular_json_auto_table =
+      s.sql("SELECT user_id FROM regular_json_auto_v1 ORDER BY user_id").toTable();
+  expect(regular_json_auto_table.rowCount() == 2, "sql_create_table_probe_only_path_row_count");
 
   const std::string window_sink_path = "/tmp/velaria-stream-window-sql-regression-output.csv";
   fs::remove(window_sink_path);
@@ -1115,8 +1187,8 @@ void runStreamSqlRegression() {
       s.readStream(std::make_shared<dataflow::MemoryStreamSource>(std::vector<Table>{window_batch})));
   s.sql(
       "CREATE SINK TABLE stream_window_summary_v1 (window_start STRING, key STRING, value_sum INT) "
-      "USING csv OPTIONS(path '" +
-      window_sink_path + "', delimiter ',')");
+      "USING csv OPTIONS(path: '" +
+      window_sink_path + "', delimiter: ',')");
 
   dataflow::StreamingQueryOptions window_options;
   window_options.trigger_interval_ms = 0;
@@ -1165,8 +1237,8 @@ void runStreamSqlRegression() {
   s.sql(
       "CREATE SINK TABLE stream_window_count_summary_v1 "
       "(window_start STRING, key STRING, event_count INT) "
-      "USING csv OPTIONS(path '" +
-      window_count_sink_path + "', delimiter ',')");
+      "USING csv OPTIONS(path: '" +
+      window_count_sink_path + "', delimiter: ',')");
 
   auto window_count_query = s.startStreamSql(
       "INSERT INTO stream_window_count_summary_v1 "
@@ -1209,8 +1281,8 @@ void runStreamSqlRegression() {
   s.sql(
       "CREATE SINK TABLE stream_window_alias_summary_v1 "
       "(bucket STRING, entity_key STRING, event_count INT) "
-      "USING csv OPTIONS(path '" +
-      alias_sink_path + "', delimiter ',')");
+      "USING csv OPTIONS(path: '" +
+      alias_sink_path + "', delimiter: ',')");
 
   auto alias_query = s.startStreamSql(
       "INSERT INTO stream_window_alias_summary_v1 "

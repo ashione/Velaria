@@ -34,7 +34,7 @@ PYTHONPATH="${PYTHONPATH:-$(pwd)/python_api}" \
   uv run --project python_api python python_api/examples/demo_stream_sql.py
 PYTHONPATH="${PYTHONPATH:-$(pwd)/python_api}" \
   uv run --project python_api python python_api/velaria_cli.py \
-    csv-sql \
+  file-sql \
     --csv "$tmp_csv" \
     --query "SELECT * FROM input_table LIMIT 1"
 PYTHONPATH="${PYTHONPATH:-$(pwd)/python_api}" \

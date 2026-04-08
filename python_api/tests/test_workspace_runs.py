@@ -39,7 +39,7 @@ class WorkspaceRunsTest(unittest.TestCase):
             with redirect_stdout(stdout):
                 exit_code = velaria_cli.main(
                     [
-                        "csv-sql",
+                        "file-sql",
                         "--csv",
                         str(csv_path),
                         "--table",
@@ -74,7 +74,7 @@ class WorkspaceRunsTest(unittest.TestCase):
                             "--tag",
                             "scores,csv",
                             "--",
-                            "csv-sql",
+                            "file-sql",
                             "--csv",
                             str(csv_path),
                             "--query",
@@ -96,7 +96,7 @@ class WorkspaceRunsTest(unittest.TestCase):
 
                 run_meta = read_run(run_id)
                 self.assertEqual(run_meta["status"], "succeeded")
-                self.assertEqual(run_meta["action"], "csv-sql")
+                self.assertEqual(run_meta["action"], "file-sql")
                 self.assertEqual(run_meta["run_name"], "score-summary")
                 self.assertEqual(run_meta["description"], "filter rows with score > 20")
                 self.assertEqual(run_meta["tags"], ["demo", "scores", "csv"])
@@ -172,7 +172,7 @@ class WorkspaceRunsTest(unittest.TestCase):
                             "--tag",
                             "scores",
                             "--",
-                            "csv-sql",
+                            "file-sql",
                             "--csv",
                             str(csv_path),
                             "--query",
@@ -197,7 +197,7 @@ class WorkspaceRunsTest(unittest.TestCase):
                             "--tag",
                             "strict",
                             "--",
-                            "csv-sql",
+                            "file-sql",
                             "--csv",
                             str(csv_path),
                             "--query",

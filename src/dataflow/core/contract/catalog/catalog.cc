@@ -4,9 +4,9 @@
 
 namespace dataflow {
 
-void ViewCatalog::createView(const std::string& name, const DataFrame& df) {
+void ViewCatalog::createView(const std::string& name, const DataFrame& df, sql::TableKind kind) {
   views_[name] = df;
-  table_kinds_[name] = sql::TableKind::Regular;
+  table_kinds_[name] = kind;
 }
 
 void ViewCatalog::createTable(const std::string& name, const std::vector<std::string>& columns,

@@ -45,6 +45,16 @@ struct JsonFileOptions {
   std::vector<std::string> columns;
 };
 
+struct FileSourceProbeResult {
+  FileSourceKind kind = FileSourceKind::Csv;
+  std::string path;
+  Schema schema;
+  char csv_delimiter = ',';
+  LineFileOptions line_options;
+  JsonFileOptions json_options;
+  std::string suggested_table_name;
+};
+
 struct FileSourceConnectorSpec {
   FileSourceKind kind = FileSourceKind::Csv;
   std::string path;
@@ -53,6 +63,7 @@ struct FileSourceConnectorSpec {
   JsonFileOptions json_options;
 };
 
+FileSourceProbeResult probe_file_source(const std::string& path);
 Schema infer_line_file_schema(const LineFileOptions& options);
 Schema infer_json_file_schema(const JsonFileOptions& options);
 Table load_line_file(const std::string& path, const LineFileOptions& options);

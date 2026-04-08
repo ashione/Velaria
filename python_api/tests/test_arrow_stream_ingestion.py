@@ -116,7 +116,7 @@ class ArrowStreamIngestionTest(unittest.TestCase):
             sink_path = str(pathlib.Path(tmp) / "sink.csv")
             session.sql(
                 f"CREATE SINK TABLE arrow_stream_reader_sink (key STRING, value_sum INT) "
-                f"USING csv OPTIONS(path '{sink_path}', delimiter ',')"
+                f"USING csv OPTIONS(path: '{sink_path}', delimiter: ',')"
             )
             query = session.start_stream_sql(
                 "INSERT INTO arrow_stream_reader_sink "

@@ -214,6 +214,7 @@ test_suite(
         ":vector_runtime_test",
         ":source_materialization_test",
         ":file_source_test",
+        ":file_source_probe_test",
     ],
 )
 
@@ -497,5 +498,11 @@ cc_test(
 cc_test(
     name = "file_source_test",
     srcs = ["src/dataflow/tests/file_source_test.cc"],
+    deps = [":dataflow_core"],
+)
+
+cc_test(
+    name = "file_source_probe_test",
+    srcs = ["src/dataflow/tests/file_source_probe_test.cc"],
     deps = [":dataflow_core"],
 )

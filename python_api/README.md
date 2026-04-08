@@ -62,7 +62,11 @@ Python does not define:
 
 Main `Session` API:
 
+- `Session.probe(...)`
+- `Session.read(...)`
 - `Session.read_csv(...)`
+- `Session.read_line_file(...)`
+- `Session.read_json(...)`
 - `Session.sql(...)`
 - `Session.create_dataframe_from_arrow(...)`
 - `Session.create_stream_from_arrow(...)`
@@ -87,6 +91,33 @@ Mapping rule:
 - Python names may be ecosystem-friendly
 - behavior must map back to the same native kernel contract exposed by C++
 - Python wrappers should not force row materialization earlier than required by the user-facing boundary
+
+File reader mapping:
+
+- `Session.probe(path)` returns inferred source kind, schema, and normalized options
+- `Session.read(path, ...)` is the preferred batch file front door and probes the source automatically
+- `Session.read_csv(...)` remains the explicit CSV override
+- `Session.read_line_file(path, mappings=[...], ...)` maps to the native line/regex source connector
+- `Session.read_json(path, columns=[...], ...)` maps to the native JSON lines / JSON array source connector
+- all four file readers share the same source materialization knobs:
+  `materialization`, `materialization_dir`, and `materialization_format`
+
+Minimal examples:
+
+```python
+import velaria
+
+session = velaria.Session()
+
+probe = session.probe("events.jsonl")
+auto_df = session.read("events.jsonl")
+
+json_df = session.read_json(
+    "events.jsonl",
+    columns=["user_id", "action", "latency"],
+    format="json_lines",
+)
+```
 
 Current SQL mapping carried by Python:
 

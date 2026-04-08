@@ -1,9 +1,12 @@
 #include "src/dataflow/core/execution/file_source.h"
 
+#include <array>
 #include <charconv>
 #include <cctype>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
+#include <optional>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
@@ -180,11 +183,11 @@ class JsonCursor {
     throw std::runtime_error("unsupported json value kind");
   }
 
-  std::unordered_map<std::string, Value> parseObject() {
+  std::vector<std::pair<std::string, Value>> parseObjectEntries() {
     if (!consume('{')) {
       throw std::runtime_error("json object expected");
     }
-    std::unordered_map<std::string, Value> out;
+    std::vector<std::pair<std::string, Value>> out;
     skipWhitespace();
     if (consume('}')) {
       return out;
@@ -194,7 +197,7 @@ class JsonCursor {
       if (!consume(':')) {
         throw std::runtime_error("json object missing ':'");
       }
-      out[key] = parseValue();
+      out.push_back({key, parseValue()});
       skipWhitespace();
       if (consume('}')) {
         break;
@@ -202,6 +205,14 @@ class JsonCursor {
       if (!consume(',')) {
         throw std::runtime_error("json object missing ','");
       }
+    }
+    return out;
+  }
+
+  std::unordered_map<std::string, Value> parseObject() {
+    std::unordered_map<std::string, Value> out;
+    for (auto& entry : parseObjectEntries()) {
+      out[entry.first] = std::move(entry.second);
     }
     return out;
   }
@@ -285,8 +296,166 @@ class JsonCursor {
   std::size_t pos_ = 0;
 };
 
+std::string toLowerCopy(std::string value) {
+  for (char& ch : value) {
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  }
+  return value;
+}
+
+std::string trimCopy(std::string value) {
+  const auto begin = value.find_first_not_of(" \t\r\n");
+  if (begin == std::string::npos) {
+    return "";
+  }
+  const auto end = value.find_last_not_of(" \t\r\n");
+  return value.substr(begin, end - begin + 1);
+}
+
+std::string readFilePayload(const std::string& path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input.is_open()) {
+    throw std::runtime_error("cannot open file: " + path);
+  }
+  return std::string((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+}
+
+std::vector<std::string> readSampleLines(const std::string& path, std::size_t limit = 8) {
+  std::ifstream input(path);
+  if (!input.is_open()) {
+    throw std::runtime_error("cannot open file: " + path);
+  }
+  std::vector<std::string> lines;
+  std::string line;
+  while (lines.size() < limit && std::getline(input, line)) {
+    const auto trimmed = trimCopy(line);
+    if (!trimmed.empty()) {
+      lines.push_back(trimmed);
+    }
+  }
+  return lines;
+}
+
+std::string defaultTableNameFromPath(const std::string& path) {
+  const auto stem = std::filesystem::path(path).stem().string();
+  return stem.empty() ? "input_table" : stem;
+}
+
+bool looksLikeIdentifierList(const std::vector<std::string_view>& tokens) {
+  if (tokens.empty()) {
+    return false;
+  }
+  for (const auto token_view : tokens) {
+    const auto token = trimCopy(std::string(token_view));
+    if (token.empty()) {
+      return false;
+    }
+    for (char ch : token) {
+      if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_')) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+std::optional<char> chooseDelimitedFormat(const std::vector<std::string>& lines, bool* csv_header) {
+  if (csv_header != nullptr) {
+    *csv_header = false;
+  }
+  if (lines.empty()) {
+    return std::nullopt;
+  }
+  constexpr std::array<char, 5> kCandidates = {',', '\t', '|', ';', ' '};
+  char best_delimiter = '\0';
+  std::size_t best_columns = 0;
+  for (const auto delimiter : kCandidates) {
+    const auto first_tokens = splitByDelimiter(lines.front(), delimiter);
+    if (first_tokens.size() <= 1) {
+      continue;
+    }
+    bool consistent = true;
+    for (std::size_t i = 1; i < lines.size(); ++i) {
+      if (splitByDelimiter(lines[i], delimiter).size() != first_tokens.size()) {
+        consistent = false;
+        break;
+      }
+    }
+    if (!consistent) {
+      continue;
+    }
+    if (first_tokens.size() > best_columns) {
+      best_columns = first_tokens.size();
+      best_delimiter = delimiter;
+    }
+  }
+  if (best_delimiter == '\0') {
+    return std::nullopt;
+  }
+  if (csv_header != nullptr && lines.size() >= 2) {
+    const auto first_tokens = splitByDelimiter(lines.front(), best_delimiter);
+    const auto second_tokens = splitByDelimiter(lines[1], best_delimiter);
+    *csv_header = first_tokens.size() == second_tokens.size() && looksLikeIdentifierList(first_tokens);
+  }
+  return best_delimiter;
+}
+
+JsonFileOptions probeJsonOptions(const std::string& path) {
+  JsonFileOptions options;
+  const auto payload = readFilePayload(path);
+  std::size_t pos = 0;
+  while (pos < payload.size() && std::isspace(static_cast<unsigned char>(payload[pos]))) {
+    ++pos;
+  }
+  if (pos >= payload.size()) {
+    throw std::runtime_error("json probe found empty input: " + path);
+  }
+  if (payload[pos] == '[') {
+    options.format = JsonFileFormat::JsonArray;
+    JsonCursor cursor(payload);
+    if (!cursor.consume('[')) {
+      throw std::runtime_error("json array source should start with '['");
+    }
+    if (cursor.consume(']')) {
+      return options;
+    }
+    for (const auto& [key, _] : cursor.parseObjectEntries()) {
+      options.columns.push_back(key);
+    }
+    return options;
+  }
+  options.format = JsonFileFormat::JsonLines;
+  const auto lines = readSampleLines(path, 1);
+  if (lines.empty()) {
+    throw std::runtime_error("json probe found no objects: " + path);
+  }
+  JsonCursor cursor(lines.front());
+  for (const auto& [key, _] : cursor.parseObjectEntries()) {
+    options.columns.push_back(key);
+  }
+  return options;
+}
+
+LineFileOptions probeLineOptions(const std::string& path) {
+  const auto lines = readSampleLines(path, 2);
+  if (lines.empty()) {
+    throw std::runtime_error("line probe found empty input: " + path);
+  }
+  bool csv_header = false;
+  const auto delimiter = chooseDelimitedFormat(lines, &csv_header);
+  LineFileOptions options;
+  options.mode = LineParseMode::Split;
+  options.split_delimiter = delimiter.value_or(' ');
+  const auto tokens = splitByDelimiter(lines.front(), options.split_delimiter);
+  options.mappings.reserve(tokens.size());
+  for (std::size_t i = 0; i < tokens.size(); ++i) {
+    options.mappings.push_back(LineColumnMapping{"c" + std::to_string(i), i});
+  }
+  return options;
+}
+
 Row mapJsonObjectToRow(const std::unordered_map<std::string, Value>& object,
-                      const JsonFileOptions& options) {
+                       const JsonFileOptions& options) {
   Row row;
   row.reserve(options.columns.size());
   for (const auto& column : options.columns) {
@@ -549,6 +718,53 @@ bool applyAggregatePushdown(const Table& input, const SourcePushdownSpec& pushdo
 }
 
 }  // namespace
+
+FileSourceProbeResult probe_file_source(const std::string& path) {
+  FileSourceProbeResult result;
+  result.path = path;
+  result.suggested_table_name = defaultTableNameFromPath(path);
+  const auto lower_path = toLowerCopy(path);
+  if (lower_path.size() >= 4 &&
+      (lower_path.ends_with(".csv") || lower_path.ends_with(".tsv"))) {
+    result.kind = FileSourceKind::Csv;
+    result.csv_delimiter = lower_path.ends_with(".tsv") ? '\t' : ',';
+    result.schema = read_csv_schema(path, result.csv_delimiter);
+    return result;
+  }
+  if (lower_path.ends_with(".json") || lower_path.ends_with(".jsonl") ||
+      lower_path.ends_with(".ndjson")) {
+    result.kind = FileSourceKind::Json;
+    result.json_options = probeJsonOptions(path);
+    result.schema = infer_json_file_schema(result.json_options);
+    return result;
+  }
+
+  const auto lines = readSampleLines(path, 2);
+  if (lines.empty()) {
+    throw std::runtime_error("probe found empty input: " + path);
+  }
+  const char first = lines.front().empty() ? '\0' : lines.front().front();
+  if (first == '{' || first == '[') {
+    result.kind = FileSourceKind::Json;
+    result.json_options = probeJsonOptions(path);
+    result.schema = infer_json_file_schema(result.json_options);
+    return result;
+  }
+
+  bool csv_header = false;
+  const auto delimiter = chooseDelimitedFormat(lines, &csv_header);
+  if (delimiter.has_value() && csv_header) {
+    result.kind = FileSourceKind::Csv;
+    result.csv_delimiter = *delimiter;
+    result.schema = read_csv_schema(path, result.csv_delimiter);
+    return result;
+  }
+
+  result.kind = FileSourceKind::Line;
+  result.line_options = probeLineOptions(path);
+  result.schema = infer_line_file_schema(result.line_options);
+  return result;
+}
 
 Schema infer_line_file_schema(const LineFileOptions& options) {
   std::vector<std::string> columns;

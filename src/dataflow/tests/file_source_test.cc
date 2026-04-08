@@ -96,6 +96,11 @@ int main() {
     dataflow::JsonFileOptions jsonl_options;
     jsonl_options.format = dataflow::JsonFileFormat::JsonLines;
     jsonl_options.columns = {"user_id", "name", "vec"};
+    const auto json_probe = session.probe(jsonl_path);
+    expect(json_probe.kind == dataflow::FileSourceKind::Json, "json probe kind mismatch");
+    expect(json_probe.schema.fields.size() == 3, "json probe schema width mismatch");
+    auto json_auto_table = session.read(jsonl_path).toTable();
+    expect(json_auto_table.rowCount() == 2, "json auto row count mismatch");
     auto jsonl_table = session.read_json(jsonl_path, jsonl_options).toTable();
     expect(jsonl_table.rowCount() == 2, "jsonl row count mismatch");
     expect(jsonl_table.rows[0][1].asString() == "alice", "jsonl name mismatch");

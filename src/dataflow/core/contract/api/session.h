@@ -18,6 +18,9 @@ class DataflowSession {
   DataFrame read_csv(const std::string& path, const SourceOptions& options);
   DataFrame read_csv(const std::string& path, char delimiter, const SourceOptions& options);
   DataFrame read_csv(const std::string& path, char delimiter = ',');
+  FileSourceProbeResult probe(const std::string& path) const;
+  DataFrame read(const std::string& path, const SourceOptions& options);
+  DataFrame read(const std::string& path);
   DataFrame read_line_file(const std::string& path, const LineFileOptions& options,
                            const SourceOptions& source_options);
   DataFrame read_line_file(const std::string& path, const LineFileOptions& options);

@@ -193,14 +193,14 @@ void testExplainStreamSql() {
           std::make_shared<MemoryStreamSource>(std::vector<Table>{makeGenericMultiAggregateBatch()})));
   session.sql(
       "CREATE SINK TABLE strategy_hot_sink (window_start STRING, key STRING, value_sum INT) "
-      "USING csv OPTIONS(path '/tmp/velaria-stream-strategy-explain.csv', delimiter ',')");
+      "USING csv OPTIONS(path: '/tmp/velaria-stream-strategy-explain.csv', delimiter: ',')");
   session.sql(
       "CREATE SINK TABLE strategy_count_sink (window_start STRING, key STRING, event_count INT) "
-      "USING csv OPTIONS(path '/tmp/velaria-stream-strategy-count-explain.csv', delimiter ',')");
+      "USING csv OPTIONS(path: '/tmp/velaria-stream-strategy-count-explain.csv', delimiter: ',')");
   session.sql(
       "CREATE SINK TABLE strategy_multi_sink "
       "(segment STRING, bucket INT, value_sum INT, event_count INT, min_value INT, max_value INT, avg_value DOUBLE) "
-      "USING csv OPTIONS(path '/tmp/velaria-stream-strategy-multi-explain.csv', delimiter ',')");
+      "USING csv OPTIONS(path: '/tmp/velaria-stream-strategy-multi-explain.csv', delimiter: ',')");
 
   StreamingQueryOptions options;
   options.execution_mode = StreamingExecutionMode::LocalWorkers;
@@ -312,11 +312,11 @@ void testMultiAggregateHotPathWithGenericKeys() {
   session.sql(
       "CREATE SINK TABLE strategy_generic_multi_single "
       "(segment STRING, bucket INT, value_sum INT, event_count INT, min_value INT, max_value INT, avg_value DOUBLE) "
-      "USING csv OPTIONS(path '/tmp/velaria-stream-strategy-generic-single.csv', delimiter ',')");
+      "USING csv OPTIONS(path: '/tmp/velaria-stream-strategy-generic-single.csv', delimiter: ',')");
   session.sql(
       "CREATE SINK TABLE strategy_generic_multi_local "
       "(segment STRING, bucket INT, value_sum INT, event_count INT, min_value INT, max_value INT, avg_value DOUBLE) "
-      "USING csv OPTIONS(path '/tmp/velaria-stream-strategy-generic-local.csv', delimiter ',')");
+      "USING csv OPTIONS(path: '/tmp/velaria-stream-strategy-generic-local.csv', delimiter: ',')");
 
   StreamingQueryOptions single_options;
   single_options.trigger_interval_ms = 0;

@@ -35,10 +35,10 @@ int main() {
 
   session.sql(
       "CREATE SOURCE TABLE stream_events_demo (key STRING, value INT) "
-      "USING csv OPTIONS(path '" + input_dir + "', delimiter ',')");
+      "USING csv OPTIONS(path: '" + input_dir + "', delimiter: ',')");
   session.sql(
       "CREATE SINK TABLE stream_summary_csv (key STRING, value_sum INT) "
-      "USING csv OPTIONS(path '" + output_path + "', delimiter ',')");
+      "USING csv OPTIONS(path: '" + output_path + "', delimiter: ',')");
 
   dataflow::StreamingQueryOptions options;
   options.trigger_interval_ms = 50;

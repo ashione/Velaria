@@ -30,7 +30,7 @@ def main():
 
         session.sql(
             f"CREATE SINK TABLE stream_summary_py (key STRING, value_sum INT) "
-            f"USING csv OPTIONS(path '{sink_path}', delimiter ',')"
+            f"USING csv OPTIONS(path: '{sink_path}', delimiter: ',')"
         )
 
         stream = session.create_stream_from_arrow(arrow_source)

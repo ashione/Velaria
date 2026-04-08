@@ -384,6 +384,17 @@ std::string readFilePayload(const std::string& path) {
   return std::string((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
 }
 
+std::string readFilePrefix(const std::string& path, std::size_t limit = 4096) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input.is_open()) {
+    throw std::runtime_error("cannot open file: " + path);
+  }
+  std::string prefix(limit, '\0');
+  input.read(prefix.data(), static_cast<std::streamsize>(limit));
+  prefix.resize(static_cast<std::size_t>(input.gcount()));
+  return prefix;
+}
+
 std::vector<std::string> readSampleLines(const std::string& path, std::size_t limit = 8) {
   std::ifstream input(path);
   if (!input.is_open()) {
@@ -629,16 +640,17 @@ std::vector<std::string> probeWarnings(const std::vector<FileSourceProbeCandidat
 
 JsonFileOptions probeJsonOptions(const std::string& path) {
   JsonFileOptions options;
-  const auto payload = readFilePayload(path);
+  const auto prefix = readFilePrefix(path);
   std::size_t pos = 0;
-  while (pos < payload.size() && std::isspace(static_cast<unsigned char>(payload[pos]))) {
+  while (pos < prefix.size() && std::isspace(static_cast<unsigned char>(prefix[pos]))) {
     ++pos;
   }
-  if (pos >= payload.size()) {
+  if (pos >= prefix.size()) {
     throw std::runtime_error("json probe found empty input: " + path);
   }
-  if (payload[pos] == '[') {
+  if (prefix[pos] == '[') {
     options.format = JsonFileFormat::JsonArray;
+    const auto payload = readFilePayload(path);
     JsonCursor cursor(payload);
     if (!cursor.consume('[')) {
       throw std::runtime_error("json array source should start with '['");

@@ -140,6 +140,30 @@ DataFrame DataflowSession::read_csv(const std::string& path, char delimiter) {
   return read_csv(path, delimiter, options);
 }
 
+DataFrame DataflowSession::read_line_file(const std::string& path, const LineFileOptions& options,
+                                          const SourceOptions& source_options) {
+  auto schema = infer_line_file_schema(options);
+  auto plan = std::make_shared<SourcePlan>("line", path, std::move(schema), options, source_options);
+  return DataFrame(plan, nullptr, std::make_shared<Schema>(plan->schema));
+}
+
+DataFrame DataflowSession::read_line_file(const std::string& path, const LineFileOptions& options) {
+  SourceOptions source_options;
+  return read_line_file(path, options, source_options);
+}
+
+DataFrame DataflowSession::read_json(const std::string& path, const JsonFileOptions& options,
+                                     const SourceOptions& source_options) {
+  auto schema = infer_json_file_schema(options);
+  auto plan = std::make_shared<SourcePlan>("json", path, std::move(schema), options, source_options);
+  return DataFrame(plan, nullptr, std::make_shared<Schema>(plan->schema));
+}
+
+DataFrame DataflowSession::read_json(const std::string& path, const JsonFileOptions& options) {
+  SourceOptions source_options;
+  return read_json(path, options, source_options);
+}
+
 StreamingDataFrame DataflowSession::readStream(std::shared_ptr<StreamSource> source) {
   return StreamingDataFrame(std::move(source));
 }

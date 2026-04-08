@@ -22,7 +22,9 @@ filegroup(
         "src/dataflow/core/execution/arrow_format.h",
         "src/dataflow/core/execution/columnar_batch.h",
         "src/dataflow/core/execution/csv.cc",
+        "src/dataflow/core/execution/file_source.cc",
         "src/dataflow/core/execution/csv.h",
+        "src/dataflow/core/execution/file_source.h",
         "src/dataflow/core/execution/nanoarrow_ipc_codec.cc",
         "src/dataflow/core/execution/nanoarrow_ipc_codec.h",
         "src/dataflow/core/execution/source_materialization.cc",
@@ -127,6 +129,7 @@ cc_library(
         "src/dataflow/core/execution/value.cc",
         "src/dataflow/core/execution/table.cc",
         "src/dataflow/core/execution/csv.cc",
+        "src/dataflow/core/execution/file_source.cc",
         "src/dataflow/core/execution/nanoarrow_ipc_codec.cc",
         "src/dataflow/core/execution/source_materialization.cc",
         "src/dataflow/core/contract/catalog/catalog.cc",
@@ -161,6 +164,7 @@ cc_library(
         "src/dataflow/core/execution/value.h",
         "src/dataflow/core/execution/table.h",
         "src/dataflow/core/execution/csv.h",
+        "src/dataflow/core/execution/file_source.h",
         "src/dataflow/core/execution/nanoarrow_ipc_codec.h",
         "src/dataflow/core/execution/source_materialization.h",
         "src/dataflow/core/contract/catalog/catalog.h",
@@ -209,6 +213,7 @@ test_suite(
         ":stream_strategy_explain_test",
         ":vector_runtime_test",
         ":source_materialization_test",
+        ":file_source_test",
     ],
 )
 
@@ -419,6 +424,12 @@ cc_binary(
     ],
 )
 
+cc_binary(
+    name = "file_source_benchmark",
+    srcs = ["src/dataflow/examples/file_source_benchmark.cc"],
+    deps = [":dataflow_core"],
+)
+
 cc_test(
     name = "columnar_batch_test",
     srcs = ["src/dataflow/tests/columnar_batch_test.cc"],
@@ -479,5 +490,12 @@ cc_test(
 cc_test(
     name = "source_materialization_test",
     srcs = ["src/dataflow/tests/source_materialization_test.cc"],
+    deps = [":dataflow_core"],
+)
+
+
+cc_test(
+    name = "file_source_test",
+    srcs = ["src/dataflow/tests/file_source_test.cc"],
     deps = [":dataflow_core"],
 )

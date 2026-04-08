@@ -17,6 +17,7 @@
 #include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/arrow_format.h"
 #include "src/dataflow/core/execution/csv.h"
+#include "src/dataflow/core/execution/file_source.h"
 #include "src/dataflow/core/execution/source_materialization.h"
 #include "src/dataflow/core/execution/runtime/execution_optimizer.h"
 #include "src/dataflow/experimental/runtime/rpc_runner.h"
@@ -853,9 +854,15 @@ bool tryExecuteSourcePushdown(const SourcePlan& node, const SourcePushdownSpec& 
   switch (node.storage_kind) {
     case SourceStorageKind::InMemory:
       return false;
-    case SourceStorageKind::CsvFile:
-      return execute_csv_source_pushdown(node.csv_path, node.schema, pushdown,
-                                         node.csv_delimiter, materialize_rows, out);
+    case SourceStorageKind::CsvFile: {
+      FileSourceConnectorSpec spec;
+      spec.kind = node.file_source_kind;
+      spec.path = node.csv_path;
+      spec.csv_delimiter = node.csv_delimiter;
+      spec.line_options = node.line_options;
+      spec.json_options = node.json_options;
+      return execute_file_source_pushdown(spec, node.schema, pushdown, materialize_rows, out);
+    }
   }
   return false;
 }
@@ -926,8 +933,8 @@ bool buildSourcePushdownSpec(const PlanNodePtr& plan, const SourceRequirementMap
   }
 }
 
-std::shared_ptr<Table> loadCsvSource(const SourcePlan& node,
-                                     const SourceRequirementMap& requirements) {
+std::shared_ptr<Table> loadSourceConnector(const SourcePlan& node,
+                                           const SourceRequirementMap& requirements) {
   const auto required_columns = requestedSourceColumns(node, requirements);
   {
     std::lock_guard<std::mutex> lock(node.cached_table_mu);
@@ -937,15 +944,20 @@ std::shared_ptr<Table> loadCsvSource(const SourcePlan& node,
     }
   }
 
-Table loaded;
+  Table loaded;
   const bool require_all_columns = required_columns.size() >= node.schema.fields.size();
   SourcePushdownSpec pushdown;
   pushdown.projected_columns = required_columns;
+  FileSourceConnectorSpec spec;
+  spec.kind = node.file_source_kind;
+  spec.path = node.csv_path;
+  spec.csv_delimiter = node.csv_delimiter;
+  spec.line_options = node.line_options;
+  spec.json_options = node.json_options;
   if (node.options.materialization.enabled) {
-    std::ostringstream options;
-    options << "delimiter=" << node.csv_delimiter;
     const auto fingerprint =
-        capture_file_source_fingerprint(node.csv_path, "csv", options.str());
+        capture_file_source_fingerprint(node.csv_path, file_source_format_name(spec),
+                                        file_source_options_signature(spec));
     const std::string materialization_root =
         node.options.materialization.root.empty() ? default_source_materialization_root()
                                                   : node.options.materialization.root;
@@ -956,10 +968,18 @@ Table loaded;
         try {
           loaded = store.load(*entry, false);
         } catch (...) {
-          loaded = load_csv(fingerprint.abs_path, node.csv_delimiter, false);
+          loaded = node.file_source_kind == FileSourceKind::Csv
+                       ? load_csv(fingerprint.abs_path, node.csv_delimiter, false)
+                       : (node.file_source_kind == FileSourceKind::Line
+                              ? load_line_file(fingerprint.abs_path, node.line_options)
+                              : load_json_file(fingerprint.abs_path, node.json_options));
         }
       } else {
-        loaded = load_csv(fingerprint.abs_path, node.csv_delimiter, false);
+        loaded = node.file_source_kind == FileSourceKind::Csv
+                     ? load_csv(fingerprint.abs_path, node.csv_delimiter, false)
+                     : (node.file_source_kind == FileSourceKind::Line
+                            ? load_line_file(fingerprint.abs_path, node.line_options)
+                            : load_json_file(fingerprint.abs_path, node.json_options));
         try {
           store.save(fingerprint, loaded);
         } catch (...) {
@@ -972,7 +992,11 @@ Table loaded;
       }
       if (!store.lookup(fingerprint).has_value()) {
         try {
-          auto full = load_csv(fingerprint.abs_path, node.csv_delimiter, false);
+          auto full = node.file_source_kind == FileSourceKind::Csv
+                          ? load_csv(fingerprint.abs_path, node.csv_delimiter, false)
+                          : (node.file_source_kind == FileSourceKind::Line
+                                 ? load_line_file(fingerprint.abs_path, node.line_options)
+                                 : load_json_file(fingerprint.abs_path, node.json_options));
           store.save(fingerprint, full);
         } catch (...) {
         }
@@ -980,10 +1004,14 @@ Table loaded;
     }
   } else {
     if (!tryExecuteSourcePushdown(node, pushdown, false, &loaded)) {
-      loaded = require_all_columns
-                   ? load_csv(node.csv_path, node.csv_delimiter, false)
-                   : load_csv_projected(node.csv_path, node.schema, required_columns,
-                                        node.csv_delimiter, false);
+      loaded = node.file_source_kind == FileSourceKind::Csv
+                   ? (require_all_columns
+                          ? load_csv(node.csv_path, node.csv_delimiter, false)
+                          : load_csv_projected(node.csv_path, node.schema, required_columns,
+                                               node.csv_delimiter, false))
+                   : (node.file_source_kind == FileSourceKind::Line
+                          ? load_line_file(node.csv_path, node.line_options)
+                          : load_json_file(node.csv_path, node.json_options));
     }
   }
 
@@ -1010,7 +1038,7 @@ BorrowedOrOwnedTable borrowOrExecute(const LocalExecutor& executor, const PlanNo
     if (node->storage_kind == SourceStorageKind::InMemory) {
       return BorrowedOrOwnedTable{&node->table, nullptr};
     }
-    auto retained = loadCsvSource(*node, requirements);
+    auto retained = loadSourceConnector(*node, requirements);
     return BorrowedOrOwnedTable{retained.get(), std::move(retained)};
   }
   const SourcePlan* pushed_source = nullptr;
@@ -1551,7 +1579,7 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
       if (node->storage_kind == SourceStorageKind::InMemory) {
         return node->table;
       }
-      return *loadCsvSource(*node, requirements);
+      return *loadSourceConnector(*node, requirements);
     }
     case PlanKind::Select: {
       const auto* node = static_cast<const SelectPlan*>(plan.get());

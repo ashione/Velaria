@@ -72,6 +72,58 @@ Schema readSchema(const std::string& payload, std::size_t* offset) {
   return Schema(std::move(fields));
 }
 
+std::string serializeLineFileOptions(const LineFileOptions& options) {
+  std::string out;
+  appendInt(&out, static_cast<int>(options.mode));
+  appendInt(&out, static_cast<unsigned char>(options.split_delimiter));
+  appendToken(&out, options.regex_pattern);
+  appendInt(&out, options.skip_empty_lines ? 1 : 0);
+  appendSize(&out, options.mappings.size());
+  for (const auto& mapping : options.mappings) {
+    appendToken(&out, mapping.column);
+    appendSize(&out, mapping.source_index);
+  }
+  return out;
+}
+
+LineFileOptions deserializeLineFileOptions(const std::string& payload) {
+  std::size_t offset = 0;
+  LineFileOptions options;
+  options.mode = static_cast<LineParseMode>(readInt(payload, &offset));
+  options.split_delimiter = static_cast<char>(readInt(payload, &offset));
+  options.regex_pattern = readToken(payload, &offset);
+  options.skip_empty_lines = (readInt(payload, &offset) != 0);
+  const auto mapping_count = readSize(payload, &offset);
+  options.mappings.reserve(mapping_count);
+  for (std::size_t i = 0; i < mapping_count; ++i) {
+    LineColumnMapping mapping;
+    mapping.column = readToken(payload, &offset);
+    mapping.source_index = readSize(payload, &offset);
+    options.mappings.push_back(std::move(mapping));
+  }
+  return options;
+}
+
+std::string serializeJsonFileOptions(const JsonFileOptions& options) {
+  std::string out;
+  appendInt(&out, static_cast<int>(options.format));
+  appendSize(&out, options.columns.size());
+  for (const auto& col : options.columns) appendToken(&out, col);
+  return out;
+}
+
+JsonFileOptions deserializeJsonFileOptions(const std::string& payload) {
+  std::size_t offset = 0;
+  JsonFileOptions options;
+  options.format = static_cast<JsonFileFormat>(readInt(payload, &offset));
+  const auto count = readSize(payload, &offset);
+  options.columns.reserve(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    options.columns.push_back(readToken(payload, &offset));
+  }
+  return options;
+}
+
 bool eqPred(const Value& lhs, const Value& rhs) { return lhs == rhs; }
 bool nePred(const Value& lhs, const Value& rhs) { return lhs != rhs; }
 bool ltPred(const Value& lhs, const Value& rhs) { return lhs < rhs; }
@@ -186,7 +238,14 @@ void serializeNode(const PlanNodePtr& plan, std::string* out) {
         appendToken(out, serializer.serialize(node->table));
       } else {
         appendToken(out, node->csv_path);
-        appendInt(out, static_cast<unsigned char>(node->csv_delimiter));
+        appendInt(out, static_cast<int>(node->file_source_kind));
+        if (node->file_source_kind == FileSourceKind::Csv) {
+          appendInt(out, static_cast<unsigned char>(node->csv_delimiter));
+        } else if (node->file_source_kind == FileSourceKind::Line) {
+          appendToken(out, serializeLineFileOptions(node->line_options));
+        } else {
+          appendToken(out, serializeJsonFileOptions(node->json_options));
+        }
       }
       return;
     }
@@ -299,8 +358,31 @@ PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset) {
         return std::make_shared<SourcePlan>(source_name, serializer.deserialize(table_payload));
       }
       const auto csv_path = readToken(payload, offset);
-      const auto csv_delimiter = static_cast<char>(readInt(payload, offset));
-      return std::make_shared<SourcePlan>(source_name, csv_path, csv_delimiter, schema);
+      const int source_tag = readInt(payload, offset);
+      if (source_tag < static_cast<int>(FileSourceKind::Csv) ||
+          source_tag > static_cast<int>(FileSourceKind::Json)) {
+        const auto csv_delimiter = static_cast<char>(source_tag);
+        auto plan = std::make_shared<SourcePlan>(source_name, csv_path, csv_delimiter, schema);
+        plan->file_source_kind = FileSourceKind::Csv;
+        return plan;
+      }
+      const auto file_kind = static_cast<FileSourceKind>(source_tag);
+      if (file_kind == FileSourceKind::Csv) {
+        const auto csv_delimiter = static_cast<char>(readInt(payload, offset));
+        auto plan = std::make_shared<SourcePlan>(source_name, csv_path, csv_delimiter, schema);
+        plan->file_source_kind = file_kind;
+        return plan;
+      }
+      if (file_kind == FileSourceKind::Line) {
+        auto plan = std::make_shared<SourcePlan>(
+            source_name, csv_path, schema, deserializeLineFileOptions(readToken(payload, offset)));
+        plan->file_source_kind = file_kind;
+        return plan;
+      }
+      auto plan = std::make_shared<SourcePlan>(
+          source_name, csv_path, schema, deserializeJsonFileOptions(readToken(payload, offset)));
+      plan->file_source_kind = file_kind;
+      return plan;
     }
     case PlanKind::Select: {
       auto child = deserializeNode(payload, offset);

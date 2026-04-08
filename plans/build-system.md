@@ -53,8 +53,7 @@
 
 ### 阶段 2（正式化）
 - 建立统一仓库结构：
-  - `WORKSPACE/WORKSPACE.bazel`（或 WORKSPACE.bzlmod 迁移）
-  - `MODULE.bazel`（启用 Bzlmod）
+  - `MODULE.bazel`（Bzlmod 唯一依赖入口）
   - 多模块 `BUILD.bazel`（core / planner / runtime / sql / scheduler / client）
 - 引入统一风格：
   - `cc_library`（按层）
@@ -92,5 +91,4 @@
 
 如果你认可，我下一步直接给你一版：
 - `MODULE.bazel`（最小依赖清单）
-- `WORKSPACE.bzl` / `BUILD.bazel` 示例
 - `src/` 到 `BUILD` 的模块分解建议（按你 DataFrame 优先路线）

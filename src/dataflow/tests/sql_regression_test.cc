@@ -102,7 +102,7 @@ void runParserRegression() {
         const auto st = dataflow::sql::SqlParser::parse(
             "SELECT token, SUM(score) AS total_score FROM rpc_input GROUP BY token "
             "HAVING SUM(score) > 15");
-        expect(st.query.having.has_value(), "parser_having_aggregate_present");
+        expect(static_cast<bool>(st.query.having), "parser_having_aggregate_present");
       });
 
   expectNoThrow(
@@ -113,10 +113,10 @@ void runParserRegression() {
             "FROM users u INNER JOIN actions a ON u.user_id = a.user_id "
             "WHERE a.score > 6 GROUP BY u.region HAVING SUM(a.score) > 15 LIMIT 10");
         expect(st.query.select_items.size() == 3, "parser_projection_size");
-        expect(st.query.where.has_value(), "parser_where_present");
+        expect(static_cast<bool>(st.query.where), "parser_where_present");
         expect(st.query.join.has_value(), "parser_join_present");
         expect(st.query.group_by.size() == 1, "parser_groupby_size");
-        expect(st.query.having.has_value(), "parser_having_present");
+        expect(static_cast<bool>(st.query.having), "parser_having_present");
         expect(st.query.limit.value_or(0) == 10, "parser_limit_present");
       });
 
@@ -216,6 +216,32 @@ void runParserRegression() {
       });
 
   expectNoThrow(
+      "parser_hybrid_search_clause_parsed",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT id, bucket FROM users "
+            "WHERE bucket = 1 "
+            "HYBRID SEARCH embedding QUERY '[1 0 0]' METRIC cosine TOP_K 7 SCORE_THRESHOLD 0.02");
+        expect(st.query.hybrid_search.has_value(), "parser_hybrid_search_present");
+        expect(st.query.hybrid_search->vector_column.name == "embedding",
+               "parser_hybrid_search_column");
+        expect(st.query.hybrid_search->query_vector == "[1 0 0]",
+               "parser_hybrid_search_query_vector");
+        expect(st.query.hybrid_search->metric == "cosine", "parser_hybrid_search_metric");
+        expect(st.query.hybrid_search->top_k == 7, "parser_hybrid_search_top_k");
+        expect(st.query.hybrid_search->score_threshold.has_value(),
+               "parser_hybrid_search_threshold_present");
+      });
+
+  expectNoThrow(
+      "parser_where_and_or_clause_parsed",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT user_id FROM users WHERE region = 'apac' OR (region = 'emea' AND score > 10)");
+        expect(static_cast<bool>(st.query.where), "parser_where_and_or_present");
+      });
+
+  expectNoThrow(
       "parser_alias_and_limit_projection",
       []() {
         const auto st = dataflow::sql::SqlParser::parse(
@@ -251,7 +277,7 @@ void runParserRegression() {
       []() {
         const auto st = dataflow::sql::SqlParser::parse(
             "SELECT u.user_id FROM users u WHERE u.user_id > (1) LIMIT 1");
-        expect(st.query.where.has_value(), "parser_predicate_where_present");
+        expect(static_cast<bool>(st.query.where), "parser_predicate_where_present");
         expect(st.query.limit.value_or(0) == 1, "parser_predicate_limit_present");
       });
 
@@ -380,6 +406,33 @@ void runSemanticRegression() {
       },
       "SELECT * cannot be mixed with other projections");
 
+  expectThrows(
+      "planner_hybrid_search_join_rejected",
+      [&]() {
+        s.submit("SELECT * FROM t_users_v1 u JOIN t_users_v1 v ON u.user_id = v.user_id "
+                 "HYBRID SEARCH score QUERY '[1 0 0]'");
+      },
+      "HYBRID SEARCH does not support JOIN");
+
+  expectThrows(
+      "planner_hybrid_search_aggregate_rejected",
+      [&]() {
+        s.submit("SELECT region, SUM(score) AS total_score FROM t_users_v1 "
+                 "HYBRID SEARCH score QUERY '[1 0 0]' GROUP BY region");
+      },
+      "HYBRID SEARCH does not support aggregate");
+
+  Table and_rows = s.submit(
+      "SELECT user_id FROM t_users_v1 WHERE region = 'apac' AND score > 20 ORDER BY user_id LIMIT 5");
+  expect(and_rows.rows.size() == 1, "planner_where_and_rows");
+  expect(and_rows.rows[0][0].asInt64() == 1, "planner_where_and_first_user");
+
+  Table or_rows = s.submit(
+      "SELECT user_id FROM t_users_v1 WHERE region = 'apac' OR region = 'emea' ORDER BY user_id LIMIT 5");
+  expect(or_rows.rows.size() == 2, "planner_where_or_rows");
+  expect(or_rows.rows[0][0].asInt64() == 1, "planner_where_or_first_user");
+  expect(or_rows.rows[1][0].asInt64() == 2, "planner_where_or_second_user");
+
   s.submit("CREATE SOURCE TABLE t_source_guard_v1 (user_id INT, region STRING)");
   expectThrows(
       "source_table_insert_rejected",
@@ -422,6 +475,30 @@ void runSemanticRegression() {
         s.submit("SELECT user_id, region FROM t_sink_guard_v1");
       },
       "table-kind constraint violation");
+
+  Table hybrid_users;
+  hybrid_users.schema = Schema({"id", "bucket", "embedding"});
+  hybrid_users.rows = {
+      {Value(int64_t(10)), Value(int64_t(0)), Value(std::vector<float>{1.0f, 0.0f, 0.0f})},
+      {Value(int64_t(20)), Value(int64_t(1)), Value(std::vector<float>{0.9f, 0.1f, 0.0f})},
+      {Value(int64_t(30)), Value(int64_t(1)), Value(std::vector<float>{0.0f, 1.0f, 0.0f})},
+  };
+  s.createTempView("t_hybrid_sql_v1", s.createDataFrame(hybrid_users));
+  Table hybrid_result = s.submit(
+      "SELECT id, bucket, vector_score FROM t_hybrid_sql_v1 "
+      "WHERE bucket = 1 "
+      "HYBRID SEARCH embedding QUERY '[1 0 0]' METRIC cosine TOP_K 2");
+  expect(hybrid_result.rows.size() == 2, "sql_hybrid_search_row_count");
+  expect(hybrid_result.schema.fields.size() == 3, "sql_hybrid_search_schema_width");
+  expect(hybrid_result.schema.fields[2] == "vector_score", "sql_hybrid_search_score_column");
+  expect(hybrid_result.rows[0][0].asInt64() == 20, "sql_hybrid_search_first_id");
+
+  const std::string hybrid_explain = s.explainSql(
+      "SELECT id, bucket, vector_score FROM t_hybrid_sql_v1 "
+      "WHERE bucket = 1 "
+      "HYBRID SEARCH embedding QUERY '[1 0 0]' METRIC cosine TOP_K 2");
+  expect(hybrid_explain.find("HybridSearch column=embedding top_k=2") != std::string::npos,
+         "sql_hybrid_search_explain_logical");
 
   s.submit("CREATE TABLE t_insert_select_positional_v1 (region STRING, total_score INT)");
   expectNoThrow(

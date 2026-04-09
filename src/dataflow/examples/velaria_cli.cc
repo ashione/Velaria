@@ -58,6 +58,8 @@ void printUsage(const char* program) {
             << "       " << program
             << " --csv <path> --vector-column <name> --query-vector <v1,v2,...>\n"
             << "       [--metric cosine|cosin|dot|l2] [--top-k <n>]\n"
+            << "       [--where-column <name> --where-op <op> --where-value <value>]\n"
+            << "       [--score-threshold <value>]\n"
             << "       vector CSV cells should use bracketed values like '[1 2 3]' or '[1,2,3]'\n";
 }
 
@@ -83,6 +85,20 @@ std::vector<float> parseVectorText(const std::string& raw) {
   return out;
 }
 
+dataflow::Value parseScalarText(const std::string& raw) {
+  if (raw == "NULL") return dataflow::Value();
+  if (raw == "TRUE") return dataflow::Value(true);
+  if (raw == "FALSE") return dataflow::Value(false);
+  try {
+    if (raw.find('.') != std::string::npos) {
+      return dataflow::Value(std::stod(raw));
+    }
+    return dataflow::Value(static_cast<int64_t>(std::stoll(raw)));
+  } catch (...) {
+    return dataflow::Value(raw);
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -92,6 +108,11 @@ int main(int argc, char** argv) {
   std::string vector_column;
   std::string query_vector;
   std::string metric = "cosine";
+  std::string where_column;
+  std::string where_op;
+  std::string where_value;
+  bool score_threshold_set = false;
+  double score_threshold = 0.0;
   std::size_t top_k = 5;
   char delimiter = ',';
 
@@ -118,6 +139,15 @@ int main(int argc, char** argv) {
       metric = argv[++i];
     } else if (arg == "--top-k" && i + 1 < argc) {
       top_k = static_cast<std::size_t>(std::stoull(argv[++i]));
+    } else if (arg == "--where-column" && i + 1 < argc) {
+      where_column = argv[++i];
+    } else if (arg == "--where-op" && i + 1 < argc) {
+      where_op = argv[++i];
+    } else if (arg == "--where-value" && i + 1 < argc) {
+      where_value = argv[++i];
+    } else if (arg == "--score-threshold" && i + 1 < argc) {
+      score_threshold = std::stod(argv[++i]);
+      score_threshold_set = true;
     } else if (arg == "-h" || arg == "--help") {
       printUsage(argv[0]);
       return 0;
@@ -157,15 +187,42 @@ int main(int argc, char** argv) {
       } else if (metric != "cosine" && metric != "cosin") {
         throw std::runtime_error("unsupported metric: " + metric);
       }
-      const auto result =
-          session.vectorQuery(table, vector_column, needle, top_k, runtime_metric).toTable();
+      const bool use_hybrid =
+          !where_column.empty() || !where_op.empty() || !where_value.empty() || score_threshold_set;
+      dataflow::Table result;
+      std::string explain;
+      if (use_hybrid) {
+        if (where_column.empty() || where_op.empty() || where_value.empty()) {
+          throw std::runtime_error(
+              "--where-column, --where-op, and --where-value must be provided together");
+        }
+        auto filtered = df.filter(where_column, where_op, parseScalarText(where_value));
+        session.createTempView(table + "_hybrid", filtered);
+        dataflow::HybridSearchOptions options;
+        options.metric = runtime_metric;
+        options.top_k = top_k;
+        if (score_threshold_set) {
+          options.score_threshold = score_threshold;
+        }
+        result = session.hybridSearch(table + "_hybrid", vector_column, needle, options).toTable();
+        explain =
+            session.explainHybridSearch(table + "_hybrid", vector_column, needle, options);
+      } else {
+        result = session.vectorQuery(table, vector_column, needle, top_k, runtime_metric).toTable();
+        explain = session.explainVectorQuery(table, vector_column, needle, top_k, runtime_metric);
+      }
       auto materialized = result;
       dataflow::materializeRows(&materialized);
-      const auto explain =
-          session.explainVectorQuery(table, vector_column, needle, top_k, runtime_metric);
       std::cout << "{\n";
       std::cout << "  \"metric\": \"" << (metric == "cosin" ? "cosine" : metric) << "\",\n";
       std::cout << "  \"top_k\": " << top_k << ",\n";
+      if (use_hybrid) {
+        std::cout << "  \"where_column\": \"" << escapeJson(where_column) << "\",\n";
+        std::cout << "  \"where_op\": \"" << escapeJson(where_op) << "\",\n";
+        std::cout << "  \"where_value\": " << valueToJson(parseScalarText(where_value)) << ",\n";
+        std::cout << "  \"score_threshold\": "
+                  << (score_threshold_set ? std::to_string(score_threshold) : "null") << ",\n";
+      }
       std::cout << "  \"explain\": \"" << escapeJson(explain) << "\",\n";
       std::cout << "  \"rows\": [\n";
       for (std::size_t i = 0; i < materialized.rows.size(); ++i) {

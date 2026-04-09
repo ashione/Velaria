@@ -246,6 +246,151 @@ int main() {
            "csv explain candidate_rows missing");
     expect(!dataflow::activeSimdBackendName().empty(), "active simd backend should be reported");
 
+    dataflow::Table hybrid_table;
+    hybrid_table.schema = dataflow::Schema({"id", "bucket", "embedding"});
+    hybrid_table.rows = {
+        {dataflow::Value(int64_t(10)), dataflow::Value(int64_t(0)),
+         dataflow::Value(std::vector<float>{1.0f, 0.0f, 0.0f})},
+        {dataflow::Value(int64_t(20)), dataflow::Value(int64_t(1)),
+         dataflow::Value(std::vector<float>{0.9f, 0.1f, 0.0f})},
+        {dataflow::Value(int64_t(30)), dataflow::Value(int64_t(1)),
+         dataflow::Value(std::vector<float>{0.0f, 1.0f, 0.0f})},
+        {dataflow::Value(int64_t(40)), dataflow::Value(int64_t(0)), dataflow::Value()},
+    };
+
+    auto hybrid_df = session.createDataFrame(hybrid_table);
+    dataflow::HybridSearchOptions filtered_options;
+    filtered_options.metric = dataflow::VectorDistanceMetric::Cosine;
+    filtered_options.top_k = 2;
+    const auto hybrid_filtered =
+        hybrid_df.filter("bucket", "=", dataflow::Value(int64_t(1)))
+            .hybridSearch("embedding", {1.0f, 0.0f, 0.0f}, filtered_options)
+            .toTable();
+    expect(hybrid_filtered.rowCount() == 2, "hybrid filtered row count mismatch");
+    expect(hybrid_filtered.schema.fields.size() == 4, "hybrid filtered schema width mismatch");
+    expect(hybrid_filtered.schema.fields[3] == "vector_score",
+           "hybrid filtered score column missing");
+    const auto hybrid_ids = dataflow::materializeValueColumn(hybrid_filtered, 0);
+    expect(dataflow::valueColumnValueAt(hybrid_ids, 0).asInt64() == 20,
+           "hybrid filtered nearest id mismatch");
+    const auto hybrid_scores = dataflow::materializeValueColumn(hybrid_filtered, 3);
+    expect(dataflow::valueColumnValueAt(hybrid_scores, 0).asDouble() <=
+               dataflow::valueColumnValueAt(hybrid_scores, 1).asDouble(),
+           "hybrid cosine should keep ascending score order");
+
+    dataflow::HybridSearchOptions dot_threshold_options;
+    dot_threshold_options.metric = dataflow::VectorDistanceMetric::Dot;
+    dot_threshold_options.top_k = 3;
+    dot_threshold_options.score_threshold = 0.95;
+    const auto dot_threshold =
+        hybrid_df.hybridSearch("embedding", {1.0f, 0.0f, 0.0f}, dot_threshold_options)
+            .toTable();
+    expect(dot_threshold.rowCount() == 1, "hybrid dot threshold row count mismatch");
+    const auto dot_threshold_ids = dataflow::materializeValueColumn(dot_threshold, 0);
+    expect(dataflow::valueColumnValueAt(dot_threshold_ids, 0).asInt64() == 10,
+           "hybrid dot threshold nearest id mismatch");
+
+    dataflow::HybridSearchOptions cosine_threshold_options;
+    cosine_threshold_options.metric = dataflow::VectorDistanceMetric::Cosine;
+    cosine_threshold_options.top_k = 3;
+    cosine_threshold_options.score_threshold = 0.02;
+    const auto cosine_threshold =
+        hybrid_df.hybridSearch("embedding", {1.0f, 0.0f, 0.0f}, cosine_threshold_options)
+            .toTable();
+    expect(cosine_threshold.rowCount() == 2, "hybrid cosine threshold row count mismatch");
+
+    dataflow::HybridSearchOptions l2_threshold_options;
+    l2_threshold_options.metric = dataflow::VectorDistanceMetric::L2;
+    l2_threshold_options.top_k = 3;
+    l2_threshold_options.score_threshold = 0.2;
+    const auto l2_threshold =
+        hybrid_df.hybridSearch("embedding", {1.0f, 0.0f, 0.0f}, l2_threshold_options)
+            .toTable();
+    expect(l2_threshold.rowCount() == 2, "hybrid l2 threshold row count mismatch");
+
+    const auto hybrid_null_filtered =
+        hybrid_df.filter("bucket", "=", dataflow::Value(int64_t(0)))
+            .hybridSearch("embedding", {1.0f, 0.0f, 0.0f}, filtered_options)
+            .toTable();
+    expect(hybrid_null_filtered.rowCount() == 1, "hybrid null vector should be skipped");
+
+    const auto hybrid_explain_none =
+        hybrid_df.explainHybridSearch("embedding", {1.0f, 0.0f, 0.0f}, filtered_options);
+    expect(hybrid_explain_none.find("mode=exact-scan-hybrid-search") != std::string::npos,
+           "hybrid explain mode missing");
+    expect(hybrid_explain_none.find("column_filter_execution=none") != std::string::npos,
+           "hybrid explain no-filter mode mismatch");
+
+    const auto hybrid_explain_filtered =
+        hybrid_df.filter("bucket", "=", dataflow::Value(int64_t(1)))
+            .explainHybridSearch("embedding", {1.0f, 0.0f, 0.0f}, filtered_options);
+    expect(hybrid_explain_filtered.find("column_filter_stage=before-vector") != std::string::npos,
+           "hybrid explain stage mismatch");
+    expect(hybrid_explain_filtered.find("column_filter_execution=post-load-filter") !=
+               std::string::npos,
+           "hybrid explain in-memory filter execution mismatch");
+    expect(hybrid_explain_filtered.find("candidate_rows=2") != std::string::npos,
+           "hybrid explain candidate rows mismatch");
+
+    bool saw_conflict = false;
+    try {
+      dataflow::Table conflict_table;
+      conflict_table.schema = dataflow::Schema({"id", "vector_score", "embedding"});
+      conflict_table.rows = {
+          {dataflow::Value(int64_t(1)), dataflow::Value(double(1.0)),
+           dataflow::Value(std::vector<float>{1.0f, 0.0f, 0.0f})},
+      };
+      session.createDataFrame(conflict_table)
+          .hybridSearch("embedding", {1.0f, 0.0f, 0.0f}, filtered_options)
+          .toTable();
+    } catch (const std::invalid_argument& ex) {
+      saw_conflict = std::string(ex.what()).find("vector_score") != std::string::npos;
+    }
+    expect(saw_conflict, "hybrid vector_score conflict should be rejected");
+
+    bool saw_dimension_mismatch = false;
+    try {
+      hybrid_df.hybridSearch("embedding", {1.0f, 0.0f}, filtered_options).toTable();
+    } catch (const std::invalid_argument& ex) {
+      saw_dimension_mismatch = std::string(ex.what()).find("fixed vector length mismatch") !=
+                               std::string::npos;
+    }
+    expect(saw_dimension_mismatch, "hybrid dimension mismatch should be rejected");
+
+    bool saw_join_rejection = false;
+    try {
+      session.createDataFrame(hybrid_table)
+          .join(session.createDataFrame(hybrid_table), "id", "id")
+          .hybridSearch("embedding", {1.0f, 0.0f, 0.0f}, filtered_options)
+          .toTable();
+    } catch (const std::invalid_argument& ex) {
+      saw_join_rejection = std::string(ex.what()).find("single-source") != std::string::npos;
+    }
+    expect(saw_join_rejection, "hybrid join plan should be rejected");
+
+    char hybrid_csv_template[] = "/tmp/velaria-hybrid-vector-runtime-XXXXXX";
+    const int hybrid_csv_fd = mkstemp(hybrid_csv_template);
+    expect(hybrid_csv_fd != -1, "mkstemp failed for hybrid vector csv test");
+    close(hybrid_csv_fd);
+    const std::string hybrid_csv_path = hybrid_csv_template;
+    {
+      std::ofstream csv(hybrid_csv_path);
+      expect(csv.good(), "failed to open hybrid vector csv temp file");
+      csv << "id,bucket,embedding\n";
+      csv << "10,0,[1 0 0]\n";
+      csv << "20,1,[0.9 0.1 0]\n";
+      csv << "30,1,[0 1 0]\n";
+      csv << "40,0,[0 0 0]\n";
+    }
+    auto hybrid_csv_df = session.read_csv(hybrid_csv_path);
+    const auto hybrid_csv_explain =
+        hybrid_csv_df.filter("bucket", "=", dataflow::Value(int64_t(1)))
+            .explainHybridSearch("embedding", {1.0f, 0.0f, 0.0f}, filtered_options);
+    std::remove(hybrid_csv_path.c_str());
+    expect(hybrid_csv_explain.find("column_filter_execution=source-pushdown") !=
+               std::string::npos,
+           "hybrid csv explain should report source pushdown");
+
     std::cout << "[test] vector runtime query and transport ok" << std::endl;
     return 0;
   } catch (const std::exception& ex) {

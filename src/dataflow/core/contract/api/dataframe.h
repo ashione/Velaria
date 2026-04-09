@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -16,6 +17,12 @@ namespace dataflow {
 class DataFrame;
 class VectorIndex;
 enum class VectorDistanceMetric { Cosine, Dot, L2 };
+
+struct HybridSearchOptions {
+  VectorDistanceMetric metric = VectorDistanceMetric::Cosine;
+  std::size_t top_k = 10;
+  std::optional<double> score_threshold;
+};
 
 struct CachedVectorColumn {
   std::shared_ptr<VectorIndex> index;
@@ -70,10 +77,16 @@ class DataFrame {
                         const std::vector<float>& queryVector,
                         size_t top_k,
                         VectorDistanceMetric metric = VectorDistanceMetric::Cosine) const;
+  DataFrame hybridSearch(const std::string& vectorColumn,
+                         const std::vector<float>& queryVector,
+                         const HybridSearchOptions& options = {}) const;
   std::string explainVectorQuery(const std::string& vectorColumn,
                                  const std::vector<float>& queryVector,
                                  size_t top_k,
                                  VectorDistanceMetric metric = VectorDistanceMetric::Cosine) const;
+  std::string explainHybridSearch(const std::string& vectorColumn,
+                                  const std::vector<float>& queryVector,
+                                  const HybridSearchOptions& options = {}) const;
 
   GroupedDataFrame groupBy(const std::vector<std::string>& keys) const;
   DataFrame join(const DataFrame& right, const std::string& leftOn, const std::string& rightOn,

@@ -10,5 +10,6 @@ Current examples:
 - `demo_stream_sql.py`
 - `demo_bitable_group_by_owner.py`
 - `demo_vector_search.py`
+- `demo_embedding_pipeline.py`
 
 Benchmarks live in [../benchmarks](../benchmarks).

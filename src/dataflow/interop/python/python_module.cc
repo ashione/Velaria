@@ -1927,6 +1927,74 @@ PyObject* sessionExplainVectorSearch(PyVelariaSession* self, PyObject* args, PyO
   });
 }
 
+PyObject* sessionHybridSearch(PyVelariaSession* self, PyObject* args, PyObject* kwargs) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    const char* table = nullptr;
+    const char* vector_column = nullptr;
+    PyObject* query_vector = nullptr;
+    unsigned long long top_k = 10;
+    const char* metric = "cosine";
+    PyObject* score_threshold = Py_None;
+    static const char* kwlist[] = {"table", "vector_column", "query_vector", "top_k", "metric",
+                                   "score_threshold", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ssO|KsO", const_cast<char**>(kwlist), &table,
+                                     &vector_column, &query_vector, &top_k, &metric,
+                                     &score_threshold)) {
+      return nullptr;
+    }
+    df::HybridSearchOptions options;
+    options.top_k = static_cast<size_t>(top_k);
+    options.metric = parseVectorMetric(metric);
+    if (score_threshold != Py_None) {
+      if (!PyFloat_Check(score_threshold) && !PyLong_Check(score_threshold)) {
+        throw std::runtime_error("score_threshold must be numeric");
+      }
+      options.score_threshold = PyFloat_AsDouble(score_threshold);
+    }
+    const auto query = parseFloatVector(query_vector, "query_vector");
+    df::DataFrame result;
+    {
+      AllowThreads allow;
+      result = self->session->hybridSearch(table, vector_column, query, options);
+    }
+    return wrapDataFrame(result);
+  });
+}
+
+PyObject* sessionExplainHybridSearch(PyVelariaSession* self, PyObject* args, PyObject* kwargs) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    const char* table = nullptr;
+    const char* vector_column = nullptr;
+    PyObject* query_vector = nullptr;
+    unsigned long long top_k = 10;
+    const char* metric = "cosine";
+    PyObject* score_threshold = Py_None;
+    static const char* kwlist[] = {"table", "vector_column", "query_vector", "top_k", "metric",
+                                   "score_threshold", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ssO|KsO", const_cast<char**>(kwlist), &table,
+                                     &vector_column, &query_vector, &top_k, &metric,
+                                     &score_threshold)) {
+      return nullptr;
+    }
+    df::HybridSearchOptions options;
+    options.top_k = static_cast<size_t>(top_k);
+    options.metric = parseVectorMetric(metric);
+    if (score_threshold != Py_None) {
+      if (!PyFloat_Check(score_threshold) && !PyLong_Check(score_threshold)) {
+        throw std::runtime_error("score_threshold must be numeric");
+      }
+      options.score_threshold = PyFloat_AsDouble(score_threshold);
+    }
+    const auto query = parseFloatVector(query_vector, "query_vector");
+    std::string explain;
+    {
+      AllowThreads allow;
+      explain = self->session->explainHybridSearch(table, vector_column, query, options);
+    }
+    return PyUnicode_FromString(explain.c_str());
+  });
+}
+
 PyObject* dataFrameToRows(PyVelariaDataFrame* self, PyObject*) {
   return withExceptionTranslation([&]() -> PyObject* {
     const df::Table* table = nullptr;
@@ -2280,6 +2348,10 @@ PyMethodDef sessionMethods[] = {
      METH_VARARGS | METH_KEYWORDS, "Run exact local vector search on a temp view."},
     {"explain_vector_search", reinterpret_cast<PyCFunction>(sessionExplainVectorSearch),
      METH_VARARGS | METH_KEYWORDS, "Explain exact local vector search strategy."},
+    {"hybrid_search", reinterpret_cast<PyCFunction>(sessionHybridSearch),
+     METH_VARARGS | METH_KEYWORDS, "Run exact local hybrid search on a temp view."},
+    {"explain_hybrid_search", reinterpret_cast<PyCFunction>(sessionExplainHybridSearch),
+     METH_VARARGS | METH_KEYWORDS, "Explain exact local hybrid search strategy."},
     {nullptr, nullptr, 0, nullptr},
 };
 

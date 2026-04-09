@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -99,10 +100,27 @@ struct Predicate {
   BinaryOperatorKind op = BinaryOperatorKind::Eq;
 };
 
+enum class PredicateExprKind { Comparison, And, Or };
+
+struct PredicateExpr {
+  PredicateExprKind kind = PredicateExprKind::Comparison;
+  Predicate predicate;
+  std::shared_ptr<PredicateExpr> left;
+  std::shared_ptr<PredicateExpr> right;
+};
+
 struct WindowSpec {
   ColumnRef time_column;
   uint64_t every_ms = 0;
   std::string output_column = "window_start";
+};
+
+struct HybridSearchSpec {
+  ColumnRef vector_column;
+  std::string query_vector;
+  std::string metric = "cosine";
+  std::size_t top_k = 10;
+  std::optional<double> score_threshold;
 };
 
 struct SqlColumnDef {
@@ -115,10 +133,11 @@ struct SqlQuery {
   bool has_from = false;
   FromItem from;
   std::optional<JoinItem> join;
-  std::optional<Predicate> where;
+  std::shared_ptr<PredicateExpr> where;
+  std::optional<HybridSearchSpec> hybrid_search;
   std::optional<WindowSpec> window;
   std::vector<ColumnRef> group_by;
-  std::optional<Predicate> having;
+  std::shared_ptr<PredicateExpr> having;
   std::vector<OrderByItem> order_by;
   std::optional<std::size_t> limit;
 };

@@ -44,6 +44,7 @@ Owns:
 - native binding in `python_api`
 - Arrow ingress/output
 - CLI, packaging, and `uv` workflow
+- offline embedding generation helpers and versioned embedding asset management
 - Excel / Bitable / custom stream adapters
 - local workspace and run tracking
 
@@ -104,7 +105,7 @@ Available today:
   - `CREATE TABLE`, `CREATE SOURCE TABLE`, `CREATE SINK TABLE`
   - `INSERT INTO ... VALUES`
   - `INSERT INTO ... SELECT`
-  - `SELECT` with projection/alias, `WHERE`, `GROUP BY`, `ORDER BY`, `LIMIT`, current minimal `JOIN`
+  - `SELECT` with projection/alias, `WHERE` (including `AND` / `OR`), `GROUP BY`, `ORDER BY`, `LIMIT`, current minimal `JOIN`
 - current batch builtins:
   - string: `LOWER`, `UPPER`, `TRIM`, `LTRIM`, `RTRIM`, `LENGTH`, `LEN`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, `REVERSE`, `CONCAT`, `CONCAT_WS`, `LEFT`, `RIGHT`, `SUBSTR` / `SUBSTRING`, `POSITION`, `REPLACE`
   - numeric/date: `ABS`, `CEIL`, `FLOOR`, `ROUND`, `YEAR`, `MONTH`, `DAY`

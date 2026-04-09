@@ -105,6 +105,8 @@ class PythonCliContractTest(unittest.TestCase):
             ["artifacts", "list"],
             ["artifacts", "preview"],
             ["file-sql"],
+            ["embedding-build"],
+            ["embedding-query"],
             ["vector-search"],
         ]
         for argv in cases:
@@ -620,6 +622,183 @@ class PythonCliContractTest(unittest.TestCase):
         self.assertIn("mode=exact-scan", payload["explain"])
         self.assertIn("candidate_rows=3", payload["explain"])
         self.assertIn("filter_pushdown=false", payload["explain"])
+
+    def test_vector_cli_hybrid_search_delegates_to_session_contract(self):
+        fake_session = mock.Mock()
+        fake_df = mock.Mock(name="df")
+        fake_df.filter.return_value = mock.Mock(name="filtered_df")
+        fake_session.read_csv.return_value = fake_df
+        fake_session.hybrid_search.return_value = _FakeDataFrame()
+        fake_session.explain_hybrid_search.return_value = (
+            "mode=exact-scan-hybrid-search\n"
+            "metric=cosine\n"
+            "top_k=2\n"
+            "score_threshold=0.02\n"
+            "candidate_rows=2\n"
+            "returned_rows=1\n"
+            "column_filter_execution=post-load-filter\n"
+            "backend=neon\n"
+        )
+
+        with tempfile.TemporaryDirectory(prefix="velaria-cli-contract-") as tmp:
+            csv_path = pathlib.Path(tmp) / "vectors.csv"
+            csv_path.write_text("id,bucket,embedding\n1,1,[1 0 0]\n", encoding="utf-8")
+            with mock.patch.object(velaria_cli, "Session", return_value=fake_session):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = velaria_cli._run_vector_search(
+                        csv_path=csv_path,
+                        vector_column="embedding",
+                        query_vector="1.0,0.0,0.0",
+                        metric="cosine",
+                        top_k=2,
+                        where_column="bucket",
+                        where_op="=",
+                        where_value="1",
+                        score_threshold=0.02,
+                    )
+
+        self.assertEqual(exit_code, 0)
+        fake_session.read_csv.assert_called_once_with(str(csv_path))
+        self.assertEqual(fake_session.create_temp_view.call_count, 2)
+        fake_session.create_temp_view.assert_any_call("input_table", fake_df)
+        fake_session.sql.assert_called_once_with("SELECT * FROM input_table WHERE bucket = 1")
+        fake_session.create_temp_view.assert_any_call("input_table_hybrid", fake_session.sql.return_value)
+        fake_session.hybrid_search.assert_called_once_with(
+            table="input_table_hybrid",
+            vector_column="embedding",
+            query_vector=[1.0, 0.0, 0.0],
+            top_k=2,
+            metric="cosine",
+            score_threshold=0.02,
+        )
+        fake_session.explain_hybrid_search.assert_called_once_with(
+            table="input_table_hybrid",
+            vector_column="embedding",
+            query_vector=[1.0, 0.0, 0.0],
+            top_k=2,
+            metric="cosine",
+            score_threshold=0.02,
+        )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["metric"], "cosine")
+        self.assertEqual(payload["top_k"], 2)
+        self.assertEqual(payload["where_column"], "bucket")
+        self.assertEqual(payload["where_op"], "=")
+        self.assertEqual(payload["where_value"], "1")
+        self.assertEqual(payload["score_threshold"], 0.02)
+        self.assertIn("mode=exact-scan-hybrid-search", payload["explain"])
+
+    def test_embedding_build_cli_delegates_to_pipeline_helper(self):
+        fake_table = pa.table(
+            {
+                "doc_id": ["doc-1"],
+                "embedding": pa.array([[1.0, 0.0, 0.0]], type=pa.list_(pa.float32(), 3)),
+            }
+        )
+        with tempfile.TemporaryDirectory(prefix="velaria-cli-embed-build-") as tmp:
+            input_path = pathlib.Path(tmp) / "docs.csv"
+            output_path = pathlib.Path(tmp) / "docs_embeddings.parquet"
+            input_path.write_text("doc_id,title,summary\n1,a,b\n", encoding="utf-8")
+            with mock.patch.object(velaria_cli, "Session", return_value=mock.Mock()):
+                with mock.patch.object(velaria_cli, "build_file_embeddings", return_value=fake_table) as build_file:
+                    stdout = io.StringIO()
+                    with redirect_stdout(stdout):
+                        exit_code = velaria_cli.main(
+                            [
+                                "embedding-build",
+                                "--input-path",
+                                str(input_path),
+                                "--input-type",
+                                "csv",
+                                "--text-columns",
+                                "title,summary",
+                                "--provider",
+                                "hash",
+                                "--output-path",
+                                str(output_path),
+                            ]
+                        )
+        self.assertEqual(exit_code, 0)
+        build_file.assert_called_once()
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["provider"], "hash")
+        self.assertEqual(payload["text_columns"], ["title", "summary"])
+        self.assertEqual(payload["row_count"], 1)
+
+    def test_embedding_query_cli_delegates_to_pipeline_helper(self):
+        fake_result = _FakeDataFrame()
+        with tempfile.TemporaryDirectory(prefix="velaria-cli-embed-query-") as tmp:
+            input_path = pathlib.Path(tmp) / "docs.csv"
+            input_path.write_text("doc_id,title,summary\n1,a,b\n", encoding="utf-8")
+            with mock.patch.object(velaria_cli, "Session", return_value=mock.Mock()):
+                with mock.patch.object(
+                    velaria_cli,
+                    "run_file_mixed_text_hybrid_search",
+                    return_value=fake_result,
+                ) as run_pipeline:
+                    stdout = io.StringIO()
+                    with redirect_stdout(stdout):
+                        exit_code = velaria_cli.main(
+                            [
+                                "embedding-query",
+                                "--input-path",
+                                str(input_path),
+                                "--input-type",
+                                "csv",
+                                "--text-columns",
+                                "title,summary",
+                                "--provider",
+                                "hash",
+                                "--query-text",
+                                "find alpha",
+                                "--top-k",
+                                "2",
+                                "--metric",
+                                "cosine",
+                            ]
+                        )
+        self.assertEqual(exit_code, 0)
+        run_pipeline.assert_called_once()
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["provider"], "hash")
+        self.assertEqual(payload["query_text"], "find alpha")
+        self.assertEqual(payload["top_k"], 2)
+
+    def test_embedding_query_cli_accepts_where_sql(self):
+        fake_result = _FakeDataFrame()
+        with tempfile.TemporaryDirectory(prefix="velaria-cli-embed-query-sql-") as tmp:
+            dataset_path = pathlib.Path(tmp) / "docs_embeddings.parquet"
+            dataset_path.write_text("placeholder", encoding="utf-8")
+            with mock.patch.object(velaria_cli, "Session", return_value=mock.Mock()):
+                with mock.patch.object(
+                    velaria_cli,
+                    "query_file_embeddings",
+                    return_value=fake_result,
+                ) as query_embeddings:
+                    stdout = io.StringIO()
+                    with redirect_stdout(stdout):
+                        exit_code = velaria_cli.main(
+                            [
+                                "embedding-query",
+                                "--dataset-path",
+                                str(dataset_path),
+                                "--provider",
+                                "hash",
+                                "--query-text",
+                                "find alpha",
+                                "--where-sql",
+                                "bucket = 1 AND region = 'apac'",
+                                "--top-k",
+                                "2",
+                            ]
+                        )
+        self.assertEqual(exit_code, 0)
+        query_embeddings.assert_called_once()
+        self.assertEqual(query_embeddings.call_args.kwargs["where_sql"], "bucket = 1 AND region = 'apac'")
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["where_sql"], "bucket = 1 AND region = 'apac'")
 
 
 if __name__ == "__main__":

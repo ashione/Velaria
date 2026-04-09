@@ -40,7 +40,8 @@ bool isClauseKeyword(const std::string& value) {
          u == "SELECT" || u == "CREATE" || u == "TABLE" || u == "INSERT" || u == "INTO" ||
          u == "VALUES" || u == "USING" || u == "OPTIONS" || u == "SOURCE" || u == "SINK" ||
          u == "WINDOW" || u == "EVERY" || u == "HYBRID" || u == "SEARCH" ||
-         u == "QUERY" || u == "METRIC" || u == "TOP_K" || u == "SCORE_THRESHOLD";
+         u == "QUERY" || u == "METRIC" || u == "TOP_K" || u == "SCORE_THRESHOLD" ||
+         u == "AND" || u == "OR";
 }
 
 bool isJoinKeyword(const std::string& value) {
@@ -374,7 +375,7 @@ FromItem parseFrom(ParseState& state) {
   return out;
 }
 
-Predicate parsePredicate(ParseState& state) {
+Predicate parseComparisonPredicate(ParseState& state) {
   Predicate out;
   bool left_paren = false;
   if (state.consumeSymbol("(")) {
@@ -423,6 +424,52 @@ Predicate parsePredicate(ParseState& state) {
     state.expectSymbol(")");
   }
   return out;
+}
+
+std::shared_ptr<PredicateExpr> makePredicateExpr(Predicate predicate) {
+  auto out = std::make_shared<PredicateExpr>();
+  out->kind = PredicateExprKind::Comparison;
+  out->predicate = std::move(predicate);
+  return out;
+}
+
+std::shared_ptr<PredicateExpr> makePredicateExpr(PredicateExprKind kind,
+                                                 std::shared_ptr<PredicateExpr> left,
+                                                 std::shared_ptr<PredicateExpr> right) {
+  auto out = std::make_shared<PredicateExpr>();
+  out->kind = kind;
+  out->left = std::move(left);
+  out->right = std::move(right);
+  return out;
+}
+
+std::shared_ptr<PredicateExpr> parsePredicate(ParseState& state);
+
+std::shared_ptr<PredicateExpr> parsePredicatePrimary(ParseState& state) {
+  if (state.consumeSymbol("(")) {
+    auto expr = parsePredicate(state);
+    state.expectSymbol(")");
+    return expr;
+  }
+  return makePredicateExpr(parseComparisonPredicate(state));
+}
+
+std::shared_ptr<PredicateExpr> parsePredicateAnd(ParseState& state) {
+  auto left = parsePredicatePrimary(state);
+  while (state.consumeWord("AND")) {
+    auto right = parsePredicatePrimary(state);
+    left = makePredicateExpr(PredicateExprKind::And, std::move(left), std::move(right));
+  }
+  return left;
+}
+
+std::shared_ptr<PredicateExpr> parsePredicate(ParseState& state) {
+  auto left = parsePredicateAnd(state);
+  while (state.consumeWord("OR")) {
+    auto right = parsePredicateAnd(state);
+    left = makePredicateExpr(PredicateExprKind::Or, std::move(left), std::move(right));
+  }
+  return left;
 }
 
 AggregateFunctionKind parseAggregateFunction(const std::string& name) {

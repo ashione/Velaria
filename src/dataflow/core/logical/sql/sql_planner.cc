@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <memory>
 #include <sstream>
+#include <functional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+#include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/runtime/execution_optimizer.h"
 
 namespace dataflow {
@@ -192,7 +194,8 @@ std::string defaultAggregateAlias(AggregateFunctionKind fn, const std::string& a
 }
 
 bool isUnaryStep(LogicalStepKind kind) {
-  return kind == LogicalStepKind::Filter || kind == LogicalStepKind::HybridSearch ||
+  return kind == LogicalStepKind::Filter || kind == LogicalStepKind::PredicateFilter ||
+         kind == LogicalStepKind::HybridSearch ||
          kind == LogicalStepKind::Project ||
          kind == LogicalStepKind::Limit || kind == LogicalStepKind::Having ||
          kind == LogicalStepKind::WithColumn;
@@ -207,6 +210,116 @@ bool isAggregateQuery(const SqlQuery& query) {
   return !query.group_by.empty() ||
          std::any_of(query.select_items.begin(), query.select_items.end(),
                      [](const SelectItem& item) { return item.is_aggregate; });
+}
+
+bool predicateExprHasAggregate(const std::shared_ptr<PredicateExpr>& expr) {
+  if (!expr) return false;
+  if (expr->kind == PredicateExprKind::Comparison) {
+    return expr->predicate.lhs_is_aggregate;
+  }
+  return predicateExprHasAggregate(expr->left) || predicateExprHasAggregate(expr->right);
+}
+
+bool predicateExprIsSimpleComparison(const std::shared_ptr<PredicateExpr>& expr) {
+  return expr && expr->kind == PredicateExprKind::Comparison;
+}
+
+bool collectConjunctivePredicates(const std::shared_ptr<PredicateExpr>& expr,
+                                  std::vector<Predicate>* out) {
+  if (!expr || out == nullptr) return false;
+  if (expr->kind == PredicateExprKind::Comparison) {
+    out->push_back(expr->predicate);
+    return true;
+  }
+  if (expr->kind != PredicateExprKind::And) {
+    return false;
+  }
+  return collectConjunctivePredicates(expr->left, out) &&
+         collectConjunctivePredicates(expr->right, out);
+}
+
+RowSelection intersectSelections(const RowSelection& lhs, const RowSelection& rhs) {
+  if (lhs.input_row_count != rhs.input_row_count) {
+    throw std::runtime_error("predicate selection input size mismatch");
+  }
+  RowSelection out;
+  out.input_row_count = lhs.input_row_count;
+  out.selected.assign(out.input_row_count, 0);
+  out.indices.reserve(std::min(lhs.selected_count, rhs.selected_count));
+  for (std::size_t i = 0; i < out.input_row_count; ++i) {
+    if (lhs.selected[i] != 0 && rhs.selected[i] != 0) {
+      out.selected[i] = 1;
+      out.indices.push_back(i);
+    }
+  }
+  out.selected_count = out.indices.size();
+  return out;
+}
+
+RowSelection unionSelections(const RowSelection& lhs, const RowSelection& rhs) {
+  if (lhs.input_row_count != rhs.input_row_count) {
+    throw std::runtime_error("predicate selection input size mismatch");
+  }
+  RowSelection out;
+  out.input_row_count = lhs.input_row_count;
+  out.selected.assign(out.input_row_count, 0);
+  out.indices.reserve(lhs.selected_count + rhs.selected_count);
+  for (std::size_t i = 0; i < out.input_row_count; ++i) {
+    if (lhs.selected[i] != 0 || rhs.selected[i] != 0) {
+      out.selected[i] = 1;
+      out.indices.push_back(i);
+    }
+  }
+  out.selected_count = out.indices.size();
+  return out;
+}
+
+using PredicateColumnResolver = std::function<std::size_t(const Predicate&)>;
+using PredicateRewriter = std::function<Predicate(const Predicate&)>;
+
+std::shared_ptr<PredicateExpr> rewritePredicateExpr(const std::shared_ptr<PredicateExpr>& expr,
+                                                    const PredicateRewriter& rewrite_predicate) {
+  if (!expr) return nullptr;
+  auto out = std::make_shared<PredicateExpr>();
+  out->kind = expr->kind;
+  if (expr->kind == PredicateExprKind::Comparison) {
+    out->predicate = rewrite_predicate(expr->predicate);
+    return out;
+  }
+  out->left = rewritePredicateExpr(expr->left, rewrite_predicate);
+  out->right = rewritePredicateExpr(expr->right, rewrite_predicate);
+  return out;
+}
+
+RowSelection evaluatePredicateExpr(const Table& input, const std::shared_ptr<PredicateExpr>& expr,
+                                   const PredicateColumnResolver& resolve_column) {
+  if (!expr) {
+    RowSelection out;
+    out.input_row_count = input.rowCount();
+    out.selected.assign(out.input_row_count, 1);
+    out.indices.reserve(out.input_row_count);
+    for (std::size_t i = 0; i < out.input_row_count; ++i) out.indices.push_back(i);
+    out.selected_count = out.input_row_count;
+    return out;
+  }
+  if (expr->kind == PredicateExprKind::Comparison) {
+    const auto column_index = resolve_column(expr->predicate);
+    return vectorizedFilterSelection(viewValueColumn(input, column_index),
+                                     expr->predicate.rhs, opToString(expr->predicate.op));
+  }
+  const auto left = evaluatePredicateExpr(input, expr->left, resolve_column);
+  const auto right = evaluatePredicateExpr(input, expr->right, resolve_column);
+  if (expr->kind == PredicateExprKind::And) {
+    return intersectSelections(left, right);
+  }
+  return unionSelections(left, right);
+}
+
+DataFrame applyPredicateExpr(const DataFrame& current, const std::shared_ptr<PredicateExpr>& expr,
+                             const PredicateColumnResolver& resolve_column) {
+  const auto input = current.toTable();
+  const auto selection = evaluatePredicateExpr(input, expr, resolve_column);
+  return DataFrame(filterTable(input, selection, false));
 }
 
 VectorDistanceMetric parseHybridMetric(const std::string& metric) {
@@ -811,8 +924,8 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
   LogicalPlan logical;
 
   if (!query.has_from) {
-    if (query.join.has_value() || query.where.has_value() || !query.group_by.empty() ||
-        query.having.has_value()) {
+    if (query.join.has_value() || query.where || !query.group_by.empty() ||
+        query.having) {
       throw SQLSemanticError("SELECT without FROM only supports literal projection");
     }
     if (std::any_of(query.select_items.begin(), query.select_items.end(),
@@ -907,18 +1020,37 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
     ctx.addRelation(rightView, rightSchema, leftWidth);
   }
 
-  if (query.where.has_value()) {
-    if (query.where->lhs_is_aggregate) {
+  if (query.where) {
+    if (predicateExprHasAggregate(query.where)) {
       throw SQLSemanticError("WHERE does not support aggregate expressions");
     }
-    std::size_t idx = ctx.resolveColumn(query.where->lhs, nullptr);
-    LogicalPlanStep filter;
-    filter.kind = LogicalStepKind::Filter;
-    filter.filter_column = idx;
-    filter.filter_op = opToString(query.where->op);
-    filter.filter_value = query.where->rhs;
-    logical.steps.push_back(filter);
-    current = current.filterByIndex(idx, filter.filter_op, filter.filter_value);
+    std::vector<Predicate> conjunctive;
+    if (collectConjunctivePredicates(query.where, &conjunctive)) {
+      for (const auto& predicate : conjunctive) {
+        std::size_t idx = ctx.resolveColumn(predicate.lhs, nullptr);
+        LogicalPlanStep filter;
+        filter.kind = LogicalStepKind::Filter;
+        filter.filter_column = idx;
+        filter.filter_op = opToString(predicate.op);
+        filter.filter_value = predicate.rhs;
+        logical.steps.push_back(filter);
+        current = current.filterByIndex(idx, filter.filter_op, filter.filter_value);
+      }
+    } else {
+      LogicalPlanStep filter;
+      filter.kind = LogicalStepKind::PredicateFilter;
+      filter.predicate_expr = rewritePredicateExpr(query.where, [&](const Predicate& predicate) {
+        auto rebound = predicate;
+        const auto idx = ctx.resolveColumn(predicate.lhs, nullptr);
+        rebound.lhs.qualifier = "__index__";
+        rebound.lhs.name = std::to_string(idx);
+        return rebound;
+      });
+      logical.steps.push_back(filter);
+      current = applyPredicateExpr(current, query.where, [&](const Predicate& predicate) {
+        return ctx.resolveColumn(predicate.lhs, nullptr);
+      });
+    }
   }
 
   const auto whereFilteredSchema = current.schema();
@@ -959,7 +1091,7 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
   }
 
   if (hasAggregateQuery) {
-    if (query.having.has_value() && query.group_by.empty()) {
+    if (query.having && query.group_by.empty()) {
       throw SQLSemanticError("GROUP BY required for HAVING");
     }
 
@@ -1012,52 +1144,63 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
     current = current.aggregate(groupKeys, specs);
 
     const auto aggSchema = current.schema();
-    if (query.having.has_value()) {
-      const auto& pred = query.having.value();
-      std::string havingColumn;
-      if (pred.lhs_is_aggregate) {
-        std::string default_name =
-            defaultAggregateAlias(pred.lhs_aggregate.function, pred.lhs_aggregate.argument.name, "");
-        if (aggSchema.has(default_name)) {
-          havingColumn = default_name;
+    if (query.having) {
+      auto resolve_having_column = [&](const Predicate& pred) -> std::size_t {
+        std::string havingColumn;
+        if (pred.lhs_is_aggregate) {
+          std::string default_name =
+              defaultAggregateAlias(pred.lhs_aggregate.function, pred.lhs_aggregate.argument.name, "");
+          if (aggSchema.has(default_name)) {
+            havingColumn = default_name;
+          } else {
+            bool matched = false;
+            for (const auto& item : query.select_items) {
+              if (!item.is_aggregate) continue;
+              const auto& agg = item.aggregate;
+              if (agg.function != pred.lhs_aggregate.function) continue;
+              if (agg.count_all != pred.lhs_aggregate.count_all) continue;
+              if (!agg.count_all &&
+                  (agg.argument.name != pred.lhs_aggregate.argument.name ||
+                   agg.argument.qualifier != pred.lhs_aggregate.argument.qualifier)) {
+                continue;
+              }
+              havingColumn =
+                  defaultAggregateAlias(item.aggregate.function, item.aggregate.argument.name, item.alias);
+              matched = true;
+              break;
+            }
+            if (!matched) {
+              throw SQLSemanticError("HAVING aggregate not found in SELECT: " + default_name);
+            }
+          }
         } else {
-          bool matched = false;
-          for (const auto& item : query.select_items) {
-            if (!item.is_aggregate) {
-              continue;
-            }
-            const auto& agg = item.aggregate;
-            if (agg.function != pred.lhs_aggregate.function) {
-              continue;
-            }
-            if (agg.count_all != pred.lhs_aggregate.count_all) {
-              continue;
-            }
-            if (!agg.count_all &&
-                (agg.argument.name != pred.lhs_aggregate.argument.name ||
-                 agg.argument.qualifier != pred.lhs_aggregate.argument.qualifier)) {
-              continue;
-            }
-            havingColumn =
-                defaultAggregateAlias(item.aggregate.function, item.aggregate.argument.name, item.alias);
-            matched = true;
-            break;
-          }
-          if (!matched) {
-            throw SQLSemanticError("HAVING aggregate not found in SELECT: " + default_name);
-          }
+          havingColumn = pred.lhs.name;
+        }
+        return aggSchema.indexOf(havingColumn);
+      };
+      std::vector<Predicate> conjunctive;
+      if (collectConjunctivePredicates(query.having, &conjunctive)) {
+        for (const auto& pred : conjunctive) {
+          LogicalPlanStep having;
+          having.kind = LogicalStepKind::Having;
+          having.having_column = aggSchema.fields[resolve_having_column(pred)];
+          having.filter_op = opToString(pred.op);
+          having.filter_value = pred.rhs;
+          logical.steps.push_back(having);
+          current = current.filterByIndex(resolve_having_column(pred), having.filter_op, having.filter_value);
         }
       } else {
-        havingColumn = pred.lhs.name;
+        LogicalPlanStep having;
+        having.kind = LogicalStepKind::PredicateFilter;
+        having.predicate_expr = rewritePredicateExpr(query.having, [&](const Predicate& pred) {
+          auto rebound = pred;
+          rebound.lhs.qualifier = "__index__";
+          rebound.lhs.name = std::to_string(resolve_having_column(pred));
+          return rebound;
+        });
+        logical.steps.push_back(having);
+        current = applyPredicateExpr(current, query.having, resolve_having_column);
       }
-      LogicalPlanStep having;
-      having.kind = LogicalStepKind::Having;
-      having.having_column = havingColumn;
-      having.filter_op = opToString(pred.op);
-      having.filter_value = pred.rhs;
-      logical.steps.push_back(having);
-      const auto havingIndex = aggSchema.indexOf(havingColumn);
-      current = current.filterByIndex(havingIndex, having.filter_op, having.filter_value);
     }
 
     std::vector<std::size_t> finalIndices;
@@ -1090,7 +1233,7 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
     if (!query.group_by.empty()) {
       throw SQLSemanticError("GROUP BY used without aggregate");
     }
-    if (query.having.has_value()) {
+    if (query.having) {
       throw SQLSemanticError("HAVING used without aggregate");
     }
 
@@ -1206,6 +1349,9 @@ std::string SqlPlanner::explainLogicalPlan(const LogicalPlan& logical) const {
       case LogicalStepKind::Filter:
         out << "Filter column=" << step.filter_column << " op=" << step.filter_op;
         break;
+      case LogicalStepKind::PredicateFilter:
+        out << "PredicateFilter";
+        break;
       case LogicalStepKind::HybridSearch:
         out << "HybridSearch column=" << step.hybrid_vector_column
             << " top_k=" << step.hybrid_options.top_k;
@@ -1274,6 +1420,14 @@ DataFrame SqlPlanner::materializeFromPhysical(const PhysicalPlan& physical) cons
       case LogicalStepKind::Filter:
         current = current.filterByIndex(step.logical.filter_column, step.logical.filter_op,
                                        step.logical.filter_value);
+        break;
+      case LogicalStepKind::PredicateFilter:
+        current = applyPredicateExpr(current, step.logical.predicate_expr, [&](const Predicate& predicate) {
+          if (predicate.lhs.qualifier == "__index__") {
+            return static_cast<std::size_t>(std::stoull(predicate.lhs.name));
+          }
+          return current.schema().indexOf(predicate.lhs.name);
+        });
         break;
       case LogicalStepKind::HybridSearch:
         current = current.hybridSearch(step.logical.hybrid_vector_column,
@@ -1350,8 +1504,11 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query,
   scan.source_name = query.from.name;
   logical.nodes.push_back(scan);
 
-  if (query.where.has_value()) {
-    const auto& predicate = *query.where;
+  if (query.where) {
+    if (!predicateExprIsSimpleComparison(query.where)) {
+      throwUnsupportedSqlV1("stream SQL WHERE does not support AND/OR");
+    }
+    const auto& predicate = query.where->predicate;
     if (predicate.lhs_is_aggregate) {
       throw SQLSemanticError("WHERE does not support aggregate expressions");
     }
@@ -1373,7 +1530,7 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query,
   }
 
   if (isAggregateQuery(query)) {
-    if (query.having.has_value() && query.group_by.empty()) {
+    if (query.having && query.group_by.empty()) {
       throw SQLSemanticError("GROUP BY required for HAVING");
     }
 
@@ -1418,8 +1575,11 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query,
     aggregate.aggregates = aggregates;
     logical.nodes.push_back(aggregate);
 
-    if (query.having.has_value()) {
-      const auto& predicate = *query.having;
+    if (query.having) {
+      if (!predicateExprIsSimpleComparison(query.having)) {
+        throwUnsupportedSqlV1("stream SQL HAVING does not support AND/OR");
+      }
+      const auto& predicate = query.having->predicate;
       StreamPlanNode filter;
       filter.kind = StreamPlanNodeKind::Filter;
       if (predicate.lhs_is_aggregate) {
@@ -1503,7 +1663,7 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query,
     if (!query.group_by.empty()) {
       throw SQLSemanticError("GROUP BY used without aggregate");
     }
-    if (query.having.has_value()) {
+    if (query.having) {
       throw SQLSemanticError("HAVING used without aggregate");
     }
 

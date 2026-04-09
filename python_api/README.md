@@ -29,6 +29,7 @@ The supported Python ecosystem includes:
 - Bitable adapters and stream source integration
 - custom source / custom sink adapters
 - vector search and vector explain APIs
+- offline embedding pipeline helpers for versioned vector assets
 
 ### Examples
 
@@ -39,6 +40,8 @@ Examples and helper assets include:
 - `examples/demo_bitable_group_by_owner.py`
 - `examples/demo_vector_search.py`
 - `benchmarks/bench_arrow_ingestion.py`
+- `examples/demo_embedding_pipeline.py`
+- `benchmarks/bench_embedding_pipeline.py`
 - local ecosystem scripts and skills
 
 ### Experimental
@@ -77,6 +80,11 @@ Main `Session` API:
 - `Session.start_stream_sql(...)`
 - `Session.vector_search(...)`
 - `Session.explain_vector_search(...)`
+- `build_embedding_rows(...)`
+- `materialize_embeddings(...)`
+- `load_embedding_dataframe(...)`
+- `embed_query_text(...)`
+- `SentenceTransformerEmbeddingProvider(...)`
 
 Additional ecosystem helpers:
 
@@ -102,6 +110,7 @@ File reader mapping:
 - all four file readers share the same source materialization knobs:
   `materialization`, `materialization_dir`, and `materialization_format`
 - `velaria-cli file-sql` defaults to `--input-type auto` and registers batch sources through `CREATE TABLE ... OPTIONS(path: '...')`
+- versioned embedding datasets written as Parquet / Arrow should be loaded through `pyarrow` plus `Session.create_dataframe_from_arrow(...)` or `load_embedding_dataframe(...)`, not `Session.read(...)`
 
 Regex line usage:
 
@@ -144,6 +153,114 @@ json_df = session.read_json(
 )
 ```
 
+Embedding pipeline example:
+
+```python
+from velaria import (
+    DEFAULT_LOCAL_EMBEDDING_MODEL,
+    DEFAULT_EMBEDDING_WARMUP_TEXT,
+    HashEmbeddingProvider,
+    Session,
+    SentenceTransformerEmbeddingProvider,
+    build_mixed_text_embedding_rows,
+    download_embedding_model,
+    materialize_mixed_text_embeddings,
+    run_mixed_text_hybrid_search,
+)
+
+records = [
+    {
+        "doc_id": "doc-1",
+        "title": "Alpha",
+        "summary": "Payment page timeout",
+        "tags": ["billing", "checkout"],
+        "bucket": 1,
+        "source_updated_at": 1,
+    },
+    {
+        "doc_id": "doc-2",
+        "title": "Beta",
+        "summary": "Refund delay in worker queue",
+        "tags": ["refund", "queue"],
+        "bucket": 2,
+        "source_updated_at": 2,
+    },
+]
+provider = HashEmbeddingProvider(dimension=8)
+session = Session()
+materialize_mixed_text_embeddings(
+    records,
+    provider=provider,
+    model="hash-demo",
+    template_version="text-v1",
+    text_fields=("title", "summary", "tags"),
+    output_path="docs_embeddings.parquet",
+)
+
+result = run_mixed_text_hybrid_search(
+    session,
+    "docs_embeddings.parquet",
+    provider=provider,
+    model="hash-demo",
+    query_text="payment page hangs during checkout",
+    where_sql="bucket = 1 AND doc_id = 'doc-1'",
+    top_k=2,
+    metric="cosine",
+)
+```
+
+For a local semantic baseline with `all-MiniLM-L6-v2`, install the optional provider dependency first:
+
+```bash
+uv sync --project python_api --extra embedding
+```
+
+Then swap the provider:
+
+```python
+provider = SentenceTransformerEmbeddingProvider(
+    model_name=DEFAULT_LOCAL_EMBEDDING_MODEL,
+)
+```
+
+If you want to avoid remote Hub resolution on every machine, put the model files in a local directory and point the provider at that directory. Supported lookup order for the default MiniLM model is:
+
+1. `VELARIA_EMBEDDING_MODEL_DIR`
+2. `python_api/models/all-MiniLM-L6-v2`
+3. fallback to the Hugging Face model id
+
+Example:
+
+```bash
+export VELARIA_EMBEDDING_MODEL_DIR=/absolute/path/to/all-MiniLM-L6-v2
+export VELARIA_EMBEDDING_CACHE_DIR=/absolute/path/to/hf-cache
+```
+
+Then `SentenceTransformerEmbeddingProvider(model_name=DEFAULT_LOCAL_EMBEDDING_MODEL)` will load from the local directory instead of the Hub.
+
+You can also explicitly pre-download and warm up the model before serving queries:
+
+```python
+from velaria import (
+    DEFAULT_LOCAL_EMBEDDING_MODEL,
+    SentenceTransformerEmbeddingProvider,
+    download_embedding_model,
+)
+
+local_dir = download_embedding_model(DEFAULT_LOCAL_EMBEDDING_MODEL)
+provider = SentenceTransformerEmbeddingProvider(model_name=DEFAULT_LOCAL_EMBEDDING_MODEL)
+provider.warmup(
+    download_if_missing=False,
+    warmup_text="warmup embedding text",
+)
+```
+
+Recommended startup flow:
+
+1. `download_embedding_model(...)` during environment/bootstrap time
+2. `provider.warmup(...)` once during process start
+3. run batch embedding or online query embedding after the model is already resident
+
 CLI examples:
 
 ```bash
@@ -166,6 +283,34 @@ uv run --project python_api python python_api/velaria_cli.py file-sql \
   --query "SELECT * FROM input_table LIMIT 5"
 ```
 
+Mixed-text embedding pipeline through the CLI:
+
+```bash
+uv run --project python_api python python_api/velaria_cli.py embedding-build \
+  --input-path /tmp/docs.csv \
+  --input-type csv \
+  --text-columns title,summary,tags \
+  --provider minilm \
+  --output-path /tmp/docs_embeddings.parquet
+
+uv run --project python_api python python_api/velaria_cli.py embedding-query \
+  --dataset-path /tmp/docs_embeddings.parquet \
+  --provider minilm \
+  --query-text "payment page hangs during checkout" \
+  --where-sql "bucket = 1 AND region = 'apac'" \
+  --top-k 5
+
+# direct query from the raw file without a prebuilt embedding dataset
+uv run --project python_api python python_api/velaria_cli.py embedding-query \
+  --input-path /tmp/docs.csv \
+  --input-type csv \
+  --text-columns title,summary,tags \
+  --provider minilm \
+  --query-text "payment page hangs during checkout" \
+  --where-sql "bucket = 1 AND region = 'apac'" \
+  --top-k 5
+```
+
 Current SQL mapping carried by Python:
 
 - `Session.sql(...)` maps to core SQL v1 batch semantics:
@@ -173,6 +318,8 @@ Current SQL mapping carried by Python:
   - `INSERT INTO ... VALUES`
   - `INSERT INTO ... SELECT`
   - `SELECT` with projection/alias, `WHERE`, `GROUP BY`, `ORDER BY`, `LIMIT`, and the current minimal `JOIN`
+  - batch `WHERE` supports single predicates plus `AND` / `OR` expressions
+  - batch `HYBRID SEARCH ... QUERY ...` on single-table non-aggregate queries
 - batch builtins currently exposed through the same core path:
   - `LOWER`, `UPPER`, `TRIM`, `LTRIM`, `RTRIM`
   - `LENGTH`, `LEN`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, `REVERSE`
@@ -243,6 +390,7 @@ Run demos:
 uv run --project python_api python python_api/examples/demo_batch_sql_arrow.py
 uv run --project python_api python python_api/examples/demo_stream_sql.py
 uv run --project python_api python python_api/examples/demo_vector_search.py
+uv run --project python_api python python_api/examples/demo_embedding_pipeline.py
 ```
 
 Recommended regression entrypoint:
@@ -277,6 +425,27 @@ Benchmark regression entrypoint:
 ```bash
 ./scripts/run_python_stage_benchmark.sh
 ```
+
+Embedding pipeline benchmark:
+
+```bash
+uv run --project python_api python python_api/benchmarks/bench_embedding_pipeline.py
+```
+
+For the local MiniLM provider:
+
+```bash
+uv sync --project python_api --extra embedding
+uv run --project python_api python python_api/benchmarks/bench_embedding_pipeline.py \
+  --provider minilm \
+  --model sentence-transformers/all-MiniLM-L6-v2
+```
+
+The benchmark reports both:
+
+- batch embedding/materialization throughput
+- online query embedding latency
+- online hybrid search latency on the resulting embedding dataset
 
 Core file-input benchmark entrypoint:
 

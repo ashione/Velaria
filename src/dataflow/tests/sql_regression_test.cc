@@ -102,7 +102,7 @@ void runParserRegression() {
         const auto st = dataflow::sql::SqlParser::parse(
             "SELECT token, SUM(score) AS total_score FROM rpc_input GROUP BY token "
             "HAVING SUM(score) > 15");
-        expect(st.query.having.has_value(), "parser_having_aggregate_present");
+        expect(static_cast<bool>(st.query.having), "parser_having_aggregate_present");
       });
 
   expectNoThrow(
@@ -113,10 +113,10 @@ void runParserRegression() {
             "FROM users u INNER JOIN actions a ON u.user_id = a.user_id "
             "WHERE a.score > 6 GROUP BY u.region HAVING SUM(a.score) > 15 LIMIT 10");
         expect(st.query.select_items.size() == 3, "parser_projection_size");
-        expect(st.query.where.has_value(), "parser_where_present");
+        expect(static_cast<bool>(st.query.where), "parser_where_present");
         expect(st.query.join.has_value(), "parser_join_present");
         expect(st.query.group_by.size() == 1, "parser_groupby_size");
-        expect(st.query.having.has_value(), "parser_having_present");
+        expect(static_cast<bool>(st.query.having), "parser_having_present");
         expect(st.query.limit.value_or(0) == 10, "parser_limit_present");
       });
 
@@ -234,6 +234,14 @@ void runParserRegression() {
       });
 
   expectNoThrow(
+      "parser_where_and_or_clause_parsed",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT user_id FROM users WHERE region = 'apac' OR (region = 'emea' AND score > 10)");
+        expect(static_cast<bool>(st.query.where), "parser_where_and_or_present");
+      });
+
+  expectNoThrow(
       "parser_alias_and_limit_projection",
       []() {
         const auto st = dataflow::sql::SqlParser::parse(
@@ -269,7 +277,7 @@ void runParserRegression() {
       []() {
         const auto st = dataflow::sql::SqlParser::parse(
             "SELECT u.user_id FROM users u WHERE u.user_id > (1) LIMIT 1");
-        expect(st.query.where.has_value(), "parser_predicate_where_present");
+        expect(static_cast<bool>(st.query.where), "parser_predicate_where_present");
         expect(st.query.limit.value_or(0) == 1, "parser_predicate_limit_present");
       });
 
@@ -413,6 +421,17 @@ void runSemanticRegression() {
                  "HYBRID SEARCH score QUERY '[1 0 0]' GROUP BY region");
       },
       "HYBRID SEARCH does not support aggregate");
+
+  Table and_rows = s.submit(
+      "SELECT user_id FROM t_users_v1 WHERE region = 'apac' AND score > 20 ORDER BY user_id LIMIT 5");
+  expect(and_rows.rows.size() == 1, "planner_where_and_rows");
+  expect(and_rows.rows[0][0].asInt64() == 1, "planner_where_and_first_user");
+
+  Table or_rows = s.submit(
+      "SELECT user_id FROM t_users_v1 WHERE region = 'apac' OR region = 'emea' ORDER BY user_id LIMIT 5");
+  expect(or_rows.rows.size() == 2, "planner_where_or_rows");
+  expect(or_rows.rows[0][0].asInt64() == 1, "planner_where_or_first_user");
+  expect(or_rows.rows[1][0].asInt64() == 2, "planner_where_or_second_user");
 
   s.submit("CREATE SOURCE TABLE t_source_guard_v1 (user_id INT, region STRING)");
   expectThrows(

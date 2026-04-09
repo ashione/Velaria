@@ -876,8 +876,11 @@ StreamingDataFrame buildAggregateStream(const StreamingDataFrame& seed, const sq
           ? grouped.count(true, output_name)
           : grouped.sum(resolveColumnName(aggregate_item->aggregate.argument, from), true, output_name);
 
-  if (query.having.has_value()) {
-    const auto& predicate = *query.having;
+  if (query.having) {
+    if (query.having->kind != sql::PredicateExprKind::Comparison) {
+      throwUnsupportedSqlV1("stream SQL HAVING does not support AND/OR");
+    }
+    const auto& predicate = query.having->predicate;
     const std::string having_column =
         predicate.lhs_is_aggregate ? output_name : resolveColumnName(predicate.lhs, from);
     aggregated = aggregated.filter(having_column, filterOp(predicate.op), predicate.rhs);
@@ -905,8 +908,11 @@ StreamingDataFrame buildAggregateStream(const StreamingDataFrame& seed, const sq
   }
 
   StreamingDataFrame current = it->second;
-  if (query.where.has_value()) {
-    const auto& predicate = *query.where;
+  if (query.where) {
+    if (query.where->kind != sql::PredicateExprKind::Comparison) {
+      throwUnsupportedSqlV1("stream SQL WHERE does not support AND/OR");
+    }
+    const auto& predicate = query.where->predicate;
     if (predicate.lhs_is_aggregate) {
       throw SQLSemanticError("WHERE does not support aggregate expressions");
     }
@@ -915,7 +921,7 @@ StreamingDataFrame buildAggregateStream(const StreamingDataFrame& seed, const sq
   }
 
   if (isAggregateQuery(query)) {
-    if (query.having.has_value() && query.group_by.empty()) {
+    if (query.having && query.group_by.empty()) {
       throw SQLSemanticError("GROUP BY required for HAVING");
     }
     current = buildAggregateStream(current, query, query.from);
@@ -923,7 +929,7 @@ StreamingDataFrame buildAggregateStream(const StreamingDataFrame& seed, const sq
     if (!query.group_by.empty()) {
       throw SQLSemanticError("GROUP BY used without aggregate");
     }
-    if (query.having.has_value()) {
+    if (query.having) {
       throw SQLSemanticError("HAVING used without aggregate");
     }
     current = projectStreamSelect(current, query, query.from);
@@ -1162,6 +1168,10 @@ std::string DataflowSession::explainSql(const std::string& sql_text) {
       case sql::LogicalStepKind::Filter:
         current = current.filterByIndex(step.logical.filter_column, step.logical.filter_op,
                                        step.logical.filter_value);
+        break;
+      case sql::LogicalStepKind::PredicateFilter:
+        current = planner.materializeFromPhysical(
+            sql::PhysicalPlan{current, std::vector<sql::PhysicalPlanStep>{step}});
         break;
       case sql::LogicalStepKind::HybridSearch:
         current = current.hybridSearch(step.logical.hybrid_vector_column,

@@ -44,6 +44,7 @@ Velaria 围绕一个 kernel 和两个非 kernel 层组织。
 - `python_api` 里的 native binding
 - Arrow 输入与输出
 - CLI、打包与 `uv` 工作流
+- 离线 embedding 生成 helper 与版本化 embedding 资产管理
 - Excel / Bitable / custom stream adapter
 - 本地 workspace 与 run tracking
 
@@ -104,7 +105,7 @@ Arrow / CSV / Python ingress
   - `CREATE TABLE`、`CREATE SOURCE TABLE`、`CREATE SINK TABLE`
   - `INSERT INTO ... VALUES`
   - `INSERT INTO ... SELECT`
-  - 支持列投影/别名、`WHERE`、`GROUP BY`、`ORDER BY`、`LIMIT`、当前最小 `JOIN` 的 `SELECT`
+  - 支持列投影/别名、`WHERE`（含 `AND` / `OR`）、`GROUP BY`、`ORDER BY`、`LIMIT`、当前最小 `JOIN` 的 `SELECT`
 - 当前 batch builtins：
   - string：`LOWER`、`UPPER`、`TRIM`、`LTRIM`、`RTRIM`、`LENGTH`、`LEN`、`CHAR_LENGTH`、`CHARACTER_LENGTH`、`REVERSE`、`CONCAT`、`CONCAT_WS`、`LEFT`、`RIGHT`、`SUBSTR` / `SUBSTRING`、`POSITION`、`REPLACE`
   - numeric/date：`ABS`、`CEIL`、`FLOOR`、`ROUND`、`YEAR`、`MONTH`、`DAY`

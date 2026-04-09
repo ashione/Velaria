@@ -30,6 +30,7 @@ py_library(
         "velaria/excel.py",
         "velaria/custom_stream.py",
         "velaria/bitable.py",
+        "velaria/embedding.py",
         "velaria/workspace/__init__.py",
         "velaria/workspace/artifact_index.py",
         "velaria/workspace/paths.py",
@@ -75,6 +76,13 @@ py_binary(
 )
 
 py_binary(
+    name = "demo_embedding_pipeline",
+    srcs = ["examples/demo_embedding_pipeline.py"],
+    main = "examples/demo_embedding_pipeline.py",
+    deps = [":velaria_py_pkg"],
+)
+
+py_binary(
     name = "bench_arrow_ingestion",
     srcs = ["benchmarks/bench_arrow_ingestion.py"],
     main = "benchmarks/bench_arrow_ingestion.py",
@@ -85,6 +93,20 @@ py_binary(
     name = "bench_stage_paths",
     srcs = ["benchmarks/bench_stage_paths.py"],
     main = "benchmarks/bench_stage_paths.py",
+    deps = [":velaria_py_pkg"],
+)
+
+py_binary(
+    name = "bench_embedding_pipeline",
+    srcs = ["benchmarks/bench_embedding_pipeline.py"],
+    main = "benchmarks/bench_embedding_pipeline.py",
+    deps = [":velaria_py_pkg"],
+)
+
+py_binary(
+    name = "bench_embedding_recall",
+    srcs = ["benchmarks/bench_embedding_recall.py"],
+    main = "benchmarks/bench_embedding_recall.py",
     deps = [":velaria_py_pkg"],
 )
 
@@ -279,6 +301,17 @@ py_test(
 )
 
 py_test(
+    name = "embedding_pipeline_test",
+    srcs = ["tests/test_embedding_pipeline.py"],
+    main = "tests/test_embedding_pipeline.py",
+    imports = ["."],
+    deps = [
+        ":velaria_py_pkg",
+        requirement("pyarrow"),
+    ],
+)
+
+py_test(
     name = "python_cli_contract_test",
     srcs = ["tests/test_python_cli_contract.py"],
     main = "tests/test_python_cli_contract.py",
@@ -319,6 +352,7 @@ test_suite(
         ":bitable_group_by_owner_integration_test",
         ":bitable_stream_source_test",
         ":custom_stream_source_test",
+        ":embedding_pipeline_test",
         ":file_source_api_test",
         ":python_cli_contract_test",
         ":read_excel_test",

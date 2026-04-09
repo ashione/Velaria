@@ -10,6 +10,11 @@ Vector benchmark:
 ./scripts/run_vector_search_benchmark.sh
 ```
 
+The wrapper now validates both:
+
+- `vector-query` exact-scan baselines
+- `hybrid-search` filtered-candidate baselines with `none` / `medium` / `high` selectivity
+
 Batch benchmark:
 
 ```bash
@@ -84,6 +89,37 @@ Current `simd` snapshot:
 | `100,000` | `768` | `cosine` | `143,918 us` | `2,504,985 us` |
 | `100,000` | `768` | `dot` | `141,099 us` | `2,410,975 us` |
 | `100,000` | `768` | `l2` | `142,327 us` | `2,400,458 us` |
+
+## Vector + Column Hybrid Query
+
+Current benchmark harness also emits `hybrid-search` JSON rows for:
+
+- no filter / near-full candidate set
+- medium selectivity filter
+- high selectivity filter
+
+Use the same repro entrypoint above. `--quick` remains the repository verification preset.
+
+Current `--quick` snapshot (`10,000` rows, `128` dim, `top_k=10`):
+
+| Metric | Filter case | Selectivity | Candidate rows | Warm query avg | Cold query | Warm explain avg |
+|---|---|---:|---:|---:|---:|---:|
+| `cosine` | `none` | `1.00` | `10,000` | `3,346 us` | `38,855 us` | `3,100 us` |
+| `cosine` | `medium` | `0.20` | `2,000` | `676 us` | `9,113 us` | `586 us` |
+| `cosine` | `high` | `0.01` | `100` | `98 us` | `956 us` | `43 us` |
+| `dot` | `none` | `1.00` | `10,000` | `2,979 us` | `37,938 us` | `2,734 us` |
+| `dot` | `medium` | `0.20` | `2,000` | `637 us` | `9,224 us` | `568 us` |
+| `dot` | `high` | `0.01` | `100` | `116 us` | `1,065 us` | `47 us` |
+| `l2` | `none` | `1.00` | `10,000` | `2,932 us` | `38,922 us` | `2,844 us` |
+| `l2` | `medium` | `0.20` | `2,000` | `670 us` | `12,136 us` | `610 us` |
+| `l2` | `high` | `0.01` | `100` | `189 us` | `1,184 us` | `45 us` |
+
+This quick snapshot shows the expected shape:
+
+- `none` stays near the pure vector-query baseline
+- `medium` reduces warm query latency to roughly one quarter of the full-candidate scan
+- `high` pushes warm query into sub-`0.2 ms` territory
+- `explainHybridSearch(...)` currently runs the search path to report `returned_rows`, so explain cost scales with candidate count
 
 ## Vector Transport
 

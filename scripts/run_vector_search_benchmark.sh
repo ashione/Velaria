@@ -18,6 +18,7 @@ path = pathlib.Path(sys.argv[1])
 lines = path.read_text().splitlines()
 
 query_profiles = []
+hybrid_profiles = []
 transport_profiles = []
 for line in lines:
     if not line.startswith("{"):
@@ -26,11 +27,15 @@ for line in lines:
     bench = payload.get("bench")
     if bench == "vector-query":
         query_profiles.append(payload)
+    elif bench == "hybrid-search":
+        hybrid_profiles.append(payload)
     elif bench == "vector-transport":
         transport_profiles.append(payload)
 
 if not query_profiles:
     raise SystemExit("missing vector-query benchmark output")
+if not hybrid_profiles:
+    raise SystemExit("missing hybrid-search benchmark output")
 if not transport_profiles:
     raise SystemExit("missing vector-transport benchmark output")
 
@@ -57,6 +62,36 @@ for item in query_profiles:
     if item["result_rows"] <= 0:
         raise SystemExit("vector-query benchmark returned no rows")
 
+for item in hybrid_profiles:
+    for key in [
+        "bench",
+        "rows",
+        "dimension",
+        "top_k",
+        "metric",
+        "filter_case",
+        "filter_selectivity",
+        "candidate_rows",
+        "cold_query_us",
+        "warm_query_avg_us",
+        "warm_explain_avg_us",
+        "result_rows",
+    ]:
+        if key not in item:
+            raise SystemExit(f"hybrid-search benchmark JSON missing key: {key}")
+    if item["bench"] != "hybrid-search":
+        raise SystemExit("unexpected bench kind in hybrid-search payload")
+    if item["top_k"] != 10:
+        raise SystemExit("hybrid-search benchmark top_k drifted from v1 baseline")
+    if item["metric"] not in {"cosine", "dot", "l2"}:
+        raise SystemExit(f"unexpected hybrid metric in benchmark output: {item['metric']}")
+    if item["filter_case"] not in {"none", "medium", "high"}:
+        raise SystemExit(f"unexpected hybrid filter case: {item['filter_case']}")
+    if item["candidate_rows"] <= 0:
+        raise SystemExit("hybrid-search benchmark candidate_rows must be positive")
+    if item["result_rows"] <= 0:
+        raise SystemExit("hybrid-search benchmark returned no rows")
+
 for item in transport_profiles:
     for key in [
         "bench",
@@ -77,5 +112,5 @@ for item in transport_profiles:
     if item["bench"] != "vector-transport":
         raise SystemExit("unexpected bench kind in vector-transport payload")
 
-print("[summary] vector search benchmark baseline ok")
+print("[summary] vector + hybrid search benchmark baseline ok")
 PY

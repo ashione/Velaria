@@ -39,7 +39,8 @@ bool isClauseKeyword(const std::string& value) {
          u == "ON" || u == "AS" ||
          u == "SELECT" || u == "CREATE" || u == "TABLE" || u == "INSERT" || u == "INTO" ||
          u == "VALUES" || u == "USING" || u == "OPTIONS" || u == "SOURCE" || u == "SINK" ||
-         u == "WINDOW" || u == "EVERY";
+         u == "WINDOW" || u == "EVERY" || u == "HYBRID" || u == "SEARCH" ||
+         u == "QUERY" || u == "METRIC" || u == "TOP_K" || u == "SCORE_THRESHOLD";
 }
 
 bool isJoinKeyword(const std::string& value) {
@@ -535,6 +536,50 @@ OrderByItem parseOrderByItem(ParseState& state) {
   return item;
 }
 
+HybridSearchSpec parseHybridSearch(ParseState& state) {
+  HybridSearchSpec out;
+  state.expectWord("SEARCH");
+  out.vector_column = parseColumn(state);
+  state.expectWord("QUERY");
+  const Token query_token = state.expectToken();
+  if (!query_token.is_string) {
+    throw SQLSyntaxError("HYBRID SEARCH QUERY must be a quoted vector literal");
+  }
+  out.query_vector = query_token.text;
+  while (true) {
+    if (state.consumeWord("METRIC")) {
+      out.metric = state.expectToken().text;
+      continue;
+    }
+    if (state.consumeWord("TOP_K")) {
+      const Token top_k = state.expectToken();
+      if (!top_k.is_number) {
+        throw SQLSyntaxError("HYBRID SEARCH TOP_K must be numeric");
+      }
+      try {
+        out.top_k = static_cast<std::size_t>(std::stoull(top_k.text));
+      } catch (...) {
+        throw SQLSyntaxError("invalid HYBRID SEARCH TOP_K: " + top_k.text);
+      }
+      continue;
+    }
+    if (state.consumeWord("SCORE_THRESHOLD")) {
+      const Token threshold = state.expectToken();
+      if (!threshold.is_number) {
+        throw SQLSyntaxError("HYBRID SEARCH SCORE_THRESHOLD must be numeric");
+      }
+      try {
+        out.score_threshold = std::stod(threshold.text);
+      } catch (...) {
+        throw SQLSyntaxError("invalid HYBRID SEARCH SCORE_THRESHOLD: " + threshold.text);
+      }
+      continue;
+    }
+    break;
+  }
+  return out;
+}
+
 SqlQuery parseSelectQuery(ParseState& state, bool alreadyConsumedSelect) {
   SqlQuery out;
   if (!alreadyConsumedSelect) {
@@ -568,6 +613,10 @@ SqlQuery parseSelectQuery(ParseState& state, bool alreadyConsumedSelect) {
 
   if (state.consumeWord("WHERE")) {
     out.where = parsePredicate(state);
+  }
+
+  if (state.consumeWord("HYBRID")) {
+    out.hybrid_search = parseHybridSearch(state);
   }
 
   if (state.consumeWord("WINDOW")) {

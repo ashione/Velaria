@@ -21,13 +21,14 @@ dataflow::Table makeSyntheticTable(std::size_t rows, std::size_t dim, uint32_t s
   std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
 
   dataflow::Table table;
-  table.schema = dataflow::Schema({"id", "embedding"});
+  table.schema = dataflow::Schema({"id", "bucket", "embedding"});
   table.rows.reserve(rows);
   for (std::size_t i = 0; i < rows; ++i) {
     std::vector<float> vec(dim);
     for (std::size_t d = 0; d < dim; ++d) vec[d] = dist(rng);
     dataflow::Row row;
     row.emplace_back(static_cast<int64_t>(i));
+    row.emplace_back(static_cast<int64_t>(i % 100));
     row.emplace_back(dataflow::Value(std::move(vec)));
     table.rows.push_back(std::move(row));
   }
@@ -45,6 +46,33 @@ std::vector<float> makeQuery(std::size_t dim, uint32_t seed) {
 long long microsBetween(std::chrono::steady_clock::time_point begin,
                         std::chrono::steady_clock::time_point end) {
   return std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+}
+
+std::size_t hybridCandidateCount(std::size_t rows, const std::string& filter_case) {
+  if (filter_case == "none") {
+    return rows;
+  }
+  if (filter_case == "medium") {
+    return (rows / 100) * 20 + std::min<std::size_t>(rows % 100, 20);
+  }
+  if (filter_case == "high") {
+    return rows == 0 ? 0 : ((rows - 1) / 100) + 1;
+  }
+  throw std::runtime_error("unknown hybrid benchmark filter case: " + filter_case);
+}
+
+dataflow::DataFrame makeHybridCandidateFrame(const dataflow::DataFrame& base,
+                                             const std::string& filter_case) {
+  if (filter_case == "none") {
+    return base;
+  }
+  if (filter_case == "medium") {
+    return base.filter("bucket", "<", dataflow::Value(int64_t(20)));
+  }
+  if (filter_case == "high") {
+    return base.filter("bucket", "=", dataflow::Value(int64_t(0)));
+  }
+  throw std::runtime_error("unknown hybrid benchmark filter case: " + filter_case);
 }
 
 void runCase(std::size_t rows, std::size_t dim, dataflow::VectorDistanceMetric metric,
@@ -94,6 +122,69 @@ void runCase(std::size_t rows, std::size_t dim, dataflow::VectorDistanceMetric m
             << "\"cold_query_us\":" << microsBetween(cold_begin, cold_end) << ","
             << "\"warm_query_avg_us\":" << (warm_query_us / static_cast<long long>(kWarmIterations)) << ","
             << "\"warm_explain_avg_us\":" << (explain_us / static_cast<long long>(kWarmIterations)) << ","
+            << "\"result_rows\":" << out.rowCount() << ""
+            << "}" << std::endl;
+}
+
+void runHybridCase(std::size_t rows, std::size_t dim, dataflow::VectorDistanceMetric metric,
+                   const std::string& metric_name, const std::string& filter_case) {
+  auto table = makeSyntheticTable(rows, dim, static_cast<uint32_t>(rows + dim + 17));
+  auto query = makeQuery(dim, static_cast<uint32_t>(dim + 11));
+  auto& session = dataflow::DataflowSession::builder();
+  const auto base_df = session.createDataFrame(table);
+  const auto candidate_df = makeHybridCandidateFrame(base_df, filter_case);
+  const auto candidate_rows = hybridCandidateCount(rows, filter_case);
+
+  dataflow::HybridSearchOptions options;
+  options.metric = metric;
+  options.top_k = 10;
+
+  const auto cold_begin = std::chrono::steady_clock::now();
+  auto out = candidate_df.hybridSearch("embedding", query, options).toTable();
+  const auto cold_end = std::chrono::steady_clock::now();
+
+  constexpr std::size_t kWarmIterations = 5;
+  long long warm_query_us = 0;
+  for (std::size_t i = 0; i < kWarmIterations; ++i) {
+    const auto begin = std::chrono::steady_clock::now();
+    auto warm = candidate_df.hybridSearch("embedding", query, options).toTable();
+    const auto end = std::chrono::steady_clock::now();
+    warm_query_us += microsBetween(begin, end);
+    if (warm.rowCount() != out.rowCount()) {
+      std::cerr << "[vector-benchmark] hybrid warm query cardinality mismatch" << std::endl;
+      std::exit(1);
+    }
+  }
+
+  long long explain_us = 0;
+  for (std::size_t i = 0; i < kWarmIterations; ++i) {
+    const auto begin = std::chrono::steady_clock::now();
+    const auto explain = candidate_df.explainHybridSearch("embedding", query, options);
+    const auto end = std::chrono::steady_clock::now();
+    explain_us += microsBetween(begin, end);
+    if (explain.find("mode=exact-scan-hybrid-search") == std::string::npos) {
+      std::cerr << "[vector-benchmark] hybrid explain output mismatch" << std::endl;
+      std::exit(1);
+    }
+  }
+
+  const double selectivity =
+      rows == 0 ? 0.0 : static_cast<double>(candidate_rows) / static_cast<double>(rows);
+  std::cout << "{"
+            << "\"bench\":\"hybrid-search\","
+            << "\"rows\":" << rows << ","
+            << "\"dimension\":" << dim << ","
+            << "\"top_k\":10,"
+            << "\"metric\":\"" << metric_name << "\","
+            << "\"filter_case\":\"" << filter_case << "\","
+            << "\"filter_selectivity\":" << std::fixed << std::setprecision(6) << selectivity
+            << ","
+            << "\"candidate_rows\":" << candidate_rows << ","
+            << "\"cold_query_us\":" << microsBetween(cold_begin, cold_end) << ","
+            << "\"warm_query_avg_us\":"
+            << (warm_query_us / static_cast<long long>(kWarmIterations)) << ","
+            << "\"warm_explain_avg_us\":"
+            << (explain_us / static_cast<long long>(kWarmIterations)) << ","
             << "\"result_rows\":" << out.rowCount() << ""
             << "}" << std::endl;
 }
@@ -205,6 +296,15 @@ int main(int argc, char** argv) {
       runCase(rows, dim, dataflow::VectorDistanceMetric::Cosine, "cosine");
       runCase(rows, dim, dataflow::VectorDistanceMetric::Dot, "dot");
       runCase(rows, dim, dataflow::VectorDistanceMetric::L2, "l2");
+      runHybridCase(rows, dim, dataflow::VectorDistanceMetric::Cosine, "cosine", "none");
+      runHybridCase(rows, dim, dataflow::VectorDistanceMetric::Cosine, "cosine", "medium");
+      runHybridCase(rows, dim, dataflow::VectorDistanceMetric::Cosine, "cosine", "high");
+      runHybridCase(rows, dim, dataflow::VectorDistanceMetric::Dot, "dot", "none");
+      runHybridCase(rows, dim, dataflow::VectorDistanceMetric::Dot, "dot", "medium");
+      runHybridCase(rows, dim, dataflow::VectorDistanceMetric::Dot, "dot", "high");
+      runHybridCase(rows, dim, dataflow::VectorDistanceMetric::L2, "l2", "none");
+      runHybridCase(rows, dim, dataflow::VectorDistanceMetric::L2, "l2", "medium");
+      runHybridCase(rows, dim, dataflow::VectorDistanceMetric::L2, "l2", "high");
       runTransportCase(rows, dim);
     }
   }

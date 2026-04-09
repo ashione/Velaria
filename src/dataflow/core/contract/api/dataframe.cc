@@ -1,15 +1,16 @@
 #include "src/dataflow/core/contract/api/dataframe.h"
 
 #include <algorithm>
-#include <iostream>
 #include <stdexcept>
 #include <cstdint>
+#include <iostream>
+#include <limits>
 #include <sstream>
 
 #include "src/dataflow/ai/plugin_runtime.h"
 #include "src/dataflow/core/execution/columnar_batch.h"
+#include "src/dataflow/core/execution/runtime/simd_dispatch.h"
 #include "src/dataflow/core/execution/runtime/vector_index.h"
-#include "src/dataflow/core/execution/columnar_batch.h"
 
 namespace dataflow {
 
@@ -33,6 +34,202 @@ VectorSearchMetric toRuntimeMetric(VectorDistanceMetric metric) {
              ? VectorSearchMetric::L2
              : (metric == VectorDistanceMetric::Dot ? VectorSearchMetric::Dot
                                                     : VectorSearchMetric::Cosine);
+}
+
+const char* metricName(VectorDistanceMetric metric) {
+  switch (metric) {
+    case VectorDistanceMetric::Cosine:
+      return "cosine";
+    case VectorDistanceMetric::Dot:
+      return "dot";
+    case VectorDistanceMetric::L2:
+      return "l2";
+  }
+  return metricName(VectorDistanceMetric::Cosine);
+}
+
+bool metricPrefersHigherScores(VectorDistanceMetric metric) {
+  return metric == VectorDistanceMetric::Dot;
+}
+
+const char* thresholdComparison(VectorDistanceMetric metric) {
+  return metricPrefersHigherScores(metric) ? ">=" : "<=";
+}
+
+std::string formatThreshold(const std::optional<double>& threshold) {
+  if (!threshold.has_value()) {
+    return "none";
+  }
+  std::ostringstream out;
+  out.precision(std::numeric_limits<double>::max_digits10);
+  out << *threshold;
+  return out.str();
+}
+
+struct HybridQueryPlanAnalysis {
+  bool valid = true;
+  std::size_t source_count = 0;
+  bool has_filter = false;
+  bool filter_pushdown = false;
+  std::string error;
+};
+
+bool subtreeSupportsSourceFilterPushdown(const PlanNodePtr& plan) {
+  if (!plan) {
+    return false;
+  }
+  switch (plan->kind) {
+    case PlanKind::Source: {
+      const auto* node = static_cast<const SourcePlan*>(plan.get());
+      return node->storage_kind == SourceStorageKind::CsvFile;
+    }
+    case PlanKind::Filter:
+      return subtreeSupportsSourceFilterPushdown(static_cast<const FilterPlan*>(plan.get())->child);
+    case PlanKind::Limit:
+      return subtreeSupportsSourceFilterPushdown(static_cast<const LimitPlan*>(plan.get())->child);
+    default:
+      return false;
+  }
+}
+
+void analyzeHybridQueryPlanRecursive(const PlanNodePtr& plan, HybridQueryPlanAnalysis* analysis) {
+  if (!plan || analysis == nullptr || !analysis->valid) {
+    return;
+  }
+  switch (plan->kind) {
+    case PlanKind::Source:
+      ++analysis->source_count;
+      return;
+    case PlanKind::Select:
+      analyzeHybridQueryPlanRecursive(static_cast<const SelectPlan*>(plan.get())->child, analysis);
+      return;
+    case PlanKind::Filter: {
+      analysis->has_filter = true;
+      analysis->filter_pushdown =
+          analysis->filter_pushdown || subtreeSupportsSourceFilterPushdown(plan);
+      analyzeHybridQueryPlanRecursive(static_cast<const FilterPlan*>(plan.get())->child, analysis);
+      return;
+    }
+    case PlanKind::WithColumn:
+      analyzeHybridQueryPlanRecursive(static_cast<const WithColumnPlan*>(plan.get())->child,
+                                      analysis);
+      return;
+    case PlanKind::Drop:
+      analyzeHybridQueryPlanRecursive(static_cast<const DropPlan*>(plan.get())->child, analysis);
+      return;
+    case PlanKind::Limit:
+      analyzeHybridQueryPlanRecursive(static_cast<const LimitPlan*>(plan.get())->child, analysis);
+      return;
+    case PlanKind::OrderBy:
+      analyzeHybridQueryPlanRecursive(static_cast<const OrderByPlan*>(plan.get())->child, analysis);
+      return;
+    case PlanKind::WindowAssign:
+      analyzeHybridQueryPlanRecursive(
+          static_cast<const WindowAssignPlan*>(plan.get())->child, analysis);
+      return;
+    case PlanKind::Join:
+    case PlanKind::Aggregate:
+    case PlanKind::Sink:
+      analysis->valid = false;
+      analysis->error =
+          "only supports single-source DataFrame plans without JOIN, AGGREGATE, or SINK";
+      return;
+  }
+}
+
+HybridQueryPlanAnalysis analyzeHybridQueryPlan(const PlanNodePtr& plan) {
+  HybridQueryPlanAnalysis analysis;
+  analyzeHybridQueryPlanRecursive(plan, &analysis);
+  if (analysis.valid && analysis.source_count != 1) {
+    analysis.valid = false;
+    analysis.error = "only supports single-source DataFrame plans";
+  }
+  return analysis;
+}
+
+void validateHybridQueryPlan(const HybridQueryPlanAnalysis& analysis, const char* api_name) {
+  if (!analysis.valid) {
+    throw std::invalid_argument(std::string(api_name) + " " + analysis.error);
+  }
+}
+
+bool passesScoreThreshold(double score, const HybridSearchOptions& options) {
+  if (!options.score_threshold.has_value()) {
+    return true;
+  }
+  return metricPrefersHigherScores(options.metric) ? score >= *options.score_threshold
+                                                   : score <= *options.score_threshold;
+}
+
+std::vector<VectorSearchResult> applyScoreThreshold(const std::vector<VectorSearchResult>& scored,
+                                                    const HybridSearchOptions& options) {
+  if (!options.score_threshold.has_value()) {
+    return scored;
+  }
+  std::vector<VectorSearchResult> filtered;
+  filtered.reserve(scored.size());
+  for (const auto& item : scored) {
+    if (passesScoreThreshold(item.score, options)) {
+      filtered.push_back(item);
+    }
+  }
+  return filtered;
+}
+
+RowSelection makeRowSelection(std::size_t row_count, const std::vector<std::size_t>& indices) {
+  RowSelection selection;
+  selection.input_row_count = row_count;
+  selection.selected.assign(row_count, 0);
+    selection.indices = indices;
+  selection.selected_count = indices.size();
+  for (const auto row_index : indices) {
+    if (row_index >= row_count) {
+      throw std::out_of_range("hybridSearch selected row index out of range");
+    }
+    selection.selected[row_index] = 1;
+  }
+  return selection;
+}
+
+Table gatherHybridSearchRows(const Table& input, const std::vector<VectorSearchResult>& scored,
+                             const CachedVectorColumn& cache) {
+  if (input.schema.index.count("vector_score") != 0) {
+    throw std::invalid_argument("hybridSearch output column already exists: vector_score");
+  }
+  std::vector<std::size_t> row_indices;
+  row_indices.reserve(scored.size());
+  std::vector<Value> scores;
+  scores.reserve(scored.size());
+  for (const auto& item : scored) {
+    row_indices.push_back(cache.row_ids.at(item.row_id));
+    scores.emplace_back(item.score);
+  }
+  Table out = filterTable(input, makeRowSelection(input.rowCount(), row_indices), false);
+  appendNamedColumn(&out, "vector_score", std::move(scores), false);
+  return out;
+}
+
+std::string formatHybridSearchExplain(const HybridSearchOptions& options,
+                                      const HybridQueryPlanAnalysis& analysis,
+                                      const CachedVectorColumn& cache, std::size_t input_rows,
+                                      std::size_t returned_rows) {
+  std::ostringstream out;
+  out << "mode=exact-scan-hybrid-search\n";
+  out << "metric=" << metricName(options.metric) << "\n";
+  out << "top_k=" << options.top_k << "\n";
+  out << "score_threshold=" << formatThreshold(options.score_threshold) << "\n";
+  out << "score_threshold_compare=" << thresholdComparison(options.metric) << "\n";
+  out << "input_rows=" << input_rows << "\n";
+  out << "candidate_rows=" << cache.row_ids.size() << "\n";
+  out << "returned_rows=" << returned_rows << "\n";
+  out << "column_filter_stage=before-vector\n";
+  out << "column_filter_execution="
+      << (analysis.has_filter ? (analysis.filter_pushdown ? "source-pushdown" : "post-load-filter")
+                              : "none")
+      << "\n";
+  out << "acceleration=flat-buffer+simd-topk\n";
+  out << "backend=" << activeSimdBackendName() << "\n";
+  return out.str();
 }
 
 std::string planKindName(PlanKind kind) {
@@ -493,6 +690,29 @@ DataFrame DataFrame::vectorQuery(const std::string& vectorColumn,
   return DataFrame(std::move(out));
 }
 
+DataFrame DataFrame::hybridSearch(const std::string& vectorColumn,
+                                  const std::vector<float>& queryVector,
+                                  const HybridSearchOptions& options) const {
+  if (queryVector.empty()) {
+    throw std::invalid_argument("query vector cannot be empty");
+  }
+  const auto analysis = analyzeHybridQueryPlan(plan_);
+  validateHybridQueryPlan(analysis, "hybridSearch");
+
+  const auto& input = materialize();
+  const auto& cache = vectorColumnCache(vectorColumn);
+  if (cache.index->dimension() != 0 && cache.index->dimension() != queryVector.size()) {
+    throw std::invalid_argument("fixed vector length mismatch in hybridSearch");
+  }
+
+  VectorSearchOptions runtime_options;
+  runtime_options.top_k = options.top_k;
+  runtime_options.metric = toRuntimeMetric(options.metric);
+  const auto filtered = applyScoreThreshold(cache.index->search(queryVector, runtime_options),
+                                            options);
+  return DataFrame(gatherHybridSearchRows(input, filtered, cache));
+}
+
 std::string DataFrame::explainVectorQuery(const std::string& vectorColumn,
                                           const std::vector<float>& queryVector, size_t top_k,
                                           VectorDistanceMetric metric) const {
@@ -505,6 +725,29 @@ std::string DataFrame::explainVectorQuery(const std::string& vectorColumn,
     throw std::invalid_argument("query vector dimension mismatch in explainVectorQuery");
   }
   return cache.index->explain(options);
+}
+
+std::string DataFrame::explainHybridSearch(const std::string& vectorColumn,
+                                           const std::vector<float>& queryVector,
+                                           const HybridSearchOptions& options) const {
+  if (queryVector.empty()) {
+    throw std::invalid_argument("query vector cannot be empty");
+  }
+  const auto analysis = analyzeHybridQueryPlan(plan_);
+  validateHybridQueryPlan(analysis, "explainHybridSearch");
+
+  const auto& input = materialize();
+  const auto& cache = vectorColumnCache(vectorColumn);
+  if (cache.index->dimension() != 0 && queryVector.size() != cache.index->dimension()) {
+    throw std::invalid_argument("query vector dimension mismatch in explainHybridSearch");
+  }
+
+  VectorSearchOptions runtime_options;
+  runtime_options.top_k = options.top_k;
+  runtime_options.metric = toRuntimeMetric(options.metric);
+  const auto filtered = applyScoreThreshold(cache.index->search(queryVector, runtime_options),
+                                            options);
+  return formatHybridSearchExplain(options, analysis, cache, input.rowCount(), filtered.size());
 }
 
 GroupedDataFrame DataFrame::groupBy(const std::vector<std::string>& keys) const {

@@ -12,7 +12,18 @@
 namespace dataflow {
 namespace sql {
 
-enum class LogicalStepKind { Scan, Filter, Join, Aggregate, Having, WithColumn, Project, OrderBy, Limit };
+enum class LogicalStepKind {
+  Scan,
+  Filter,
+  HybridSearch,
+  Join,
+  Aggregate,
+  Having,
+  WithColumn,
+  Project,
+  OrderBy,
+  Limit
+};
 enum class PhysicalStepKind { FusedUnary, Join, Aggregate, SourceOnly };
 
 struct LogicalPlanStep {
@@ -22,6 +33,9 @@ struct LogicalPlanStep {
   std::size_t filter_column = 0;
   std::string filter_op;
   Value filter_value;
+  std::string hybrid_vector_column;
+  std::vector<float> hybrid_query_vector;
+  HybridSearchOptions hybrid_options;
 
   std::string join_left_column;
   std::string join_right_column;

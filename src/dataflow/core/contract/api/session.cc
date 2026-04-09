@@ -1163,6 +1163,11 @@ std::string DataflowSession::explainSql(const std::string& sql_text) {
         current = current.filterByIndex(step.logical.filter_column, step.logical.filter_op,
                                        step.logical.filter_value);
         break;
+      case sql::LogicalStepKind::HybridSearch:
+        current = current.hybridSearch(step.logical.hybrid_vector_column,
+                                       step.logical.hybrid_query_vector,
+                                       step.logical.hybrid_options);
+        break;
       case sql::LogicalStepKind::Join:
         current =
             current.join(step.logical.join_right, step.logical.join_left_column,
@@ -1227,11 +1232,25 @@ DataFrame DataflowSession::vectorQuery(const std::string& table, const std::stri
   return catalog_.getView(table).vectorQuery(vector_column, query_vector, top_k, metric);
 }
 
+DataFrame DataflowSession::hybridSearch(const std::string& table,
+                                        const std::string& vector_column,
+                                        const std::vector<float>& query_vector,
+                                        const HybridSearchOptions& options) {
+  return catalog_.getView(table).hybridSearch(vector_column, query_vector, options);
+}
+
 std::string DataflowSession::explainVectorQuery(const std::string& table,
                                                 const std::string& vector_column,
                                                 const std::vector<float>& query_vector,
                                                 size_t top_k, VectorDistanceMetric metric) {
   return catalog_.getView(table).explainVectorQuery(vector_column, query_vector, top_k, metric);
+}
+
+std::string DataflowSession::explainHybridSearch(const std::string& table,
+                                                 const std::string& vector_column,
+                                                 const std::vector<float>& query_vector,
+                                                 const HybridSearchOptions& options) {
+  return catalog_.getView(table).explainHybridSearch(vector_column, query_vector, options);
 }
 
 StreamingDataFrame DataflowSession::streamSql(const std::string& sql) {

@@ -455,6 +455,29 @@ uv run --project python_api python python_api/velaria_cli.py run start -- vector
 uv run --project python_api python python_api/velaria_cli.py artifacts list --run-id <run_id>
 ```
 
+Hybrid search through the CLI keeps the same command and adds optional filter / threshold controls:
+
+```bash
+uv run --project python_api python python_api/velaria_cli.py vector-search \
+  --csv /path/to/vectors.csv \
+  --vector-column embedding \
+  --query-vector "0.1,0.2,0.3" \
+  --metric cosine \
+  --top-k 5 \
+  --where-column bucket \
+  --where-op = \
+  --where-value 1 \
+  --score-threshold 0.02
+```
+
+Batch SQL also supports a minimal hybrid search clause through `file-sql`:
+
+```bash
+uv run --project python_api python python_api/velaria_cli.py file-sql \
+  --csv /path/to/vectors.csv \
+  --query "SELECT id, bucket, vector_score FROM input_table WHERE bucket = 1 HYBRID SEARCH embedding QUERY '[0.1 0.2 0.3]' METRIC cosine TOP_K 5 SCORE_THRESHOLD 0.02"
+```
+
 Python ecosystem source groups:
 
 - supported:
@@ -495,6 +518,8 @@ Current vector search scope:
 
 - local exact scan only
 - metrics: `cosine`, `dot`, `l2`
+- batch SQL supports a minimal `HYBRID SEARCH ... QUERY ...` clause
+- CLI `vector-search` supports optional `--where-column/--where-op/--where-value` and `--score-threshold`
 - no ANN / distributed execution / standalone vector DB behavior
 
 ## Excel, Bitable, and Custom Streams

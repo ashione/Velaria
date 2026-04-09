@@ -43,9 +43,15 @@ class DataflowSession {
   DataFrame vectorQuery(const std::string& table, const std::string& vector_column,
                         const std::vector<float>& query_vector, size_t top_k,
                         VectorDistanceMetric metric = VectorDistanceMetric::Cosine);
+  DataFrame hybridSearch(const std::string& table, const std::string& vector_column,
+                         const std::vector<float>& query_vector,
+                         const HybridSearchOptions& options = {});
   std::string explainVectorQuery(const std::string& table, const std::string& vector_column,
                                  const std::vector<float>& query_vector, size_t top_k,
                                  VectorDistanceMetric metric = VectorDistanceMetric::Cosine);
+  std::string explainHybridSearch(const std::string& table, const std::string& vector_column,
+                                  const std::vector<float>& query_vector,
+                                  const HybridSearchOptions& options = {});
   StreamingDataFrame streamSql(const std::string& sql);
   std::string explainStreamSql(const std::string& sql,
                                const StreamingQueryOptions& options = {});

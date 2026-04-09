@@ -192,7 +192,8 @@ std::string defaultAggregateAlias(AggregateFunctionKind fn, const std::string& a
 }
 
 bool isUnaryStep(LogicalStepKind kind) {
-  return kind == LogicalStepKind::Filter || kind == LogicalStepKind::Project ||
+  return kind == LogicalStepKind::Filter || kind == LogicalStepKind::HybridSearch ||
+         kind == LogicalStepKind::Project ||
          kind == LogicalStepKind::Limit || kind == LogicalStepKind::Having ||
          kind == LogicalStepKind::WithColumn;
 }
@@ -206,6 +207,19 @@ bool isAggregateQuery(const SqlQuery& query) {
   return !query.group_by.empty() ||
          std::any_of(query.select_items.begin(), query.select_items.end(),
                      [](const SelectItem& item) { return item.is_aggregate; });
+}
+
+VectorDistanceMetric parseHybridMetric(const std::string& metric) {
+  if (metric == "cosine" || metric == "cosin") {
+    return VectorDistanceMetric::Cosine;
+  }
+  if (metric == "dot") {
+    return VectorDistanceMetric::Dot;
+  }
+  if (metric == "l2") {
+    return VectorDistanceMetric::L2;
+  }
+  throw SQLSemanticError("unsupported HYBRID SEARCH metric: " + metric);
 }
 
 bool hasMixedSelectStar(const SqlQuery& query) {
@@ -258,6 +272,9 @@ void ensureSingleTableStreamQuery(const SqlQuery& query) {
   if (std::any_of(query.select_items.begin(), query.select_items.end(),
                   [](const SelectItem& item) { return item.is_literal; })) {
     throwUnsupportedSqlV1("stream SQL does not support literal projection");
+  }
+  if (query.hybrid_search.has_value()) {
+    throwUnsupportedSqlV1("stream SQL does not support HYBRID SEARCH");
   }
 }
 
@@ -785,6 +802,9 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
   if (query.window.has_value()) {
     throwUnsupportedSqlV1("WINDOW BY ... EVERY ... AS ... is only supported in stream SQL");
   }
+  if (query.hybrid_search.has_value() && query.join.has_value()) {
+    throw SQLSemanticError("HYBRID SEARCH does not support JOIN queries");
+  }
   if (hasMixedSelectStar(query)) {
     throwUnsupportedSqlV1("SELECT * cannot be mixed with other projections");
   }
@@ -906,6 +926,9 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
       !query.group_by.empty() ||
       std::any_of(query.select_items.begin(), query.select_items.end(),
                   [](const SelectItem& item) { return item.is_aggregate; });
+  if (query.hybrid_search.has_value() && hasAggregateQuery) {
+    throw SQLSemanticError("HYBRID SEARCH does not support aggregate queries");
+  }
 
   if (std::any_of(query.select_items.begin(), query.select_items.end(),
                   [](const SelectItem& item) { return item.is_literal; })) {
@@ -915,6 +938,24 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
                   [](const SelectItem& item) { return item.is_string_function; }) &&
       hasAggregateQuery) {
     throwUnsupportedSqlV1("string functions are not supported in aggregate queries");
+  }
+
+  if (query.hybrid_search.has_value()) {
+    const auto& hybrid = *query.hybrid_search;
+    const auto vector_index = ctx.resolveColumn(hybrid.vector_column, nullptr);
+    LogicalPlanStep hybrid_step;
+    hybrid_step.kind = LogicalStepKind::HybridSearch;
+    hybrid_step.hybrid_vector_column = current.schema().fields[vector_index];
+    hybrid_step.hybrid_query_vector = Value::parseFixedVector(hybrid.query_vector);
+    hybrid_step.hybrid_options.metric = parseHybridMetric(hybrid.metric);
+    hybrid_step.hybrid_options.top_k = hybrid.top_k;
+    hybrid_step.hybrid_options.score_threshold = hybrid.score_threshold;
+    logical.steps.push_back(hybrid_step);
+    current = current.hybridSearch(hybrid_step.hybrid_vector_column,
+                                   hybrid_step.hybrid_query_vector,
+                                   hybrid_step.hybrid_options);
+    ctx.clear();
+    ctx.addRelation(query.from, current.schema(), 0);
   }
 
   if (hasAggregateQuery) {
@@ -1165,6 +1206,10 @@ std::string SqlPlanner::explainLogicalPlan(const LogicalPlan& logical) const {
       case LogicalStepKind::Filter:
         out << "Filter column=" << step.filter_column << " op=" << step.filter_op;
         break;
+      case LogicalStepKind::HybridSearch:
+        out << "HybridSearch column=" << step.hybrid_vector_column
+            << " top_k=" << step.hybrid_options.top_k;
+        break;
       case LogicalStepKind::Join:
         out << "Join left=" << step.join_left_column << " right=" << step.join_right_column;
         break;
@@ -1229,6 +1274,11 @@ DataFrame SqlPlanner::materializeFromPhysical(const PhysicalPlan& physical) cons
       case LogicalStepKind::Filter:
         current = current.filterByIndex(step.logical.filter_column, step.logical.filter_op,
                                        step.logical.filter_value);
+        break;
+      case LogicalStepKind::HybridSearch:
+        current = current.hybridSearch(step.logical.hybrid_vector_column,
+                                       step.logical.hybrid_query_vector,
+                                       step.logical.hybrid_options);
         break;
       case LogicalStepKind::Join:
         current =

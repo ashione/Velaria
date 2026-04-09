@@ -105,6 +105,14 @@ struct WindowSpec {
   std::string output_column = "window_start";
 };
 
+struct HybridSearchSpec {
+  ColumnRef vector_column;
+  std::string query_vector;
+  std::string metric = "cosine";
+  std::size_t top_k = 10;
+  std::optional<double> score_threshold;
+};
+
 struct SqlColumnDef {
   std::string name;
   std::string type;
@@ -116,6 +124,7 @@ struct SqlQuery {
   FromItem from;
   std::optional<JoinItem> join;
   std::optional<Predicate> where;
+  std::optional<HybridSearchSpec> hybrid_search;
   std::optional<WindowSpec> window;
   std::vector<ColumnRef> group_by;
   std::optional<Predicate> having;

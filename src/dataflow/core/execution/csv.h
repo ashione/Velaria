@@ -17,9 +17,7 @@ bool execute_csv_source_pushdown(const std::string& path, const Schema& schema,
                                  const SourcePushdownSpec& pushdown,
                                  char delimiter, bool materialize_rows, Table* out);
 bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
-                               const std::vector<std::size_t>& key_indices,
-                               const std::vector<AggregateSpec>& aggs,
-                               const SourceFilterPushdownSpec* filter,
+                               const SourcePushdownSpec& pushdown,
                                char delimiter, Table* out);
 void save_csv(const Table& table, const std::string& path);
 

@@ -12,6 +12,31 @@ namespace dataflow {
 
 namespace {
 
+std::shared_ptr<PlanPredicateExpr> makeAndPredicate(std::shared_ptr<PlanPredicateExpr> left,
+                                                    std::shared_ptr<PlanPredicateExpr> right) {
+  if (!left) return right;
+  if (!right) return left;
+  auto out = std::make_shared<PlanPredicateExpr>();
+  out->kind = PlanPredicateExprKind::And;
+  out->left = std::move(left);
+  out->right = std::move(right);
+  return out;
+}
+
+bool collectConjunctiveComparisons(const std::shared_ptr<PlanPredicateExpr>& expr,
+                                   std::vector<SourceFilterPushdownSpec>* out) {
+  if (!expr || out == nullptr) return false;
+  if (expr->kind == PlanPredicateExprKind::Comparison) {
+    out->push_back(expr->comparison);
+    return true;
+  }
+  if (expr->kind != PlanPredicateExprKind::And) {
+    return false;
+  }
+  return collectConjunctiveComparisons(expr->left, out) &&
+         collectConjunctiveComparisons(expr->right, out);
+}
+
 enum class KeyColumnShape {
   Unknown = 0,
   String = 1,
@@ -173,16 +198,17 @@ void appendRejectedCandidate(std::vector<std::string>* rejected, const std::stri
 
 }  // namespace
 
-FilterChainPattern analyzeFilterChain(const PlanNodePtr& plan) {
-  FilterChainPattern pattern;
+PredicatePattern analyzePredicatePattern(const PlanNodePtr& plan) {
+  PredicatePattern pattern;
   PlanNodePtr current = plan;
   while (current && current->kind == PlanKind::Filter) {
     const auto* node = static_cast<const FilterPlan*>(current.get());
-    pattern.filters.push_back(node);
+    pattern.predicate = makeAndPredicate(pattern.predicate, node->predicate);
     current = node->child;
   }
   pattern.base_child = std::move(current);
-  std::reverse(pattern.filters.begin(), pattern.filters.end());
+  pattern.is_conjunctive =
+      collectConjunctiveComparisons(pattern.predicate, &pattern.conjunctive_filters);
   return pattern;
 }
 
@@ -192,8 +218,8 @@ LimitExecutionPattern analyzeLimitExecution(const LimitPlan& plan) {
     return pattern;
   }
   if (plan.child->kind == PlanKind::Filter) {
-    pattern.use_filter_chain = true;
-    pattern.filter_chain = analyzeFilterChain(plan.child);
+    pattern.use_predicate_filter = true;
+    pattern.predicate_filter = analyzePredicatePattern(plan.child);
     return pattern;
   }
   if (plan.child->kind == PlanKind::OrderBy) {

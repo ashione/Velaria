@@ -59,6 +59,7 @@ class DataFrame {
                            const std::vector<std::string>& aliases = {}) const;
   DataFrame filter(const std::string& column, const std::string& op, const Value& value) const;
   DataFrame filterByIndex(size_t columnIndex, const std::string& op, const Value& value) const;
+  DataFrame filterPredicate(std::shared_ptr<PlanPredicateExpr> predicate) const;
   DataFrame withColumn(const std::string& name, const std::string& sourceColumn) const;
   DataFrame withColumn(const std::string& name, ComputedColumnKind function,
                       const std::vector<ComputedColumnArg>& args) const;

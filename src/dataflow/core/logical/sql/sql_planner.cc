@@ -238,43 +238,6 @@ bool collectConjunctivePredicates(const std::shared_ptr<PredicateExpr>& expr,
          collectConjunctivePredicates(expr->right, out);
 }
 
-RowSelection intersectSelections(const RowSelection& lhs, const RowSelection& rhs) {
-  if (lhs.input_row_count != rhs.input_row_count) {
-    throw std::runtime_error("predicate selection input size mismatch");
-  }
-  RowSelection out;
-  out.input_row_count = lhs.input_row_count;
-  out.selected.assign(out.input_row_count, 0);
-  out.indices.reserve(std::min(lhs.selected_count, rhs.selected_count));
-  for (std::size_t i = 0; i < out.input_row_count; ++i) {
-    if (lhs.selected[i] != 0 && rhs.selected[i] != 0) {
-      out.selected[i] = 1;
-      out.indices.push_back(i);
-    }
-  }
-  out.selected_count = out.indices.size();
-  return out;
-}
-
-RowSelection unionSelections(const RowSelection& lhs, const RowSelection& rhs) {
-  if (lhs.input_row_count != rhs.input_row_count) {
-    throw std::runtime_error("predicate selection input size mismatch");
-  }
-  RowSelection out;
-  out.input_row_count = lhs.input_row_count;
-  out.selected.assign(out.input_row_count, 0);
-  out.indices.reserve(lhs.selected_count + rhs.selected_count);
-  for (std::size_t i = 0; i < out.input_row_count; ++i) {
-    if (lhs.selected[i] != 0 || rhs.selected[i] != 0) {
-      out.selected[i] = 1;
-      out.indices.push_back(i);
-    }
-  }
-  out.selected_count = out.indices.size();
-  return out;
-}
-
-using PredicateColumnResolver = std::function<std::size_t(const Predicate&)>;
 using PredicateRewriter = std::function<Predicate(const Predicate&)>;
 
 std::shared_ptr<PredicateExpr> rewritePredicateExpr(const std::shared_ptr<PredicateExpr>& expr,
@@ -291,35 +254,24 @@ std::shared_ptr<PredicateExpr> rewritePredicateExpr(const std::shared_ptr<Predic
   return out;
 }
 
-RowSelection evaluatePredicateExpr(const Table& input, const std::shared_ptr<PredicateExpr>& expr,
-                                   const PredicateColumnResolver& resolve_column) {
-  if (!expr) {
-    RowSelection out;
-    out.input_row_count = input.rowCount();
-    out.selected.assign(out.input_row_count, 1);
-    out.indices.reserve(out.input_row_count);
-    for (std::size_t i = 0; i < out.input_row_count; ++i) out.indices.push_back(i);
-    out.selected_count = out.input_row_count;
+std::shared_ptr<::dataflow::PlanPredicateExpr> toPlanPredicateExpr(
+    const std::shared_ptr<PredicateExpr>& expr) {
+  if (!expr) return nullptr;
+  auto out = std::make_shared<::dataflow::PlanPredicateExpr>();
+  if (expr->kind == PredicateExprKind::Comparison) {
+    out->kind = ::dataflow::PlanPredicateExprKind::Comparison;
+    out->comparison.column_index =
+        static_cast<std::size_t>(std::stoull(expr->predicate.lhs.name));
+    out->comparison.value = expr->predicate.rhs;
+    out->comparison.op = opToString(expr->predicate.op);
     return out;
   }
-  if (expr->kind == PredicateExprKind::Comparison) {
-    const auto column_index = resolve_column(expr->predicate);
-    return vectorizedFilterSelection(viewValueColumn(input, column_index),
-                                     expr->predicate.rhs, opToString(expr->predicate.op));
-  }
-  const auto left = evaluatePredicateExpr(input, expr->left, resolve_column);
-  const auto right = evaluatePredicateExpr(input, expr->right, resolve_column);
-  if (expr->kind == PredicateExprKind::And) {
-    return intersectSelections(left, right);
-  }
-  return unionSelections(left, right);
-}
-
-DataFrame applyPredicateExpr(const DataFrame& current, const std::shared_ptr<PredicateExpr>& expr,
-                             const PredicateColumnResolver& resolve_column) {
-  const auto input = current.toTable();
-  const auto selection = evaluatePredicateExpr(input, expr, resolve_column);
-  return DataFrame(filterTable(input, selection, false));
+  out->kind = expr->kind == PredicateExprKind::And
+                  ? ::dataflow::PlanPredicateExprKind::And
+                  : ::dataflow::PlanPredicateExprKind::Or;
+  out->left = toPlanPredicateExpr(expr->left);
+  out->right = toPlanPredicateExpr(expr->right);
+  return out;
 }
 
 VectorDistanceMetric parseHybridMetric(const std::string& metric) {
@@ -1047,9 +999,7 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
         return rebound;
       });
       logical.steps.push_back(filter);
-      current = applyPredicateExpr(current, query.where, [&](const Predicate& predicate) {
-        return ctx.resolveColumn(predicate.lhs, nullptr);
-      });
+      current = current.filterPredicate(toPlanPredicateExpr(filter.predicate_expr));
     }
   }
 
@@ -1199,7 +1149,7 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
           return rebound;
         });
         logical.steps.push_back(having);
-        current = applyPredicateExpr(current, query.having, resolve_having_column);
+        current = current.filterPredicate(toPlanPredicateExpr(having.predicate_expr));
       }
     }
 
@@ -1422,12 +1372,7 @@ DataFrame SqlPlanner::materializeFromPhysical(const PhysicalPlan& physical) cons
                                        step.logical.filter_value);
         break;
       case LogicalStepKind::PredicateFilter:
-        current = applyPredicateExpr(current, step.logical.predicate_expr, [&](const Predicate& predicate) {
-          if (predicate.lhs.qualifier == "__index__") {
-            return static_cast<std::size_t>(std::stoull(predicate.lhs.name));
-          }
-          return current.schema().indexOf(predicate.lhs.name);
-        });
+        current = current.filterPredicate(toPlanPredicateExpr(step.logical.predicate_expr));
         break;
       case LogicalStepKind::HybridSearch:
         current = current.hybridSearch(step.logical.hybrid_vector_column,

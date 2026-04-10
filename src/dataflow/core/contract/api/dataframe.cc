@@ -16,13 +16,6 @@ namespace dataflow {
 
 namespace {
 
-bool eqPred(const Value& lhs, const Value& rhs) { return lhs == rhs; }
-bool nePred(const Value& lhs, const Value& rhs) { return lhs != rhs; }
-bool ltPred(const Value& lhs, const Value& rhs) { return lhs < rhs; }
-bool gtPred(const Value& lhs, const Value& rhs) { return lhs > rhs; }
-bool ltePred(const Value& lhs, const Value& rhs) { return lhs < rhs || lhs == rhs; }
-bool gtePred(const Value& lhs, const Value& rhs) { return lhs > rhs || lhs == rhs; }
-
 std::shared_ptr<Executor> defaultExecutor() { return std::make_shared<LocalExecutor>(); }
 
 std::shared_ptr<const Schema> makeSchemaHint(const Schema& schema) {
@@ -318,7 +311,6 @@ void explainPlan(const PlanNodePtr& node, std::ostringstream& out, int depth = 0
   }
   if (node->kind == PlanKind::Filter) {
     const auto* n = static_cast<FilterPlan*>(node.get());
-    out << std::string((depth + 1) * 2, ' ') << "idx=" << n->column_index << "\n";
     explainPlan(n->child, out, depth + 1);
     return;
   }
@@ -527,23 +519,21 @@ DataFrame DataFrame::selectByIndices(const std::vector<size_t>& columns,
 }
 
 DataFrame DataFrame::filterByIndex(size_t columnIndex, const std::string& op, const Value& value) const {
-  bool (*pred)(const Value&, const Value&) = &eqPred;
-  if (op == "==" || op == "=") {
-    pred = &eqPred;
-  } else if (op == "!=") {
-    pred = &nePred;
-  } else if (op == "<") {
-    pred = &ltPred;
-  } else if (op == ">") {
-    pred = &gtPred;
-  } else if (op == "<=") {
-    pred = &ltePred;
-  } else if (op == ">=") {
-    pred = &gtePred;
-  } else {
+  if (!(op == "==" || op == "=" || op == "!=" || op == "<" || op == ">" || op == "<=" ||
+        op == ">=")) {
     throw std::invalid_argument("unsupported filter op: " + op);
   }
-  auto node = std::make_shared<FilterPlan>(plan_, columnIndex, value, op, pred);
+  auto predicate = std::make_shared<PlanPredicateExpr>();
+  predicate->kind = PlanPredicateExprKind::Comparison;
+  predicate->comparison.column_index = columnIndex;
+  predicate->comparison.value = value;
+  predicate->comparison.op = op;
+  auto node = std::make_shared<FilterPlan>(plan_, std::move(predicate));
+  return DataFrame(node, executor_, schema_hint_);
+}
+
+DataFrame DataFrame::filterPredicate(std::shared_ptr<PlanPredicateExpr> predicate) const {
+  auto node = std::make_shared<FilterPlan>(plan_, std::move(predicate));
   return DataFrame(node, executor_, schema_hint_);
 }
 

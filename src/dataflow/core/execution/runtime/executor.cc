@@ -553,7 +553,8 @@ Table executeDenseSingleInt64KeyAggregateTable(
   return out;
 }
 
-RowSelection combinedFilterSelection(const Table& input, const std::vector<const FilterPlan*>& filters,
+RowSelection combinedFilterSelection(const Table& input,
+                                     const std::vector<SourceFilterPushdownSpec>& filters,
                                      std::size_t max_selected = 0) {
   RowSelection out;
   const auto row_count = input.rowCount();
@@ -565,18 +566,18 @@ RowSelection combinedFilterSelection(const Table& input, const std::vector<const
     return out;
   }
   if (filters.size() == 1) {
-    return vectorizedFilterSelection(viewValueColumn(input, filters.front()->column_index),
-                                     filters.front()->value, filters.front()->op, max_selected);
+    return vectorizedFilterSelection(viewValueColumn(input, filters.front().column_index),
+                                     filters.front().value, filters.front().op, max_selected);
   }
   if (filters.size() > 1) {
     std::vector<ValueColumnView> filter_columns;
     std::vector<BoundFilter> bound_filters;
     filter_columns.reserve(filters.size());
     bound_filters.reserve(filters.size());
-    for (const auto* filter : filters) {
-      filter_columns.push_back(viewValueColumn(input, filter->column_index));
+    for (const auto& filter : filters) {
+      filter_columns.push_back(viewValueColumn(input, filter.column_index));
       bound_filters.push_back(
-          BoundFilter{filter_columns.back().buffer, &filter->value, parseFilterCompareOp(filter->op)});
+          BoundFilter{filter_columns.back().buffer, &filter.value, parseFilterCompareOp(filter.op)});
     }
     out.selected.assign(row_count, 0);
     out.selected_count = 0;
@@ -620,6 +621,9 @@ struct BorrowedOrOwnedTable {
 };
 
 using SourceRequirementMap = std::unordered_map<const SourcePlan*, std::vector<std::size_t>>;
+
+void collectPredicateColumns(const std::shared_ptr<PlanPredicateExpr>& expr,
+                             std::vector<std::size_t>* columns);
 
 std::vector<std::size_t> normalizeRequiredColumns(std::vector<std::size_t> indices) {
   std::sort(indices.begin(), indices.end());
@@ -706,7 +710,7 @@ void collectSourceRequirements(const PlanNodePtr& plan, const std::vector<std::s
     case PlanKind::Filter: {
       const auto* node = static_cast<const FilterPlan*>(plan.get());
       auto child_required = required_output;
-      appendRequiredColumn(&child_required, node->column_index);
+      collectPredicateColumns(node->predicate, &child_required);
       collectSourceRequirements(node->child, normalizeRequiredColumns(std::move(child_required)),
                                 requirements);
       return;
@@ -867,6 +871,121 @@ bool tryExecuteSourcePushdown(const SourcePlan& node, const SourcePushdownSpec& 
   return false;
 }
 
+std::shared_ptr<PlanPredicateExpr> makePredicateComparisonExpr(const SourceFilterPushdownSpec& filter) {
+  auto expr = std::make_shared<PlanPredicateExpr>();
+  expr->kind = PlanPredicateExprKind::Comparison;
+  expr->comparison = filter;
+  return expr;
+}
+
+std::shared_ptr<PlanPredicateExpr> makePredicateAndExpr(std::shared_ptr<PlanPredicateExpr> left,
+                                                        std::shared_ptr<PlanPredicateExpr> right) {
+  if (!left) return right;
+  if (!right) return left;
+  auto expr = std::make_shared<PlanPredicateExpr>();
+  expr->kind = PlanPredicateExprKind::And;
+  expr->left = std::move(left);
+  expr->right = std::move(right);
+  return expr;
+}
+
+std::shared_ptr<PlanPredicateExpr> predicateExprFromFilters(
+    const std::vector<SourceFilterPushdownSpec>& filters) {
+  std::shared_ptr<PlanPredicateExpr> expr;
+  for (const auto& filter : filters) {
+    expr = makePredicateAndExpr(std::move(expr), makePredicateComparisonExpr(filter));
+  }
+  return expr;
+}
+
+bool collectConjunctivePredicateFilters(const std::shared_ptr<PlanPredicateExpr>& expr,
+                                        std::vector<SourceFilterPushdownSpec>* out) {
+  if (!expr || out == nullptr) return false;
+  if (expr->kind == PlanPredicateExprKind::Comparison) {
+    out->push_back(expr->comparison);
+    return true;
+  }
+  if (expr->kind != PlanPredicateExprKind::And) {
+    return false;
+  }
+  return collectConjunctivePredicateFilters(expr->left, out) &&
+         collectConjunctivePredicateFilters(expr->right, out);
+}
+
+void collectPredicateColumns(const std::shared_ptr<PlanPredicateExpr>& expr,
+                             std::vector<std::size_t>* columns) {
+  if (!expr || columns == nullptr) {
+    return;
+  }
+  if (expr->kind == PlanPredicateExprKind::Comparison) {
+    columns->push_back(expr->comparison.column_index);
+    return;
+  }
+  collectPredicateColumns(expr->left, columns);
+  collectPredicateColumns(expr->right, columns);
+}
+
+RowSelection intersectSelections(const RowSelection& lhs, const RowSelection& rhs) {
+  if (lhs.input_row_count != rhs.input_row_count) {
+    throw std::runtime_error("predicate selection input size mismatch");
+  }
+  RowSelection out;
+  out.input_row_count = lhs.input_row_count;
+  out.selected.assign(out.input_row_count, 0);
+  out.indices.reserve(std::min(lhs.selected_count, rhs.selected_count));
+  for (std::size_t i = 0; i < out.input_row_count; ++i) {
+    if (lhs.selected[i] != 0 && rhs.selected[i] != 0) {
+      out.selected[i] = 1;
+      out.indices.push_back(i);
+    }
+  }
+  out.selected_count = out.indices.size();
+  return out;
+}
+
+RowSelection unionSelections(const RowSelection& lhs, const RowSelection& rhs) {
+  if (lhs.input_row_count != rhs.input_row_count) {
+    throw std::runtime_error("predicate selection input size mismatch");
+  }
+  RowSelection out;
+  out.input_row_count = lhs.input_row_count;
+  out.selected.assign(out.input_row_count, 0);
+  out.indices.reserve(lhs.selected_count + rhs.selected_count);
+  for (std::size_t i = 0; i < out.input_row_count; ++i) {
+    if (lhs.selected[i] != 0 || rhs.selected[i] != 0) {
+      out.selected[i] = 1;
+      out.indices.push_back(i);
+    }
+  }
+  out.selected_count = out.indices.size();
+  return out;
+}
+
+RowSelection evaluatePlanPredicateExpr(const Table& input,
+                                       const std::shared_ptr<PlanPredicateExpr>& expr) {
+  if (!expr) {
+    RowSelection out;
+    out.input_row_count = input.rowCount();
+    out.selected.assign(out.input_row_count, 1);
+    out.indices.reserve(out.input_row_count);
+    for (std::size_t i = 0; i < out.input_row_count; ++i) {
+      out.indices.push_back(i);
+    }
+    out.selected_count = out.input_row_count;
+    return out;
+  }
+  if (expr->kind == PlanPredicateExprKind::Comparison) {
+    return vectorizedFilterSelection(viewValueColumn(input, expr->comparison.column_index),
+                                     expr->comparison.value, expr->comparison.op);
+  }
+  const auto left = evaluatePlanPredicateExpr(input, expr->left);
+  const auto right = evaluatePlanPredicateExpr(input, expr->right);
+  if (expr->kind == PlanPredicateExprKind::And) {
+    return intersectSelections(left, right);
+  }
+  return unionSelections(left, right);
+}
+
 bool buildSourcePushdownSpec(const PlanNodePtr& plan, const SourceRequirementMap& requirements,
                              const SourcePlan** source_out, SourcePushdownSpec* pushdown_out) {
   if (!plan || source_out == nullptr || pushdown_out == nullptr) {
@@ -891,10 +1010,21 @@ bool buildSourcePushdownSpec(const PlanNodePtr& plan, const SourceRequirementMap
       if (!buildSourcePushdownSpec(node->child, requirements, &source, &spec)) {
         return false;
       }
-      spec.filter.enabled = true;
-      spec.filter.column_index = node->column_index;
-      spec.filter.value = node->value;
-      spec.filter.op = node->op;
+      std::vector<SourceFilterPushdownSpec> conjunctive_filters;
+      if (collectConjunctivePredicateFilters(node->predicate, &conjunctive_filters) &&
+          !spec.predicate_expr) {
+        spec.filters.insert(spec.filters.end(), conjunctive_filters.begin(), conjunctive_filters.end());
+      } else {
+        auto combined = node->predicate;
+        if (spec.predicate_expr) {
+          combined = makePredicateAndExpr(spec.predicate_expr, combined);
+        }
+        if (!spec.filters.empty()) {
+          combined = makePredicateAndExpr(predicateExprFromFilters(spec.filters), combined);
+          spec.filters.clear();
+        }
+        spec.predicate_expr = std::move(combined);
+      }
       *source_out = source;
       *pushdown_out = std::move(spec);
       return true;
@@ -1587,7 +1717,7 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
       return projectTable(*input.table, node->indices, node->aliases, false);
     }
     case PlanKind::Filter: {
-      const auto filter_pattern = analyzeFilterChain(plan);
+      const auto filter_pattern = analyzePredicatePattern(plan);
       const SourcePlan* pushed_source = nullptr;
       SourcePushdownSpec pushed_spec;
       if (buildSourcePushdownSpec(plan, requirements, &pushed_source, &pushed_spec) &&
@@ -1598,8 +1728,11 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
         }
       }
       const auto child_input = borrowOrExecute(executor, filter_pattern.base_child, requirements);
-      const auto selection =
-          combinedFilterSelection(*child_input.table, filter_pattern.filters);
+      const auto selection = filter_pattern.is_conjunctive
+                                 ? combinedFilterSelection(*child_input.table,
+                                                           filter_pattern.conjunctive_filters)
+                                 : evaluatePlanPredicateExpr(*child_input.table,
+                                                             filter_pattern.predicate);
       return filterTable(*child_input.table, selection, false);
     }
     case PlanKind::WithColumn: {
@@ -1632,12 +1765,19 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
         }
       }
       const auto limit_pattern = analyzeLimitExecution(*node);
-      if (limit_pattern.use_filter_chain) {
+      if (limit_pattern.use_predicate_filter) {
         const auto table_input =
-            borrowOrExecute(executor, limit_pattern.filter_chain.base_child, requirements);
-        const auto selection = combinedFilterSelection(
-            *table_input.table, limit_pattern.filter_chain.filters, node->n);
-        return filterTable(*table_input.table, selection, false);
+            borrowOrExecute(executor, limit_pattern.predicate_filter.base_child, requirements);
+        if (limit_pattern.predicate_filter.is_conjunctive) {
+          const auto selection = combinedFilterSelection(
+              *table_input.table, limit_pattern.predicate_filter.conjunctive_filters, node->n);
+          return filterTable(*table_input.table, selection, false);
+        }
+        auto filtered = filterTable(*table_input.table,
+                                    evaluatePlanPredicateExpr(
+                                        *table_input.table, limit_pattern.predicate_filter.predicate),
+                                    false);
+        return limitTable(filtered, node->n, false);
       }
       if (limit_pattern.use_topn) {
         const auto input = borrowOrExecute(executor, limit_pattern.order_by->child, requirements);

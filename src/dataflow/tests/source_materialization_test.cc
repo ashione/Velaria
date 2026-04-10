@@ -213,7 +213,32 @@ int main() {
     csv_multi << "apac,svcB,30,1\n";
     csv_multi << "emea,svcA,40,0\n";
     csv_multi.close();
+    const auto line_multi_path = make_temp_file("velaria-materialized-source-line-multi");
+    std::ofstream line_multi(line_multi_path, std::ios::trunc);
+    line_multi << "apac|svcA|10|0\n";
+    line_multi << "apac|svcA|20|1\n";
+    line_multi << "apac|svcB|30|1\n";
+    line_multi << "emea|svcA|40|0\n";
+    line_multi.close();
+    const auto json_multi_path = make_temp_file("velaria-materialized-source-json-multi");
+    std::ofstream json_multi(json_multi_path, std::ios::trunc);
+    json_multi << "{\"region\":\"apac\",\"service\":\"svcA\",\"score\":10,\"failed\":0}\n";
+    json_multi << "{\"region\":\"apac\",\"service\":\"svcA\",\"score\":20,\"failed\":1}\n";
+    json_multi << "{\"region\":\"apac\",\"service\":\"svcB\",\"score\":30,\"failed\":1}\n";
+    json_multi << "{\"region\":\"emea\",\"service\":\"svcA\",\"score\":40,\"failed\":0}\n";
+    json_multi.close();
     session.createTempView("csv_group_multi_input", session.read_csv(csv_multi_path));
+    dataflow::LineFileOptions line_multi_options;
+    line_multi_options.mode = dataflow::LineParseMode::Split;
+    line_multi_options.split_delimiter = '|';
+    line_multi_options.mappings = {{"region", 0}, {"service", 1}, {"score", 2}, {"failed", 3}};
+    session.createTempView("line_group_multi_input",
+                           session.read_line_file(line_multi_path, line_multi_options));
+    dataflow::JsonFileOptions json_multi_options;
+    json_multi_options.format = dataflow::JsonFileFormat::JsonLines;
+    json_multi_options.columns = {"region", "service", "score", "failed"};
+    session.createTempView("json_group_multi_input",
+                           session.read_json(json_multi_path, json_multi_options));
     auto pushed_group_multi =
         session.sql("SELECT region, service, COUNT(*) AS cnt, AVG(score) AS avg_score, "
                     "MAX(score) AS max_score FROM csv_group_multi_input "
@@ -229,6 +254,88 @@ int main() {
     dataflow::materializeRows(&pushed_group_multi_filtered);
     expect(pushed_group_multi_filtered.rows.size() == 2,
            "source pushdown filtered multi-key aggregate row count mismatch");
+    auto pushed_group_multi_filtered_and =
+        session.sql("SELECT region, service, COUNT(*) AS cnt FROM csv_group_multi_input "
+                    "WHERE failed > 0 AND score > 20 GROUP BY region, service LIMIT 10")
+            .toTable();
+    dataflow::materializeRows(&pushed_group_multi_filtered_and);
+    expect(pushed_group_multi_filtered_and.rows.size() == 1,
+           "source pushdown filtered-and multi-key aggregate row count mismatch");
+    expect_table_value(pushed_group_multi_filtered_and, 0, 0, dataflow::Value("apac"),
+                       "source pushdown filtered-and region mismatch");
+    expect_table_value(pushed_group_multi_filtered_and, 0, 1, dataflow::Value("svcB"),
+                       "source pushdown filtered-and service mismatch");
+    expect_table_value(pushed_group_multi_filtered_and, 0, 2, dataflow::Value(1.0),
+                       "source pushdown filtered-and count mismatch");
+    auto pushed_group_multi_filtered_or =
+        session.sql("SELECT region, service, COUNT(*) AS cnt FROM csv_group_multi_input "
+                    "WHERE failed > 0 OR score > 35 GROUP BY region, service LIMIT 10")
+            .toTable();
+    dataflow::materializeRows(&pushed_group_multi_filtered_or);
+    expect(pushed_group_multi_filtered_or.rows.size() == 3,
+           "source pushdown filtered-or multi-key aggregate row count mismatch");
+    auto pushed_group_multi_filtered_mixed =
+        session.sql("SELECT region, service, COUNT(*) AS cnt FROM csv_group_multi_input "
+                    "WHERE (failed > 0 OR score > 35) AND region = 'apac' "
+                    "GROUP BY region, service LIMIT 10")
+            .toTable();
+    dataflow::materializeRows(&pushed_group_multi_filtered_mixed);
+    expect(pushed_group_multi_filtered_mixed.rows.size() == 2,
+           "source pushdown filtered-mixed multi-key aggregate row count mismatch");
+    auto pushed_group_multi_filtered_or_limit =
+        session.read_csv(csv_multi_path)
+            .filterPredicate([&]() {
+              auto lhs = std::make_shared<dataflow::PlanPredicateExpr>();
+              lhs->kind = dataflow::PlanPredicateExprKind::Comparison;
+              lhs->comparison.column_index = 0;
+              lhs->comparison.op = "=";
+              lhs->comparison.value = dataflow::Value("apac");
+              auto rhs = std::make_shared<dataflow::PlanPredicateExpr>();
+              rhs->kind = dataflow::PlanPredicateExprKind::Comparison;
+              rhs->comparison.column_index = 1;
+              rhs->comparison.op = "=";
+              rhs->comparison.value = dataflow::Value("svcA");
+              auto expr = std::make_shared<dataflow::PlanPredicateExpr>();
+              expr->kind = dataflow::PlanPredicateExprKind::Or;
+              expr->left = lhs;
+              expr->right = rhs;
+              return expr;
+            }())
+            .limit(2)
+            .toTable();
+    dataflow::materializeRows(&pushed_group_multi_filtered_or_limit);
+    expect(pushed_group_multi_filtered_or_limit.rows.size() == 2,
+           "source pushdown filtered-or-limit row count mismatch");
+    auto line_filtered_or =
+        session.sql("SELECT region, service FROM line_group_multi_input "
+                    "WHERE failed > 0 OR score > 35 ORDER BY region, service LIMIT 10")
+            .toTable();
+    dataflow::materializeRows(&line_filtered_or);
+    expect(line_filtered_or.rows.size() == 3,
+           "line source pushdown filtered-or row count mismatch");
+    auto line_filtered_mixed =
+        session.sql("SELECT region, service FROM line_group_multi_input "
+                    "WHERE (failed > 0 OR score > 35) AND region = 'apac' "
+                    "ORDER BY service LIMIT 10")
+            .toTable();
+    dataflow::materializeRows(&line_filtered_mixed);
+    expect(line_filtered_mixed.rows.size() == 2,
+           "line source pushdown filtered-mixed row count mismatch");
+    auto json_filtered_or =
+        session.sql("SELECT region, service FROM json_group_multi_input "
+                    "WHERE failed > 0 OR score > 35 ORDER BY region, service LIMIT 10")
+            .toTable();
+    dataflow::materializeRows(&json_filtered_or);
+    expect(json_filtered_or.rows.size() == 3,
+           "json source pushdown filtered-or row count mismatch");
+    auto json_filtered_mixed =
+        session.sql("SELECT region, service FROM json_group_multi_input "
+                    "WHERE (failed > 0 OR score > 35) AND region = 'apac' "
+                    "ORDER BY service LIMIT 10")
+            .toTable();
+    dataflow::materializeRows(&json_filtered_mixed);
+    expect(json_filtered_mixed.rows.size() == 2,
+           "json source pushdown filtered-mixed row count mismatch");
 
     dataflow::Table mixed_key_partials;
     mixed_key_partials.schema = dataflow::Schema({"group_key", "sum_value"});

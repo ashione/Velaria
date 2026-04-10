@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <optional>
 #include <regex>
@@ -963,6 +964,42 @@ bool compareValueSafe(const Value& lhs, const Value& rhs, const std::string& op)
   }
 }
 
+void collectPredicateSchemaIndices(const std::shared_ptr<PlanPredicateExpr>& expr,
+                                   const std::function<void(std::size_t)>& visit) {
+  if (!expr || !visit) {
+    return;
+  }
+  if (expr->kind == PlanPredicateExprKind::Comparison) {
+    visit(expr->comparison.column_index);
+    return;
+  }
+  collectPredicateSchemaIndices(expr->left, visit);
+  collectPredicateSchemaIndices(expr->right, visit);
+}
+
+bool evaluatePredicateExprLocal(const std::vector<Value>& values,
+                                const std::vector<int>& local_by_schema,
+                                const std::shared_ptr<PlanPredicateExpr>& expr) {
+  if (!expr) {
+    return true;
+  }
+  if (expr->kind == PlanPredicateExprKind::Comparison) {
+    if (expr->comparison.column_index >= local_by_schema.size()) {
+      return false;
+    }
+    const auto local_index = local_by_schema[expr->comparison.column_index];
+    return local_index >= 0 && static_cast<std::size_t>(local_index) < values.size() &&
+           compareValueSafe(values[static_cast<std::size_t>(local_index)], expr->comparison.value,
+                            expr->comparison.op);
+  }
+  const bool left = evaluatePredicateExprLocal(values, local_by_schema, expr->left);
+  const bool right = evaluatePredicateExprLocal(values, local_by_schema, expr->right);
+  if (expr->kind == PlanPredicateExprKind::And) {
+    return left && right;
+  }
+  return left || right;
+}
+
 Table applyFilterAndLimit(const Table& input, const SourcePushdownSpec& pushdown,
                           bool materialize_rows) {
   const std::size_t row_count =
@@ -975,12 +1012,30 @@ Table applyFilterAndLimit(const Table& input, const SourcePushdownSpec& pushdown
   filtered.columnar_cache->arrow_formats.resize(filtered.schema.fields.size());
 
   for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
-    if (pushdown.filter.enabled) {
-      if (pushdown.filter.column_index >= input.schema.fields.size()) {
+    bool matches_filters = true;
+    for (const auto& filter : pushdown.filters) {
+      if (filter.column_index >= input.schema.fields.size()) {
         throw std::runtime_error("source pushdown filter column out of range");
       }
-      const auto& cell = input.columnar_cache->columns[pushdown.filter.column_index].values[row_index];
-      if (!compareValueSafe(cell, pushdown.filter.value, pushdown.filter.op)) {
+      const auto& cell = input.columnar_cache->columns[filter.column_index].values[row_index];
+      if (!compareValueSafe(cell, filter.value, filter.op)) {
+        matches_filters = false;
+        break;
+      }
+    }
+    if (!matches_filters) {
+      continue;
+    }
+    if (pushdown.predicate_expr) {
+      std::vector<Value> row_values(filtered.schema.fields.size());
+      for (std::size_t col = 0; col < filtered.schema.fields.size(); ++col) {
+        row_values[col] = input.columnar_cache->columns[col].values[row_index];
+      }
+      std::vector<int> local_by_schema(filtered.schema.fields.size(), -1);
+      for (std::size_t col = 0; col < filtered.schema.fields.size(); ++col) {
+        local_by_schema[col] = static_cast<int>(col);
+      }
+      if (!evaluatePredicateExprLocal(row_values, local_by_schema, pushdown.predicate_expr)) {
         continue;
       }
     }
@@ -1083,9 +1138,16 @@ bool validateAggregatePushdown(const Schema& schema, const SourcePushdownSpec& p
   for (const auto key_index : pushdown.aggregate.keys) {
     if (key_index >= schema.fields.size()) return false;
   }
-  if (pushdown.filter.enabled && pushdown.filter.column_index >= schema.fields.size()) {
-    return false;
+  for (const auto& filter : pushdown.filters) {
+    if (filter.column_index >= schema.fields.size()) return false;
   }
+  bool predicate_valid = true;
+  collectPredicateSchemaIndices(pushdown.predicate_expr, [&](std::size_t column_index) {
+    if (column_index >= schema.fields.size()) {
+      predicate_valid = false;
+    }
+  });
+  if (!predicate_valid) return false;
   for (const auto& agg : pushdown.aggregate.aggregates) {
     if (agg.function != AggregateFunction::Count && agg.value_index >= schema.fields.size()) {
       return false;
@@ -1104,9 +1166,10 @@ AggregateAccessPlan buildAggregateAccessPlan(const Schema& schema, const SourceP
     plan.local_by_schema[schema_index] = static_cast<int>(plan.schema_indices.size());
     plan.schema_indices.push_back(schema_index);
   };
-  if (pushdown.filter.enabled) {
-    add_schema_index(pushdown.filter.column_index);
+  for (const auto& filter : pushdown.filters) {
+    add_schema_index(filter.column_index);
   }
+  collectPredicateSchemaIndices(pushdown.predicate_expr, add_schema_index);
   for (const auto key_index : pushdown.aggregate.keys) {
     add_schema_index(key_index);
   }
@@ -1129,12 +1192,13 @@ AggregateAccessPlan buildAggregateAccessPlan(const Schema& schema, const SourceP
 
 bool includeRowForAggregate(const std::vector<Value>& values, const AggregateAccessPlan& access_plan,
                             const SourcePushdownSpec& pushdown) {
-  if (!pushdown.filter.enabled) {
-    return true;
+  for (const auto& filter : pushdown.filters) {
+    const auto local_index = access_plan.local_by_schema[filter.column_index];
+    if (!compareValueSafe(values[static_cast<std::size_t>(local_index)], filter.value, filter.op)) {
+      return false;
+    }
   }
-  const auto local_index = access_plan.local_by_schema[pushdown.filter.column_index];
-  return compareValueSafe(values[static_cast<std::size_t>(local_index)], pushdown.filter.value,
-                          pushdown.filter.op);
+  return evaluatePredicateExprLocal(values, access_plan.local_by_schema, pushdown.predicate_expr);
 }
 
 void accumulateAggregateRow(const std::vector<Value>& values, const AggregateAccessPlan& access_plan,
@@ -1457,7 +1521,7 @@ bool execute_file_source_pushdown(const FileSourceConnectorSpec& spec, const Sch
   Table loaded = (spec.kind == FileSourceKind::Line)
                      ? load_line_file(spec.path, spec.line_options)
                      : load_json_file(spec.path, spec.json_options);
-  if (pushdown.filter.enabled || pushdown.limit != 0) {
+  if (!pushdown.filters.empty() || pushdown.predicate_expr || pushdown.limit != 0) {
     loaded = applyFilterAndLimit(loaded, pushdown, materialize_rows);
   }
   if (pushdown.has_aggregate) {

@@ -9,9 +9,12 @@ namespace dataflow {
 
 struct Table;
 
-struct FilterChainPattern {
+struct PredicatePattern {
   PlanNodePtr base_child;
-  std::vector<const FilterPlan*> filters;
+  std::shared_ptr<PlanPredicateExpr> predicate;
+  // Populated only when the predicate tree is a pure AND of comparisons.
+  std::vector<SourceFilterPushdownSpec> conjunctive_filters;
+  bool is_conjunctive = false;
 };
 
 enum class AggregateExecutionShape {
@@ -36,13 +39,13 @@ struct AggregateExecutionPattern {
 };
 
 struct LimitExecutionPattern {
-  bool use_filter_chain = false;
-  FilterChainPattern filter_chain;
+  bool use_predicate_filter = false;
+  PredicatePattern predicate_filter;
   bool use_topn = false;
   const OrderByPlan* order_by = nullptr;
 };
 
-FilterChainPattern analyzeFilterChain(const PlanNodePtr& plan);
+PredicatePattern analyzePredicatePattern(const PlanNodePtr& plan);
 LimitExecutionPattern analyzeLimitExecution(const LimitPlan& plan);
 const char* aggregateExecKindName(AggImplKind kind);
 const char* aggregatePartialLayoutName(AggregatePartialLayoutKind kind);

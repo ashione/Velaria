@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -76,6 +77,14 @@ dataflow::Table run_group_sum(const dataflow::DataFrame& df, const std::string& 
       .toTable();
 }
 
+dataflow::Table run_sql_predicate_aggregate(dataflow::DataflowSession& session,
+                                            const std::string& table_name,
+                                            const std::string& where_clause) {
+  return session.sql("SELECT grp, COUNT(*) AS cnt FROM " + table_name + " WHERE " + where_clause +
+                     " GROUP BY grp LIMIT 32")
+      .toTable();
+}
+
 void expect(bool cond, const std::string& msg) {
   if (!cond) {
     throw std::runtime_error(msg);
@@ -97,6 +106,25 @@ void emit_bench(const std::string& bench_case, std::size_t rows, int rounds, lon
   std::cout << "}" << std::endl;
 }
 
+void emit_compare(const std::string& bench_case, std::size_t rows, int rounds,
+                  long long baseline_us, long long candidate_us, const std::string& baseline,
+                  const std::string& candidate) {
+  const double ratio = baseline_us == 0
+                           ? 0.0
+                           : static_cast<double>(candidate_us) / static_cast<double>(baseline_us);
+  std::cout << "{"
+            << "\"bench\":\"file-input-compare\","
+            << "\"case\":\"" << bench_case << "\","
+            << "\"rows\":" << rows << ","
+            << "\"rounds\":" << rounds << ","
+            << "\"baseline\":\"" << baseline << "\","
+            << "\"candidate\":\"" << candidate << "\","
+            << "\"baseline_us\":" << baseline_us << ","
+            << "\"candidate_us\":" << candidate_us << ","
+            << "\"ratio\":" << ratio
+            << "}" << std::endl;
+}
+
 std::string table_name_for(const std::string& prefix, int round) {
   std::ostringstream out;
   out << prefix << "_" << ::getpid() << "_" << round;
@@ -109,6 +137,16 @@ std::string read_all(const std::string& path) {
     throw std::runtime_error("cannot open benchmark input");
   }
   return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+}
+
+dataflow::SourceOptions no_pushdown_options(const std::string& tag, int round) {
+  dataflow::SourceOptions options;
+  options.materialization.enabled = true;
+  std::ostringstream root;
+  root << "/tmp/velaria_bench_no_pushdown_" << ::getpid() << "_" << tag << "_" << round;
+  options.materialization.root = root.str();
+  std::filesystem::remove_all(options.materialization.root);
+  return options;
 }
 
 inline void skip_to_next_line(const char*& ptr, const char* end) {
@@ -401,6 +439,112 @@ int main(int argc, char** argv) {
     }, rounds);
     emit_bench("sql_create_table_explicit_json", rows, rounds, sql_explicit_create_us, 1,
                "create+count");
+
+    const auto sql_predicate_and_us = run_bench_us([&](int round) {
+      const auto pushdown_view = table_name_for("file_source_bench_csv_predicate_pushdown", round);
+      session.createTempView(pushdown_view, session.read_csv(csv_path));
+      auto out = run_sql_predicate_aggregate(
+          session, pushdown_view, "grp = 'g1' AND val > 500");
+      expect(out.rowCount() == 1, "sql predicate and benchmark row count mismatch");
+    }, rounds);
+    emit_bench("sql_csv_predicate_and_group_count", rows, rounds, sql_predicate_and_us, 1,
+               "source-pushdown");
+    const auto sql_predicate_and_nopush_us = run_bench_us([&](int round) {
+      const auto fallback_view = table_name_for("file_source_bench_csv_predicate_fallback_only", round);
+      session.createTempView(fallback_view,
+                             session.read_csv(csv_path, no_pushdown_options("csv_and_only", round)));
+      auto out = run_sql_predicate_aggregate(
+          session, fallback_view, "grp = 'g1' AND val > 500");
+      expect(out.rowCount() == 1, "sql predicate and no-pushdown row count mismatch");
+    }, rounds);
+    emit_compare("sql_csv_predicate_and_group_count", rows, rounds, sql_predicate_and_nopush_us,
+                 sql_predicate_and_us, "no-pushdown", "pushdown");
+
+    const auto sql_predicate_or_us = run_bench_us([&](int round) {
+      const auto pushdown_view = table_name_for("file_source_bench_csv_or_pushdown", round);
+      session.createTempView(pushdown_view, session.read_csv(csv_path));
+      auto out = run_sql_predicate_aggregate(
+          session, pushdown_view, "grp = 'g1' OR grp = 'g2'");
+      expect(out.rowCount() == 2, "sql predicate or benchmark row count mismatch");
+    }, rounds);
+    emit_bench("sql_csv_predicate_or_group_count", rows, rounds, sql_predicate_or_us, 2,
+               "source-pushdown");
+    const auto sql_predicate_or_nopush_us = run_bench_us([&](int round) {
+      const auto fallback_view = table_name_for("file_source_bench_csv_or_fallback", round);
+      session.createTempView(fallback_view,
+                             session.read_csv(csv_path, no_pushdown_options("csv_or", round)));
+      auto out = run_sql_predicate_aggregate(
+          session, fallback_view, "grp = 'g1' OR grp = 'g2'");
+      expect(out.rowCount() == 2, "sql predicate or no-pushdown row count mismatch");
+    }, rounds);
+    emit_compare("sql_csv_predicate_or_group_count", rows, rounds, sql_predicate_or_nopush_us,
+                 sql_predicate_or_us, "no-pushdown", "pushdown");
+
+    const auto sql_predicate_mixed_us = run_bench_us([&](int round) {
+      const auto pushdown_view = table_name_for("file_source_bench_csv_mixed_pushdown", round);
+      session.createTempView(pushdown_view, session.read_csv(csv_path));
+      auto out = run_sql_predicate_aggregate(
+          session, pushdown_view,
+          "(grp = 'g1' OR grp = 'g2') AND val > 500");
+      expect(out.rowCount() == 2, "sql predicate mixed benchmark row count mismatch");
+    }, rounds);
+    emit_bench("sql_csv_predicate_mixed_group_count", rows, rounds, sql_predicate_mixed_us, 2,
+               "source-pushdown");
+    const auto sql_predicate_mixed_nopush_us = run_bench_us([&](int round) {
+      const auto fallback_view = table_name_for("file_source_bench_csv_mixed_fallback", round);
+      session.createTempView(fallback_view,
+                             session.read_csv(csv_path, no_pushdown_options("csv_mixed", round)));
+      auto out = run_sql_predicate_aggregate(
+          session, fallback_view, "(grp = 'g1' OR grp = 'g2') AND val > 500");
+      expect(out.rowCount() == 2, "sql predicate mixed no-pushdown row count mismatch");
+    }, rounds);
+    emit_compare("sql_csv_predicate_mixed_group_count", rows, rounds,
+                 sql_predicate_mixed_nopush_us, sql_predicate_mixed_us,
+                 "no-pushdown", "pushdown");
+
+    const auto sql_predicate_line_or_us = run_bench_us([&](int round) {
+      const auto pushdown_view = table_name_for("file_source_bench_line_or_pushdown", round);
+      session.createTempView(pushdown_view, session.read_line_file(line_path, line_options));
+      auto out = run_sql_predicate_aggregate(
+          session, pushdown_view, "grp = 'g1' OR grp = 'g2'");
+      expect(out.rowCount() == 2, "sql line predicate or benchmark row count mismatch");
+    }, rounds);
+    emit_bench("sql_line_predicate_or_group_count", rows, rounds, sql_predicate_line_or_us, 2,
+               "source-pushdown");
+    const auto sql_predicate_line_or_nopush_us = run_bench_us([&](int round) {
+      const auto fallback_view = table_name_for("file_source_bench_line_or_fallback", round);
+      session.createTempView(
+          fallback_view,
+          session.read_line_file(line_path, line_options, no_pushdown_options("line_or", round)));
+      auto out = run_sql_predicate_aggregate(
+          session, fallback_view, "grp = 'g1' OR grp = 'g2'");
+      expect(out.rowCount() == 2, "sql line predicate or no-pushdown row count mismatch");
+    }, rounds);
+    emit_compare("sql_line_predicate_or_group_count", rows, rounds,
+                 sql_predicate_line_or_nopush_us, sql_predicate_line_or_us,
+                 "no-pushdown", "pushdown");
+
+    const auto sql_predicate_json_or_us = run_bench_us([&](int round) {
+      const auto pushdown_view = table_name_for("file_source_bench_json_or_pushdown", round);
+      session.createTempView(pushdown_view, session.read_json(jsonl_path, json_options));
+      auto out = run_sql_predicate_aggregate(
+          session, pushdown_view, "grp = 'g1' OR grp = 'g2'");
+      expect(out.rowCount() == 2, "sql json predicate or benchmark row count mismatch");
+    }, rounds);
+    emit_bench("sql_json_predicate_or_group_count", rows, rounds, sql_predicate_json_or_us, 2,
+               "source-pushdown");
+    const auto sql_predicate_json_or_nopush_us = run_bench_us([&](int round) {
+      const auto fallback_view = table_name_for("file_source_bench_json_or_fallback", round);
+      session.createTempView(
+          fallback_view,
+          session.read_json(jsonl_path, json_options, no_pushdown_options("json_or", round)));
+      auto out = run_sql_predicate_aggregate(
+          session, fallback_view, "grp = 'g1' OR grp = 'g2'");
+      expect(out.rowCount() == 2, "sql json predicate or no-pushdown row count mismatch");
+    }, rounds);
+    emit_compare("sql_json_predicate_or_group_count", rows, rounds,
+                 sql_predicate_json_or_nopush_us, sql_predicate_json_or_us,
+                 "no-pushdown", "pushdown");
 
     return 0;
   } catch (const std::exception& ex) {

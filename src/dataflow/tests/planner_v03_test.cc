@@ -111,6 +111,46 @@ int main() {
   expect(order_out.rows[1][1].asInt64() == 5, "order by second score");
   expect(order_out.rows[2][1].asInt64() == 3, "order by third score");
 
+  auto filter_df = dataflow::DataFrame(aggregate_source).filter("score", ">", dataflow::Value(int64_t(4)));
+  const auto filter_encoded = filter_df.serializePlan();
+  const auto filter_decoded = dataflow::deserializePlan(filter_encoded);
+  auto filter_out = executor.execute(filter_decoded);
+  dataflow::materializeRows(&filter_out);
+  expect(filter_out.rows.size() == 2, "filter plan roundtrip should preserve predicate rows");
+  expect(filter_out.rows[0][1].asInt64() == 5, "filter roundtrip first score mismatch");
+  expect(filter_out.rows[1][1].asInt64() == 7, "filter roundtrip second score mismatch");
+  auto left_pred = std::make_shared<dataflow::PlanPredicateExpr>();
+  left_pred->kind = dataflow::PlanPredicateExprKind::Comparison;
+  left_pred->comparison.column_index = 0;
+  left_pred->comparison.op = "=";
+  left_pred->comparison.value = dataflow::Value("apac");
+  auto right_pred = std::make_shared<dataflow::PlanPredicateExpr>();
+  right_pred->kind = dataflow::PlanPredicateExprKind::Comparison;
+  right_pred->comparison.column_index = 1;
+  right_pred->comparison.op = ">";
+  right_pred->comparison.value = dataflow::Value(int64_t(4));
+  auto and_pred = std::make_shared<dataflow::PlanPredicateExpr>();
+  and_pred->kind = dataflow::PlanPredicateExprKind::And;
+  and_pred->left = left_pred;
+  and_pred->right = right_pred;
+  auto alt_pred = std::make_shared<dataflow::PlanPredicateExpr>();
+  alt_pred->kind = dataflow::PlanPredicateExprKind::Comparison;
+  alt_pred->comparison.column_index = 0;
+  alt_pred->comparison.op = "=";
+  alt_pred->comparison.value = dataflow::Value("emea");
+  auto nested_pred = std::make_shared<dataflow::PlanPredicateExpr>();
+  nested_pred->kind = dataflow::PlanPredicateExprKind::Or;
+  nested_pred->left = and_pred;
+  nested_pred->right = alt_pred;
+  auto nested_filter_df = dataflow::DataFrame(aggregate_source).filterPredicate(nested_pred);
+  const auto nested_filter_encoded = nested_filter_df.serializePlan();
+  const auto nested_filter_decoded = dataflow::deserializePlan(nested_filter_encoded);
+  auto nested_filter_out = executor.execute(nested_filter_decoded);
+  dataflow::materializeRows(&nested_filter_out);
+  expect(nested_filter_out.rows.size() == 2, "nested filter plan roundtrip should preserve rows");
+  expect(nested_filter_out.rows[0][0].toString() == "emea", "nested filter first key mismatch");
+  expect(nested_filter_out.rows[1][0].toString() == "apac", "nested filter second key mismatch");
+
   dataflow::PlanNodePtr aggregate_plan =
       std::make_shared<dataflow::SourcePlan>("memory", aggregate_source);
   dataflow::AggregateSpec sum_spec{dataflow::AggregateFunction::Sum, 1, "total_score"};

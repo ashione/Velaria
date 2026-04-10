@@ -128,15 +128,26 @@ struct SourceAggregatePushdownSpec {
 };
 
 struct SourceFilterPushdownSpec {
-  bool enabled = false;
   size_t column_index = 0;
   Value value;
   std::string op;
 };
 
+enum class PlanPredicateExprKind { Comparison, And, Or };
+
+struct PlanPredicateExpr {
+  PlanPredicateExprKind kind = PlanPredicateExprKind::Comparison;
+  SourceFilterPushdownSpec comparison;
+  std::shared_ptr<PlanPredicateExpr> left;
+  std::shared_ptr<PlanPredicateExpr> right;
+};
+
 struct SourcePushdownSpec {
   std::vector<std::size_t> projected_columns;
-  SourceFilterPushdownSpec filter;
+  // Fast path for pushdown-friendly conjunctive comparisons.
+  std::vector<SourceFilterPushdownSpec> filters;
+  // General predicate fallback for OR / nested boolean expressions.
+  std::shared_ptr<PlanPredicateExpr> predicate_expr;
   std::size_t limit = 0;
   bool has_aggregate = false;
   SourceAggregatePushdownSpec aggregate;
@@ -223,18 +234,11 @@ struct SelectPlan : PlanNode {
 
 struct FilterPlan : PlanNode {
   PlanNodePtr child;
-  size_t column_index;
-  Value value;
-  std::string op;
-  bool (*pred)(const Value& lhs, const Value& rhs);
-  FilterPlan(PlanNodePtr p, size_t cidx, Value v, std::string op_name,
-             bool (*pfn)(const Value&, const Value&))
+  std::shared_ptr<PlanPredicateExpr> predicate;
+  explicit FilterPlan(PlanNodePtr p, std::shared_ptr<PlanPredicateExpr> predicate_expr)
       : PlanNode(PlanKind::Filter),
         child(std::move(p)),
-        column_index(cidx),
-        value(std::move(v)),
-        op(std::move(op_name)),
-        pred(pfn) {}
+        predicate(std::move(predicate_expr)) {}
 };
 
 struct WithColumnPlan : PlanNode {

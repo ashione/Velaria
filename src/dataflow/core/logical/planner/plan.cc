@@ -12,7 +12,7 @@
 namespace dataflow {
 
 namespace {
-constexpr int kPlanFormatVersion = 1001;
+constexpr int kPlanFormatVersion = 1002;
 
 void appendToken(std::string* out, const std::string& value) {
   out->append(std::to_string(value.size()));
@@ -124,23 +124,6 @@ JsonFileOptions deserializeJsonFileOptions(const std::string& payload) {
   return options;
 }
 
-bool eqPred(const Value& lhs, const Value& rhs) { return lhs == rhs; }
-bool nePred(const Value& lhs, const Value& rhs) { return lhs != rhs; }
-bool ltPred(const Value& lhs, const Value& rhs) { return lhs < rhs; }
-bool gtPred(const Value& lhs, const Value& rhs) { return lhs > rhs; }
-bool ltePred(const Value& lhs, const Value& rhs) { return lhs < rhs || lhs == rhs; }
-bool gtePred(const Value& lhs, const Value& rhs) { return lhs > rhs || lhs == rhs; }
-
-bool (*predicateForOp(const std::string& op))(const Value&, const Value&) {
-  if (op == "==" || op == "=") return &eqPred;
-  if (op == "!=") return &nePred;
-  if (op == "<") return &ltPred;
-  if (op == ">") return &gtPred;
-  if (op == "<=") return &ltePred;
-  if (op == ">=") return &gtePred;
-  throw std::runtime_error("plan decode: unsupported filter op: " + op);
-}
-
 std::string serializeValue(const Value& value) {
   std::string out;
   appendInt(&out, static_cast<int>(value.type()));
@@ -217,6 +200,44 @@ Value deserializeValue(const std::string& payload) {
   throw std::runtime_error("plan decode: unsupported value type");
 }
 
+void serializePredicateExpr(const std::shared_ptr<PlanPredicateExpr>& expr, std::string* out) {
+  if (!out) {
+    throw std::runtime_error("plan encode: predicate output is null");
+  }
+  if (!expr) {
+    appendInt(out, -1);
+    return;
+  }
+  appendInt(out, static_cast<int>(expr->kind));
+  if (expr->kind == PlanPredicateExprKind::Comparison) {
+    appendSize(out, expr->comparison.column_index);
+    appendToken(out, expr->comparison.op);
+    appendToken(out, serializeValue(expr->comparison.value));
+    return;
+  }
+  serializePredicateExpr(expr->left, out);
+  serializePredicateExpr(expr->right, out);
+}
+
+std::shared_ptr<PlanPredicateExpr> deserializePredicateExpr(const std::string& payload,
+                                                            std::size_t* offset) {
+  const int raw_kind = readInt(payload, offset);
+  if (raw_kind < 0) {
+    return nullptr;
+  }
+  auto expr = std::make_shared<PlanPredicateExpr>();
+  expr->kind = static_cast<PlanPredicateExprKind>(raw_kind);
+  if (expr->kind == PlanPredicateExprKind::Comparison) {
+    expr->comparison.column_index = readSize(payload, offset);
+    expr->comparison.op = readToken(payload, offset);
+    expr->comparison.value = deserializeValue(readToken(payload, offset));
+    return expr;
+  }
+  expr->left = deserializePredicateExpr(payload, offset);
+  expr->right = deserializePredicateExpr(payload, offset);
+  return expr;
+}
+
 void serializeNode(const PlanNodePtr& plan, std::string* out) {
   if (!out) {
     throw std::runtime_error("plan encode: output is null");
@@ -261,9 +282,7 @@ void serializeNode(const PlanNodePtr& plan, std::string* out) {
     case PlanKind::Filter: {
       const auto* node = static_cast<const FilterPlan*>(plan.get());
       serializeNode(node->child, out);
-      appendSize(out, node->column_index);
-      appendToken(out, node->op);
-      appendToken(out, serializeValue(node->value));
+      serializePredicateExpr(node->predicate, out);
       return;
     }
     case PlanKind::WithColumn: {
@@ -343,7 +362,7 @@ void serializeNode(const PlanNodePtr& plan, std::string* out) {
   throw std::runtime_error("plan encode: unsupported plan kind");
 }
 
-PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset) {
+PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset, int format_version) {
   const int raw_kind = readInt(payload, offset);
   if (raw_kind < 0) return nullptr;
   const auto kind = static_cast<PlanKind>(raw_kind);
@@ -385,7 +404,7 @@ PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset) {
       return plan;
     }
     case PlanKind::Select: {
-      auto child = deserializeNode(payload, offset);
+      auto child = deserializeNode(payload, offset, format_version);
       std::vector<std::size_t> indices;
       const auto index_count = readSize(payload, offset);
       indices.reserve(index_count);
@@ -397,14 +416,12 @@ PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset) {
       return std::make_shared<SelectPlan>(std::move(child), std::move(indices), std::move(aliases));
     }
     case PlanKind::Filter: {
-      auto child = deserializeNode(payload, offset);
-      const auto column_index = readSize(payload, offset);
-      const auto op = readToken(payload, offset);
-      const auto value = deserializeValue(readToken(payload, offset));
-      return std::make_shared<FilterPlan>(std::move(child), column_index, value, op, predicateForOp(op));
+      auto child = deserializeNode(payload, offset, format_version);
+      auto predicate = deserializePredicateExpr(payload, offset);
+      return std::make_shared<FilterPlan>(std::move(child), std::move(predicate));
     }
     case PlanKind::WithColumn: {
-      auto child = deserializeNode(payload, offset);
+      auto child = deserializeNode(payload, offset, format_version);
       const auto added_column = readToken(payload, offset);
       const auto source_column_index = readSize(payload, offset);
       const auto function = static_cast<ComputedColumnKind>(readInt(payload, offset));
@@ -430,7 +447,7 @@ PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset) {
       return node;
     }
     case PlanKind::Drop: {
-      auto child = deserializeNode(payload, offset);
+      auto child = deserializeNode(payload, offset, format_version);
       std::vector<std::size_t> keep_indices;
       const auto keep_count = readSize(payload, offset);
       keep_indices.reserve(keep_count);
@@ -438,11 +455,11 @@ PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset) {
       return std::make_shared<DropPlan>(std::move(child), std::move(keep_indices));
     }
     case PlanKind::Limit: {
-      auto child = deserializeNode(payload, offset);
+      auto child = deserializeNode(payload, offset, format_version);
       return std::make_shared<LimitPlan>(std::move(child), readSize(payload, offset));
     }
     case PlanKind::OrderBy: {
-      auto child = deserializeNode(payload, offset);
+      auto child = deserializeNode(payload, offset, format_version);
       std::vector<std::size_t> indices;
       const auto index_count = readSize(payload, offset);
       indices.reserve(index_count);
@@ -454,7 +471,7 @@ PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset) {
       return std::make_shared<OrderByPlan>(std::move(child), std::move(indices), std::move(ascending));
     }
     case PlanKind::WindowAssign: {
-      auto child = deserializeNode(payload, offset);
+      auto child = deserializeNode(payload, offset, format_version);
       const auto time_column_index = readSize(payload, offset);
       const auto window_ms = static_cast<uint64_t>(readSize(payload, offset));
       const auto output_column = readToken(payload, offset);
@@ -462,7 +479,7 @@ PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset) {
                                                 output_column);
     }
     case PlanKind::Aggregate: {
-      auto child = deserializeNode(payload, offset);
+      auto child = deserializeNode(payload, offset, format_version);
       std::vector<std::size_t> keys;
       const auto key_count = readSize(payload, offset);
       keys.reserve(key_count);
@@ -480,15 +497,15 @@ PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset) {
       return std::make_shared<AggregatePlan>(std::move(child), std::move(keys), std::move(aggs));
     }
     case PlanKind::Join: {
-      auto left = deserializeNode(payload, offset);
-      auto right = deserializeNode(payload, offset);
+      auto left = deserializeNode(payload, offset, format_version);
+      auto right = deserializeNode(payload, offset, format_version);
       const auto left_key = readSize(payload, offset);
       const auto right_key = readSize(payload, offset);
       const auto join_kind = static_cast<JoinKind>(readInt(payload, offset));
       return std::make_shared<JoinPlan>(std::move(left), std::move(right), left_key, right_key, join_kind);
     }
     case PlanKind::Sink: {
-      auto child = deserializeNode(payload, offset);
+      auto child = deserializeNode(payload, offset, format_version);
       const auto sink_name = readToken(payload, offset);
       return std::make_shared<SinkPlan>(std::move(child), sink_name);
     }
@@ -509,15 +526,11 @@ PlanNodePtr deserializePlan(const std::string& payload) {
   std::size_t offset = 0;
   const auto marker = readInt(payload, &offset);
   if (marker != kPlanFormatVersion) {
-    offset = 0;
-    auto plan = deserializeNode(payload, &offset);
-    if (offset != payload.size()) {
-      throw std::runtime_error("plan decode: trailing bytes detected");
-    }
-    return plan;
+    throw std::runtime_error("plan decode: unsupported plan format version: " +
+                             std::to_string(marker));
   }
 
-  auto plan = deserializeNode(payload, &offset);
+  auto plan = deserializeNode(payload, &offset, marker);
   if (offset != payload.size()) {
     throw std::runtime_error("plan decode: trailing bytes detected");
   }

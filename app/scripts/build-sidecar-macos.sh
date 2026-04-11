@@ -30,6 +30,18 @@ PYTHON_BIN="${STAGE_DIR}/venv/bin/python"
 NORMALIZED_WHL="$(python3 "${ROOT_DIR}/scripts/normalize_wheel_filename.py" "${NATIVE_WHL}")"
 uv pip install --python "${PYTHON_BIN}" "${NORMALIZED_WHL}" pyinstaller
 
+VELARIA_PKG_DIR="$("${PYTHON_BIN}" - <<'PY'
+import pathlib
+import velaria
+print(pathlib.Path(velaria.__file__).resolve().parent)
+PY
+)"
+NATIVE_EXT="${VELARIA_PKG_DIR}/_velaria.so"
+if [[ ! -f "${NATIVE_EXT}" ]]; then
+  echo "[sidecar] native extension not found in installed wheel: ${NATIVE_EXT}" >&2
+  exit 1
+fi
+
 echo "[sidecar] packaging velaria_service.py with PyInstaller"
 "${PYTHON_BIN}" -m PyInstaller \
   --noconfirm \
@@ -39,6 +51,8 @@ echo "[sidecar] packaging velaria_service.py with PyInstaller"
   --distpath "${OUT_DIR}" \
   --workpath "${BUILD_DIR}/work" \
   --specpath "${BUILD_DIR}/spec" \
+  --hidden-import velaria._velaria \
+  --add-binary "${NATIVE_EXT}:velaria" \
   --collect-submodules velaria \
   --collect-binaries velaria \
   --collect-data velaria \

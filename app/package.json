@@ -1,0 +1,17 @@
+{
+  "name": "velaria-electron-prototype",
+  "version": "0.1.0",
+  "description": "Velaria desktop prototype with Electron + Python sidecar",
+  "main": "src/main/main.js",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "build:sidecar": "bash ./scripts/build-sidecar-macos.sh",
+    "dist:mac": "electron-builder --config electron-builder.yml --mac dmg",
+    "package:mac": "bash ./scripts/package-macos.sh"
+  },
+  "devDependencies": {
+    "electron": "^35.7.5",
+    "electron-builder": "^25.1.8"
+  }
+}

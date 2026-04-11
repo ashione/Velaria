@@ -1,0 +1,22 @@
+appId: com.velaria.desktop
+productName: Velaria
+asar: true
+directories:
+  output: ../out/electron/dist
+  buildResources: resources
+files:
+  - package.json
+  - src/**/*
+extraResources:
+  - from: ../out/sidecar/macos/velaria-service
+    to: bin/velaria-service
+    filter:
+      - '**/*'
+mac:
+  target:
+    - dmg
+  artifactName: Velaria-${version}-${arch}.${ext}
+  category: public.app-category.developer-tools
+  hardenedRuntime: true
+dmg:
+  sign: false

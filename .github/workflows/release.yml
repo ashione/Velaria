@@ -68,12 +68,24 @@ jobs:
           fi
 
   wheel-manylinux:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.runs-on }}
     needs: validate-version
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
+        include:
+          - python-version: "3.12"
+            arch: x86_64
+            runs-on: ubuntu-22.04
+          - python-version: "3.13"
+            arch: x86_64
+            runs-on: ubuntu-22.04
+          - python-version: "3.12"
+            arch: aarch64
+            runs-on: ubuntu-22.04-arm
+          - python-version: "3.13"
+            arch: aarch64
+            runs-on: ubuntu-22.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -94,7 +106,11 @@ jobs:
 
       - name: Build native wheel
         run: |
-          bazel build //python_api:velaria_native_whl
+          BAZEL_SIMD_FLAGS=()
+          if [[ "${{ matrix.arch }}" == "x86_64" ]]; then
+            BAZEL_SIMD_FLAGS+=(--per_file_copt=src/dataflow/core/execution/runtime/simd_backend_avx2\\.cc@-mavx2)
+          fi
+          bazel build "${BAZEL_SIMD_FLAGS[@]}" //python_api:velaria_native_whl
           mkdir -p dist/linux
           cp bazel-bin/python_api/velaria-*-native.whl dist/linux/
           python3 ./scripts/normalize_wheel_filename.py dist/linux/velaria-*-native.whl
@@ -107,14 +123,39 @@ jobs:
             dist/linux/velaria-*.whl
           rm -f dist/linux/velaria-*-linux_*.whl
 
+      - name: Verify repaired wheel architecture
+        run: |
+          ls dist/linux/velaria-*.whl
+          python3 - <<'PY'
+          import pathlib
+          import sys
+          arch = "${{ matrix.arch }}"
+          wheels = list(pathlib.Path("dist/linux").glob("velaria-*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected exactly one repaired wheel, got {len(wheels)}")
+          name = wheels[0].name
+          expected = "x86_64" if arch == "x86_64" else "aarch64"
+          if expected not in name:
+              raise SystemExit(f"wheel {name} does not contain expected arch marker {expected}")
+          print(f"wheel ok: {name}")
+          PY
+
       - name: Validate manylinux wheel contents
         run: |
           python3 ./scripts/validate_native_wheel.py dist/linux/velaria-*.whl python_api/velaria
 
+      - name: Verify SIMD backend from repaired wheel
+        run: |
+          python -m venv .venv-release-simd
+          source .venv-release-simd/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install dist/linux/velaria-*.whl
+          python ./scripts/verify_release_simd.py --arch ${{ matrix.arch }}
+
       - name: Upload manylinux artifact
         uses: actions/upload-artifact@v4
         with:
-          name: velaria-manylinux-wheel-py${{ matrix.python-version }}
+          name: velaria-manylinux-${{ matrix.arch }}-wheel-py${{ matrix.python-version }}
           path: dist/linux/*.whl
 
   wheel-macos:
@@ -172,12 +213,66 @@ jobs:
           name: velaria-macos-universal2-wheel-py${{ matrix.python-version }}
           path: dist/macos/*.whl
 
+  app-macos:
+    runs-on: macos-14
+    needs: validate-version
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Setup Bazelisk
+        uses: bazelbuild/setup-bazelisk@v3
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Configure Python for Bazel
+        run: |
+          echo "VELARIA_PYTHON_BIN=$(which python)" >> "$GITHUB_ENV"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install desktop app dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Build unsigned macOS app and dmg
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          bash ./app/scripts/package-macos.sh
+
+      - name: Stage macOS app artifacts
+        run: |
+          mkdir -p dist/macos-app
+          cp out/electron/dist/Velaria-*.dmg dist/macos-app/
+
+      - name: Upload macOS app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: velaria-macos-arm64-app
+          path: |
+            dist/macos-app/*.dmg
+
   publish-release:
     runs-on: ubuntu-latest
     needs:
       - validate-version
       - wheel-manylinux
       - wheel-macos
+      - app-macos
     steps:
       - name: Download manylinux artifact
         uses: actions/download-artifact@v4
@@ -193,6 +288,13 @@ jobs:
           path: dist/release
           merge-multiple: true
 
+      - name: Download macOS app artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: velaria-macos-arm64-app
+          path: dist/release
+          merge-multiple: true
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -200,3 +302,4 @@ jobs:
           generate_release_notes: true
           files: |
             dist/release/*.whl
+            dist/release/*.dmg

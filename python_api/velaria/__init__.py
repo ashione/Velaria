@@ -43,6 +43,22 @@ from .bitable import BitableClient, group_rows_by_field, group_rows_count_by_fie
 from ._version import __version__
 
 
+def _is_frozen_runtime():
+    return bool(getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"))
+
+
+def _native_missing_message():
+    if _is_frozen_runtime():
+        return (
+            "Velaria desktop package is missing its native engine files. "
+            "Please reinstall the app or download a newer release."
+        )
+    return (
+        "Velaria native extension was not found. Install the native wheel, or in a source "
+        "checkout build //:velaria_pyext so the package can auto-discover bazel-bin/_velaria.so."
+    )
+
+
 def _load_from_path(ext_path: pathlib.Path):
     spec = importlib.util.spec_from_file_location("velaria._velaria", ext_path)
     if spec is None or spec.loader is None:
@@ -107,14 +123,16 @@ def _load_native():
         candidate = _find_dev_extension()
         if candidate is not None:
             return _load_from_path(candidate)
-        raise ImportError(
-            "Velaria native extension was not found. Install the native wheel, or in a source "
-            "checkout build //:velaria_pyext so the package can auto-discover bazel-bin/_velaria.so."
-        ) from exc
+        raise ImportError(_native_missing_message()) from exc
 
 
 class _NativeUnavailable:
     def __init__(self, *args, **kwargs):
+        if _is_frozen_runtime():
+            raise ImportError(
+                "Velaria desktop package is missing its native engine files. "
+                "Please reinstall the app or download a newer release."
+            )
         raise ImportError(
             "Velaria native extension is required for Session/DataFrame/Streaming APIs. "
             "Install the native wheel or build //:velaria_pyext in the source checkout."

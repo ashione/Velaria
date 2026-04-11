@@ -19,5 +19,3 @@ mac:
   artifactName: Velaria-${version}-${arch}.${ext}
   category: public.app-category.developer-tools
   hardenedRuntime: true
-dmg:
-  sign: false

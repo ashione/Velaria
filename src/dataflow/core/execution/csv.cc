@@ -284,42 +284,7 @@ bool tryMatchesParsedCellFilter(const ParsedCell& lhs, const Value& rhs, const s
 }
 
 bool tryMatchesRawCellFilter(std::string_view cell, const Value& rhs, const std::string& op) {
-  if (rhs.type() == DataType::Bool) {
-    const bool rhs_bool = rhs.asBool();
-    if (cell == "true" || cell == "TRUE" || cell == "false" || cell == "FALSE") {
-      const bool lhs_bool = (cell == "true" || cell == "TRUE");
-      const int compare_result = lhs_bool == rhs_bool ? 0 : (lhs_bool ? 1 : -1);
-      return matchesCompareOp(compare_result, op);
-    }
-  }
-
-  if (rhs.type() == DataType::String) {
-    const int compare_result = std::string_view(rhs.asString()) == cell
-                                   ? 0
-                                   : (cell < std::string_view(rhs.asString()) ? -1 : 1);
-    return matchesCompareOp(compare_result, op);
-  }
-
-  int64_t int_value = 0;
-  switch (parseInt64(cell, &int_value)) {
-    case Int64ParseStatus::Parsed:
-      return tryMatchesValueFilter(Value(int_value), rhs, op);
-    case Int64ParseStatus::Overflow:
-    case Int64ParseStatus::NotInteger:
-      break;
-  }
-
-  if (mightBeDoubleLexically(cell)) {
-    double double_value = 0.0;
-    if (parseDouble(cell, &double_value)) {
-      return tryMatchesValueFilter(Value(double_value), rhs, op);
-    }
-  }
-
-  if (cell.empty()) {
-    return tryMatchesValueFilter(Value(), rhs, op);
-  }
-  return tryMatchesValueFilter(Value(std::string(cell)), rhs, op);
+  return tryMatchesParsedCellFilter(parseParsedCell(cell), rhs, op);
 }
 
 void collectPredicateColumns(const std::shared_ptr<PlanPredicateExpr>& expr,

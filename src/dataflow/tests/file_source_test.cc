@@ -1,4 +1,5 @@
 #include <fstream>
+#include <unordered_map>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -57,6 +58,20 @@ void expect_same_value_columns(const dataflow::Table& lhs, const dataflow::Table
   for (std::size_t i = 0; i < lhs_values.size(); ++i) {
     expect(lhs_values[i] == rhs_values[i], "column value mismatch");
   }
+}
+
+std::unordered_map<std::string, int64_t> count_by_group(const dataflow::Table& table,
+                                                        std::size_t key_column,
+                                                        std::size_t value_column) {
+  expect(table.columnar_cache != nullptr, "columnar cache missing");
+  std::unordered_map<std::string, int64_t> out;
+  const auto& keys = table.columnar_cache->columns[key_column].values;
+  const auto& values = table.columnar_cache->columns[value_column].values;
+  expect(keys.size() == values.size(), "group count column size mismatch");
+  for (std::size_t i = 0; i < keys.size(); ++i) {
+    out[keys[i].asString()] = values[i].asInt64();
+  }
+  return out;
 }
 
 }  // namespace
@@ -307,6 +322,54 @@ int main() {
            "csv predicate sql first row mismatch");
     expect(predicate_sql.rows[1][0].asString() == predicate_result.rows[1][0].asString(),
            "csv predicate sql second row mismatch");
+
+    const auto csv_sparse_a_path = make_temp_file("velaria-source-sparse-filter-a");
+    const auto csv_sparse_b_path = make_temp_file("velaria-source-sparse-filter-b");
+    {
+      std::ofstream sparse_a(csv_sparse_a_path);
+      std::ofstream sparse_b(csv_sparse_b_path);
+      if (!sparse_a.is_open() || !sparse_b.is_open()) {
+        throw std::runtime_error("cannot write sparse filter csv");
+      }
+      sparse_a << "grp,code\n";
+      sparse_b << "grp,code\n";
+      for (int i = 0; i < 100; ++i) sparse_a << "A,1\n";
+      for (int i = 0; i < 100; ++i) sparse_a << "B,1\n";
+      for (int i = 0; i < 1948; ++i) sparse_a << "A,01\n";
+      for (int i = 0; i < 1948; ++i) sparse_a << "B,01\n";
+      for (int i = 0; i < 200; ++i) sparse_a << "A,1\n";
+      for (int i = 0; i < 200; ++i) sparse_a << "B,1\n";
+      for (int i = 0; i < 252; ++i) sparse_a << "A,01\n";
+      for (int i = 0; i < 252; ++i) sparse_a << "B,01\n";
+
+      for (int i = 0; i < 300; ++i) sparse_b << "A,1\n";
+      for (int i = 0; i < 300; ++i) sparse_b << "B,1\n";
+      for (int i = 0; i < 1748; ++i) sparse_b << "A,01\n";
+      for (int i = 0; i < 1748; ++i) sparse_b << "B,01\n";
+      for (int i = 0; i < 452; ++i) sparse_b << "A,01\n";
+      for (int i = 0; i < 452; ++i) sparse_b << "B,01\n";
+    }
+    const auto sparse_schema = dataflow::read_csv_schema(csv_sparse_a_path);
+    dataflow::SourcePushdownSpec sparse_pushdown;
+    sparse_pushdown.filters.push_back({1, dataflow::Value(int64_t(1)), "="});
+    sparse_pushdown.has_aggregate = true;
+    sparse_pushdown.aggregate.keys = {0};
+    sparse_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Count, 0, "cnt"},
+    };
+    dataflow::Table sparse_result_a;
+    dataflow::Table sparse_result_b;
+    expect(dataflow::execute_csv_source_pushdown(
+               csv_sparse_a_path, sparse_schema, sparse_pushdown, ',', false, &sparse_result_a),
+           "csv sparse aggregate pushdown a failed");
+    expect(dataflow::execute_csv_source_pushdown(
+               csv_sparse_b_path, sparse_schema, sparse_pushdown, ',', false, &sparse_result_b),
+           "csv sparse aggregate pushdown b failed");
+    const auto counts_a = count_by_group(sparse_result_a, 0, 1);
+    const auto counts_b = count_by_group(sparse_result_b, 0, 1);
+    expect(counts_a == counts_b, "csv sparse filter ordering changed aggregate result");
+    expect(counts_a.at("A") == 300, "csv sparse filter A count mismatch");
+    expect(counts_a.at("B") == 300, "csv sparse filter B count mismatch");
 
     const auto line_logic_path = make_temp_file("velaria-source-predicate-line");
     write_file(line_logic_path, "1|A|10\n2|A|20\n3|B|5\n4|C|30\n");

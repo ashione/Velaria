@@ -244,6 +244,17 @@ bash app/scripts/build-sidecar-macos.sh
 bash app/scripts/package-macos.sh
 ```
 
+Unsigned beta package note for macOS:
+
+- the current `.dmg` can be distributed without an Apple Developer account, but it is not notarized
+- Gatekeeper may report the app as damaged or block the first launch
+- if you trust the build, open the installed app from Finder with `Right Click -> Open`
+- if macOS still blocks the app, remove the quarantine attribute manually:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Velaria.app
+```
+
 File-source pushdown now carries a shape classification from executor lowering into source execution.
 Current shapes are:
 

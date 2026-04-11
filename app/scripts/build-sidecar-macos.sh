@@ -40,6 +40,7 @@ echo "[sidecar] packaging velaria_service.py with PyInstaller"
   --workpath "${BUILD_DIR}/work" \
   --specpath "${BUILD_DIR}/spec" \
   --collect-submodules velaria \
+  --collect-binaries velaria \
   --collect-data velaria \
   "${ROOT_DIR}/python_api/velaria_service.py"
 

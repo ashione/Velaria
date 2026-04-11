@@ -67,6 +67,17 @@ Expected outputs:
 - `out/electron/dist/mac-arm64/Velaria.app`
 - `out/electron/dist/Velaria-<version>-arm64.dmg`
 
+Unsigned beta install note on macOS:
+
+- the generated `.dmg` is a beta package when Apple signing and notarization are not configured
+- Finder may block the installed app or label it as damaged
+- first try `Right Click -> Open` on `Velaria.app`
+- if Gatekeeper still blocks it, remove the quarantine attribute:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Velaria.app
+```
+
 ## Experimental Runtime
 
 Same-host flow:

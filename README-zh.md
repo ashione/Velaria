@@ -244,6 +244,17 @@ bash app/scripts/build-sidecar-macos.sh
 bash app/scripts/package-macos.sh
 ```
 
+macOS 未签名内测包说明：
+
+- 当前 `.dmg` 可以在没有 Apple Developer 账号的情况下分发，但它不是 notarized 正式安装包
+- Gatekeeper 可能会提示“已损坏”或阻止首次打开
+- 如果你信任这个构建版本，先在 Finder 里对安装后的 app 执行“右键 -> 打开”
+- 如果系统仍然拦截，可以手动移除隔离属性：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Velaria.app
+```
+
 当前 file-source pushdown 已经把执行形态从 executor lowering 传递到 source 执行侧。
 目前的 `shape` 包括：
 

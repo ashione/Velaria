@@ -23,6 +23,16 @@ Use this index to decide which plan document is authoritative for the question y
   - current status board for the core runtime columnar path
   - tracks implemented items, explicit non-goals, and next phases
   - this is the main plan document to update for the active core-runtime line
+- [analytical-storage-format-v1.md](./analytical-storage-format-v1.md)
+  - v1 analytical storage format direction for internal saved tables
+- [visual-data-app-v1.md](./visual-data-app-v1.md)
+  - product-level positioning for the local visual data app
+- [visual-data-app-shape-v1.md](./visual-data-app-shape-v1.md)
+  - app information architecture and top-level page shape
+- [visual-data-app-workflows-v1.md](./visual-data-app-workflows-v1.md)
+  - import / data detail / analyze workflow design
+- [electron-dmg-packaging-v1.md](./electron-dmg-packaging-v1.md)
+  - Electron desktop packaging plan and `.dmg` delivery path
 
 ## Historical Notes Still Useful As Background
 

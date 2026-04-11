@@ -23,6 +23,16 @@
   - 当前 core runtime columnar 路线的状态板
   - 维护已实现项、明确不做项和下一阶段
   - 当前活跃的 core-runtime 路线应优先更新这份文档
+- [analytical-storage-format-v1.md](./analytical-storage-format-v1.md)
+  - 内部分析型保存表格式的 v1 设计
+- [visual-data-app-v1.md](./visual-data-app-v1.md)
+  - 本地可视化数据 app 的产品定位与系统分层
+- [visual-data-app-shape-v1.md](./visual-data-app-shape-v1.md)
+  - app 的信息架构与页面骨架
+- [visual-data-app-workflows-v1.md](./visual-data-app-workflows-v1.md)
+  - 导入 / 展示 / 分析三条核心工作流
+- [electron-dmg-packaging-v1.md](./electron-dmg-packaging-v1.md)
+  - Electron 桌面打包与 `.dmg` 交付方案
 
 ## 仍有参考价值的历史设计说明
 

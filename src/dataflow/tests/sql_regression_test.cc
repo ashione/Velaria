@@ -325,6 +325,25 @@ void runParserRegression() {
       },
       "unterminated string literal");
 
+  expectNoThrow(
+      "parser_quoted_identifier_with_unicode_columns",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT \"目的市\" FROM input_table WHERE \"始发市\" = '杭州' LIMIT 50");
+        expect(st.query.select_items.size() == 1, "parser_quoted_identifier_projection_size");
+        expect(st.query.select_items[0].column.name == "目的市",
+               "parser_quoted_identifier_projection_name");
+        expect(static_cast<bool>(st.query.where), "parser_quoted_identifier_where_present");
+        expect(st.query.limit.value_or(0) == 50, "parser_quoted_identifier_limit");
+      });
+
+  expectThrowsType<dataflow::SQLSyntaxError>(
+      "parser_unquoted_unicode_identifier_reports_readable_error",
+      []() {
+        dataflow::sql::SqlParser::parse("SELECT 目的市 FROM input_table");
+      },
+      "invalid token byte 0x");
+
   expectThrowsType<dataflow::SQLUnsupportedError>(
       "parser_unsupported_statement_category",
       []() {
@@ -432,6 +451,20 @@ void runSemanticRegression() {
   expect(or_rows.rows.size() == 2, "planner_where_or_rows");
   expect(or_rows.rows[0][0].asInt64() == 1, "planner_where_or_first_user");
   expect(or_rows.rows[1][0].asInt64() == 2, "planner_where_or_second_user");
+
+  expectNoThrow(
+      "unicode_quoted_identifier_select_regression",
+      [&]() {
+        s.submit("CREATE TABLE t_cn_v1 (\"始发市\" STRING, \"目的市\" STRING)");
+        s.submit("INSERT INTO t_cn_v1 VALUES ('杭州', '北京'), ('杭州', '上海'), ('深圳', '广州')");
+        const auto out = s.submit(
+            "SELECT \"目的市\" FROM t_cn_v1 WHERE \"始发市\" = '杭州' LIMIT 50");
+        expect(out.rows.size() == 2, "unicode_quoted_identifier_rows");
+        expect(out.schema.fields.size() == 1, "unicode_quoted_identifier_schema_size");
+        expect(out.schema.fields[0] == "目的市", "unicode_quoted_identifier_schema_name");
+        expect(out.rows[0][0].asString() == "北京", "unicode_quoted_identifier_first_value");
+        expect(out.rows[1][0].asString() == "上海", "unicode_quoted_identifier_second_value");
+      });
 
   s.submit("CREATE SOURCE TABLE t_source_guard_v1 (user_id INT, region STRING)");
   expectThrows(

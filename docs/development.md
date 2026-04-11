@@ -41,6 +41,32 @@ uv run --project python_api python python_api/velaria_cli.py artifacts list --ru
 uv run --project python_api python python_api/velaria_cli.py artifacts preview --artifact-id <artifact_id>
 ```
 
+Desktop app prototype:
+
+```bash
+cd app
+npm install
+npm start
+```
+
+Build the packaged sidecar:
+
+```bash
+bash app/scripts/build-sidecar-macos.sh
+```
+
+Build the unsigned local macOS app and `.dmg`:
+
+```bash
+bash app/scripts/package-macos.sh
+```
+
+Expected outputs:
+
+- `out/sidecar/macos/velaria-service/`
+- `out/electron/dist/mac-arm64/Velaria.app`
+- `out/electron/dist/Velaria-<version>-arm64.dmg`
+
 ## Experimental Runtime
 
 Same-host flow:
@@ -97,6 +123,13 @@ bazel test //:core_regression
 bazel test //:python_ecosystem_regression
 bazel test //:experimental_regression
 ```
+
+Release packaging notes:
+
+- Linux release now builds `manylinux x86_64` and `manylinux aarch64` wheels.
+- macOS release continues to build `universal2` wheels.
+- macOS desktop release also produces a `.dmg`.
+- Linux release keeps one wheel per OS/arch and verifies SIMD backend availability from the installed repaired wheel rather than publishing a separate wheel per SIMD instruction set.
 
 Stage benchmark notes:
 

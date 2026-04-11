@@ -67,6 +67,17 @@ bash app/scripts/package-macos.sh
 - `out/electron/dist/mac-arm64/Velaria.app`
 - `out/electron/dist/Velaria-<version>-arm64.dmg`
 
+macOS 未签名内测包安装说明：
+
+- 当没有配置 Apple 签名和 notarization 时，这里产出的 `.dmg` 只是内测包
+- Finder 可能会阻止安装后的 app，或者提示“已损坏”
+- 先在 Finder 里对 `Velaria.app` 执行“右键 -> 打开”
+- 如果 Gatekeeper 仍然阻止启动，可以手动移除隔离属性：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Velaria.app
+```
+
 ## Experimental Runtime
 
 同机执行链路：

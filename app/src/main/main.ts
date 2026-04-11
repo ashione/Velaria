@@ -1,15 +1,18 @@
-const { app, BrowserWindow, dialog, ipcMain } = require('electron');
-const path = require('node:path');
-const fs = require('node:fs/promises');
-const { spawn } = require('node:child_process');
+import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import path from 'node:path';
+import fs from 'node:fs/promises';
+import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import type { Readable } from 'node:stream';
 
-const DEFAULT_PORT = parseInt(process.env.VELARIA_SERVICE_PORT || '37491', 10);
+const DEFAULT_PORT = Number.parseInt(process.env.VELARIA_SERVICE_PORT || '37491', 10);
 
-let mainWindow = null;
-let sidecarProcess = null;
+let mainWindow: BrowserWindow | null = null;
+type SidecarProcess = ChildProcessByStdio<null, Readable, Readable>;
+
+let sidecarProcess: SidecarProcess | null = null;
 
 function repoRoot() {
-  return path.resolve(__dirname, '..', '..', '..');
+  return path.resolve(__dirname, '..', '..', '..', '..');
 }
 
 function serviceBaseUrl() {
@@ -28,14 +31,18 @@ function startSidecar() {
     return sidecarProcess;
   }
 
+  let processRef: SidecarProcess;
   if (app.isPackaged) {
     const execPath = sidecarExecutablePath();
-    sidecarProcess = spawn(execPath, ['--port', String(DEFAULT_PORT)], {
+    if (!execPath) {
+      throw new Error('missing packaged sidecar path');
+    }
+    processRef = spawn(execPath, ['--port', String(DEFAULT_PORT)], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
   } else {
     const root = repoRoot();
-    sidecarProcess = spawn(
+    processRef = spawn(
       'uv',
       [
         'run',
@@ -57,22 +64,23 @@ function startSidecar() {
     );
   }
 
-  sidecarProcess.stdout.on('data', (chunk) => {
+  processRef.stdout.on('data', (chunk) => {
     process.stdout.write(`[velaria-service] ${chunk}`);
   });
-  sidecarProcess.stderr.on('data', (chunk) => {
+  processRef.stderr.on('data', (chunk) => {
     process.stderr.write(`[velaria-service] ${chunk}`);
   });
-  sidecarProcess.on('exit', (code, signal) => {
+  processRef.on('exit', (code, signal) => {
     console.log(`[velaria-service] exited code=${code} signal=${signal}`);
     sidecarProcess = null;
   });
-  return sidecarProcess;
+  sidecarProcess = processRef;
+  return processRef;
 }
 
 async function waitForServiceReady() {
-  const deadline = Date.now() + 30000;
-  let lastError = null;
+  const deadline = Date.now() + 30_000;
+  let lastError: Error | null = null;
   while (Date.now() < deadline) {
     try {
       const response = await fetch(`${serviceBaseUrl()}/health`);
@@ -81,7 +89,7 @@ async function waitForServiceReady() {
       }
       lastError = new Error(`health status ${response.status}`);
     } catch (error) {
-      lastError = error;
+      lastError = error as Error;
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
@@ -102,7 +110,10 @@ function createWindow() {
       sandbox: false,
     },
   });
-  mainWindow.loadFile(path.join(__dirname, '..', '..', 'dist', 'renderer', 'index.html'));
+  mainWindow.loadFile(path.join(__dirname, '..', '..', 'renderer', 'index.html'));
+  if (!app.isPackaged) {
+    mainWindow.webContents.openDevTools({ mode: 'detach' });
+  }
 }
 
 async function bootstrap() {
@@ -146,14 +157,12 @@ ipcMain.handle('shell:pick-file', async () => {
   return result.filePaths[0];
 });
 
-ipcMain.handle('shell:get-service-info', async () => {
-  return {
-    baseUrl: serviceBaseUrl(),
-    packaged: app.isPackaged,
-  };
-});
+ipcMain.handle('shell:get-service-info', async () => ({
+  baseUrl: serviceBaseUrl(),
+  packaged: app.isPackaged,
+}));
 
-ipcMain.handle('shell:export-file', async (_event, payload) => {
+ipcMain.handle('shell:export-file', async (_event, payload: { sourcePath?: string; suggestedName?: string }) => {
   const sourcePath = payload?.sourcePath;
   if (!sourcePath) {
     throw new Error('sourcePath is required');

@@ -67,6 +67,12 @@ type AnalyzeState = {
   query: string;
 };
 
+type FilterBuilderState = {
+  column: string;
+  operator: '=' | '!=' | '>' | '>=' | '<' | '<=';
+  value: string;
+};
+
 const defaultAnalyzeState: AnalyzeState = {
   inputPath: '',
   inputType: 'auto',
@@ -133,8 +139,7 @@ function highlightSql(sql: string): string {
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
+    .replaceAll('"', '&quot;');
   html = html.replace(/(--.*)$/gm, '<span class="sql-token-comment">$1</span>');
   html = html.replace(/('(?:''|[^'])*')/g, '<span class="sql-token-string">$1</span>');
   html = html.replace(/\b(\d+(?:\.\d+)?)\b/g, '<span class="sql-token-number">$1</span>');
@@ -170,6 +175,46 @@ function parseSqlStructure(sql: string) {
   };
 }
 
+function quoteIdentifier(identifier: string) {
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(identifier)) {
+    return identifier;
+  }
+  return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+function quoteLiteral(value: string) {
+  const trimmed = value.trim();
+  if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+    return trimmed;
+  }
+  return `'${trimmed.replaceAll("'", "''")}'`;
+}
+
+function renderPreviewTable(preview: DatasetRecord['preview']) {
+  const rows = preview?.rows || [];
+  const schema = preview?.schema || (rows[0] ? Object.keys(rows[0]) : []);
+  if (!rows.length) {
+    return '<div class="empty">No preview rows returned.</div>';
+  }
+  const head = schema.map((column) => `<th>${column}</th>`).join('');
+  const body = rows
+    .map((row) => {
+      const cells = schema
+        .map((column) => `<td>${String((row as Record<string, unknown>)[column] ?? '')}</td>`)
+        .join('');
+      return `<tr>${cells}</tr>`;
+    })
+    .join('');
+  return `
+    <div class="preview-wrap">
+      <table>
+        <thead><tr>${head}</tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>
+  `;
+}
+
 export function App() {
   const [locale, setLocale] = useState<Locale>(() => (window.localStorage.getItem(LOCALE_KEY) as Locale) || 'zh');
   const [view, setView] = useState<ViewKey>('home');
@@ -186,8 +231,13 @@ export function App() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedRunDetail, setSelectedRunDetail] = useState<RunDetailPayload | null>(null);
   const [analysisState, setAnalysisState] = useState<AnalyzeState>(defaultAnalyzeState);
+  const [filterBuilder, setFilterBuilder] = useState<FilterBuilderState>({
+    column: '',
+    operator: '=',
+    value: '',
+  });
   const [analysisResultHtml, setAnalysisResultHtml] = useState('<div class="empty">No run yet.</div>');
-  const [sqlUnderstandingExpanded, setSqlUnderstandingExpanded] = useState(true);
+  const [sqlUnderstandingExpanded, setSqlUnderstandingExpanded] = useState(false);
 
   const t = (key: string, vars: Record<string, string | number> = {}) => {
     const dict = I18N[locale] || I18N.en;
@@ -230,6 +280,7 @@ export function App() {
 
   const sqlStructure = useMemo(() => parseSqlStructure(analysisState.query), [analysisState.query]);
   const highlightedSql = useMemo(() => highlightSql(analysisState.query), [analysisState.query]);
+  const schemaColumns = currentDataset?.schema || [];
 
   const pagedRuns = useMemo(() => {
     const start = (runsPage - 1) * 8;
@@ -347,6 +398,29 @@ export function App() {
       query = `SELECT score, COUNT(*) AS cnt FROM ${table} GROUP BY score ORDER BY cnt DESC LIMIT 20`;
     }
     setAnalysisState((current) => ({ ...current, preset, query }));
+  }
+
+  function insertColumnIntoQuery(column: string) {
+    const quoted = quoteIdentifier(column);
+    setAnalysisState((current) => ({
+      ...current,
+      query: `${current.query.trim()} ${quoted}`.trim(),
+    }));
+  }
+
+  function applyFilterBuilder() {
+    if (!filterBuilder.column || !filterBuilder.value.trim()) {
+      return;
+    }
+    const table = analysisState.tableName || 'input_table';
+    const whereClause = `SELECT * FROM ${quoteIdentifier(table)} WHERE ${quoteIdentifier(
+      filterBuilder.column
+    )} ${filterBuilder.operator} ${quoteLiteral(filterBuilder.value)} LIMIT 50`;
+    setAnalysisState((current) => ({
+      ...current,
+      query: whereClause,
+      preset: 'filter',
+    }));
   }
 
   async function runAnalysis(event: React.FormEvent) {
@@ -693,35 +767,78 @@ export function App() {
 
         {view === 'analyze' && (
           <section className="section active">
-            <div className="analyze-workbench">
-              <section className="workbench-panel">
-                <div className="workbench-head">
+            <div className="stack">
+              <div className="summary-band">
+                <section className="compact-panel">
                   <h3>{t('datasets')}</h3>
-                </div>
-                <div className="workbench-body">
-                  <div className="notice">{t('analyze_hint')}</div>
                   <input
                     className="analyze-search"
                     placeholder={t('analysis_dataset_search')}
                     value={datasetSearch}
                     onChange={(event) => setDatasetSearch(event.target.value)}
                   />
-                  <div className="analyze-dataset-list">
+                  <div className="analyze-dataset-list" style={{ maxHeight: 140, overflow: 'auto' }}>
                     {datasetCards}
                     {!datasetCards.length && <div className="empty">{t('no_datasets_available')}</div>}
                   </div>
-                </div>
-              </section>
+                </section>
 
-              <section className="workbench-panel">
-                <div className="workbench-head">
+                <section className="compact-panel">
+                  <div className="actions" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                    <h3>{t('dataset_context')}</h3>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => setSqlUnderstandingExpanded((value) => !value)}
+                    >
+                      {t(sqlUnderstandingExpanded ? 'collapse' : 'expand')}
+                    </button>
+                  </div>
+                  <label>
+                    <span>{t('dataset_label')}</span>
+                    <select
+                      value={selectedDatasetId || ''}
+                      onChange={(event) => setSelectedDatasetId(event.target.value)}
+                    >
+                      {visibleDatasets.map((dataset) => (
+                        <option key={dataset.datasetId} value={dataset.datasetId}>
+                          {dataset.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="compact-grid">
+                    <div className="compact-card">
+                      <strong>{t('field_source')}</strong>
+                      <div className="mono">{currentDataset?.sourcePath || '—'}</div>
+                    </div>
+                    <div className="compact-card">
+                      <strong>{t('field_schema')}</strong>
+                      <div>{currentDataset?.schema.join('、') || '—'}</div>
+                    </div>
+                  </div>
+                  {sqlUnderstandingExpanded && (
+                    <div className="compact-grid">
+                      {sqlCards.map(([labelKey, value]) => (
+                        <div key={labelKey} className="compact-card">
+                          <strong>{t(labelKey)}</strong>
+                          <div>{value || t('sql_part_not_set')}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              </div>
+
+              <section className="panel">
+                <div className="panel-head">
                   <h2>{t('analyze_workspace')}</h2>
                   <div className="meta">
                     <span>{t('meta_sql_mode')}</span>
                     <span>{t('meta_run_tracked')}</span>
                   </div>
                 </div>
-                <div className="workbench-body">
+                <div className="panel-body stack">
                   <form onSubmit={runAnalysis}>
                     <div className="query-toolbar">
                       <label className="field">
@@ -770,6 +887,58 @@ export function App() {
                           <option value="aggregate">{t('preset_aggregate')}</option>
                         </select>
                       </label>
+                    </div>
+                    <div className="query-toolbar">
+                      <label className="field">
+                        <span>筛选列</span>
+                        <select
+                          value={filterBuilder.column}
+                          onChange={(event) =>
+                            setFilterBuilder((current) => ({ ...current, column: event.target.value }))
+                          }
+                        >
+                          <option value="">请选择</option>
+                          {schemaColumns.map((column) => (
+                            <option key={column} value={column}>
+                              {column}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="field">
+                        <span>条件</span>
+                        <select
+                          value={filterBuilder.operator}
+                          onChange={(event) =>
+                            setFilterBuilder((current) => ({
+                              ...current,
+                              operator: event.target.value as FilterBuilderState['operator'],
+                            }))
+                          }
+                        >
+                          <option value="=">=</option>
+                          <option value="!=">!=</option>
+                          <option value=">">&gt;</option>
+                          <option value=">=">&gt;=</option>
+                          <option value="<">&lt;</option>
+                          <option value="<=">&lt;=</option>
+                        </select>
+                      </label>
+                      <label className="field">
+                        <span>值</span>
+                        <input
+                          value={filterBuilder.value}
+                          onChange={(event) =>
+                            setFilterBuilder((current) => ({ ...current, value: event.target.value }))
+                          }
+                        />
+                      </label>
+                      <div className="field">
+                        <span>快速条件</span>
+                        <button type="button" className="ghost" onClick={applyFilterBuilder}>
+                          生成 WHERE
+                        </button>
+                      </div>
                     </div>
                     <label>
                       <span>{t('sql_query')}</span>
@@ -838,193 +1007,113 @@ export function App() {
                   </div>
                 </div>
               </section>
-
-              <aside className="inspector-stack">
-                <section className="workbench-panel">
-                  <div className="workbench-head">
-                    <h3>{t('dataset_context')}</h3>
-                  </div>
-                  <div className="workbench-body">
-                    <label>
-                      <span>{t('dataset_label')}</span>
-                      <select
-                        value={selectedDatasetId || ''}
-                        onChange={(event) => setSelectedDatasetId(event.target.value)}
-                      >
-                        {visibleDatasets.map((dataset) => (
-                          <option key={dataset.datasetId} value={dataset.datasetId}>
-                            {dataset.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <div className="result-box">
-                      {currentDataset ? (
-                        <>
-                          <div className="meta">
-                            <span>{currentDataset.sourceType}</span>
-                            <span>{t('rows_count', { count: currentDataset.preview?.row_count ?? '—' })}</span>
-                            <span>{currentDataset.kind}</span>
-                          </div>
-                          <div className="mono">
-                            <strong>{t('field_source')}:</strong> {currentDataset.sourcePath}
-                          </div>
-                          <div className="mono">
-                            <strong>{t('field_schema')}:</strong> {currentDataset.schema.join(', ') || '—'}
-                          </div>
-                          <div className="mono">
-                            <strong>{t('field_dataset_id')}:</strong> {currentDataset.datasetId}
-                          </div>
-                        </>
-                      ) : (
-                        <div className="empty">{t('no_dataset_for_analyze')}</div>
-                      )}
-                    </div>
-                  </div>
-                </section>
-
-                <section className="workbench-panel">
-                  <div className="workbench-head">
-                    <h3>{t('sql_understanding_title')}</h3>
-                    <button
-                      type="button"
-                      className="ghost"
-                      onClick={() => setSqlUnderstandingExpanded((value) => !value)}
-                    >
-                      {t(sqlUnderstandingExpanded ? 'collapse' : 'expand')}
-                    </button>
-                  </div>
-                  {sqlUnderstandingExpanded && (
-                    <div className="workbench-body">
-                      <div className="sql-understanding-grid">
-                        {sqlCards.map(([labelKey, value]) => (
-                          <div key={labelKey} className="sql-understanding-card">
-                            <strong>{t(labelKey)}</strong>
-                            <div>{value || t('sql_part_not_set')}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </section>
-              </aside>
             </div>
           </section>
         )}
 
         {view === 'runs' && (
           <section className="section active">
-            <div className="split">
-              <section className="panel">
-                <div className="panel-head">
-                  <h2>{t('run_history')}</h2>
+            <section className="panel">
+              <div className="panel-head">
+                <h2>{t('run_history')}</h2>
+                <div className="actions">
+                  <button className="ghost" onClick={() => void refreshRuns()}>
+                    {t('refresh')}
+                  </button>
+                </div>
+              </div>
+              <div className="panel-body">
+                <div className="list">
+                  {pagedRuns.map((run) => {
+                    const expanded = run.run_id === selectedRunId;
+                    return (
+                      <div key={run.run_id} className={`list-item ${expanded ? 'active' : ''}`}>
+                        <div
+                          onClick={() => setSelectedRunId(expanded ? null : run.run_id)}
+                          style={{ cursor: 'pointer' }}
+                        >
+                          <h4>{run.run_name || run.run_id}</h4>
+                          <div className="meta">
+                            <span>{run.status}</span>
+                            <span>{run.action}</span>
+                            <span>{`${run.artifact_count ?? 0} ${t('label_artifacts')}`}</span>
+                          </div>
+                        </div>
+                        {expanded && selectedRunDetail && selectedRunDetail.run.run_id === run.run_id && (
+                          <div className="result-box" style={{ marginTop: 14 }}>
+                            <div className="meta">
+                              <span>{String(selectedRunDetail.run.status)}</span>
+                              <span>{String(selectedRunDetail.run.action)}</span>
+                              <span>{t('rows_count', { count: selectedRunDetail.preview.row_count ?? '—' })}</span>
+                            </div>
+                            <div className="mono">
+                              <strong>{t('field_run_id')}:</strong> {String(selectedRunDetail.run.run_id)}
+                            </div>
+                            <div className="mono">
+                              <strong>{t('field_artifact_id')}:</strong> {selectedRunDetail.artifact.artifact_id}
+                            </div>
+                            <div className="mono">
+                              <strong>{t('field_artifact_uri')}:</strong> {selectedRunDetail.artifact.uri}
+                            </div>
+                            <div className="actions">
+                              <button className="ghost" onClick={exportCurrentRunArtifact}>
+                                {t('export_file')}
+                              </button>
+                              <button className="ghost" onClick={saveResultAsDataset}>
+                                {t('save_result_action')}
+                              </button>
+                              <button
+                                className="ghost"
+                                onClick={() => {
+                                  if (selectedRunDetail) {
+                                    const record = createDatasetRecord({
+                                      name: `result-${selectedRunDetail.run.run_id.slice(0, 12)}`,
+                                      sourceType:
+                                        selectedRunDetail.artifact.format === 'arrow'
+                                          ? 'arrow'
+                                          : selectedRunDetail.artifact.format,
+                                      sourcePath: decodeFileUri(selectedRunDetail.artifact.uri),
+                                      preview: selectedRunDetail.preview,
+                                      kind: 'result',
+                                    });
+                                    setDatasets((current) => [record, ...current]);
+                                    setSelectedDatasetId(record.datasetId);
+                                    setView('analyze');
+                                  }
+                                }}
+                              >
+                                {t('analyze_action')}
+                              </button>
+                            </div>
+                            <div
+                              dangerouslySetInnerHTML={{
+                                __html: renderPreviewTable(selectedRunDetail.preview),
+                              }}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {!runs.length && <div className="empty">{t('no_runs_yet')}</div>}
+                </div>
+                <div className="actions" style={{ marginTop: 14, justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div className="helper">{t('page_status', { page: runs.length ? runsPage : 0, total: Math.max(1, Math.ceil(runs.length / 8)) })}</div>
                   <div className="actions">
-                    <button className="ghost" onClick={() => void refreshRuns()}>
-                      {t('refresh')}
+                    <button className="ghost" disabled={runsPage <= 1} onClick={() => setRunsPage((page) => Math.max(1, page - 1))}>
+                      {t('page_prev')}
+                    </button>
+                    <button
+                      className="ghost"
+                      disabled={runsPage >= Math.max(1, Math.ceil(runs.length / 8))}
+                      onClick={() => setRunsPage((page) => Math.min(Math.max(1, Math.ceil(runs.length / 8)), page + 1))}
+                    >
+                      {t('page_next')}
                     </button>
                   </div>
                 </div>
-                <div className="panel-body">
-                  <div className="list">
-                    {pagedRuns.map((run) => (
-                      <div
-                        key={run.run_id}
-                        className={`list-item ${run.run_id === selectedRunId ? 'active' : ''}`}
-                        onClick={() => setSelectedRunId(run.run_id)}
-                      >
-                        <h4>{run.run_name || run.run_id}</h4>
-                        <div className="meta">
-                          <span>{run.status}</span>
-                          <span>{run.action}</span>
-                          <span>{`${run.artifact_count ?? 0} ${t('label_artifacts')}`}</span>
-                        </div>
-                      </div>
-                    ))}
-                    {!runs.length && <div className="empty">{t('no_runs_yet')}</div>}
-                  </div>
-                  <div className="actions" style={{ marginTop: 14, justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div className="helper">{t('page_status', { page: runs.length ? runsPage : 0, total: Math.max(1, Math.ceil(runs.length / 8)) })}</div>
-                    <div className="actions">
-                      <button className="ghost" disabled={runsPage <= 1} onClick={() => setRunsPage((page) => Math.max(1, page - 1))}>
-                        {t('page_prev')}
-                      </button>
-                      <button
-                        className="ghost"
-                        disabled={runsPage >= Math.max(1, Math.ceil(runs.length / 8))}
-                        onClick={() => setRunsPage((page) => Math.min(Math.max(1, Math.ceil(runs.length / 8)), page + 1))}
-                      >
-                        {t('page_next')}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </section>
-
-              <section className="panel">
-                <div className="panel-head">
-                  <h2>{t('run_detail')}</h2>
-                </div>
-                <div className="panel-body">
-                  <div className="result-box">
-                    {selectedRunDetail ? (
-                      <>
-                        <div className="meta">
-                          <span>{String(selectedRunDetail.run.status)}</span>
-                          <span>{String(selectedRunDetail.run.action)}</span>
-                          <span>{t('rows_count', { count: selectedRunDetail.preview.row_count ?? '—' })}</span>
-                        </div>
-                        <div className="mono">
-                          <strong>{t('field_run_id')}:</strong> {String(selectedRunDetail.run.run_id)}
-                        </div>
-                        <div className="mono">
-                          <strong>{t('field_artifact_id')}:</strong> {selectedRunDetail.artifact.artifact_id}
-                        </div>
-                        <div className="mono">
-                          <strong>{t('field_artifact_uri')}:</strong> {selectedRunDetail.artifact.uri}
-                        </div>
-                        <div className="actions">
-                          <button className="ghost" onClick={exportCurrentRunArtifact}>
-                            {t('export_file')}
-                          </button>
-                          <button className="ghost" onClick={saveResultAsDataset}>
-                            {t('save_result_action')}
-                          </button>
-                          <button
-                            className="ghost"
-                            onClick={() => {
-                              if (selectedRunDetail) {
-                                const record = createDatasetRecord({
-                                  name: `result-${selectedRunDetail.run.run_id.slice(0, 12)}`,
-                                  sourceType:
-                                    selectedRunDetail.artifact.format === 'arrow'
-                                      ? 'arrow'
-                                      : selectedRunDetail.artifact.format,
-                                  sourcePath: decodeFileUri(selectedRunDetail.artifact.uri),
-                                  preview: selectedRunDetail.preview,
-                                  kind: 'result',
-                                });
-                                setDatasets((current) => [record, ...current]);
-                                setSelectedDatasetId(record.datasetId);
-                                setView('analyze');
-                              }
-                            }}
-                          >
-                            {t('analyze_action')}
-                          </button>
-                        </div>
-                        <div
-                          dangerouslySetInnerHTML={{
-                            __html: renderPreviewTable(selectedRunDetail.preview),
-                          }}
-                        />
-                      </>
-                    ) : (
-                      <div className="empty">{t('run_detail_empty')}</div>
-                    )}
-                  </div>
-                </div>
-              </section>
-            </div>
+              </div>
+            </section>
           </section>
         )}
       </main>

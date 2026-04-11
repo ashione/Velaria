@@ -6,6 +6,7 @@ directories:
   buildResources: resources
 files:
   - package.json
+  - dist/**/*
   - src/**/*
 extraResources:
   - from: ../out/sidecar/macos/velaria-service

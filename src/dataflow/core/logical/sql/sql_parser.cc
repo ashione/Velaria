@@ -1,6 +1,7 @@
 #include "src/dataflow/core/logical/sql/sql_parser.h"
 
 #include <cctype>
+#include <cstdio>
 #include <stdexcept>
 #include <optional>
 #include <string>
@@ -16,9 +17,11 @@ struct Token {
   std::string text;
   bool is_string = false;
   bool is_number = false;
+  bool is_quoted_identifier = false;
 
   Token() = default;
-  Token(std::string t, bool s, bool n) : text(std::move(t)), is_string(s), is_number(n) {}
+  Token(std::string t, bool s, bool n, bool q = false)
+      : text(std::move(t)), is_string(s), is_number(n), is_quoted_identifier(q) {}
 };
 
 std::string toUpper(std::string value) {
@@ -49,16 +52,51 @@ bool isJoinKeyword(const std::string& value) {
   return u == "JOIN" || u == "INNER" || u == "LEFT";
 }
 
+std::string formatInvalidTokenByte(unsigned char byte) {
+  char buffer[32];
+  std::snprintf(buffer, sizeof(buffer), "invalid token byte 0x%02X", byte);
+  return buffer;
+}
+
+Token parseQuotedToken(const std::string& sql, std::size_t* cursor) {
+  const char quote = sql[*cursor];
+  const bool is_identifier = quote == '"';
+  std::string content;
+  ++(*cursor);
+  while (*cursor < sql.size()) {
+    const char current = sql[*cursor];
+    if (current == quote) {
+      if (*cursor + 1 < sql.size() && sql[*cursor + 1] == quote) {
+        content.push_back(quote);
+        *cursor += 2;
+        continue;
+      }
+      ++(*cursor);
+      return Token(content, !is_identifier, false, is_identifier);
+    }
+    if (current == '\\' && *cursor + 1 < sql.size()) {
+      content.push_back(sql[*cursor + 1]);
+      *cursor += 2;
+      continue;
+    }
+    content.push_back(current);
+    ++(*cursor);
+  }
+  throw SQLSyntaxError(is_identifier ? "unterminated quoted identifier"
+                                     : "unterminated string literal");
+}
+
 std::vector<Token> tokenize(const std::string& sql) {
   std::vector<Token> out;
   std::size_t i = 0;
   while (i < sql.size()) {
+    const unsigned char byte = static_cast<unsigned char>(sql[i]);
     char c = sql[i];
-    if (std::isspace(static_cast<unsigned char>(c))) {
+    if (std::isspace(byte)) {
       ++i;
       continue;
     }
-    if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
+    if (std::isalpha(byte) || c == '_') {
       std::size_t start = i++;
       while (i < sql.size()) {
         char p = sql[i];
@@ -71,7 +109,7 @@ std::vector<Token> tokenize(const std::string& sql) {
       out.push_back(Token(sql.substr(start, i - start), false, false));
       continue;
     }
-    if (std::isdigit(static_cast<unsigned char>(c)) || ((c == '+' || c == '-') &&
+    if (std::isdigit(byte) || ((c == '+' || c == '-') &&
         i + 1 < sql.size() && std::isdigit(static_cast<unsigned char>(sql[i + 1])))) {
       std::size_t start = i++;
       bool hasDot = false;
@@ -92,22 +130,7 @@ std::vector<Token> tokenize(const std::string& sql) {
       continue;
     }
     if (c == '\'' || c == '"') {
-      char quote = c;
-      std::size_t start = i + 1;
-      ++i;
-      while (i < sql.size() && sql[i] != quote) {
-        if (sql[i] == '\\' && i + 1 < sql.size()) {
-          i += 2;
-        } else {
-          ++i;
-        }
-      }
-      if (i >= sql.size()) {
-        throw SQLSyntaxError("unterminated string literal");
-      }
-      std::string content = sql.substr(start, i - start);
-      ++i;
-      out.push_back(Token(content, true, false));
+      out.push_back(parseQuotedToken(sql, &i));
       continue;
     }
     if (i + 1 < sql.size()) {
@@ -124,7 +147,7 @@ std::vector<Token> tokenize(const std::string& sql) {
       ++i;
       continue;
     }
-    throw SQLSyntaxError(std::string("invalid token: ") + c);
+    throw SQLSyntaxError(formatInvalidTokenByte(byte));
   }
   out.push_back(Token("", false, false));
   return out;

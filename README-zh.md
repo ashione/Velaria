@@ -228,6 +228,7 @@ bazel run //:sql_demo
 bazel run //:df_demo
 bazel run //:stream_demo
 bazel run //:file_source_benchmark -- 200000 3
+# 会输出 CSV / line / JSON file-source 子 case 的 JSON 行
 uv run --project python_api python python_api/velaria_cli.py --help
 ./dist/velaria-cli --help
 ```
@@ -242,6 +243,16 @@ npm start
 bash app/scripts/build-sidecar-macos.sh
 bash app/scripts/package-macos.sh
 ```
+
+当前 file-source pushdown 已经把执行形态从 executor lowering 传递到 source 执行侧。
+目前的 `shape` 包括：
+
+- `ConjunctiveFilterOnly`
+- `SingleKeyCount`
+- `SingleKeyNumericAggregate`
+- `Generic`
+
+这样 source 端可以针对简单 conjunctive filter 和单 key aggregate 选择更轻的 fast path，而不是所有情况都走同一套通用执行路径。
 
 ## 5. 开发文档
 

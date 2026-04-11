@@ -44,6 +44,7 @@ Velaria 围绕一个 kernel 和两个非 kernel 层组织。
 - `python_api` 里的 native binding
 - Arrow 输入与输出
 - CLI、打包与 `uv` 工作流
+- 本地 app-side service 与 Electron 原型支持
 - 离线 embedding 生成 helper 与版本化 embedding 资产管理
 - Excel / Bitable / custom stream adapter
 - 本地 workspace 与 run tracking
@@ -122,6 +123,8 @@ Arrow / CSV / Python ingress
   - unbounded-source `ORDER BY` 会被显式拒绝
 - fixed-dimension `float32` 的本地 exact vector search
 - Python Arrow 输入/输出与 workspace-backed run tracking
+- `app/` 下的本地桌面原型，由 `velaria-service` 提供本地服务
+- macOS 桌面原型打包，当前可产出 `.dmg`
 - 可通过正式支持的 Python 生态层接入 AI / agent / skill，并利用 workspace 与 artifact 管理能力复用结果、管理本地数据
 - 同机 actor/rpc/jobmaster smoke 路径
 
@@ -131,6 +134,7 @@ Arrow / CSV / Python ingress
 - `CREATE SINK TABLE` 可写但不能作为查询输入
 - SQL v1 不扩展到 `CTE`、子查询、`UNION` 或更复杂 join 语义
 - Python callback / Python UDF 不进入热路径
+- Electron 桌面 app 仍然只是本地原型，还不是稳定公开产品面
 - 仓库不宣称已完成 distributed runtime
 
 稳定公开 surface：
@@ -228,7 +232,32 @@ uv run --project python_api python python_api/velaria_cli.py --help
 ./dist/velaria-cli --help
 ```
 
+桌面 app 原型入口：
+
+```bash
+cd app
+npm install
+npm start
+
+bash app/scripts/build-sidecar-macos.sh
+bash app/scripts/package-macos.sh
+```
+
 ## 5. 开发文档
 
 - 英文：[docs/development.md](./docs/development.md)
 - 中文：[docs/development-zh.md](./docs/development-zh.md)
+
+## 6. 打包说明
+
+当前仓库可见的 release 打包包括：
+
+- Linux native wheel：
+  - `manylinux x86_64`
+  - `manylinux aarch64`
+- macOS native wheel：
+  - `universal2`
+- macOS 桌面原型：
+  - `.dmg`
+
+Linux release 会保持“每个 OS/arch 一个 wheel”，而不是按 SIMD 指令集继续拆更多 wheel；同一 wheel 内部通过 runtime SIMD dispatch 选择后端。

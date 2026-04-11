@@ -12,6 +12,7 @@ src/dataflow/runner/dashboard/*.js.map
 *.log
 *.tmp
 *.temp
+.DS_Store
 
 # Python local artifacts
 .venv/
@@ -24,4 +25,5 @@ python_api/benchmarks/data/*.csv
 
 # Desktop app local artifacts
 app/node_modules/
+app/dist/
 out/

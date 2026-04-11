@@ -41,6 +41,32 @@ uv run --project python_api python python_api/velaria_cli.py artifacts list --ru
 uv run --project python_api python python_api/velaria_cli.py artifacts preview --artifact-id <artifact_id>
 ```
 
+桌面 app 原型：
+
+```bash
+cd app
+npm install
+npm start
+```
+
+构建打包 sidecar：
+
+```bash
+bash app/scripts/build-sidecar-macos.sh
+```
+
+构建本地未签名 macOS app 与 `.dmg`：
+
+```bash
+bash app/scripts/package-macos.sh
+```
+
+预期产物：
+
+- `out/sidecar/macos/velaria-service/`
+- `out/electron/dist/mac-arm64/Velaria.app`
+- `out/electron/dist/Velaria-<version>-arm64.dmg`
+
 ## Experimental Runtime
 
 同机执行链路：
@@ -97,6 +123,17 @@ bazel test //:core_regression
 bazel test //:python_ecosystem_regression
 bazel test //:experimental_regression
 ```
+
+Release 打包说明：
+
+- Linux release 现在会构建：
+  - `manylinux x86_64`
+  - `manylinux aarch64`
+- macOS release 继续构建：
+  - `universal2 wheel`
+- macOS 桌面 release 还会产出：
+  - `.dmg`
+- Linux release 会保持“每个 OS/arch 一个 wheel”，不会再按 SIMD 指令集额外拆 wheel；同一 wheel 内部再通过 runtime SIMD dispatch 选择后端。
 
 Stage benchmark 说明：
 

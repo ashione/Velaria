@@ -44,6 +44,7 @@ Owns:
 - native binding in `python_api`
 - Arrow ingress/output
 - CLI, packaging, and `uv` workflow
+- local app-side service and Electron prototype support
 - offline embedding generation helpers and versioned embedding asset management
 - Excel / Bitable / custom stream adapters
 - local workspace and run tracking
@@ -122,6 +123,8 @@ Available today:
   - unbounded-source `ORDER BY` is rejected explicitly
 - local exact vector search on fixed-dimension `float32`
 - Python Arrow ingress/output and workspace-backed run tracking
+- local desktop app prototype under `app/`, backed by `velaria-service`
+- macOS desktop packaging prototype producing `.dmg`
 - AI / agent / skill integration through the supported Python ecosystem layer, with workspace and artifact management for result reuse and local data management
 - same-host actor/rpc/jobmaster smoke path
 
@@ -131,6 +134,7 @@ Current constraints:
 - `CREATE SINK TABLE` accepts writes but cannot be used as query input
 - SQL v1 does not expand to `CTE`, subquery, `UNION`, or richer join semantics
 - Python callbacks / Python UDFs are not part of the hot path
+- the Electron desktop app is still a local prototype, not a stable product surface
 - the repository does not claim a completed distributed runtime
 
 Stable public surfaces:
@@ -228,7 +232,32 @@ uv run --project python_api python python_api/velaria_cli.py --help
 ./dist/velaria-cli --help
 ```
 
+Desktop app prototype entry points:
+
+```bash
+cd app
+npm install
+npm start
+
+bash app/scripts/build-sidecar-macos.sh
+bash app/scripts/package-macos.sh
+```
+
 ## 5. Development Docs
 
 - English: [docs/development.md](./docs/development.md)
 - Chinese: [docs/development-zh.md](./docs/development-zh.md)
+
+## 6. Packaging Notes
+
+Current repository-visible release packaging includes:
+
+- Linux native wheels for:
+  - `manylinux x86_64`
+  - `manylinux aarch64`
+- macOS native wheels for:
+  - `universal2`
+- macOS desktop prototype packaging for:
+  - `.dmg`
+
+Linux release packaging keeps one wheel per OS/arch and relies on runtime SIMD dispatch inside that wheel rather than publishing separate wheels for each SIMD instruction set.

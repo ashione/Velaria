@@ -5,13 +5,24 @@
   "main": "src/main/main.js",
   "license": "MIT",
   "scripts": {
-    "start": "electron .",
+    "dev:renderer": "vite",
+    "build:renderer": "vite build",
+    "start": "npm run build:renderer && electron .",
     "build:sidecar": "bash ./scripts/build-sidecar-macos.sh",
-    "dist:mac": "electron-builder --config electron-builder.yml --mac dmg",
+    "dist:mac": "npm run build:renderer && electron-builder --config electron-builder.yml --mac dmg",
     "package:mac": "bash ./scripts/package-macos.sh"
   },
   "devDependencies": {
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@vitejs/plugin-react": "^5.0.4",
     "electron": "^35.7.5",
-    "electron-builder": "^25.1.8"
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.9"
+  },
+  "dependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
   }
 }

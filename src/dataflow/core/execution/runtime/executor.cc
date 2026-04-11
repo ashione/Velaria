@@ -912,6 +912,27 @@ bool collectConjunctivePredicateFilters(const std::shared_ptr<PlanPredicateExpr>
          collectConjunctivePredicateFilters(expr->right, out);
 }
 
+SourcePushdownShape classifySourcePushdownShape(const SourcePushdownSpec& spec) {
+  if (spec.has_aggregate) {
+    if (spec.aggregate.keys.size() == 1 && spec.aggregate.aggregates.size() == 1 &&
+        !spec.predicate_expr) {
+      const auto& agg = spec.aggregate.aggregates.front();
+      if (agg.function == AggregateFunction::Count) {
+        return SourcePushdownShape::SingleKeyCount;
+      }
+      if (agg.function == AggregateFunction::Sum || agg.function == AggregateFunction::Avg ||
+          agg.function == AggregateFunction::Min || agg.function == AggregateFunction::Max) {
+        return SourcePushdownShape::SingleKeyNumericAggregate;
+      }
+    }
+    return SourcePushdownShape::Generic;
+  }
+  if (!spec.filters.empty() && !spec.predicate_expr) {
+    return SourcePushdownShape::ConjunctiveFilterOnly;
+  }
+  return SourcePushdownShape::Generic;
+}
+
 void collectPredicateColumns(const std::shared_ptr<PlanPredicateExpr>& expr,
                              std::vector<std::size_t>* columns) {
   if (!expr || columns == nullptr) {
@@ -999,6 +1020,7 @@ bool buildSourcePushdownSpec(const PlanNodePtr& plan, const SourceRequirementMap
       }
       SourcePushdownSpec spec;
       spec.projected_columns = requestedSourceColumns(*source, requirements);
+      spec.shape = classifySourcePushdownShape(spec);
       *source_out = source;
       *pushdown_out = std::move(spec);
       return true;
@@ -1025,6 +1047,7 @@ bool buildSourcePushdownSpec(const PlanNodePtr& plan, const SourceRequirementMap
         }
         spec.predicate_expr = std::move(combined);
       }
+      spec.shape = classifySourcePushdownShape(spec);
       *source_out = source;
       *pushdown_out = std::move(spec);
       return true;
@@ -1037,6 +1060,7 @@ bool buildSourcePushdownSpec(const PlanNodePtr& plan, const SourceRequirementMap
         return false;
       }
       spec.limit = spec.limit == 0 ? node->n : std::min(spec.limit, node->n);
+      spec.shape = classifySourcePushdownShape(spec);
       *source_out = source;
       *pushdown_out = std::move(spec);
       return true;
@@ -1054,6 +1078,7 @@ bool buildSourcePushdownSpec(const PlanNodePtr& plan, const SourceRequirementMap
       spec.has_aggregate = true;
       spec.aggregate.keys = node->keys;
       spec.aggregate.aggregates = node->aggregates;
+      spec.shape = classifySourcePushdownShape(spec);
       *source_out = source;
       *pushdown_out = std::move(spec);
       return true;

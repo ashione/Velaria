@@ -24,6 +24,39 @@ bazel build //:tpch_q1_style_benchmark
 ./bazel-bin/tpch_q1_style_benchmark 500 4096 4 4 0 0 all string-keys q6
 ```
 
+File-input benchmark:
+
+```bash
+bazel run //:file_source_benchmark -- 200000 3
+perf record --call-graph=dwarf bazel-bin/file_source_benchmark -- 200000 3
+perf report
+```
+
+The file-input benchmark emits JSON rows for:
+
+- CSV hardcode / explicit / auto-probed paths
+- CSV scan-only / full-columnar / full-row-materialize / projected / filter-pushdown / aggregate-pushdown sub-cases
+- line split / regex explicit paths plus direct filter-pushdown / aggregate-pushdown cases
+- JSON lines explicit / auto-probed paths plus direct filter-pushdown / aggregate-pushdown cases
+- SQL file-registration and CSV / line / JSON predicate-pushdown paths
+
+Current file-source optimizer/executor layering:
+
+- executor lowering classifies source pushdown into `ConjunctiveFilterOnly`, `SingleKeyCount`, `SingleKeyNumericAggregate`, or `Generic`
+- file sources use those shapes to select lighter fast paths where semantics allow
+- current fast paths are most effective for line split, line regex, JSON selected-field pushdown, and simple CSV single-key aggregate cases
+
+Current clean-`main` comparison snapshot for representative file-source cases:
+
+| Case | clean `main` | current | delta |
+|---|---:|---:|---:|
+| `read_line_regex_explicit_group_sum` | `5679936 us` | `641735 us` | `-88.7%` |
+| `sql_csv_predicate_and_group_count` | `133011 us` | `109146 us` | `-17.9%` |
+| `sql_csv_predicate_or_group_count` | `307313 us` | `171556 us` | `-44.2%` |
+| `sql_csv_predicate_mixed_group_count` | `462000 us` | `275583 us` | `-40.3%` |
+| `sql_line_predicate_or_group_count` | `314852 us` | `174627 us` | `-44.5%` |
+| `sql_json_predicate_or_group_count` | `604404 us` | `420423 us` | `-30.4%` |
+
 ## Measurement Notes
 
 - Snapshot date: April 6, 2026

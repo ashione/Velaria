@@ -224,9 +224,20 @@ bazel run //:sql_demo
 bazel run //:df_demo
 bazel run //:stream_demo
 bazel run //:file_source_benchmark -- 200000 3
+# emits CSV / line / JSON file-source sub-cases as JSON lines
 uv run --project python_api python python_api/velaria_cli.py --help
 ./dist/velaria-cli --help
 ```
+
+File-source pushdown now carries a shape classification from executor lowering into source execution.
+Current shapes are:
+
+- `ConjunctiveFilterOnly`
+- `SingleKeyCount`
+- `SingleKeyNumericAggregate`
+- `Generic`
+
+These shapes let file sources choose lighter fast paths for simple conjunctive filters and single-key aggregates instead of routing every case through the same generic execution path.
 
 ## 5. Development Docs
 

@@ -9,6 +9,18 @@ namespace dataflow {
 
 namespace {
 
+const char* scalarFindByte(const char* begin, const char* end, char needle) {
+  if (begin == nullptr || end == nullptr || begin >= end) {
+    return nullptr;
+  }
+  for (const char* ptr = begin; ptr < end; ++ptr) {
+    if (*ptr == needle) {
+      return ptr;
+    }
+  }
+  return nullptr;
+}
+
 bool matchesCompare(double lhs, double rhs, NumericCompareOp op) {
   switch (op) {
     case NumericCompareOp::Eq:
@@ -106,6 +118,7 @@ double scalarSquaredL2F32(const float* lhs, const float* rhs, std::size_t size) 
 const SimdKernelDispatch kScalarDispatch = {
     SimdBackendKind::Scalar,
     simdBackendName(SimdBackendKind::Scalar),
+    &scalarFindByte,
     &scalarSelectDouble,
     &scalarSumDouble,
     &scalarAccumulateDouble,

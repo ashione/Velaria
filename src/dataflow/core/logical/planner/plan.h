@@ -133,6 +133,13 @@ struct SourceFilterPushdownSpec {
   std::string op;
 };
 
+enum class SourcePushdownShape {
+  Generic = 0,
+  ConjunctiveFilterOnly = 1,
+  SingleKeyCount = 2,
+  SingleKeyNumericAggregate = 3,
+};
+
 enum class PlanPredicateExprKind { Comparison, And, Or };
 
 struct PlanPredicateExpr {
@@ -151,6 +158,7 @@ struct SourcePushdownSpec {
   std::size_t limit = 0;
   bool has_aggregate = false;
   SourceAggregatePushdownSpec aggregate;
+  SourcePushdownShape shape = SourcePushdownShape::Generic;
 };
 
 struct ComputedColumnArg {

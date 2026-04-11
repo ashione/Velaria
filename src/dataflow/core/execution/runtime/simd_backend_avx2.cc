@@ -10,6 +10,28 @@
 namespace dataflow {
 
 namespace {
+const char* avx2FindByte(const char* begin, const char* end, char needle) {
+#if defined(__AVX2__)
+  if (begin == nullptr || end == nullptr || begin >= end) {
+    return nullptr;
+  }
+  constexpr std::size_t kLaneCount = 32;
+  const __m256i needle_vec = _mm256_set1_epi8(needle);
+  const char* ptr = begin;
+  for (; ptr + kLaneCount <= end; ptr += kLaneCount) {
+    const __m256i bytes = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
+    const __m256i matches = _mm256_cmpeq_epi8(bytes, needle_vec);
+    const uint32_t mask = static_cast<uint32_t>(_mm256_movemask_epi8(matches));
+    if (mask != 0) {
+      return ptr + __builtin_ctz(mask);
+    }
+  }
+  return scalarDispatch().find_byte(ptr, end, needle);
+#else
+  return scalarDispatch().find_byte(begin, end, needle);
+#endif
+}
+
 NumericSelectionResult avx2SelectDouble(const double* values, const uint8_t* is_null,
                                         std::size_t row_count, double rhs,
                                         NumericCompareOp op, std::size_t max_selected) {
@@ -117,6 +139,7 @@ double avx2SquaredL2F32(const float* lhs, const float* rhs, std::size_t size) {
 const SimdKernelDispatch kAvx2Dispatch = {
     SimdBackendKind::Avx2,
     simdBackendName(SimdBackendKind::Avx2),
+    &avx2FindByte,
     &avx2SelectDouble,
     &avx2SumDouble,
     &avx2AccumulateDouble,

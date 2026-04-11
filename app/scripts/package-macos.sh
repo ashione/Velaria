@@ -13,5 +13,11 @@ if [[ ! -d node_modules ]]; then
   npm install
 fi
 
+echo "[package] building electron sources"
+npm run build:electron
+
+echo "[package] building renderer sources"
+npm run build:renderer
+
 echo "[package] building macOS dmg"
 npx electron-builder --config electron-builder.yml --mac dmg

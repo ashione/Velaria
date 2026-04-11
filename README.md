@@ -224,6 +224,7 @@ bazel run //:sql_demo
 bazel run //:df_demo
 bazel run //:stream_demo
 bazel run //:file_source_benchmark -- 200000 3
+# emits CSV / line / JSON file-source sub-cases as JSON lines
 uv run --project python_api python python_api/velaria_cli.py --help
 ./dist/velaria-cli --help
 ```

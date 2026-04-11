@@ -224,6 +224,7 @@ bazel run //:sql_demo
 bazel run //:df_demo
 bazel run //:stream_demo
 bazel run //:file_source_benchmark -- 200000 3
+# 会输出 CSV / line / JSON file-source 子 case 的 JSON 行
 uv run --project python_api python python_api/velaria_cli.py --help
 ./dist/velaria-cli --help
 ```

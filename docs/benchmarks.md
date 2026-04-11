@@ -24,6 +24,22 @@ bazel build //:tpch_q1_style_benchmark
 ./bazel-bin/tpch_q1_style_benchmark 500 4096 4 4 0 0 all string-keys q6
 ```
 
+File-input benchmark:
+
+```bash
+bazel run //:file_source_benchmark -- 200000 3
+perf record --call-graph=dwarf bazel-bin/file_source_benchmark -- 200000 3
+perf report
+```
+
+The file-input benchmark emits JSON rows for:
+
+- CSV hardcode / explicit / auto-probed paths
+- CSV scan-only / full-columnar / full-row-materialize / projected / filter-pushdown / aggregate-pushdown sub-cases
+- line split / regex explicit paths plus direct filter-pushdown / aggregate-pushdown cases
+- JSON lines explicit / auto-probed paths plus direct filter-pushdown / aggregate-pushdown cases
+- SQL file-registration and CSV / line / JSON predicate-pushdown paths
+
 ## Measurement Notes
 
 - Snapshot date: April 6, 2026

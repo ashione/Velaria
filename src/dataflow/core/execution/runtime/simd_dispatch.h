@@ -43,6 +43,7 @@ struct NumericSelectionResult {
 struct SimdKernelDispatch {
   SimdBackendKind backend = SimdBackendKind::Scalar;
   const char* backend_name = kSimdBackendNameScalar;
+  const char* (*find_byte)(const char* begin, const char* end, char needle) = nullptr;
   NumericSelectionResult (*select_double)(const double* values, const uint8_t* is_null,
                                           std::size_t row_count, double rhs,
                                           NumericCompareOp op,

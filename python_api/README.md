@@ -456,10 +456,18 @@ bazel run //:file_source_benchmark -- 200000 3
 That benchmark currently reports:
 
 - CSV hardcode / explicit / auto-probed paths
-- line split hardcode / explicit / auto-probed paths
+- CSV scan-only / full-columnar / full-row-materialize / projected / filter-pushdown / aggregate-pushdown sub-cases
+- line split hardcode / explicit / auto-probed paths and direct filter-pushdown / aggregate-pushdown cases
 - line regex parse and grouped-aggregate paths
-- JSON lines hardcode / explicit / auto-probed paths
-- SQL `CREATE TABLE ... OPTIONS(path: '...')` registration costs
+- JSON lines hardcode / explicit / auto-probed paths and direct filter-pushdown / aggregate-pushdown cases
+- SQL `CREATE TABLE ... OPTIONS(path: '...')` registration costs plus CSV / line / JSON predicate-pushdown comparisons
+
+For Linux perf sampling on the native CSV path:
+
+```bash
+perf record --call-graph=dwarf bazel-bin/file_source_benchmark -- 200000 3
+perf report
+```
 
 By default that script generates benchmark input at runtime.
 To use a local anonymized CSV instead, set `VELARIA_STAGE_BENCH_CSV=/path/to/file.csv`.

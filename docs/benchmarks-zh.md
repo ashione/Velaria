@@ -24,6 +24,22 @@ bazel build //:tpch_q1_style_benchmark
 ./bazel-bin/tpch_q1_style_benchmark 500 4096 4 4 0 0 all string-keys q6
 ```
 
+File-input benchmark：
+
+```bash
+bazel run //:file_source_benchmark -- 200000 3
+perf record --call-graph=dwarf bazel-bin/file_source_benchmark -- 200000 3
+perf report
+```
+
+这个 file-input benchmark 会输出以下 JSON 行：
+
+- CSV hardcode / explicit / auto-probed 路径
+- CSV scan-only / full-columnar / full-row-materialize / projected / filter-pushdown / aggregate-pushdown 子 case
+- line split / regex explicit 路径，以及 direct filter-pushdown / aggregate-pushdown 子 case
+- JSON lines explicit / auto-probed 路径，以及 direct filter-pushdown / aggregate-pushdown 子 case
+- SQL 文件注册，以及 CSV / line / JSON predicate-pushdown 路径
+
 ## 口径说明
 
 - 快照时间：2026 年 4 月 6 日

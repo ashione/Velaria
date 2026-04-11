@@ -9,10 +9,13 @@
 #include <iterator>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unistd.h>
 #include <vector>
 
 #include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/execution/columnar_batch.h"
+#include "src/dataflow/core/execution/csv.h"
 
 namespace {
 
@@ -137,6 +140,63 @@ std::string read_all(const std::string& path) {
     throw std::runtime_error("cannot open benchmark input");
   }
   return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+}
+
+std::size_t count_csv_rows(const std::string& path) {
+  const auto payload = read_all(path);
+  if (payload.empty()) {
+    return 0;
+  }
+  std::size_t rows = 0;
+  bool skip_header = true;
+  for (const char ch : payload) {
+    if (ch == '\n') {
+      if (skip_header) {
+        skip_header = false;
+      } else {
+        ++rows;
+      }
+    }
+  }
+  if (!payload.empty() && payload.back() != '\n' && !skip_header) {
+    ++rows;
+  }
+  return rows;
+}
+
+std::size_t grouped_sum_rows_from_table(const dataflow::Table& table, std::size_t key_index,
+                                        std::size_t value_index, double filter_min) {
+  expect(table.columnar_cache != nullptr, "columnar cache missing for grouped sum benchmark");
+  const auto& keys = table.columnar_cache->columns[key_index].values;
+  const auto& values = table.columnar_cache->columns[value_index].values;
+  expect(keys.size() == values.size(), "columnar key/value size mismatch");
+  std::unordered_map<std::string, double> sums;
+  sums.reserve(32);
+  for (std::size_t row = 0; row < values.size(); ++row) {
+    if (!values[row].isNumber() || values[row].asDouble() <= filter_min) {
+      continue;
+    }
+    sums[keys[row].asString()] += values[row].asDouble();
+  }
+  return sums.size();
+}
+
+dataflow::SourcePushdownSpec filter_only_pushdown(std::size_t key_index,
+                                                  std::size_t value_index) {
+  dataflow::SourcePushdownSpec pushdown;
+  pushdown.projected_columns = {key_index, value_index};
+  pushdown.filters.push_back({value_index, dataflow::Value(int64_t(500)), ">"});
+  return pushdown;
+}
+
+dataflow::SourcePushdownSpec aggregate_pushdown(std::size_t key_index,
+                                                std::size_t value_index) {
+  dataflow::SourcePushdownSpec pushdown = filter_only_pushdown(key_index, value_index);
+  pushdown.has_aggregate = true;
+  pushdown.aggregate.keys = {key_index};
+  pushdown.aggregate.aggregates = {
+      {dataflow::AggregateFunction::Sum, value_index, "sum_val"}};
+  return pushdown;
 }
 
 dataflow::SourceOptions no_pushdown_options(const std::string& tag, int round) {
@@ -315,6 +375,8 @@ int main(int argc, char** argv) {
     dataflow::JsonFileOptions json_options;
     json_options.format = dataflow::JsonFileFormat::JsonLines;
     json_options.columns = {"id", "grp", "val"};
+    const auto line_schema = dataflow::infer_line_file_schema(line_options);
+    const auto json_schema = dataflow::infer_json_file_schema(json_options);
     dataflow::LineFileOptions line_regex_options;
     line_regex_options.mode = dataflow::LineParseMode::Regex;
     line_regex_options.regex_pattern =
@@ -366,6 +428,55 @@ int main(int argc, char** argv) {
     }, rounds);
     emit_bench("read_csv_auto_group_sum", rows, rounds, csv_auto_us, 16, "probe+read");
 
+    const auto csv_schema = dataflow::read_csv_schema(csv_path);
+    const auto csv_scan_only_us = run_bench_us([&](int) {
+      expect(count_csv_rows(csv_path) == rows, "csv scan-only row count mismatch");
+    }, rounds);
+    emit_bench("read_csv_scan_only", rows, rounds, csv_scan_only_us, rows, "row-count-only");
+
+    const auto csv_full_columnar_us = run_bench_us([&](int) {
+      auto table = dataflow::load_csv(csv_path, ',', false);
+      expect(table.rowCount() == rows, "csv full columnar row count mismatch");
+    }, rounds);
+    emit_bench("read_csv_full_columnar_only", rows, rounds, csv_full_columnar_us, rows,
+               "load_csv(materialize_rows=false)");
+
+    const auto csv_full_rows_us = run_bench_us([&](int) {
+      auto table = dataflow::load_csv(csv_path, ',', true);
+      expect(table.rowCount() == rows, "csv full materialized row count mismatch");
+    }, rounds);
+    emit_bench("read_csv_full_materialize_rows", rows, rounds, csv_full_rows_us, rows,
+               "load_csv(materialize_rows=true)");
+
+    const auto csv_projected_us = run_bench_us([&](int) {
+      auto table = dataflow::load_csv_projected(csv_path, csv_schema, {1, 2}, ',', false);
+      expect(grouped_sum_rows_from_table(table, 1, 2, 500.0) == 16,
+             "csv projected group sum row count mismatch");
+    }, rounds);
+    emit_bench("read_csv_projected_group_sum", rows, rounds, csv_projected_us, 16,
+               "projected-columnar");
+
+    const auto csv_filter_only_us = run_bench_us([&](int) {
+      dataflow::Table filtered;
+      expect(dataflow::execute_csv_source_pushdown(
+                 csv_path, csv_schema, filter_only_pushdown(1, 2), ',', false, &filtered),
+             "csv filter-only pushdown execution failed");
+      expect(filtered.rowCount() > 0 && filtered.rowCount() < rows,
+             "csv filter-only pushdown row count mismatch");
+    }, rounds);
+    emit_bench("read_csv_filter_only", rows, rounds, csv_filter_only_us,
+               static_cast<std::size_t>((rows * 499) / 1000), "source-pushdown-filter");
+
+    const auto csv_aggregate_only_us = run_bench_us([&](int) {
+      dataflow::Table aggregated;
+      expect(dataflow::execute_csv_source_pushdown(
+                 csv_path, csv_schema, aggregate_pushdown(1, 2), ',', false, &aggregated),
+             "csv aggregate pushdown execution failed");
+      expect(aggregated.rowCount() == 16, "csv aggregate pushdown row count mismatch");
+    }, rounds);
+    emit_bench("read_csv_aggregate_pushdown", rows, rounds, csv_aggregate_only_us, 16,
+               "source-pushdown-aggregate");
+
     const auto line_explicit_us = run_bench_us([&](int) {
       auto out = run_group_sum(session.read_line_file(line_path, line_options), "grp", "val");
       expect(out.rowCount() == 16, "line explicit benchmark row count mismatch");
@@ -382,6 +493,35 @@ int main(int argc, char** argv) {
       expect(out.rowCount() == 16, "line auto benchmark row count mismatch");
     }, rounds);
     emit_bench("read_line_auto_group_sum", rows, rounds, line_auto_us, 16, "probe+read");
+
+    const auto line_filter_only_us = run_bench_us([&](int) {
+      dataflow::FileSourceConnectorSpec spec;
+      spec.kind = dataflow::FileSourceKind::Line;
+      spec.path = line_path;
+      spec.line_options = line_options;
+      dataflow::Table filtered;
+      expect(dataflow::execute_file_source_pushdown(spec, line_schema,
+                                                    filter_only_pushdown(1, 2), false, &filtered),
+             "line filter-only pushdown execution failed");
+      expect(filtered.rowCount() > 0 && filtered.rowCount() < rows,
+             "line filter-only pushdown row count mismatch");
+    }, rounds);
+    emit_bench("read_line_filter_only", rows, rounds, line_filter_only_us,
+               static_cast<std::size_t>((rows * 499) / 1000), "source-pushdown-filter");
+
+    const auto line_aggregate_only_us = run_bench_us([&](int) {
+      dataflow::FileSourceConnectorSpec spec;
+      spec.kind = dataflow::FileSourceKind::Line;
+      spec.path = line_path;
+      spec.line_options = line_options;
+      dataflow::Table aggregated;
+      expect(dataflow::execute_file_source_pushdown(spec, line_schema,
+                                                    aggregate_pushdown(1, 2), false, &aggregated),
+             "line aggregate pushdown execution failed");
+      expect(aggregated.rowCount() == 16, "line aggregate pushdown row count mismatch");
+    }, rounds);
+    emit_bench("read_line_aggregate_pushdown", rows, rounds, line_aggregate_only_us, 16,
+               "source-pushdown-aggregate");
 
     const auto line_regex_parse_us = run_bench_us([&](int) {
       auto out = session.read_line_file(line_regex_path, line_regex_options).limit(1).toTable();
@@ -419,6 +559,35 @@ int main(int argc, char** argv) {
       expect(out.rowCount() == 16, "json auto benchmark row count mismatch");
     }, rounds);
     emit_bench("read_json_auto_group_sum", rows, rounds, json_auto_us, 16, "probe+read");
+
+    const auto json_filter_only_us = run_bench_us([&](int) {
+      dataflow::FileSourceConnectorSpec spec;
+      spec.kind = dataflow::FileSourceKind::Json;
+      spec.path = jsonl_path;
+      spec.json_options = json_options;
+      dataflow::Table filtered;
+      expect(dataflow::execute_file_source_pushdown(spec, json_schema,
+                                                    filter_only_pushdown(1, 2), false, &filtered),
+             "json filter-only pushdown execution failed");
+      expect(filtered.rowCount() > 0 && filtered.rowCount() < rows,
+             "json filter-only pushdown row count mismatch");
+    }, rounds);
+    emit_bench("read_json_filter_only", rows, rounds, json_filter_only_us,
+               static_cast<std::size_t>((rows * 499) / 1000), "source-pushdown-filter");
+
+    const auto json_aggregate_only_us = run_bench_us([&](int) {
+      dataflow::FileSourceConnectorSpec spec;
+      spec.kind = dataflow::FileSourceKind::Json;
+      spec.path = jsonl_path;
+      spec.json_options = json_options;
+      dataflow::Table aggregated;
+      expect(dataflow::execute_file_source_pushdown(spec, json_schema,
+                                                    aggregate_pushdown(1, 2), false, &aggregated),
+             "json aggregate pushdown execution failed");
+      expect(aggregated.rowCount() == 16, "json aggregate pushdown row count mismatch");
+    }, rounds);
+    emit_bench("read_json_aggregate_pushdown", rows, rounds, json_aggregate_only_us, 16,
+               "source-pushdown-aggregate");
 
     const auto sql_probe_create_us = run_bench_us([&](int round) {
       const auto table_name = table_name_for("file_probe_input", round);

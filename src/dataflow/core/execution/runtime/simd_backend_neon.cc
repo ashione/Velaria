@@ -10,6 +10,43 @@ namespace dataflow {
 
 namespace {
 constexpr std::size_t kNeonFloatLaneCount = 4;
+constexpr std::size_t kNeonByteLaneCount = 16;
+
+const char* neonFindByte(const char* begin, const char* end, char needle) {
+#if defined(__ARM_NEON) || defined(__aarch64__)
+  if (begin == nullptr || end == nullptr || begin >= end) {
+    return nullptr;
+  }
+  const uint8x16_t needle_vec = vdupq_n_u8(static_cast<uint8_t>(needle));
+  const char* ptr = begin;
+  for (; ptr + kNeonByteLaneCount <= end; ptr += kNeonByteLaneCount) {
+    const uint8x16_t bytes =
+        vld1q_u8(reinterpret_cast<const uint8_t*>(ptr));
+    const uint8x16_t matches = vceqq_u8(bytes, needle_vec);
+#if defined(__aarch64__)
+    const uint64x2_t lanes = vreinterpretq_u64_u8(matches);
+    if ((vgetq_lane_u64(lanes, 0) | vgetq_lane_u64(lanes, 1)) != 0) {
+      for (std::size_t i = 0; i < kNeonByteLaneCount; ++i) {
+        if (ptr[i] == needle) {
+          return ptr + i;
+        }
+      }
+    }
+#else
+    uint8_t tmp[kNeonByteLaneCount];
+    vst1q_u8(tmp, matches);
+    for (std::size_t i = 0; i < kNeonByteLaneCount; ++i) {
+      if (tmp[i] != 0) {
+        return ptr + i;
+      }
+    }
+#endif
+  }
+  return scalarDispatch().find_byte(ptr, end, needle);
+#else
+  return scalarDispatch().find_byte(begin, end, needle);
+#endif
+}
 
 NumericSelectionResult neonSelectDouble(const double* values, const uint8_t* is_null,
                                         std::size_t row_count, double rhs,
@@ -74,6 +111,7 @@ double neonSquaredL2F32(const float* lhs, const float* rhs, std::size_t size) {
 const SimdKernelDispatch kNeonDispatch = {
     SimdBackendKind::Neon,
     simdBackendName(SimdBackendKind::Neon),
+    &neonFindByte,
     &neonSelectDouble,
     &neonSumDouble,
     &neonAccumulateDouble,

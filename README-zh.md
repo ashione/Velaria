@@ -229,6 +229,16 @@ uv run --project python_api python python_api/velaria_cli.py --help
 ./dist/velaria-cli --help
 ```
 
+当前 file-source pushdown 已经把执行形态从 executor lowering 传递到 source 执行侧。
+目前的 `shape` 包括：
+
+- `ConjunctiveFilterOnly`
+- `SingleKeyCount`
+- `SingleKeyNumericAggregate`
+- `Generic`
+
+这样 source 端可以针对简单 conjunctive filter 和单 key aggregate 选择更轻的 fast path，而不是所有情况都走同一套通用执行路径。
+
 ## 5. 开发文档
 
 - 英文：[docs/development.md](./docs/development.md)

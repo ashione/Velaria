@@ -462,6 +462,22 @@ That benchmark currently reports:
 - JSON lines hardcode / explicit / auto-probed paths and direct filter-pushdown / aggregate-pushdown cases
 - SQL `CREATE TABLE ... OPTIONS(path: '...')` registration costs plus CSV / line / JSON predicate-pushdown comparisons
 
+Current pushdown lowering also classifies source work into:
+
+- `ConjunctiveFilterOnly`
+- `SingleKeyCount`
+- `SingleKeyNumericAggregate`
+- `Generic`
+
+Representative clean-`main` vs current snapshot on `200000 / 3`:
+
+- `read_line_regex_explicit_group_sum`: `5679936 us -> 641735 us`
+- `sql_csv_predicate_and_group_count`: `133011 us -> 109146 us`
+- `sql_csv_predicate_or_group_count`: `307313 us -> 171556 us`
+- `sql_csv_predicate_mixed_group_count`: `462000 us -> 275583 us`
+- `sql_line_predicate_or_group_count`: `314852 us -> 174627 us`
+- `sql_json_predicate_or_group_count`: `604404 us -> 420423 us`
+
 For Linux perf sampling on the native CSV path:
 
 ```bash

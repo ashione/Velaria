@@ -229,6 +229,16 @@ uv run --project python_api python python_api/velaria_cli.py --help
 ./dist/velaria-cli --help
 ```
 
+File-source pushdown now carries a shape classification from executor lowering into source execution.
+Current shapes are:
+
+- `ConjunctiveFilterOnly`
+- `SingleKeyCount`
+- `SingleKeyNumericAggregate`
+- `Generic`
+
+These shapes let file sources choose lighter fast paths for simple conjunctive filters and single-key aggregates instead of routing every case through the same generic execution path.
+
 ## 5. Development Docs
 
 - English: [docs/development.md](./docs/development.md)

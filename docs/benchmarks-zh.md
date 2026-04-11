@@ -40,6 +40,23 @@ perf report
 - JSON lines explicit / auto-probed 路径，以及 direct filter-pushdown / aggregate-pushdown 子 case
 - SQL 文件注册，以及 CSV / line / JSON predicate-pushdown 路径
 
+当前 file-source 的优化器/执行器分层：
+
+- executor lowering 会把 source pushdown 分类成 `ConjunctiveFilterOnly`、`SingleKeyCount`、`SingleKeyNumericAggregate`、`Generic`
+- source 端会根据这些 `shape` 选择更轻的 fast path
+- 当前收益最明显的是 line split、line regex、JSON 按命中字段解析，以及简单 CSV 单 key aggregate
+
+当前代表性 file-source case 相比干净 `main` 的对比快照：
+
+| Case | clean `main` | current | 变化 |
+|---|---:|---:|---:|
+| `read_line_regex_explicit_group_sum` | `5679936 us` | `641735 us` | `-88.7%` |
+| `sql_csv_predicate_and_group_count` | `133011 us` | `109146 us` | `-17.9%` |
+| `sql_csv_predicate_or_group_count` | `307313 us` | `171556 us` | `-44.2%` |
+| `sql_csv_predicate_mixed_group_count` | `462000 us` | `275583 us` | `-40.3%` |
+| `sql_line_predicate_or_group_count` | `314852 us` | `174627 us` | `-44.5%` |
+| `sql_json_predicate_or_group_count` | `604404 us` | `420423 us` | `-30.4%` |
+
 ## 口径说明
 
 - 快照时间：2026 年 4 月 6 日

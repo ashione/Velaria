@@ -13,6 +13,8 @@ import pyarrow as pa
 import pyarrow.ipc as pa_ipc
 import pyarrow.parquet as pq
 
+from .excel import read_excel
+
 
 _DEFAULT_TEMPLATE_FIELDS = ("title", "summary", "content", "body", "tags")
 DEFAULT_LOCAL_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
@@ -298,10 +300,10 @@ def build_embedding_rows(
     text_builder: Callable[[Mapping[str, Any]], str] | None = None,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for record in records:
+    for index, record in enumerate(records, start=1):
         row = {key: _normalize_scalar(value) for key, value in dict(record).items()}
         if doc_id_field not in row:
-            raise ValueError(f"record missing doc id field: {doc_id_field}")
+            row[doc_id_field] = f"doc-{index}"
         text = text_builder(record) if text_builder is not None else render_text_template(record)
         if not text.strip():
             raise ValueError("embedding text must not be empty")
@@ -426,9 +428,64 @@ def _load_input_dataframe(
     delimiter: str = ",",
     json_columns: Sequence[str] | None = None,
     json_format: str = "json_lines",
+    mappings: str | Sequence[str] | Sequence[Sequence[Any]] | Sequence[Mapping[str, Any]] | None = None,
+    line_mode: str = "split",
+    regex_pattern: str | None = None,
+    sheet_name: Any = 0,
+    date_format: str = "%Y-%m-%d",
 ) -> Any:
-    path = str(input_path)
+    source_path = pathlib.Path(input_path)
+    path = str(source_path)
+    suffix = source_path.suffix.lower()
+
+    def load_arrow_table() -> pa.Table:
+        if suffix in {".parquet", ".pq"}:
+            return pq.read_table(source_path)
+        if suffix in {".arrow", ".ipc", ".feather"}:
+            with source_path.open("rb") as handle:
+                try:
+                    return pa_ipc.open_file(handle).read_all()
+                except Exception:
+                    handle.seek(0)
+                    return pa_ipc.open_stream(handle).read_all()
+        raise ValueError(f"unsupported embedding dataset format: {source_path}")
+
+    def parse_mappings(
+        raw: str | Sequence[str] | Sequence[Sequence[Any]] | Sequence[Mapping[str, Any]] | None,
+    ) -> list[tuple[str, int]]:
+        if raw is None:
+            return []
+        items: Sequence[Any]
+        if isinstance(raw, str):
+            items = [piece.strip() for piece in raw.split(",") if piece.strip()]
+        else:
+            items = list(raw)
+        parsed: list[tuple[str, int]] = []
+        for item in items:
+            if isinstance(item, str):
+                if ":" not in item:
+                    raise ValueError(f"invalid mappings entry: {item}")
+                name, index_text = item.split(":", 1)
+                parsed.append((name.strip(), int(index_text.strip())))
+                continue
+            if isinstance(item, Mapping):
+                name = item.get("name") or item.get("column")
+                index_value = item.get("index")
+                if name is None or index_value is None:
+                    raise ValueError(f"invalid mappings entry: {item}")
+                parsed.append((str(name).strip(), int(index_value)))
+                continue
+            if isinstance(item, Sequence) and not isinstance(item, (bytes, bytearray)) and len(item) == 2:
+                parsed.append((str(item[0]).strip(), int(item[1])))
+                continue
+            raise ValueError(f"invalid mappings entry: {item}")
+        return parsed
+
     if input_type == "auto":
+        if suffix in {".xlsx", ".xlsm", ".xls"}:
+            return read_excel(session, path, sheet_name=sheet_name, date_format=date_format)
+        if suffix in {".parquet", ".pq", ".arrow", ".ipc", ".feather"}:
+            return session.create_dataframe_from_arrow(load_arrow_table())
         return session.read(path)
     if input_type == "csv":
         return session.read_csv(path, delimiter=delimiter)
@@ -437,6 +494,21 @@ def _load_input_dataframe(
         if json_columns:
             kwargs["columns"] = list(json_columns)
         return session.read_json(path, **kwargs)
+    if input_type == "excel":
+        return read_excel(session, path, sheet_name=sheet_name, date_format=date_format)
+    if input_type in {"parquet", "arrow"}:
+        return session.create_dataframe_from_arrow(load_arrow_table())
+    if input_type == "line":
+        parsed_mappings = parse_mappings(mappings)
+        if not parsed_mappings:
+            raise ValueError("line input requires mappings")
+        kwargs: dict[str, Any] = {"mappings": parsed_mappings}
+        if line_mode == "regex":
+            kwargs["mode"] = "regex"
+            kwargs["regex_pattern"] = regex_pattern or ""
+        else:
+            kwargs["split_delimiter"] = delimiter
+        return session.read_line_file(path, **kwargs)
     raise ValueError(f"unsupported input_type: {input_type}")
 
 
@@ -452,6 +524,11 @@ def build_file_embeddings(
     delimiter: str = ",",
     json_columns: Sequence[str] | None = None,
     json_format: str = "json_lines",
+    mappings: str | Sequence[str] | Sequence[Sequence[Any]] | Sequence[Mapping[str, Any]] | None = None,
+    line_mode: str = "split",
+    regex_pattern: str | None = None,
+    sheet_name: Any = 0,
+    date_format: str = "%Y-%m-%d",
     doc_id_field: str = "doc_id",
     source_updated_at_field: str = "source_updated_at",
     output_path: str | pathlib.Path | None = None,
@@ -467,6 +544,11 @@ def build_file_embeddings(
         delimiter=delimiter,
         json_columns=json_columns,
         json_format=json_format,
+        mappings=mappings,
+        line_mode=line_mode,
+        regex_pattern=regex_pattern,
+        sheet_name=sheet_name,
+        date_format=date_format,
     )
     source_table = source_df.to_arrow()
     return materialize_mixed_text_embeddings(
@@ -716,6 +798,11 @@ def run_file_mixed_text_hybrid_search(
     delimiter: str = ",",
     json_columns: Sequence[str] | None = None,
     json_format: str = "json_lines",
+    mappings: str | Sequence[str] | Sequence[Sequence[Any]] | Sequence[Mapping[str, Any]] | None = None,
+    line_mode: str = "split",
+    regex_pattern: str | None = None,
+    sheet_name: Any = 0,
+    date_format: str = "%Y-%m-%d",
     doc_id_field: str = "doc_id",
     source_updated_at_field: str = "source_updated_at",
     output_path: str | pathlib.Path | None = None,
@@ -743,6 +830,11 @@ def run_file_mixed_text_hybrid_search(
         delimiter=delimiter,
         json_columns=json_columns,
         json_format=json_format,
+        mappings=mappings,
+        line_mode=line_mode,
+        regex_pattern=regex_pattern,
+        sheet_name=sheet_name,
+        date_format=date_format,
         doc_id_field=doc_id_field,
         source_updated_at_field=source_updated_at_field,
         output_path=output_path,

@@ -206,6 +206,13 @@ button {
   align-self: start;
 }
 
+.split {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 22px;
+  align-items: start;
+}
+
 .panel-head,
 .workbench-head {
   display: flex;
@@ -304,8 +311,14 @@ button:disabled {
   color: var(--accent-strong);
 }
 
+.danger-button {
+  background: rgba(168, 89, 38, 0.14);
+  color: var(--warn);
+}
+
 .actions,
-.meta {
+.meta,
+.inline-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
@@ -317,11 +330,18 @@ button:disabled {
   font-size: 12px;
 }
 
-.meta span {
+.meta span,
+.badge {
   padding: 6px 10px;
   border-radius: 999px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.42);
+}
+
+.badge {
+  font-size: 12px;
+  color: var(--accent-strong);
+  background: rgba(15, 123, 116, 0.08);
 }
 
 .list,
@@ -330,17 +350,24 @@ button:disabled {
 .stack,
 .result-stack,
 .sql-understanding,
-.guide-grid {
+.guide-grid,
+.result-dual-grid {
   display: grid;
   gap: 14px;
   min-width: 0;
+}
+
+.result-dual-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
 }
 
 .list-item,
 .analyze-dataset-item,
 .guide-card,
 .sql-understanding-card,
-.result-box {
+.result-box,
+.subsection-card {
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.58);
   border-radius: 18px;
@@ -359,6 +386,14 @@ button:disabled {
 .guide-card h3 {
   margin: 0 0 6px;
   font-size: 18px;
+}
+
+.item-head,
+.subsection-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
 }
 
 .card-grid {
@@ -442,6 +477,12 @@ button:disabled {
   color: var(--warn);
 }
 
+.notice.subtle {
+  background: rgba(255, 255, 255, 0.45);
+  border-color: var(--line);
+  color: var(--muted);
+}
+
 .empty,
 .helper {
   color: var(--muted);
@@ -477,12 +518,21 @@ th {
   background: #faf3e7;
 }
 
-.mono {
+.mono,
+.explain-block {
   font-family: "SF Mono", Menlo, Monaco, monospace;
   font-size: 13px;
   overflow-wrap: anywhere;
   word-break: break-all;
   white-space: pre-wrap;
+}
+
+.explain-block {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.5);
 }
 
 .guide-step {
@@ -600,6 +650,21 @@ th {
   min-width: 0;
 }
 
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.toggle-row input[type="checkbox"] {
+  width: auto;
+}
+
+.danger-button {
+  background: rgba(168, 89, 38, 0.12);
+  color: var(--warn);
+}
+
 .collapsed {
   display: none;
 }
@@ -610,6 +675,7 @@ th {
   }
 
   .summary-band,
+  .result-dual-grid,
   .analyze-workbench,
   .split,
   .compact-grid,

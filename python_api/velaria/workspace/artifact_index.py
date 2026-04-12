@@ -54,6 +54,13 @@ RUN_OPTIONAL_COLUMNS = {
 }
 
 
+class RunDeleteConflictError(RuntimeError):
+    def __init__(self, run_id: str, status: str | None) -> None:
+        self.run_id = run_id
+        self.status = status
+        super().__init__(f"cannot delete non-terminal run: {run_id} ({status})")
+
+
 def _json_dumps(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
@@ -486,6 +493,53 @@ class ArtifactIndex:
         if row is None:
             return None
         return self._artifact_from_row(row)
+
+    def delete_run(
+        self,
+        run_id: str,
+        *,
+        delete_files: bool = False,
+    ) -> dict[str, Any]:
+        run = self.get_run(run_id)
+        if run is None:
+            raise FileNotFoundError(f"run not found: {run_id}")
+        status = run.get("status")
+        if status not in TERMINAL_RUN_STATUSES:
+            raise RunDeleteConflictError(run_id, status)
+
+        artifacts = self.list_artifacts(run_id=run_id, limit=1_000_000)
+        artifact_ids = [artifact["artifact_id"] for artifact in artifacts]
+        deleted_run_dir: str | None = None
+
+        if self.backend == "sqlite":
+            assert self._conn is not None
+            self._conn.execute("DELETE FROM artifacts WHERE run_id = ?", (run_id,))
+            self._conn.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))
+            self._conn.commit()
+        else:
+            self._append_event(
+                {
+                    "kind": "run_delete",
+                    "run_id": run_id,
+                    "created_at": _utc_now(),
+                }
+            )
+
+        if delete_files:
+            run_dir = pathlib.Path(run["run_dir"])
+            if run_dir.exists():
+                shutil.rmtree(run_dir)
+                deleted_run_dir = str(run_dir)
+
+        return {
+            "run_id": run_id,
+            "status": status,
+            "artifact_ids": artifact_ids,
+            "artifact_count": len(artifact_ids),
+            "run_dir": run["run_dir"],
+            "deleted_run_dir": deleted_run_dir,
+            "backend": self.backend,
+        }
 
     def _select_runs_for_cleanup(
         self,

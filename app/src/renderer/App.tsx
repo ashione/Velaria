@@ -1,22 +1,44 @@
 import { useEffect, useMemo, useState } from 'react';
 import { DATASETS_KEY, I18N, LOCALE_KEY, type Locale } from './i18n';
 
+type PreviewData = {
+  schema?: string[];
+  rows?: Record<string, unknown>[];
+  row_count?: number;
+  truncated?: boolean;
+};
+
+type ImportOptions = {
+  delimiter: string;
+  columns: string;
+  mappings: string;
+  regexPattern: string;
+  lineMode: 'split' | 'regex';
+  jsonFormat: string;
+};
+
+type EmbeddingConfig = {
+  enabled: boolean;
+  textColumns: string[];
+  provider: string;
+  model: string;
+  templateVersion: string;
+  vectorColumn: string;
+};
+
 type DatasetRecord = {
   datasetId: string;
   name: string;
   sourceType: string;
   sourcePath: string;
-  preview: {
-    schema?: string[];
-    rows?: Record<string, unknown>[];
-    row_count?: number;
-    truncated?: boolean;
-  };
+  preview: PreviewData;
   schema: string[];
   kind: 'imported' | 'result';
   createdAt: string;
   description: string;
   sourceLabel: string;
+  importOptions: ImportOptions;
+  embeddingConfig: EmbeddingConfig;
 };
 
 type RunSummary = {
@@ -35,12 +57,7 @@ type RunDetailPayload = {
     format: string;
     schema_json?: string[];
   };
-  preview: {
-    schema?: string[];
-    rows?: Record<string, unknown>[];
-    row_count?: number;
-    truncated?: boolean;
-  };
+  preview: PreviewData;
 };
 
 type ImportPreviewPayload = {
@@ -49,7 +66,7 @@ type ImportPreviewPayload = {
     source_type: string;
     source_path: string;
   };
-  preview: DatasetRecord['preview'];
+  preview: PreviewData;
 };
 
 type ServiceInfo = {
@@ -65,6 +82,12 @@ type AnalyzeState = {
   tableName: string;
   preset: 'preview' | 'filter' | 'aggregate';
   query: string;
+  delimiter: string;
+  columns: string;
+  mappings: string;
+  regexPattern: string;
+  lineMode: 'split' | 'regex';
+  jsonFormat: string;
 };
 
 type FilterBuilderState = {
@@ -73,12 +96,83 @@ type FilterBuilderState = {
   value: string;
 };
 
+type ImportFormState = {
+  inputPath: string;
+  inputType: string;
+  delimiter: string;
+  columns: string;
+  regexPattern: string;
+  datasetName: string;
+  jsonFormat: string;
+  embeddingEnabled: boolean;
+  embeddingTextColumns: string;
+  embeddingProvider: string;
+  embeddingModel: string;
+  embeddingTemplateVersion: string;
+  embeddingVectorColumn: string;
+};
+
+type HybridSearchState = {
+  queryText: string;
+  textColumns: string;
+  provider: string;
+  model: string;
+  templateVersion: string;
+  topK: string;
+  vectorColumn: string;
+};
+
+const defaultImportOptions: ImportOptions = {
+  delimiter: ',',
+  columns: '',
+  mappings: '',
+  regexPattern: '',
+  lineMode: 'split',
+  jsonFormat: 'json_lines',
+};
+
+const defaultEmbeddingConfig: EmbeddingConfig = {
+  enabled: false,
+  textColumns: [],
+  provider: '',
+  model: '',
+  templateVersion: '',
+  vectorColumn: 'embedding',
+};
+
+const defaultImportForm: ImportFormState = {
+  inputPath: '',
+  inputType: 'auto',
+  delimiter: ',',
+  columns: '',
+  regexPattern: '',
+  datasetName: '',
+  jsonFormat: 'json_lines',
+  embeddingEnabled: false,
+  embeddingTextColumns: '',
+  embeddingProvider: '',
+  embeddingModel: '',
+  embeddingTemplateVersion: '',
+  embeddingVectorColumn: 'embedding',
+};
+
 const defaultAnalyzeState: AnalyzeState = {
   inputPath: '',
   inputType: 'auto',
   tableName: 'input_table',
   preset: 'preview',
   query: 'SELECT * FROM input_table LIMIT 20',
+  ...defaultImportOptions,
+};
+
+const defaultHybridSearchState: HybridSearchState = {
+  queryText: '',
+  textColumns: '',
+  provider: '',
+  model: '',
+  templateVersion: '',
+  topK: '10',
+  vectorColumn: 'embedding',
 };
 
 const viewMeta = {
@@ -97,14 +191,92 @@ function decodeFileUri(uri: string): string {
   }
 }
 
+function escapeHtml(value: unknown): string {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
+}
+
+function csvToList(value: string): string[] {
+  return value
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function listToCsv(values: string[]): string {
+  return values.join(', ');
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function normalizePreview(value: unknown): PreviewData {
+  const record = asRecord(value);
+  const schema = Array.isArray(record?.schema)
+    ? record.schema.filter((item): item is string => typeof item === 'string')
+    : undefined;
+  const rows = Array.isArray(record?.rows)
+    ? record.rows.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
+    : undefined;
+  return {
+    schema,
+    rows,
+    row_count:
+      typeof record?.row_count === 'number'
+        ? record.row_count
+        : Array.isArray(rows)
+          ? rows.length
+          : undefined,
+    truncated: typeof record?.truncated === 'boolean' ? record.truncated : undefined,
+  };
+}
+
+function normalizeImportOptions(value: unknown): ImportOptions {
+  const record = asRecord(value);
+  return {
+    delimiter: typeof record?.delimiter === 'string' ? record.delimiter : ',',
+    columns: typeof record?.columns === 'string' ? record.columns : '',
+    mappings: typeof record?.mappings === 'string' ? record.mappings : '',
+    regexPattern: typeof record?.regexPattern === 'string' ? record.regexPattern : '',
+    lineMode: record?.lineMode === 'regex' ? 'regex' : 'split',
+    jsonFormat: typeof record?.jsonFormat === 'string' ? record.jsonFormat : 'json_lines',
+  };
+}
+
+function normalizeEmbeddingConfig(value: unknown): EmbeddingConfig {
+  const record = asRecord(value);
+  const textColumns = Array.isArray(record?.textColumns)
+    ? record.textColumns.filter((item): item is string => typeof item === 'string')
+    : [];
+  return {
+    enabled: Boolean(record?.enabled),
+    textColumns,
+    provider: typeof record?.provider === 'string' ? record.provider : '',
+    model: typeof record?.model === 'string' ? record.model : '',
+    templateVersion: typeof record?.templateVersion === 'string' ? record.templateVersion : '',
+    vectorColumn: typeof record?.vectorColumn === 'string' && record.vectorColumn
+      ? record.vectorColumn
+      : 'embedding',
+  };
+}
+
 function createDatasetRecord(payload: {
   name: string;
   sourceType: string;
   sourcePath: string;
-  preview: DatasetRecord['preview'];
+  preview: PreviewData;
   kind: DatasetRecord['kind'];
   description?: string;
+  importOptions?: Partial<ImportOptions>;
+  embeddingConfig?: Partial<EmbeddingConfig>;
 }): DatasetRecord {
+  const importOptions = { ...defaultImportOptions, ...(payload.importOptions || {}) };
+  const embeddingConfig = { ...defaultEmbeddingConfig, ...(payload.embeddingConfig || {}) };
   return {
     datasetId: `dataset_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
     name: payload.name,
@@ -116,6 +288,34 @@ function createDatasetRecord(payload: {
     createdAt: new Date().toISOString(),
     description: payload.description || '',
     sourceLabel: '',
+    importOptions,
+    embeddingConfig,
+  };
+}
+
+function normalizeDatasetRecord(value: unknown): DatasetRecord | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  if (typeof record.datasetId !== 'string') return null;
+  if (typeof record.name !== 'string') return null;
+  if (typeof record.sourceType !== 'string') return null;
+  if (typeof record.sourcePath !== 'string') return null;
+  const preview = normalizePreview(record.preview);
+  return {
+    datasetId: record.datasetId,
+    name: record.name,
+    sourceType: record.sourceType,
+    sourcePath: record.sourcePath,
+    preview,
+    schema: Array.isArray(record.schema)
+      ? record.schema.filter((item): item is string => typeof item === 'string')
+      : preview.schema || [],
+    kind: record.kind === 'result' ? 'result' : 'imported',
+    createdAt: typeof record.createdAt === 'string' ? record.createdAt : new Date().toISOString(),
+    description: typeof record.description === 'string' ? record.description : '',
+    sourceLabel: typeof record.sourceLabel === 'string' ? record.sourceLabel : '',
+    importOptions: normalizeImportOptions(record.importOptions),
+    embeddingConfig: normalizeEmbeddingConfig(record.embeddingConfig),
   };
 }
 
@@ -124,7 +324,10 @@ function loadDatasets(): DatasetRecord[] {
     const raw = window.localStorage.getItem(DATASETS_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => normalizeDatasetRecord(item))
+      .filter((item): item is DatasetRecord => item !== null);
   } catch {
     return [];
   }
@@ -135,16 +338,12 @@ function saveDatasets(datasets: DatasetRecord[]) {
 }
 
 function highlightSql(sql: string): string {
-  let html = sql
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;');
+  let html = escapeHtml(sql);
   html = html.replace(/(--.*)$/gm, '<span class="sql-token-comment">$1</span>');
   html = html.replace(/('(?:''|[^'])*')/g, '<span class="sql-token-string">$1</span>');
   html = html.replace(/\b(\d+(?:\.\d+)?)\b/g, '<span class="sql-token-number">$1</span>');
   html = html.replace(
-    /\b(SELECT|FROM|WHERE|GROUP\s+BY|ORDER\s+BY|LIMIT|INSERT\s+INTO|CREATE\s+TABLE|CREATE\s+SOURCE\s+TABLE|CREATE\s+SINK\s+TABLE|VALUES|AND|OR|AS|JOIN|LEFT|RIGHT|INNER|OUTER|ON|ASC|DESC|COUNT|SUM|AVG|MIN|MAX)\b/gi,
+    /\b(SELECT|FROM|WHERE|GROUP\s+BY|ORDER\s+BY|LIMIT|INSERT\s+INTO|CREATE\s+TABLE|CREATE\s+SOURCE\s+TABLE|CREATE\s+SINK\s+TABLE|VALUES|AND|OR|AS|JOIN|LEFT|RIGHT|INNER|OUTER|ON|ASC|DESC|COUNT|SUM|AVG|MIN|MAX|HYBRID\s+SEARCH)\b/gi,
     '<span class="sql-token-keyword">$1</span>'
   );
   html = html.replace(/\b([A-Za-z_][A-Za-z0-9_]*)(?=\s*\()/g, '<span class="sql-token-identifier">$1</span>');
@@ -190,17 +389,17 @@ function quoteLiteral(value: string) {
   return `'${trimmed.replaceAll("'", "''")}'`;
 }
 
-function renderPreviewTable(preview: DatasetRecord['preview']) {
-  const rows = preview?.rows || [];
-  const schema = preview?.schema || (rows[0] ? Object.keys(rows[0]) : []);
+function renderPreviewTable(preview: PreviewData, emptyText: string) {
+  const rows = preview.rows || [];
+  const schema = preview.schema || (rows[0] ? Object.keys(rows[0]) : []);
   if (!rows.length) {
-    return '<div class="empty">No preview rows returned.</div>';
+    return `<div class="empty">${escapeHtml(emptyText)}</div>`;
   }
-  const head = schema.map((column) => `<th>${column}</th>`).join('');
+  const head = schema.map((column) => `<th>${escapeHtml(column)}</th>`).join('');
   const body = rows
     .map((row) => {
       const cells = schema
-        .map((column) => `<td>${String((row as Record<string, unknown>)[column] ?? '')}</td>`)
+        .map((column) => `<td>${escapeHtml((row as Record<string, unknown>)[column] ?? '')}</td>`)
         .join('');
       return `<tr>${cells}</tr>`;
     })
@@ -215,6 +414,46 @@ function renderPreviewTable(preview: DatasetRecord['preview']) {
   `;
 }
 
+function extractHybridPreview(payload: unknown): PreviewData {
+  const record = asRecord(payload);
+  if (!record) return {};
+  if (record.preview) return normalizePreview(record.preview);
+  if (record.result) {
+    const result = asRecord(record.result);
+    if (result?.preview) return normalizePreview(result.preview);
+    return normalizePreview(result);
+  }
+  return normalizePreview(record);
+}
+
+function extractHybridExplain(payload: unknown): string {
+  const record = asRecord(payload);
+  if (!record) return '';
+  const explain = record.explain ?? asRecord(record.result)?.explain ?? record.strategy ?? record.debug;
+  if (!explain) return '';
+  if (typeof explain === 'string') return explain;
+  try {
+    return JSON.stringify(explain, null, 2);
+  } catch {
+    return String(explain);
+  }
+}
+
+function embeddingFormToConfig(form: ImportFormState): EmbeddingConfig {
+  return {
+    enabled: form.embeddingEnabled,
+    textColumns: csvToList(form.embeddingTextColumns),
+    provider: form.embeddingProvider.trim(),
+    model: form.embeddingModel.trim(),
+    templateVersion: form.embeddingTemplateVersion.trim(),
+    vectorColumn: form.embeddingVectorColumn.trim() || 'embedding',
+  };
+}
+
+function isDatasetBackedByRun(dataset: DatasetRecord, runDir: string): boolean {
+  return dataset.kind === 'result' && dataset.sourcePath.startsWith(`${runDir}/`);
+}
+
 export function App() {
   const [locale, setLocale] = useState<Locale>(() => (window.localStorage.getItem(LOCALE_KEY) as Locale) || 'zh');
   const [view, setView] = useState<ViewKey>('home');
@@ -225,9 +464,12 @@ export function App() {
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
   const [datasetSearch, setDatasetSearch] = useState('');
   const [pendingImport, setPendingImport] = useState<ImportPreviewPayload | null>(null);
+  const [importForm, setImportForm] = useState<ImportFormState>(defaultImportForm);
   const [importMessage, setImportMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
+  const [datasetMessage, setDatasetMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [runsPage, setRunsPage] = useState(1);
+  const [runMessage, setRunMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedRunDetail, setSelectedRunDetail] = useState<RunDetailPayload | null>(null);
   const [analysisState, setAnalysisState] = useState<AnalyzeState>(defaultAnalyzeState);
@@ -237,6 +479,9 @@ export function App() {
     value: '',
   });
   const [analysisResultHtml, setAnalysisResultHtml] = useState('<div class="empty">No run yet.</div>');
+  const [hybridSearch, setHybridSearch] = useState<HybridSearchState>(defaultHybridSearchState);
+  const [hybridResultHtml, setHybridResultHtml] = useState('<div class="empty">No hybrid search yet.</div>');
+  const [hybridMessage, setHybridMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
   const [sqlUnderstandingExpanded, setSqlUnderstandingExpanded] = useState(false);
 
   const t = (key: string, vars: Record<string, string | number> = {}) => {
@@ -256,6 +501,10 @@ export function App() {
 
   useEffect(() => {
     saveDatasets(datasets);
+    if (selectedDatasetId && !datasets.some((dataset) => dataset.datasetId === selectedDatasetId)) {
+      setSelectedDatasetId(datasets[0]?.datasetId ?? null);
+      return;
+    }
     if (!selectedDatasetId && datasets[0]) {
       setSelectedDatasetId(datasets[0].datasetId);
     }
@@ -310,9 +559,9 @@ export function App() {
       const health = await fetch(`${info.baseUrl}/health`).then((r) => r.json());
       setServiceStatus(t('status_ready_on', { port: health.port }));
       setServiceMeta(t('status_packaged', { packaged: info.packaged, version: health.version }));
-      const runsPayload = await fetch(`${info.baseUrl}/api/runs?limit=100`).then((r) => r.json());
+      const runsPayload = await fetch(`${info.baseUrl}/api/v1/runs?limit=100`).then((r) => r.json());
       setRuns(runsPayload.runs || []);
-      if (!selectedRunId && runsPayload.runs?.[0]) {
+      if (runsPayload.runs?.[0]) {
         setSelectedRunId(runsPayload.runs[0].run_id);
       }
     } catch (error) {
@@ -326,43 +575,70 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (currentDataset) {
-      setAnalysisState((prev) => ({
-        ...prev,
-        inputPath: currentDataset.sourcePath,
-        inputType: currentDataset.sourceType,
-      }));
-    }
+    if (!currentDataset) return;
+    setAnalysisState((prev) => ({
+      ...prev,
+      inputPath: currentDataset.sourcePath,
+      inputType: currentDataset.sourceType,
+      delimiter: currentDataset.importOptions.delimiter,
+      columns: currentDataset.importOptions.columns,
+      mappings: currentDataset.importOptions.mappings,
+      regexPattern: currentDataset.importOptions.regexPattern,
+      lineMode: currentDataset.importOptions.lineMode,
+      jsonFormat: currentDataset.importOptions.jsonFormat,
+    }));
+    setHybridSearch((prev) => ({
+      ...prev,
+      textColumns: listToCsv(currentDataset.embeddingConfig.textColumns),
+      provider: currentDataset.embeddingConfig.provider,
+      model: currentDataset.embeddingConfig.model,
+      templateVersion: currentDataset.embeddingConfig.templateVersion,
+      vectorColumn: currentDataset.embeddingConfig.vectorColumn || 'embedding',
+    }));
+    setFilterBuilder((prev) => ({
+      ...prev,
+      column: currentDataset.schema.includes(prev.column) ? prev.column : '',
+    }));
   }, [currentDataset]);
 
-  async function refreshRuns() {
-    const payload = await api('/api/runs?limit=100');
-    setRuns(payload.runs || []);
+  async function refreshRuns(nextSelectedRunId: string | null = selectedRunId) {
+    const payload = await api('/api/v1/runs?limit=100');
+    const nextRuns = payload.runs || [];
+    setRuns(nextRuns);
     setRunsPage(1);
-    if (!selectedRunId && payload.runs?.[0]) {
-      setSelectedRunId(payload.runs[0].run_id);
+    const fallbackRunId =
+      nextSelectedRunId && nextRuns.some((run: RunSummary) => run.run_id === nextSelectedRunId)
+        ? nextSelectedRunId
+        : nextRuns[0]?.run_id ?? null;
+    setSelectedRunId(fallbackRunId);
+    if (!fallbackRunId) {
+      setSelectedRunDetail(null);
     }
   }
 
   async function previewImport(event: React.FormEvent) {
     event.preventDefault();
     setImportMessage({ kind: 'info', text: t('loading_preview') });
+    setDatasetMessage(null);
     try {
-      const payload: Record<string, string> = {
-        input_path: (document.getElementById('import-path') as HTMLInputElement).value.trim(),
-        input_type: (document.getElementById('import-type') as HTMLSelectElement).value,
-        delimiter: (document.getElementById('import-delimiter') as HTMLInputElement).value,
-        dataset_name: (document.getElementById('import-dataset-name') as HTMLInputElement).value.trim(),
+      const payload: Record<string, unknown> = {
+        input_path: importForm.inputPath.trim(),
+        input_type: importForm.inputType,
+        delimiter: importForm.delimiter,
+        dataset_name: importForm.datasetName.trim(),
       };
-      const columns = (document.getElementById('import-columns') as HTMLInputElement).value.trim();
-      const regexPattern = (document.getElementById('import-regex-pattern') as HTMLInputElement).value.trim();
-      if (payload.input_type === 'json') payload.columns = columns;
-      if (payload.input_type === 'line') {
+      const columns = importForm.columns.trim();
+      const regexPattern = importForm.regexPattern.trim();
+      if (importForm.inputType === 'json' && columns) payload.columns = columns;
+      if (importForm.inputType === 'line') {
         payload.mappings = columns;
         payload.regex_pattern = regexPattern;
         payload.line_mode = regexPattern ? 'regex' : 'split';
       }
-      const result = (await api('/api/import/preview', {
+      if (importForm.embeddingEnabled) {
+        payload.embedding_config = embeddingFormToConfig(importForm);
+      }
+      const result = (await api('/api/v1/import/preview', {
         method: 'POST',
         body: JSON.stringify(payload),
       })) as ImportPreviewPayload;
@@ -382,11 +658,34 @@ export function App() {
       sourcePath: pendingImport.dataset.source_path,
       preview: pendingImport.preview,
       kind: 'imported',
+      importOptions: {
+        delimiter: importForm.delimiter,
+        columns: importForm.inputType === 'json' ? importForm.columns.trim() : '',
+        mappings: importForm.inputType === 'line' ? importForm.columns.trim() : '',
+        regexPattern: importForm.regexPattern.trim(),
+        lineMode: importForm.regexPattern.trim() ? 'regex' : 'split',
+        jsonFormat: importForm.jsonFormat,
+      },
+      embeddingConfig: embeddingFormToConfig(importForm),
     });
     setDatasets((current) => [record, ...current]);
     setSelectedDatasetId(record.datasetId);
     setPendingImport(null);
+    setImportMessage(null);
+    setDatasetMessage({ kind: 'info', text: t('dataset_saved_message') });
     setView('analyze');
+  }
+
+  function removeDataset(datasetId: string) {
+    const target = datasets.find((dataset) => dataset.datasetId === datasetId);
+    if (!target) return;
+    const confirmed = window.confirm(t('confirm_remove_dataset', { name: target.name }));
+    if (!confirmed) return;
+    setDatasets((current) => current.filter((dataset) => dataset.datasetId !== datasetId));
+    setDatasetMessage({
+      kind: 'info',
+      text: t('dataset_removed_message', { name: target.name }),
+    });
   }
 
   function setPreset(preset: AnalyzeState['preset']) {
@@ -400,18 +699,8 @@ export function App() {
     setAnalysisState((current) => ({ ...current, preset, query }));
   }
 
-  function insertColumnIntoQuery(column: string) {
-    const quoted = quoteIdentifier(column);
-    setAnalysisState((current) => ({
-      ...current,
-      query: `${current.query.trim()} ${quoted}`.trim(),
-    }));
-  }
-
   function applyFilterBuilder() {
-    if (!filterBuilder.column || !filterBuilder.value.trim()) {
-      return;
-    }
+    if (!filterBuilder.column || !filterBuilder.value.trim()) return;
     const table = analysisState.tableName || 'input_table';
     const whereClause = `SELECT * FROM ${quoteIdentifier(table)} WHERE ${quoteIdentifier(
       filterBuilder.column
@@ -425,46 +714,102 @@ export function App() {
 
   async function runAnalysis(event: React.FormEvent) {
     event.preventDefault();
-    setAnalysisResultHtml(`<div class="empty">${t('running_analysis')}</div>`);
+    setAnalysisResultHtml(`<div class="empty">${escapeHtml(t('running_analysis'))}</div>`);
     try {
       const payload = {
         input_path: analysisState.inputPath,
         input_type: analysisState.inputType,
+        delimiter: analysisState.delimiter,
+        line_mode: analysisState.lineMode,
+        regex_pattern: analysisState.regexPattern || undefined,
+        mappings: analysisState.mappings || undefined,
+        columns: analysisState.columns || undefined,
+        json_format: analysisState.jsonFormat,
         table: analysisState.tableName,
         query: analysisState.query,
         run_name: `analysis-${new Date().toISOString()}`,
         description: 'Desktop workbench analysis run',
       };
-      const runPayload = await api('/api/runs/file-sql', {
+      const runPayload = await api('/api/v1/runs/file-sql', {
         method: 'POST',
         body: JSON.stringify(payload),
       });
       setSelectedRunId(runPayload.run_id);
-      const runDetail = (await api(`/api/runs/${encodeURIComponent(runPayload.run_id)}/result?limit=20`)) as RunDetailPayload;
+      const runDetail = (await api(`/api/v1/runs/${encodeURIComponent(runPayload.run_id)}/result?limit=20`)) as RunDetailPayload;
       setSelectedRunDetail(runDetail);
       setAnalysisResultHtml(`
         <div class="meta">
-          <span>${runPayload.run.status}</span>
-          <span>${runPayload.run.run_id}</span>
-          <span>${t('rows_count', { count: runDetail.preview.row_count || '—' })}</span>
+          <span>${escapeHtml(runPayload.run.status)}</span>
+          <span>${escapeHtml(runPayload.run.run_id)}</span>
+          <span>${escapeHtml(t('rows_count', { count: runDetail.preview.row_count || '—' }))}</span>
         </div>
-        <div class="preview-wrap"><table><thead><tr>${(runDetail.preview.schema || []).map((name: string) => `<th>${name}</th>`).join('')}</tr></thead><tbody>${(runDetail.preview.rows || [])
-          .map((row: Record<string, unknown>) => `<tr>${(runDetail.preview.schema || []).map((name: string) => `<td>${String(row[name] ?? '')}</td>`).join('')}</tr>`)
-          .join('')}</tbody></table></div>
+        ${renderPreviewTable(runDetail.preview, t('no_preview_rows'))}
       `);
-      await refreshRuns();
+      await refreshRuns(runPayload.run_id);
     } catch (error) {
       setSelectedRunDetail(null);
-      setAnalysisResultHtml(`<div class="empty">${t('run_failed', { error: String(error) })}</div>`);
+      setAnalysisResultHtml(`<div class="empty">${escapeHtml(t('run_failed', { error: String(error) }))}</div>`);
+    }
+  }
+
+  async function runHybridSearch(event: React.FormEvent) {
+    event.preventDefault();
+    if (!currentDataset) return;
+    const queryText = hybridSearch.queryText.trim();
+    if (!queryText) {
+      setHybridMessage({ kind: 'error', text: t('hybrid_query_required') });
+      return;
+    }
+    setHybridMessage({ kind: 'info', text: t('hybrid_loading') });
+    setHybridResultHtml(`<div class="empty">${escapeHtml(t('hybrid_loading'))}</div>`);
+    try {
+      const payload = {
+        input_path: currentDataset.sourcePath,
+        input_type: currentDataset.sourceType,
+        delimiter: currentDataset.importOptions.delimiter,
+        columns: currentDataset.importOptions.columns || undefined,
+        mappings: currentDataset.importOptions.mappings || undefined,
+        regex_pattern: currentDataset.importOptions.regexPattern || undefined,
+        line_mode: currentDataset.importOptions.lineMode,
+        json_format: currentDataset.importOptions.jsonFormat,
+        query_text: queryText,
+        text_columns: csvToList(hybridSearch.textColumns),
+        provider: hybridSearch.provider.trim() || undefined,
+        model: hybridSearch.model.trim() || undefined,
+        template_version: hybridSearch.templateVersion.trim() || undefined,
+        top_k: Number(hybridSearch.topK) || 10,
+        vector_column: hybridSearch.vectorColumn.trim() || 'embedding',
+      };
+      const result = await api('/api/v1/runs/hybrid-search', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      const preview = extractHybridPreview(result);
+      const explain = extractHybridExplain(result);
+      setHybridResultHtml(`
+        <div class="meta">
+          <span>${escapeHtml(t('rows_count', { count: preview.row_count ?? preview.rows?.length ?? '—' }))}</span>
+          <span>${escapeHtml(hybridSearch.vectorColumn.trim() || 'embedding')}</span>
+          <span>${escapeHtml(hybridSearch.provider.trim() || '—')}</span>
+        </div>
+        ${explain ? `<pre class="explain-block">${escapeHtml(explain)}</pre>` : ''}
+        ${renderPreviewTable(preview, t('hybrid_no_result'))}
+      `);
+      setHybridMessage(null);
+    } catch (error) {
+      setHybridResultHtml(`<div class="empty">${escapeHtml(t('hybrid_failed', { error: String(error) }))}</div>`);
+      setHybridMessage({ kind: 'error', text: t('hybrid_failed', { error: String(error) }) });
     }
   }
 
   async function loadRunDetail(runId: string) {
     try {
-      const payload = (await api(`/api/runs/${encodeURIComponent(runId)}/result?limit=20`)) as RunDetailPayload;
+      const payload = (await api(`/api/v1/runs/${encodeURIComponent(runId)}/result?limit=20`)) as RunDetailPayload;
       setSelectedRunDetail(payload);
-    } catch {
+      setRunMessage(null);
+    } catch (error) {
       setSelectedRunDetail(null);
+      setRunMessage({ kind: 'error', text: t('run_detail_failed', { error: String(error) }) });
     }
   }
 
@@ -473,6 +818,40 @@ export function App() {
       void loadRunDetail(selectedRunId);
     }
   }, [selectedRunId, view]);
+
+  async function deleteRun(runId: string) {
+    const target = runs.find((run) => run.run_id === runId);
+    const confirmed = window.confirm(
+      t('confirm_delete_run', { name: target?.run_name || runId })
+    );
+    if (!confirmed) return;
+    try {
+      const runPayload = await api(`/api/v1/runs/${encodeURIComponent(runId)}`);
+      const runDir = String(runPayload.run?.run_dir || '');
+      let removedDatasetCount = 0;
+      if (runDir) {
+        setDatasets((current) => {
+          const next = current.filter((dataset) => {
+            const shouldRemove = isDatasetBackedByRun(dataset, runDir);
+            if (shouldRemove) removedDatasetCount += 1;
+            return !shouldRemove;
+          });
+          return next;
+        });
+      }
+      await api(`/api/v1/runs/${encodeURIComponent(runId)}`, { method: 'DELETE' });
+      await refreshRuns(selectedRunId === runId ? null : selectedRunId);
+      if (selectedRunId === runId) {
+        setSelectedRunDetail(null);
+      }
+      setRunMessage({
+        kind: 'info',
+        text: t('run_deleted_message', { runId, count: removedDatasetCount }),
+      });
+    } catch (error) {
+      setRunMessage({ kind: 'error', text: t('run_delete_failed', { error: String(error) }) });
+    }
+  }
 
   async function exportPath(sourcePath: string) {
     return window.velariaShell.exportFile({ sourcePath });
@@ -488,7 +867,7 @@ export function App() {
     await exportPath(decodeFileUri(selectedRunDetail.artifact.uri));
   }
 
-  function saveResultAsDataset() {
+  function saveRunDetailAsDataset(nextView: ViewKey = 'data') {
     if (!selectedRunDetail) return;
     const record = createDatasetRecord({
       name: `result-${selectedRunDetail.run.run_id.slice(0, 12)}`,
@@ -500,25 +879,45 @@ export function App() {
       preview: selectedRunDetail.preview,
       kind: 'result',
       description: `Saved from run ${selectedRunDetail.run.run_id}`,
+      embeddingConfig: defaultEmbeddingConfig,
     });
     setDatasets((current) => [record, ...current]);
     setSelectedDatasetId(record.datasetId);
-    setView('data');
+    setDatasetMessage({ kind: 'info', text: t('dataset_saved_from_run') });
+    setView(nextView);
   }
 
-  const datasetCards = visibleDatasets.map((dataset) => (
-    <div
-      key={dataset.datasetId}
-      className={`analyze-dataset-item ${dataset.datasetId === selectedDatasetId ? 'active' : ''}`}
-      onClick={() => setSelectedDatasetId(dataset.datasetId)}
-    >
-      <h4>{dataset.name}</h4>
-      <div className="meta">
-        <span>{dataset.sourceType}</span>
-        <span>{t('rows_count', { count: dataset.preview?.row_count ?? '—' })}</span>
+  const datasetCards = visibleDatasets.map((dataset) => {
+    const embeddingStatus = dataset.embeddingConfig.enabled
+      ? t('embedding_ready')
+      : t('embedding_disabled_short');
+    return (
+      <div
+        key={dataset.datasetId}
+        className={`analyze-dataset-item ${dataset.datasetId === selectedDatasetId ? 'active' : ''}`}
+        onClick={() => setSelectedDatasetId(dataset.datasetId)}
+      >
+        <div className="item-head">
+          <h4>{dataset.name}</h4>
+          <button
+            type="button"
+            className="ghost danger-button"
+            onClick={(event) => {
+              event.stopPropagation();
+              removeDataset(dataset.datasetId);
+            }}
+          >
+            {t('remove_dataset')}
+          </button>
+        </div>
+        <div className="meta">
+          <span>{dataset.sourceType}</span>
+          <span>{t('rows_count', { count: dataset.preview?.row_count ?? '—' })}</span>
+          <span>{embeddingStatus}</span>
+        </div>
       </div>
-    </div>
-  ));
+    );
+  });
 
   const sqlCards = [
     ['sql_part_select', sqlStructure.select],
@@ -528,6 +927,13 @@ export function App() {
     ['sql_part_order_by', sqlStructure.orderBy],
     ['sql_part_limit', sqlStructure.limit],
   ] as const;
+
+  const datasetKindLabel = currentDataset
+    ? t(currentDataset.kind === 'result' ? 'kind_result' : 'kind_imported')
+    : '—';
+  const currentEmbeddingSummary = currentDataset?.embeddingConfig.enabled
+    ? `${currentDataset.embeddingConfig.textColumns.join(', ') || '—'} · ${currentDataset.embeddingConfig.provider || '—'} · ${currentDataset.embeddingConfig.model || '—'}`
+    : t('embedding_disabled');
 
   return (
     <div className="shell">
@@ -629,7 +1035,10 @@ export function App() {
                           setView('data');
                         }}
                       >
-                        <h4>{dataset.name}</h4>
+                        <div className="item-head">
+                          <h4>{dataset.name}</h4>
+                          <span className="badge">{dataset.embeddingConfig.enabled ? t('embedding_ready') : t('embedding_disabled_short')}</span>
+                        </div>
                         <div className="meta">
                           <span>{dataset.sourceType}</span>
                           <span>{t('rows_count', { count: dataset.preview?.row_count ?? '—' })}</span>
@@ -655,7 +1064,14 @@ export function App() {
                   <form onSubmit={previewImport}>
                     <label>
                       <span>{t('input_path')}</span>
-                      <input id="import-path" placeholder={t('input_placeholder')} required />
+                      <input
+                        value={importForm.inputPath}
+                        onChange={(event) =>
+                          setImportForm((current) => ({ ...current, inputPath: event.target.value }))
+                        }
+                        placeholder={t('input_placeholder')}
+                        required
+                      />
                     </label>
                     <div className="actions">
                       <button
@@ -664,7 +1080,7 @@ export function App() {
                         onClick={async () => {
                           const path = await window.velariaShell.pickFile();
                           if (path) {
-                            (document.getElementById('import-path') as HTMLInputElement).value = path;
+                            setImportForm((current) => ({ ...current, inputPath: path }));
                           }
                         }}
                       >
@@ -675,7 +1091,12 @@ export function App() {
                     <div className="field-grid">
                       <label>
                         <span>{t('input_type')}</span>
-                        <select id="import-type" defaultValue="auto">
+                        <select
+                          value={importForm.inputType}
+                          onChange={(event) =>
+                            setImportForm((current) => ({ ...current, inputType: event.target.value }))
+                          }
+                        >
                           <option value="auto">auto</option>
                           <option value="csv">csv</option>
                           <option value="json">json</option>
@@ -687,25 +1108,145 @@ export function App() {
                       </label>
                       <label>
                         <span>{t('delimiter_label')}</span>
-                        <input id="import-delimiter" defaultValue="," />
+                        <input
+                          value={importForm.delimiter}
+                          onChange={(event) =>
+                            setImportForm((current) => ({ ...current, delimiter: event.target.value }))
+                          }
+                        />
                       </label>
                     </div>
                     <div className="field-grid">
                       <label>
                         <span>{t('columns_or_mappings')}</span>
-                        <input id="import-columns" placeholder={t('columns_placeholder')} />
+                        <input
+                          value={importForm.columns}
+                          onChange={(event) =>
+                            setImportForm((current) => ({ ...current, columns: event.target.value }))
+                          }
+                          placeholder={t('columns_placeholder')}
+                        />
                       </label>
                       <label>
                         <span>{t('regex_pattern')}</span>
-                        <input id="import-regex-pattern" placeholder={t('regex_placeholder')} />
+                        <input
+                          value={importForm.regexPattern}
+                          onChange={(event) =>
+                            setImportForm((current) => ({ ...current, regexPattern: event.target.value }))
+                          }
+                          placeholder={t('regex_placeholder')}
+                        />
                       </label>
                     </div>
                     <label>
                       <span>{t('dataset_name')}</span>
-                      <input id="import-dataset-name" placeholder={t('dataset_name_placeholder')} />
+                      <input
+                        value={importForm.datasetName}
+                        onChange={(event) =>
+                          setImportForm((current) => ({ ...current, datasetName: event.target.value }))
+                        }
+                        placeholder={t('dataset_name_placeholder')}
+                      />
                     </label>
+
+                    <div className="subsection-card">
+                      <div className="subsection-head">
+                        <div>
+                          <h3>{t('import_embedding_title')}</h3>
+                          <div className="helper">{t('import_embedding_hint')}</div>
+                        </div>
+                        <label className="toggle-row">
+                          <input
+                            type="checkbox"
+                            checked={importForm.embeddingEnabled}
+                            onChange={(event) =>
+                              setImportForm((current) => ({
+                                ...current,
+                                embeddingEnabled: event.target.checked,
+                              }))
+                            }
+                          />
+                          <span>{t('embedding_enable')}</span>
+                        </label>
+                      </div>
+                      <div className="field-grid">
+                        <label>
+                          <span>{t('embedding_text_columns')}</span>
+                          <input
+                            value={importForm.embeddingTextColumns}
+                            onChange={(event) =>
+                              setImportForm((current) => ({
+                                ...current,
+                                embeddingTextColumns: event.target.value,
+                              }))
+                            }
+                            placeholder={t('embedding_columns_placeholder')}
+                            disabled={!importForm.embeddingEnabled}
+                          />
+                        </label>
+                        <label>
+                          <span>{t('embedding_provider')}</span>
+                          <input
+                            value={importForm.embeddingProvider}
+                            onChange={(event) =>
+                              setImportForm((current) => ({
+                                ...current,
+                                embeddingProvider: event.target.value,
+                              }))
+                            }
+                            placeholder={t('embedding_provider_placeholder')}
+                            disabled={!importForm.embeddingEnabled}
+                          />
+                        </label>
+                      </div>
+                      <div className="field-grid">
+                        <label>
+                          <span>{t('embedding_model')}</span>
+                          <input
+                            value={importForm.embeddingModel}
+                            onChange={(event) =>
+                              setImportForm((current) => ({
+                                ...current,
+                                embeddingModel: event.target.value,
+                              }))
+                            }
+                            placeholder={t('embedding_model_placeholder')}
+                            disabled={!importForm.embeddingEnabled}
+                          />
+                        </label>
+                        <label>
+                          <span>{t('embedding_template_version')}</span>
+                          <input
+                            value={importForm.embeddingTemplateVersion}
+                            onChange={(event) =>
+                              setImportForm((current) => ({
+                                ...current,
+                                embeddingTemplateVersion: event.target.value,
+                              }))
+                            }
+                            placeholder={t('embedding_template_placeholder')}
+                            disabled={!importForm.embeddingEnabled}
+                          />
+                        </label>
+                      </div>
+                      <label>
+                        <span>{t('embedding_vector_column')}</span>
+                        <input
+                          value={importForm.embeddingVectorColumn}
+                          onChange={(event) =>
+                            setImportForm((current) => ({
+                              ...current,
+                              embeddingVectorColumn: event.target.value,
+                            }))
+                          }
+                          placeholder={t('embedding_vector_placeholder')}
+                          disabled={!importForm.embeddingEnabled}
+                        />
+                      </label>
+                    </div>
                   </form>
                   <div className="notice">{t('import_hint')}</div>
+                  <div className="notice subtle">{t('dataset_delete_hint')}</div>
                   {importMessage && (
                     <div className={`notice ${importMessage.kind === 'error' ? 'error' : ''}`}>
                       {importMessage.text}
@@ -718,10 +1259,11 @@ export function App() {
                           <span>{pendingImport.dataset.name}</span>
                           <span>{pendingImport.dataset.source_type}</span>
                           <span>{t('rows_count', { count: pendingImport.preview.row_count ?? '—' })}</span>
+                          <span>{importForm.embeddingEnabled ? t('embedding_ready') : t('embedding_disabled_short')}</span>
                         </div>
                         <div
                           dangerouslySetInnerHTML={{
-                            __html: renderPreviewTable(pendingImport.preview),
+                            __html: renderPreviewTable(pendingImport.preview, t('no_preview_rows')),
                           }}
                         />
                       </>
@@ -741,7 +1283,12 @@ export function App() {
                 <div className="panel-head">
                   <h2>{t('datasets')}</h2>
                 </div>
-                <div className="panel-body">
+                <div className="panel-body stack">
+                  {datasetMessage && (
+                    <div className={`notice ${datasetMessage.kind === 'error' ? 'error' : ''}`}>
+                      {datasetMessage.text}
+                    </div>
+                  )}
                   <div className="list">
                     {datasets.map((dataset) => (
                       <div
@@ -749,16 +1296,85 @@ export function App() {
                         className={`list-item ${dataset.datasetId === selectedDatasetId ? 'active' : ''}`}
                         onClick={() => setSelectedDatasetId(dataset.datasetId)}
                       >
-                        <h4>{dataset.name}</h4>
+                        <div className="item-head">
+                          <h4>{dataset.name}</h4>
+                          <div className="inline-actions">
+                            <span className="badge">
+                              {dataset.embeddingConfig.enabled ? t('embedding_ready') : t('embedding_disabled_short')}
+                            </span>
+                            <button
+                              type="button"
+                              className="ghost danger-button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                removeDataset(dataset.datasetId);
+                              }}
+                            >
+                              {t('remove_dataset')}
+                            </button>
+                          </div>
+                        </div>
                         <div className="meta">
                           <span>{dataset.sourceType}</span>
                           <span>{t('rows_count', { count: dataset.preview?.row_count ?? '—' })}</span>
-                          <span>{dataset.kind}</span>
+                          <span>{t(dataset.kind === 'result' ? 'kind_result' : 'kind_imported')}</span>
                         </div>
                       </div>
                     ))}
                     {!datasets.length && <div className="empty">{t('no_datasets_available')}</div>}
                   </div>
+
+                  {currentDataset && (
+                    <div className="result-box">
+                      <div className="item-head">
+                        <h4>{currentDataset.name}</h4>
+                        <div className="inline-actions">
+                          <button className="ghost" type="button" onClick={exportCurrentDataset}>
+                            {t('export_file')}
+                          </button>
+                          <button
+                            className="ghost"
+                            type="button"
+                            onClick={() => {
+                              setView('analyze');
+                            }}
+                          >
+                            {t('analyze_action')}
+                          </button>
+                          <button
+                            className="ghost danger-button"
+                            type="button"
+                            onClick={() => removeDataset(currentDataset.datasetId)}
+                          >
+                            {t('remove_dataset')}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="compact-grid">
+                        <div className="compact-card">
+                          <strong>{t('field_source')}</strong>
+                          <div className="mono">{currentDataset.sourcePath}</div>
+                        </div>
+                        <div className="compact-card">
+                          <strong>{t('field_schema')}</strong>
+                          <div>{currentDataset.schema.join(', ') || '—'}</div>
+                        </div>
+                        <div className="compact-card">
+                          <strong>{t('field_embedding')}</strong>
+                          <div>{currentEmbeddingSummary}</div>
+                        </div>
+                        <div className="compact-card">
+                          <strong>{t('field_kind')}</strong>
+                          <div>{datasetKindLabel}</div>
+                        </div>
+                      </div>
+                      <div
+                        dangerouslySetInnerHTML={{
+                          __html: renderPreviewTable(currentDataset.preview, t('no_preview_rows')),
+                        }}
+                      />
+                    </div>
+                  )}
                 </div>
               </section>
             </div>
@@ -777,7 +1393,7 @@ export function App() {
                     value={datasetSearch}
                     onChange={(event) => setDatasetSearch(event.target.value)}
                   />
-                  <div className="analyze-dataset-list" style={{ maxHeight: 140, overflow: 'auto' }}>
+                  <div className="analyze-dataset-list" style={{ maxHeight: 220, overflow: 'auto' }}>
                     {datasetCards}
                     {!datasetCards.length && <div className="empty">{t('no_datasets_available')}</div>}
                   </div>
@@ -799,12 +1415,17 @@ export function App() {
                     <select
                       value={selectedDatasetId || ''}
                       onChange={(event) => setSelectedDatasetId(event.target.value)}
+                      disabled={!visibleDatasets.length}
                     >
-                      {visibleDatasets.map((dataset) => (
-                        <option key={dataset.datasetId} value={dataset.datasetId}>
-                          {dataset.name}
-                        </option>
-                      ))}
+                      {visibleDatasets.length ? (
+                        visibleDatasets.map((dataset) => (
+                          <option key={dataset.datasetId} value={dataset.datasetId}>
+                            {dataset.name}
+                          </option>
+                        ))
+                      ) : (
+                        <option value="">{t('no_dataset_option')}</option>
+                      )}
                     </select>
                   </label>
                   <div className="compact-grid">
@@ -814,7 +1435,15 @@ export function App() {
                     </div>
                     <div className="compact-card">
                       <strong>{t('field_schema')}</strong>
-                      <div>{currentDataset?.schema.join('、') || '—'}</div>
+                      <div>{currentDataset?.schema.join(', ') || '—'}</div>
+                    </div>
+                    <div className="compact-card">
+                      <strong>{t('field_embedding')}</strong>
+                      <div>{currentEmbeddingSummary}</div>
+                    </div>
+                    <div className="compact-card">
+                      <strong>{t('field_kind')}</strong>
+                      <div>{datasetKindLabel}</div>
                     </div>
                   </div>
                   {sqlUnderstandingExpanded && (
@@ -890,14 +1519,14 @@ export function App() {
                     </div>
                     <div className="query-toolbar">
                       <label className="field">
-                        <span>筛选列</span>
+                        <span>{t('filter_column')}</span>
                         <select
                           value={filterBuilder.column}
                           onChange={(event) =>
                             setFilterBuilder((current) => ({ ...current, column: event.target.value }))
                           }
                         >
-                          <option value="">请选择</option>
+                          <option value="">{t('filter_column_placeholder')}</option>
                           {schemaColumns.map((column) => (
                             <option key={column} value={column}>
                               {column}
@@ -906,7 +1535,7 @@ export function App() {
                         </select>
                       </label>
                       <label className="field">
-                        <span>条件</span>
+                        <span>{t('filter_operator')}</span>
                         <select
                           value={filterBuilder.operator}
                           onChange={(event) =>
@@ -925,7 +1554,7 @@ export function App() {
                         </select>
                       </label>
                       <label className="field">
-                        <span>值</span>
+                        <span>{t('filter_value')}</span>
                         <input
                           value={filterBuilder.value}
                           onChange={(event) =>
@@ -934,9 +1563,9 @@ export function App() {
                         />
                       </label>
                       <div className="field">
-                        <span>快速条件</span>
+                        <span>{t('filter_quick_action')}</span>
                         <button type="button" className="ghost" onClick={applyFilterBuilder}>
-                          生成 WHERE
+                          {t('filter_generate')}
                         </button>
                       </div>
                     </div>
@@ -991,19 +1620,127 @@ export function App() {
                         type="button"
                         className="ghost"
                         disabled={!selectedRunDetail}
-                        onClick={saveResultAsDataset}
+                        onClick={() => saveRunDetailAsDataset('data')}
                       >
                         {t('save_result_as_dataset')}
                       </button>
                     </div>
                   </form>
 
-                  <div className="result-stack">
-                    <div className="helper">{t('run_detail')}</div>
-                    <div
-                      className="result-box"
-                      dangerouslySetInnerHTML={{ __html: analysisResultHtml }}
-                    />
+                  <div className="result-dual-grid">
+                    <div className="result-stack">
+                      <div className="helper">{t('run_detail')}</div>
+                      <div
+                        className="result-box"
+                        dangerouslySetInnerHTML={{ __html: analysisResultHtml }}
+                      />
+                    </div>
+
+                    <div className="result-stack">
+                      <div className="helper">{t('hybrid_results')}</div>
+                      {hybridMessage && (
+                        <div className={`notice ${hybridMessage.kind === 'error' ? 'error' : ''}`}>
+                          {hybridMessage.text}
+                        </div>
+                      )}
+                      <form className="subsection-card" onSubmit={runHybridSearch}>
+                        <div className="subsection-head">
+                          <div>
+                            <h3>{t('hybrid_search_title')}</h3>
+                            <div className="helper">{t('hybrid_search_hint')}</div>
+                          </div>
+                          <button type="submit" disabled={!currentDataset}>
+                            {t('run_hybrid_search')}
+                          </button>
+                        </div>
+                        <label>
+                          <span>{t('hybrid_query')}</span>
+                          <input
+                            value={hybridSearch.queryText}
+                            onChange={(event) =>
+                              setHybridSearch((current) => ({ ...current, queryText: event.target.value }))
+                            }
+                            placeholder={t('hybrid_query_placeholder')}
+                            disabled={!currentDataset}
+                          />
+                        </label>
+                        <div className="field-grid">
+                          <label>
+                            <span>{t('embedding_text_columns')}</span>
+                            <input
+                              value={hybridSearch.textColumns}
+                              onChange={(event) =>
+                                setHybridSearch((current) => ({ ...current, textColumns: event.target.value }))
+                              }
+                              placeholder={t('embedding_columns_placeholder')}
+                              disabled={!currentDataset}
+                            />
+                          </label>
+                          <label>
+                            <span>{t('hybrid_top_k')}</span>
+                            <input
+                              value={hybridSearch.topK}
+                              onChange={(event) =>
+                                setHybridSearch((current) => ({ ...current, topK: event.target.value }))
+                              }
+                              disabled={!currentDataset}
+                            />
+                          </label>
+                        </div>
+                        <div className="field-grid">
+                          <label>
+                            <span>{t('embedding_provider')}</span>
+                            <input
+                              value={hybridSearch.provider}
+                              onChange={(event) =>
+                                setHybridSearch((current) => ({ ...current, provider: event.target.value }))
+                              }
+                              placeholder={t('embedding_provider_placeholder')}
+                              disabled={!currentDataset}
+                            />
+                          </label>
+                          <label>
+                            <span>{t('embedding_model')}</span>
+                            <input
+                              value={hybridSearch.model}
+                              onChange={(event) =>
+                                setHybridSearch((current) => ({ ...current, model: event.target.value }))
+                              }
+                              placeholder={t('embedding_model_placeholder')}
+                              disabled={!currentDataset}
+                            />
+                          </label>
+                        </div>
+                        <div className="field-grid">
+                          <label>
+                            <span>{t('embedding_template_version')}</span>
+                            <input
+                              value={hybridSearch.templateVersion}
+                              onChange={(event) =>
+                                setHybridSearch((current) => ({ ...current, templateVersion: event.target.value }))
+                              }
+                              placeholder={t('embedding_template_placeholder')}
+                              disabled={!currentDataset}
+                            />
+                          </label>
+                          <label>
+                            <span>{t('embedding_vector_column')}</span>
+                            <input
+                              value={hybridSearch.vectorColumn}
+                              onChange={(event) =>
+                                setHybridSearch((current) => ({ ...current, vectorColumn: event.target.value }))
+                              }
+                              placeholder={t('embedding_vector_placeholder')}
+                              disabled={!currentDataset}
+                            />
+                          </label>
+                        </div>
+                      </form>
+                      <div
+                        className="result-box"
+                        dangerouslySetInnerHTML={{ __html: hybridResultHtml }}
+                      />
+                    </div>
                   </div>
                 </div>
               </section>
@@ -1022,7 +1759,12 @@ export function App() {
                   </button>
                 </div>
               </div>
-              <div className="panel-body">
+              <div className="panel-body stack">
+                {runMessage && (
+                  <div className={`notice ${runMessage.kind === 'error' ? 'error' : ''}`}>
+                    {runMessage.text}
+                  </div>
+                )}
                 <div className="list">
                   {pagedRuns.map((run) => {
                     const expanded = run.run_id === selectedRunId;
@@ -1032,7 +1774,19 @@ export function App() {
                           onClick={() => setSelectedRunId(expanded ? null : run.run_id)}
                           style={{ cursor: 'pointer' }}
                         >
-                          <h4>{run.run_name || run.run_id}</h4>
+                          <div className="item-head">
+                            <h4>{run.run_name || run.run_id}</h4>
+                            <button
+                              type="button"
+                              className="ghost danger-button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void deleteRun(run.run_id);
+                              }}
+                            >
+                              {t('delete_run')}
+                            </button>
+                          </div>
                           <div className="meta">
                             <span>{run.status}</span>
                             <span>{run.action}</span>
@@ -1059,35 +1813,29 @@ export function App() {
                               <button className="ghost" onClick={exportCurrentRunArtifact}>
                                 {t('export_file')}
                               </button>
-                              <button className="ghost" onClick={saveResultAsDataset}>
+                              <button className="ghost" onClick={() => saveRunDetailAsDataset('data')}>
                                 {t('save_result_action')}
                               </button>
                               <button
                                 className="ghost"
                                 onClick={() => {
-                                  if (selectedRunDetail) {
-                                    const record = createDatasetRecord({
-                                      name: `result-${selectedRunDetail.run.run_id.slice(0, 12)}`,
-                                      sourceType:
-                                        selectedRunDetail.artifact.format === 'arrow'
-                                          ? 'arrow'
-                                          : selectedRunDetail.artifact.format,
-                                      sourcePath: decodeFileUri(selectedRunDetail.artifact.uri),
-                                      preview: selectedRunDetail.preview,
-                                      kind: 'result',
-                                    });
-                                    setDatasets((current) => [record, ...current]);
-                                    setSelectedDatasetId(record.datasetId);
-                                    setView('analyze');
-                                  }
+                                  saveRunDetailAsDataset('analyze');
                                 }}
                               >
                                 {t('analyze_action')}
                               </button>
+                              <button
+                                className="ghost danger-button"
+                                onClick={() => {
+                                  void deleteRun(run.run_id);
+                                }}
+                              >
+                                {t('delete_run')}
+                              </button>
                             </div>
                             <div
                               dangerouslySetInnerHTML={{
-                                __html: renderPreviewTable(selectedRunDetail.preview),
+                                __html: renderPreviewTable(selectedRunDetail.preview, t('no_preview_rows')),
                               }}
                             />
                           </div>

@@ -232,6 +232,73 @@ class ArtifactIndexTest(unittest.TestCase):
                 self.assertTrue(run_dir.exists())
                 self.assertIsNotNone(index.get_run("run-1"))
 
+    def test_delete_run_removes_terminal_run_and_run_dir(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-artifact-delete-") as tmp:
+            run_dir = pathlib.Path(tmp) / "runs" / "run-1"
+            run_dir.mkdir(parents=True)
+            artifact_path = run_dir / "artifacts" / "result.parquet"
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            artifact_path.write_text("demo", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                index = ArtifactIndex()
+                index.upsert_run(
+                    {
+                        "run_id": "run-1",
+                        "created_at": "2026-04-01T10:00:00Z",
+                        "finished_at": "2026-04-01T10:00:02Z",
+                        "status": "succeeded",
+                        "action": "hybrid-search",
+                        "cli_args": {"query_text": "alpha"},
+                        "velaria_version": "0.0.test",
+                        "run_dir": str(run_dir),
+                    }
+                )
+                index.insert_artifact(
+                    {
+                        "artifact_id": "artifact-1",
+                        "run_id": "run-1",
+                        "created_at": "2026-04-01T10:00:01Z",
+                        "type": "file",
+                        "uri": artifact_path.resolve().as_uri(),
+                        "format": "parquet",
+                        "row_count": 1,
+                        "schema_json": ["doc_id"],
+                        "preview_json": {"rows": [{"doc_id": "doc-1"}]},
+                        "tags_json": ["result"],
+                    }
+                )
+
+                deleted = index.delete_run("run-1", delete_files=True)
+                self.assertEqual(deleted["run_id"], "run-1")
+                self.assertEqual(deleted["artifact_count"], 1)
+                self.assertEqual(deleted["deleted_run_dir"], str(run_dir))
+                self.assertIsNone(index.get_run("run-1"))
+                self.assertEqual(index.list_artifacts(run_id="run-1"), [])
+                self.assertFalse(run_dir.exists())
+
+    def test_delete_run_rejects_non_terminal_status(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-artifact-delete-running-") as tmp:
+            run_dir = pathlib.Path(tmp) / "runs" / "run-1"
+            run_dir.mkdir(parents=True)
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                index = ArtifactIndex()
+                index.upsert_run(
+                    {
+                        "run_id": "run-1",
+                        "created_at": "2026-04-01T10:00:00Z",
+                        "finished_at": None,
+                        "status": "running",
+                        "action": "hybrid-search",
+                        "cli_args": {"query_text": "alpha"},
+                        "velaria_version": "0.0.test",
+                        "run_dir": str(run_dir),
+                    }
+                )
+
+                with self.assertRaisesRegex(Exception, "cannot delete non-terminal run"):
+                    index.delete_run("run-1", delete_files=True)
+                self.assertTrue(run_dir.exists())
+
     def test_keep_last_and_delete_files(self):
         with tempfile.TemporaryDirectory(prefix="velaria-artifact-keep-") as tmp:
             with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):

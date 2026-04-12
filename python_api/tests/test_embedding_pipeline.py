@@ -642,6 +642,40 @@ class EmbeddingPipelineTest(unittest.TestCase):
             self.assertEqual(table.column("doc_id").to_pylist(), ["doc-1", "doc-2"])
             self.assertEqual(table.schema.field("embedding").type, pa.list_(pa.float32(), 3))
 
+    def test_build_file_embeddings_reads_parquet_and_materializes_embedding_table(self):
+        provider = StaticEmbeddingProvider(
+            {
+                "title: Alpha\nsummary: Payment page timeout\ntags: billing, checkout": [1.0, 0.0, 0.0],
+                "title: Beta\nsummary: Refund delay in worker queue\ntags: refund, queue": [0.0, 1.0, 0.0],
+            }
+        )
+        session = Session()
+        with tempfile.TemporaryDirectory(prefix="velaria-file-embed-parquet-") as tmp:
+            parquet_path = pathlib.Path(tmp) / "docs.parquet"
+            pq.write_table(
+                pa.table(
+                    {
+                        "doc_id": ["doc-1", "doc-2"],
+                        "title": ["Alpha", "Beta"],
+                        "summary": ["Payment page timeout", "Refund delay in worker queue"],
+                        "tags": ["billing, checkout", "refund, queue"],
+                        "source_updated_at": [1, 2],
+                    }
+                ),
+                parquet_path,
+            )
+            table = build_file_embeddings(
+                session,
+                parquet_path,
+                provider=provider,
+                model="static-demo",
+                template_version="text-v1",
+                input_type="parquet",
+                text_columns=("title", "summary", "tags"),
+            )
+            self.assertEqual(table.column("doc_id").to_pylist(), ["doc-1", "doc-2"])
+            self.assertEqual(table.schema.field("embedding").type, pa.list_(pa.float32(), 3))
+
     def test_run_file_mixed_text_hybrid_search_builds_and_queries_from_csv(self):
         provider = StaticEmbeddingProvider(
             {
@@ -678,6 +712,40 @@ class EmbeddingPipelineTest(unittest.TestCase):
             ).to_rows()
             doc_id_index = result["schema"].index("doc_id")
             self.assertEqual(result["rows"][0][doc_id_index], "doc-1")
+
+    def test_run_file_mixed_text_hybrid_search_builds_and_queries_from_line_file(self):
+        provider = StaticEmbeddingProvider(
+            {
+                "title: Alpha\nsummary: Payment page timeout": [1.0, 0.0, 0.0],
+                "title: Beta\nsummary: Refund delay in worker queue": [0.0, 1.0, 0.0],
+                "payment timeout": [1.0, 0.0, 0.0],
+            }
+        )
+        session = Session()
+        with tempfile.TemporaryDirectory(prefix="velaria-file-query-line-") as tmp:
+            line_path = pathlib.Path(tmp) / "docs.log"
+            line_path.write_text(
+                "Alpha|Payment page timeout\n"
+                "Beta|Refund delay in worker queue\n",
+                encoding="utf-8",
+            )
+            result = run_file_mixed_text_hybrid_search(
+                session,
+                line_path,
+                provider=provider,
+                model="static-demo",
+                query_text="payment timeout",
+                template_version="text-v1",
+                input_type="line",
+                mappings="title:0,summary:1",
+                line_mode="split",
+                delimiter="|",
+                text_columns=("title", "summary"),
+                top_k=1,
+                metric="cosine",
+            ).to_rows()
+            title_index = result["schema"].index("title")
+            self.assertEqual(result["rows"][0][title_index], "Alpha")
 
 
 if __name__ == "__main__":

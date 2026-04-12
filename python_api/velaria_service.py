@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import threading
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,7 +15,15 @@ from urllib.parse import parse_qs, urlparse
 import pyarrow.ipc as pa_ipc
 import pyarrow.parquet as pq
 import velaria.cli as cli_impl
-from velaria import Session, __version__, read_excel
+from velaria import (
+    Session,
+    __version__,
+    DEFAULT_LOCAL_CHINESE_EMBEDDING_MODEL,
+    build_file_embeddings,
+    query_file_embeddings,
+    read_excel,
+)
+from velaria.workspace.artifact_index import RunDeleteConflictError
 from velaria.workspace import (
     ArtifactIndex,
     append_stderr,
@@ -41,18 +50,61 @@ def _parse_csv_list(raw: str | None) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
-def _parse_mappings(raw: str | None) -> list[tuple[str, int]]:
+class ApiRouteNotFoundError(FileNotFoundError):
+    pass
+
+
+def _default_embedding_provider() -> str:
+    return "minilm"
+
+
+def _default_embedding_model(provider: str | None, model: str | None) -> str | None:
+    normalized_provider = str(provider or "").strip().lower()
+    if model:
+        return model
+    if normalized_provider == "minilm":
+        return DEFAULT_LOCAL_CHINESE_EMBEDDING_MODEL
+    return model
+
+
+def _parse_string_list(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return _parse_csv_list(raw)
+    if isinstance(raw, (list, tuple, set)):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    raise ValueError(f"invalid list payload: {raw}")
+
+
+def _parse_mappings(raw: Any) -> list[tuple[str, int]]:
     mappings: list[tuple[str, int]] = []
     if not raw:
         return mappings
-    for piece in raw.split(","):
-        part = piece.strip()
-        if not part:
+    if isinstance(raw, str):
+        entries: list[Any] = [piece.strip() for piece in raw.split(",") if piece.strip()]
+    elif isinstance(raw, (list, tuple)):
+        entries = list(raw)
+    else:
+        raise ValueError(f"invalid mappings payload: {raw}")
+    for item in entries:
+        if isinstance(item, str):
+            if ":" not in item:
+                raise ValueError(f"invalid mappings entry: {item}")
+            name, index_text = item.split(":", 1)
+            mappings.append((name.strip(), int(index_text.strip())))
             continue
-        if ":" not in part:
-            raise ValueError(f"invalid mappings entry: {part}")
-        name, index_text = part.split(":", 1)
-        mappings.append((name.strip(), int(index_text.strip())))
+        if isinstance(item, dict):
+            name = item.get("name") or item.get("column")
+            index_value = item.get("index")
+            if name is None or index_value is None:
+                raise ValueError(f"invalid mappings entry: {item}")
+            mappings.append((str(name).strip(), int(index_value)))
+            continue
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            mappings.append((str(item[0]).strip(), int(item[1])))
+            continue
+        raise ValueError(f"invalid mappings entry: {item}")
     return mappings
 
 
@@ -141,6 +193,155 @@ def _preview_from_dataframe(df: Any, limit: int) -> dict[str, Any]:
     return preview
 
 
+def _resolve_json_columns(payload: dict[str, Any], text_columns: list[str]) -> list[str]:
+    columns = _parse_string_list(payload.get("columns"))
+    if columns:
+        return columns
+    ordered: list[str] = []
+    for column in text_columns:
+        if column and column not in ordered:
+            ordered.append(column)
+    return ordered
+
+
+def _score_semantics(metric: str) -> tuple[str, str]:
+    normalized_metric = str(metric or "cosine").strip().lower()
+    if normalized_metric == "dot":
+        return "higher_is_better", "similarity"
+    return "lower_is_better", "distance"
+
+
+def _execute_embedding_build(payload: dict[str, Any], run_dir: Path, *, provider: Any, resolved_model: str) -> dict[str, Any]:
+    session = Session()
+    provider_name = str(payload.get("provider") or _default_embedding_provider())
+    input_path = payload.get("input_path")
+    if not input_path:
+        raise ValueError("input_path is required")
+
+    text_columns = _parse_string_list(payload.get("text_columns"))
+    if not text_columns:
+        raise ValueError("text_columns must not be empty")
+
+    input_type = str(payload.get("input_type") or "auto").lower()
+    template_version = str(payload.get("template_version") or "text-v1")
+    vector_column = str(payload.get("vector_column") or "embedding")
+    if vector_column != "embedding":
+        raise ValueError("embedding-build currently materializes vectors into the 'embedding' column only")
+    output_path = (
+        _normalize_path(payload["output_path"])
+        if payload.get("output_path")
+        else run_dir / "artifacts" / "embedding_dataset.parquet"
+    )
+    normalized_input_path = str(_normalize_path(str(input_path)))
+    built_table = build_file_embeddings(
+        session,
+        normalized_input_path,
+        provider=provider,
+        model=resolved_model,
+        template_version=template_version,
+        text_columns=text_columns,
+        input_type=input_type,
+        delimiter=(payload.get("delimiter") or ",")[:1],
+        json_columns=_resolve_json_columns(payload, text_columns) if input_type == "json" else None,
+        json_format=str(payload.get("json_format") or "json_lines"),
+        mappings=payload.get("mappings") or payload.get("columns"),
+        line_mode=str(payload.get("line_mode") or "split"),
+        regex_pattern=payload.get("regex_pattern"),
+        sheet_name=payload.get("sheet_name", 0),
+        date_format=str(payload.get("date_format") or "%Y-%m-%d"),
+        doc_id_field=str(payload.get("doc_id_field") or "doc_id"),
+        source_updated_at_field=str(payload.get("source_updated_at_field") or "source_updated_at"),
+        output_path=output_path,
+    )
+    preview_limit = int(payload.get("preview_limit", 50))
+    preview = cli_impl._preview_payload_from_table(built_table, limit=preview_limit)
+    preview["schema"] = built_table.schema.names
+    preview["row_count"] = built_table.num_rows
+    artifacts = [cli_impl._table_artifact(output_path, built_table, ["dataset", "embedding-build"])]
+    return {
+        "payload": {
+            "dataset_path": str(output_path),
+            "input_path": normalized_input_path,
+            "input_type": input_type,
+            "text_columns": text_columns,
+            "provider": provider_name,
+            "model": resolved_model,
+            "template_version": template_version,
+            "vector_column": vector_column,
+            "schema": built_table.schema.names,
+            "row_count": built_table.num_rows,
+        },
+        "preview": preview,
+        "artifacts": artifacts,
+    }
+
+
+def _execute_hybrid_search(payload: dict[str, Any], run_dir: Path, *, provider: Any, resolved_model: str) -> dict[str, Any]:
+    session = Session()
+    provider_name = str(payload.get("provider") or _default_embedding_provider())
+    query_text = str(payload.get("query_text") or "").strip()
+    if not query_text:
+        raise ValueError("query_text must not be empty")
+
+    top_k = int(payload.get("top_k", 10))
+    if top_k <= 0:
+        raise ValueError("top_k must be positive")
+
+    vector_column = str(payload.get("vector_column") or "embedding")
+    template_version = str(payload.get("template_version") or "text-v1")
+    metric = str(payload.get("metric") or "cosine")
+    where_sql = payload.get("where_sql")
+    dataset_path = payload.get("dataset_path")
+    if not dataset_path:
+        raise ValueError(
+            "dataset_path is required for hybrid search. Build embeddings first via /api/v1/runs/embedding-build."
+        )
+    normalized_dataset_path = str(_normalize_path(str(dataset_path)))
+    result_df = query_file_embeddings(
+        session,
+        normalized_dataset_path,
+        provider=provider,
+        model=resolved_model,
+        query_text=query_text,
+        vector_column=vector_column,
+        top_k=top_k,
+        metric=metric,
+        where_sql=str(where_sql) if where_sql else None,
+    )
+
+    result_table = result_df.to_arrow()
+    preview_limit = int(payload.get("preview_limit", 50))
+    preview = cli_impl._preview_payload_from_table(result_table, limit=preview_limit)
+    preview["schema"] = result_table.schema.names
+    preview["row_count"] = result_table.num_rows
+    output_path = (
+        _normalize_path(payload["output_path"])
+        if payload.get("output_path")
+        else run_dir / "artifacts" / "result.parquet"
+    )
+    artifacts = [cli_impl._table_artifact(output_path, result_table, ["result", "hybrid-search"])]
+    score_order, score_kind = _score_semantics(metric)
+    return {
+        "payload": {
+            "dataset_path": normalized_dataset_path,
+            "query_text": query_text,
+            "provider": provider_name,
+            "model": resolved_model,
+            "template_version": template_version,
+            "top_k": top_k,
+            "metric": metric,
+            "where_sql": str(where_sql) if where_sql else None,
+            "vector_column": vector_column,
+            "score_semantics": score_order,
+            "score_kind": score_kind,
+            "schema": result_table.schema.names,
+            "row_count": result_table.num_rows,
+        },
+        "preview": preview,
+        "artifacts": artifacts,
+    }
+
+
 def _execute_file_sql(payload: dict[str, Any], run_id: str, run_dir: Path) -> dict[str, Any]:
     session = Session()
     input_df = _load_dataframe(session, payload)
@@ -193,10 +394,87 @@ def _register_artifacts(index: ArtifactIndex, run_id: str, artifacts: list[dict[
     return created
 
 
+def _api_parts(path: str) -> tuple[str, ...] | None:
+    parts = tuple(part for part in path.split("/") if part)
+    if not parts or parts[0] != "api":
+        return None
+    if len(parts) >= 2 and parts[1] == "v1":
+        return parts[2:]
+    return parts[1:]
+
+
+def _build_run_response(
+    index: ArtifactIndex,
+    run: dict[str, Any],
+    *,
+    run_dir: Path | None = None,
+    result: dict[str, Any] | None = None,
+    artifacts: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    artifact_list = list(artifacts or [])
+    payload: dict[str, Any] = {
+        "ok": True,
+        "run_id": run["run_id"],
+        "run": _enrich_run(index, run),
+        "artifacts": artifact_list,
+        "artifact": artifact_list[0] if artifact_list else None,
+    }
+    if run_dir is not None:
+        payload["run_dir"] = str(run_dir)
+    if result is not None:
+        payload["result"] = result["payload"]
+        preview = result.get("preview") or result["payload"].get("preview")
+        if preview is not None:
+            payload["preview"] = preview
+    return payload
+
+
+def _error_response(exc: Exception) -> tuple[HTTPStatus, dict[str, Any]]:
+    if isinstance(exc, ApiRouteNotFoundError):
+        return (
+            HTTPStatus.NOT_FOUND,
+            cli_impl._error_payload(
+                str(exc),
+                error_type="api_not_found",
+                phase="api",
+            ),
+        )
+    if isinstance(exc, RunDeleteConflictError):
+        return (
+            HTTPStatus.CONFLICT,
+            cli_impl._error_payload(
+                str(exc),
+                error_type="run_conflict",
+                phase="run_lifecycle",
+                details={
+                    "run_id": exc.run_id,
+                    "status": exc.status,
+                },
+            ),
+        )
+    if isinstance(exc, FileNotFoundError):
+        return HTTPStatus.NOT_FOUND, cli_impl._error_payload_from_exception(exc)
+    if isinstance(exc, ValueError):
+        return HTTPStatus.BAD_REQUEST, cli_impl._error_payload_from_exception(exc)
+    return HTTPStatus.INTERNAL_SERVER_ERROR, cli_impl._error_payload_from_exception(exc)
+
+
 @dataclass
 class VelariaService:
     host: str
     port: int
+    _embedding_provider_cache: dict[tuple[str, str | None], tuple[Any, str]] = field(default_factory=dict)
+    _embedding_provider_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def get_embedding_provider(self, provider_name: str, model_name: str | None):
+        cache_key = (provider_name.strip().lower(), model_name or None)
+        with self._embedding_provider_lock:
+            cached = self._embedding_provider_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            created = cli_impl._make_embedding_provider(provider_name, model_name)
+            self._embedding_provider_cache[cache_key] = created
+            return created
 
     def build_handler(self):
         service = self
@@ -211,7 +489,7 @@ class VelariaService:
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.send_header("Access-Control-Allow-Headers", "Content-Type")
-                self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+                self.send_header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
                 self.end_headers()
                 self.wfile.write(body)
 
@@ -226,7 +504,7 @@ class VelariaService:
                 self.send_response(HTTPStatus.NO_CONTENT)
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.send_header("Access-Control-Allow-Headers", "Content-Type")
-                self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+                self.send_header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
                 self.end_headers()
 
             def do_GET(self) -> None:  # noqa: N802
@@ -244,7 +522,10 @@ class VelariaService:
                             },
                         )
                         return
-                    if path == "/api/runs":
+                    parts = _api_parts(path)
+                    if parts is None:
+                        raise ApiRouteNotFoundError(f"unknown endpoint: {path}")
+                    if parts == ("runs",):
                         query = parse_qs(parsed.query)
                         limit = int(query.get("limit", ["20"])[0])
                         index = ArtifactIndex()
@@ -260,8 +541,8 @@ class VelariaService:
                             return
                         finally:
                             index.close()
-                    if path.startswith("/api/runs/") and path.endswith("/result"):
-                        run_id = path.split("/")[3]
+                    if len(parts) == 3 and parts[0] == "runs" and parts[2] == "result":
+                        run_id = parts[1]
                         query = parse_qs(parsed.query)
                         limit = int(query.get("limit", ["20"])[0])
                         index = ArtifactIndex()
@@ -286,8 +567,8 @@ class VelariaService:
                             return
                         finally:
                             index.close()
-                    if path.startswith("/api/runs/"):
-                        run_id = path.split("/")[3]
+                    if len(parts) == 2 and parts[0] == "runs":
+                        run_id = parts[1]
                         index = ArtifactIndex()
                         try:
                             run = index.get_run(run_id)
@@ -304,8 +585,8 @@ class VelariaService:
                             return
                         finally:
                             index.close()
-                    if path.startswith("/api/artifacts/") and path.endswith("/preview"):
-                        artifact_id = path.split("/")[3]
+                    if len(parts) == 3 and parts[0] == "artifacts" and parts[2] == "preview":
+                        artifact_id = parts[1]
                         query = parse_qs(parsed.query)
                         limit = int(query.get("limit", ["20"])[0])
                         index = ArtifactIndex()
@@ -328,17 +609,20 @@ class VelariaService:
                             return
                         finally:
                             index.close()
-                    raise FileNotFoundError(f"unknown endpoint: {path}")
+                    raise ApiRouteNotFoundError(f"unknown endpoint: {path}")
                 except Exception as exc:
-                    payload = cli_impl._error_payload_from_exception(exc)
-                    self._send_json(HTTPStatus.BAD_REQUEST, payload)
+                    status, payload = _error_response(exc)
+                    self._send_json(status, payload)
 
             def do_POST(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)
                 path = parsed.path
                 try:
                     payload = self._read_json()
-                    if path == "/api/import/preview":
+                    parts = _api_parts(path)
+                    if parts is None:
+                        raise ApiRouteNotFoundError(f"unknown endpoint: {path}")
+                    if parts == ("import", "preview"):
                         session = Session()
                         df = _load_dataframe(session, payload)
                         preview = _preview_from_dataframe(df, limit=int(payload.get("limit", 50)))
@@ -356,7 +640,7 @@ class VelariaService:
                             },
                         )
                         return
-                    if path == "/api/runs/file-sql":
+                    if parts == ("runs", "file-sql"):
                         tags = payload.get("tags") or []
                         if isinstance(tags, str):
                             tags = _parse_csv_list(tags)
@@ -398,16 +682,85 @@ class VelariaService:
                             created_artifacts = _register_artifacts(index, run_id, result.get("artifacts", []))
                             finalized = finalize_run(run_id, "succeeded")
                             index.upsert_run(finalized)
+                            self._send_json(HTTPStatus.OK, _build_run_response(index, finalized, run_dir=run_dir, result=result, artifacts=created_artifacts))
+                            return
+                        except Exception as exc:
+                            append_stderr(run_id, traceback.format_exc())
+                            finalized = finalize_run(
+                                run_id,
+                                "failed",
+                                error=str(exc),
+                                details=cli_impl._error_payload_from_exception(exc),
+                            )
+                            index.upsert_run(finalized)
+                            raise
+                        finally:
+                            index.close()
+                    if parts == ("runs", "embedding-build"):
+                        tags = payload.get("tags") or []
+                        if isinstance(tags, str):
+                            tags = _parse_csv_list(tags)
+                        provider_name = payload.get("provider") or _default_embedding_provider()
+                        resolved_model_name = _default_embedding_model(provider_name, payload.get("model"))
+                        action_args = {
+                            "input_path": str(_normalize_path(payload["input_path"])),
+                            "input_type": payload.get("input_type", "auto"),
+                            "delimiter": payload.get("delimiter", ","),
+                            "line_mode": payload.get("line_mode", "split"),
+                            "regex_pattern": payload.get("regex_pattern"),
+                            "mappings": payload.get("mappings"),
+                            "columns": payload.get("columns"),
+                            "json_format": payload.get("json_format", "json_lines"),
+                            "text_columns": payload.get("text_columns"),
+                            "provider": provider_name,
+                            "model": resolved_model_name,
+                            "template_version": payload.get("template_version", "text-v1"),
+                            "vector_column": payload.get("vector_column", "embedding"),
+                            "doc_id_field": payload.get("doc_id_field", "doc_id"),
+                            "source_updated_at_field": payload.get("source_updated_at_field", "source_updated_at"),
+                            "output_path": payload.get("output_path"),
+                            "preview_limit": int(payload.get("preview_limit", 50)),
+                            "sheet_name": payload.get("sheet_name", 0),
+                            "date_format": payload.get("date_format", "%Y-%m-%d"),
+                        }
+                        run_id, run_dir = create_run(
+                            "embedding-build",
+                            action_args,
+                            __version__,
+                            run_name=payload.get("run_name"),
+                            description=payload.get("description"),
+                            tags=tags,
+                        )
+                        write_inputs(
+                            run_id,
+                            {
+                                "action": "embedding-build",
+                                "action_args": action_args,
+                                "run_name": payload.get("run_name"),
+                                "description": payload.get("description"),
+                                "tags": tags,
+                            },
+                        )
+                        index = ArtifactIndex()
+                        try:
+                            index.upsert_run(read_run(run_id))
+                            provider, resolved_model = service.get_embedding_provider(
+                                str(provider_name),
+                                resolved_model_name,
+                            )
+                            result = _execute_embedding_build(action_args, run_dir, provider=provider, resolved_model=resolved_model)
+                            created_artifacts = _register_artifacts(index, run_id, result.get("artifacts", []))
+                            finalized = finalize_run(run_id, "succeeded")
+                            index.upsert_run(finalized)
                             self._send_json(
                                 HTTPStatus.OK,
-                                {
-                                    "ok": True,
-                                    "run_id": run_id,
-                                    "run_dir": str(run_dir),
-                                    "run": _enrich_run(index, finalized),
-                                    "result": result["payload"],
-                                    "artifacts": created_artifacts,
-                                },
+                                _build_run_response(
+                                    index,
+                                    finalized,
+                                    run_dir=run_dir,
+                                    result=result,
+                                    artifacts=created_artifacts,
+                                ),
                             )
                             return
                         except Exception as exc:
@@ -422,10 +775,101 @@ class VelariaService:
                             raise
                         finally:
                             index.close()
-                    raise FileNotFoundError(f"unknown endpoint: {path}")
+                    if parts in {("search", "hybrid"), ("runs", "hybrid-search")}:
+                        tags = payload.get("tags") or []
+                        if isinstance(tags, str):
+                            tags = _parse_csv_list(tags)
+                        provider_name = payload.get("provider") or _default_embedding_provider()
+                        resolved_model_name = _default_embedding_model(provider_name, payload.get("model"))
+                        action_args = {
+                            "dataset_path": str(_normalize_path(str(payload["dataset_path"])))
+                            if payload.get("dataset_path")
+                            else None,
+                            "query_text": payload["query_text"],
+                            "provider": provider_name,
+                            "model": resolved_model_name,
+                            "template_version": payload.get("template_version", "text-v1"),
+                            "top_k": int(payload.get("top_k", 10)),
+                            "metric": payload.get("metric", "cosine"),
+                            "where_sql": payload.get("where_sql"),
+                            "vector_column": payload.get("vector_column", "embedding"),
+                            "output_path": payload.get("output_path"),
+                            "preview_limit": int(payload.get("preview_limit", 50)),
+                        }
+                        run_id, run_dir = create_run(
+                            "hybrid-search",
+                            action_args,
+                            __version__,
+                            run_name=payload.get("run_name"),
+                            description=payload.get("description"),
+                            tags=tags,
+                        )
+                        write_inputs(
+                            run_id,
+                            {
+                                "action": "hybrid-search",
+                                "action_args": action_args,
+                                "run_name": payload.get("run_name"),
+                                "description": payload.get("description"),
+                                "tags": tags,
+                            },
+                        )
+                        index = ArtifactIndex()
+                        try:
+                            index.upsert_run(read_run(run_id))
+                            provider, resolved_model = service.get_embedding_provider(
+                                str(provider_name),
+                                resolved_model_name,
+                            )
+                            result = _execute_hybrid_search(action_args, run_dir, provider=provider, resolved_model=resolved_model)
+                            created_artifacts = _register_artifacts(index, run_id, result.get("artifacts", []))
+                            finalized = finalize_run(run_id, "succeeded")
+                            index.upsert_run(finalized)
+                            self._send_json(HTTPStatus.OK, _build_run_response(index, finalized, run_dir=run_dir, result=result, artifacts=created_artifacts))
+                            return
+                        except Exception as exc:
+                            append_stderr(run_id, traceback.format_exc())
+                            finalized = finalize_run(
+                                run_id,
+                                "failed",
+                                error=str(exc),
+                                details=cli_impl._error_payload_from_exception(exc),
+                            )
+                            index.upsert_run(finalized)
+                            raise
+                        finally:
+                            index.close()
+                    raise ApiRouteNotFoundError(f"unknown endpoint: {path}")
                 except Exception as exc:
-                    payload = cli_impl._error_payload_from_exception(exc)
-                    self._send_json(HTTPStatus.BAD_REQUEST, payload)
+                    status, payload = _error_response(exc)
+                    self._send_json(status, payload)
+
+            def do_DELETE(self) -> None:  # noqa: N802
+                parsed = urlparse(self.path)
+                path = parsed.path
+                try:
+                    parts = _api_parts(path)
+                    if parts is None:
+                        raise ApiRouteNotFoundError(f"unknown endpoint: {path}")
+                    if len(parts) == 2 and parts[0] == "runs":
+                        run_id = parts[1]
+                        index = ArtifactIndex()
+                        try:
+                            deleted = index.delete_run(run_id, delete_files=True)
+                            self._send_json(
+                                HTTPStatus.OK,
+                                {
+                                    "ok": True,
+                                    **deleted,
+                                },
+                            )
+                            return
+                        finally:
+                            index.close()
+                    raise ApiRouteNotFoundError(f"unknown endpoint: {path}")
+                except Exception as exc:
+                    status, payload = _error_response(exc)
+                    self._send_json(status, payload)
 
             def log_message(self, format: str, *args) -> None:  # noqa: A003
                 return

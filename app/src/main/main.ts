@@ -48,6 +48,8 @@ function startSidecar() {
         'run',
         '--project',
         path.join(root, 'python_api'),
+        '--extra',
+        'embedding',
         'python',
         path.join(root, 'python_api', 'velaria_service.py'),
         '--port',
@@ -132,9 +134,7 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  app.quit();
 });
 
 app.on('before-quit', () => {

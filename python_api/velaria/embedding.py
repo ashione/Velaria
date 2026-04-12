@@ -19,6 +19,8 @@ from .excel import read_excel
 _DEFAULT_TEMPLATE_FIELDS = ("title", "summary", "content", "body", "tags")
 DEFAULT_LOCAL_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_LOCAL_EMBEDDING_MODEL_DIR = pathlib.Path(__file__).resolve().parents[1] / "models" / "all-MiniLM-L6-v2"
+DEFAULT_LOCAL_CHINESE_EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
+DEFAULT_LOCAL_CHINESE_EMBEDDING_MODEL_DIR = pathlib.Path(__file__).resolve().parents[1] / "models" / "BAAI--bge-small-zh-v1.5"
 EMBEDDING_MODEL_DIR_ENV = "VELARIA_EMBEDDING_MODEL_DIR"
 EMBEDDING_CACHE_DIR_ENV = "VELARIA_EMBEDDING_CACHE_DIR"
 DEFAULT_EMBEDDING_WARMUP_TEXT = "warmup embedding text"
@@ -187,6 +189,8 @@ def default_embedding_model_dir(model_name: str | pathlib.Path = DEFAULT_LOCAL_E
         return model_name
     if model_name == DEFAULT_LOCAL_EMBEDDING_MODEL:
         return DEFAULT_LOCAL_EMBEDDING_MODEL_DIR
+    if model_name == DEFAULT_LOCAL_CHINESE_EMBEDDING_MODEL:
+        return DEFAULT_LOCAL_CHINESE_EMBEDDING_MODEL_DIR
     return pathlib.Path(__file__).resolve().parents[1] / "models" / model_name.replace("/", "--")
 
 
@@ -226,14 +230,16 @@ def download_embedding_model(
 def resolve_embedding_model_name(model_name: str | pathlib.Path) -> str:
     if isinstance(model_name, pathlib.Path):
         return str(model_name)
-    if model_name != DEFAULT_LOCAL_EMBEDDING_MODEL:
+    if model_name not in {DEFAULT_LOCAL_EMBEDDING_MODEL, DEFAULT_LOCAL_CHINESE_EMBEDDING_MODEL}:
         return model_name
 
     env_dir = os.environ.get(EMBEDDING_MODEL_DIR_ENV)
     if env_dir:
         return env_dir
-    if DEFAULT_LOCAL_EMBEDDING_MODEL_DIR.exists():
+    if model_name == DEFAULT_LOCAL_EMBEDDING_MODEL and DEFAULT_LOCAL_EMBEDDING_MODEL_DIR.exists():
         return str(DEFAULT_LOCAL_EMBEDDING_MODEL_DIR)
+    if model_name == DEFAULT_LOCAL_CHINESE_EMBEDDING_MODEL and DEFAULT_LOCAL_CHINESE_EMBEDDING_MODEL_DIR.exists():
+        return str(DEFAULT_LOCAL_CHINESE_EMBEDDING_MODEL_DIR)
     return model_name
 
 
@@ -277,6 +283,25 @@ def render_text_template(
         value = _stringify_template_value(record.get(field))
         if value:
             parts.append(f"{field}: {value}")
+    if not parts:
+        ignored_fields = {
+            text_field,
+            "doc_id",
+            "source_updated_at",
+            "embedding",
+            "embedding_version",
+            "text_template_version",
+            "provider_name",
+            "model_name",
+            "dimension",
+            "embedded_at",
+        }
+        for field, raw_value in record.items():
+            if field in ignored_fields:
+                continue
+            value = _stringify_template_value(raw_value)
+            if value:
+                parts.append(f"{field}: {value}")
     if not parts:
         raise ValueError("record does not contain usable text fields")
     return "\n".join(parts)

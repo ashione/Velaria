@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { DATASETS_KEY, I18N, LOCALE_KEY, type Locale } from './i18n';
 
+const DEFAULT_CHINESE_EMBEDDING_MODEL = 'BAAI/bge-small-zh-v1.5';
+const EMBEDDING_MODEL_OPTIONS = [
+  'BAAI/bge-small-zh-v1.5',
+  'sentence-transformers/all-MiniLM-L6-v2',
+] as const;
+const EMBEDDING_TEMPLATE_OPTIONS = ['text-v1'] as const;
+
 type PreviewData = {
   schema?: string[];
   rows?: Record<string, unknown>[];
@@ -26,6 +33,16 @@ type EmbeddingConfig = {
   vectorColumn: string;
 };
 
+type EmbeddingDatasetRecord = {
+  datasetPath: string;
+  artifactUri: string;
+  artifactId: string;
+  runId: string;
+  builtAt: string;
+  schema: string[];
+  rowCount?: number;
+};
+
 type DatasetRecord = {
   datasetId: string;
   name: string;
@@ -39,6 +56,12 @@ type DatasetRecord = {
   sourceLabel: string;
   importOptions: ImportOptions;
   embeddingConfig: EmbeddingConfig;
+  embeddingDataset: EmbeddingDatasetRecord | null;
+};
+
+type EmbeddingBuildState = {
+  status: 'building' | 'failed';
+  error?: string;
 };
 
 type RunSummary = {
@@ -122,6 +145,12 @@ type HybridSearchState = {
   vectorColumn: string;
 };
 
+type LastResultState = {
+  kind: 'sql' | 'hybrid';
+  title: string;
+  html: string;
+};
+
 const defaultImportOptions: ImportOptions = {
   delimiter: ',',
   columns: '',
@@ -134,9 +163,9 @@ const defaultImportOptions: ImportOptions = {
 const defaultEmbeddingConfig: EmbeddingConfig = {
   enabled: false,
   textColumns: [],
-  provider: '',
-  model: '',
-  templateVersion: '',
+  provider: 'minilm',
+  model: DEFAULT_CHINESE_EMBEDDING_MODEL,
+  templateVersion: 'text-v1',
   vectorColumn: 'embedding',
 };
 
@@ -150,9 +179,9 @@ const defaultImportForm: ImportFormState = {
   jsonFormat: 'json_lines',
   embeddingEnabled: false,
   embeddingTextColumns: '',
-  embeddingProvider: '',
-  embeddingModel: '',
-  embeddingTemplateVersion: '',
+  embeddingProvider: 'minilm',
+  embeddingModel: DEFAULT_CHINESE_EMBEDDING_MODEL,
+  embeddingTemplateVersion: 'text-v1',
   embeddingVectorColumn: 'embedding',
 };
 
@@ -168,9 +197,9 @@ const defaultAnalyzeState: AnalyzeState = {
 const defaultHybridSearchState: HybridSearchState = {
   queryText: '',
   textColumns: '',
-  provider: '',
-  model: '',
-  templateVersion: '',
+  provider: 'minilm',
+  model: DEFAULT_CHINESE_EMBEDDING_MODEL,
+  templateVersion: 'text-v1',
   topK: '10',
   vectorColumn: 'embedding',
 };
@@ -253,15 +282,39 @@ function normalizeEmbeddingConfig(value: unknown): EmbeddingConfig {
   const textColumns = Array.isArray(record?.textColumns)
     ? record.textColumns.filter((item): item is string => typeof item === 'string')
     : [];
+  const provider = typeof record?.provider === 'string' ? record.provider : 'minilm';
+  const model =
+    typeof record?.model === 'string' && record.model
+      ? record.model
+      : provider === 'minilm'
+        ? DEFAULT_CHINESE_EMBEDDING_MODEL
+        : '';
   return {
     enabled: Boolean(record?.enabled),
     textColumns,
-    provider: typeof record?.provider === 'string' ? record.provider : '',
-    model: typeof record?.model === 'string' ? record.model : '',
+    provider,
+    model,
     templateVersion: typeof record?.templateVersion === 'string' ? record.templateVersion : '',
     vectorColumn: typeof record?.vectorColumn === 'string' && record.vectorColumn
       ? record.vectorColumn
       : 'embedding',
+  };
+}
+
+function normalizeEmbeddingDatasetRecord(value: unknown): EmbeddingDatasetRecord | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  if (typeof record.datasetPath !== 'string' || !record.datasetPath) return null;
+  return {
+    datasetPath: record.datasetPath,
+    artifactUri: typeof record.artifactUri === 'string' ? record.artifactUri : '',
+    artifactId: typeof record.artifactId === 'string' ? record.artifactId : '',
+    runId: typeof record.runId === 'string' ? record.runId : '',
+    builtAt: typeof record.builtAt === 'string' ? record.builtAt : new Date().toISOString(),
+    schema: Array.isArray(record.schema)
+      ? record.schema.filter((item): item is string => typeof item === 'string')
+      : [],
+    rowCount: typeof record.rowCount === 'number' ? record.rowCount : undefined,
   };
 }
 
@@ -274,6 +327,7 @@ function createDatasetRecord(payload: {
   description?: string;
   importOptions?: Partial<ImportOptions>;
   embeddingConfig?: Partial<EmbeddingConfig>;
+  embeddingDataset?: EmbeddingDatasetRecord | null;
 }): DatasetRecord {
   const importOptions = { ...defaultImportOptions, ...(payload.importOptions || {}) };
   const embeddingConfig = { ...defaultEmbeddingConfig, ...(payload.embeddingConfig || {}) };
@@ -290,6 +344,7 @@ function createDatasetRecord(payload: {
     sourceLabel: '',
     importOptions,
     embeddingConfig,
+    embeddingDataset: payload.embeddingDataset || null,
   };
 }
 
@@ -316,6 +371,7 @@ function normalizeDatasetRecord(value: unknown): DatasetRecord | null {
     sourceLabel: typeof record.sourceLabel === 'string' ? record.sourceLabel : '',
     importOptions: normalizeImportOptions(record.importOptions),
     embeddingConfig: normalizeEmbeddingConfig(record.embeddingConfig),
+    embeddingDataset: normalizeEmbeddingDatasetRecord(record.embeddingDataset),
   };
 }
 
@@ -414,6 +470,82 @@ function renderPreviewTable(preview: PreviewData, emptyText: string) {
   `;
 }
 
+function toNumericScore(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function metricPrefersHigherScores(metric: string): boolean {
+  return metric.trim().toLowerCase() === 'dot';
+}
+
+function renderHybridPreviewTable(
+  preview: PreviewData,
+  emptyText: string,
+  metric: string,
+  scoreColumn = 'vector_score'
+) {
+  const rows = [...(preview.rows || [])];
+  const baseSchema = preview.schema || (rows[0] ? Object.keys(rows[0]) : []);
+  if (!rows.length) {
+    return `<div class="empty">${escapeHtml(emptyText)}</div>`;
+  }
+
+  const hasScore = baseSchema.includes(scoreColumn);
+  const higherIsBetter = metricPrefersHigherScores(metric);
+  const scoreDisplayLabel = higherIsBetter ? 'vector_score' : 'vector_distance';
+  if (hasScore) {
+    rows.sort((left, right) => {
+      const leftScore = toNumericScore((left as Record<string, unknown>)[scoreColumn]);
+      const rightScore = toNumericScore((right as Record<string, unknown>)[scoreColumn]);
+      if (leftScore == null && rightScore == null) return 0;
+      if (leftScore == null) return 1;
+      if (rightScore == null) return -1;
+      return higherIsBetter ? rightScore - leftScore : leftScore - rightScore;
+    });
+  }
+
+  const schema = hasScore
+    ? ['rank', scoreDisplayLabel, ...baseSchema.filter((column) => column !== scoreColumn)]
+    : ['rank', ...baseSchema];
+
+  const head = schema.map((column) => `<th>${escapeHtml(column)}</th>`).join('');
+  const body = rows
+    .map((row, index) => {
+      const record = row as Record<string, unknown>;
+      const cells = schema
+        .map((column) => {
+          if (column === 'rank') {
+            return `<td>${index + 1}</td>`;
+          }
+          const value = column === scoreDisplayLabel ? record[scoreColumn] : record[column];
+          if (column === scoreDisplayLabel) {
+            const score = toNumericScore(value);
+            return `<td>${score == null ? '' : score.toFixed(6)}</td>`;
+          }
+          return `<td>${escapeHtml(value ?? '')}</td>`;
+        })
+        .join('');
+      return `<tr>${cells}</tr>`;
+    })
+    .join('');
+
+  return `
+    <div class="preview-wrap">
+      <table class="hybrid-table">
+        <thead><tr>${head}</tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>
+  `;
+}
+
 function extractHybridPreview(payload: unknown): PreviewData {
   const record = asRecord(payload);
   if (!record) return {};
@@ -439,6 +571,33 @@ function extractHybridExplain(payload: unknown): string {
   }
 }
 
+function extractEmbeddingDatasetRecord(payload: unknown): EmbeddingDatasetRecord {
+  const record = asRecord(payload);
+  const result = asRecord(record?.result);
+  const run = asRecord(record?.run);
+  const artifact = asRecord(record?.artifact);
+  const datasetPath = typeof result?.dataset_path === 'string' ? result.dataset_path : '';
+  if (!datasetPath) {
+    throw new Error('embedding build response missing dataset_path');
+  }
+  return {
+    datasetPath,
+    artifactUri: typeof artifact?.uri === 'string' ? artifact.uri : '',
+    artifactId: typeof artifact?.artifact_id === 'string' ? artifact.artifact_id : '',
+    runId:
+      typeof record?.run_id === 'string'
+        ? record.run_id
+        : typeof run?.run_id === 'string'
+          ? run.run_id
+          : '',
+    builtAt: new Date().toISOString(),
+    schema: Array.isArray(result?.schema)
+      ? result.schema.filter((item): item is string => typeof item === 'string')
+      : [],
+    rowCount: typeof result?.row_count === 'number' ? result.row_count : undefined,
+  };
+}
+
 function embeddingFormToConfig(form: ImportFormState): EmbeddingConfig {
   return {
     enabled: form.embeddingEnabled,
@@ -448,6 +607,27 @@ function embeddingFormToConfig(form: ImportFormState): EmbeddingConfig {
     templateVersion: form.embeddingTemplateVersion.trim(),
     vectorColumn: form.embeddingVectorColumn.trim() || 'embedding',
   };
+}
+
+function createEmbeddingBuildPayload(dataset: DatasetRecord): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    input_path: dataset.sourcePath,
+    input_type: dataset.sourceType,
+    delimiter: dataset.importOptions.delimiter,
+    json_format: dataset.importOptions.jsonFormat,
+    line_mode: dataset.importOptions.lineMode,
+    text_columns: dataset.embeddingConfig.textColumns,
+    provider: dataset.embeddingConfig.provider || undefined,
+    model: dataset.embeddingConfig.model || undefined,
+    template_version: dataset.embeddingConfig.templateVersion || undefined,
+    vector_column: dataset.embeddingConfig.vectorColumn || 'embedding',
+    run_name: `embedding-${dataset.name}`,
+    description: `Embedding build for dataset ${dataset.name}`,
+  };
+  if (dataset.importOptions.columns) payload.columns = dataset.importOptions.columns;
+  if (dataset.importOptions.mappings) payload.mappings = dataset.importOptions.mappings;
+  if (dataset.importOptions.regexPattern) payload.regex_pattern = dataset.importOptions.regexPattern;
+  return payload;
 }
 
 function isDatasetBackedByRun(dataset: DatasetRecord, runDir: string): boolean {
@@ -482,7 +662,14 @@ export function App() {
   const [hybridSearch, setHybridSearch] = useState<HybridSearchState>(defaultHybridSearchState);
   const [hybridResultHtml, setHybridResultHtml] = useState('<div class="empty">No hybrid search yet.</div>');
   const [hybridMessage, setHybridMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
+  const [lastResult, setLastResult] = useState<LastResultState>({
+    kind: 'sql',
+    title: 'SQL',
+    html: '<div class="empty">No run yet.</div>',
+  });
   const [sqlUnderstandingExpanded, setSqlUnderstandingExpanded] = useState(false);
+  const [savingDataset, setSavingDataset] = useState(false);
+  const [embeddingBuilds, setEmbeddingBuilds] = useState<Record<string, EmbeddingBuildState>>({});
 
   const t = (key: string, vars: Record<string, string | number> = {}) => {
     const dict = I18N[locale] || I18N.en;
@@ -545,9 +732,27 @@ export function App() {
       },
       ...options,
     });
-    const payload = await response.json();
-    if (!response.ok || payload.ok === false) {
-      throw new Error(payload.error || `request failed: ${response.status}`);
+    const rawText = await response.text();
+    const isJson = (response.headers.get('content-type') || '').includes('application/json');
+    let payload: any = {};
+    if (rawText) {
+      if (isJson) {
+        try {
+          payload = JSON.parse(rawText);
+        } catch {
+          payload = { raw: rawText };
+        }
+      } else {
+        payload = { raw: rawText };
+      }
+    }
+    if (!response.ok || payload?.ok === false) {
+      const errorMessage =
+        (typeof payload?.error === 'string' && payload.error) ||
+        (typeof payload?.message === 'string' && payload.message) ||
+        (typeof payload?.raw === 'string' && payload.raw.trim()) ||
+        `request failed: ${response.status}`;
+      throw new Error(errorMessage);
     }
     return payload;
   }
@@ -650,30 +855,157 @@ export function App() {
     }
   }
 
-  function saveImportDataset() {
-    if (!pendingImport) return;
-    const record = createDatasetRecord({
-      name: pendingImport.dataset.name,
-      sourceType: pendingImport.dataset.source_type,
-      sourcePath: pendingImport.dataset.source_path,
-      preview: pendingImport.preview,
-      kind: 'imported',
-      importOptions: {
-        delimiter: importForm.delimiter,
-        columns: importForm.inputType === 'json' ? importForm.columns.trim() : '',
-        mappings: importForm.inputType === 'line' ? importForm.columns.trim() : '',
-        regexPattern: importForm.regexPattern.trim(),
-        lineMode: importForm.regexPattern.trim() ? 'regex' : 'split',
-        jsonFormat: importForm.jsonFormat,
-      },
-      embeddingConfig: embeddingFormToConfig(importForm),
+  function getEmbeddingUiStatus(dataset: DatasetRecord | null): 'disabled' | 'configured' | 'building' | 'failed' | 'ready' {
+    if (!dataset) return 'disabled';
+    const transient = embeddingBuilds[dataset.datasetId];
+    if (dataset.embeddingDataset?.datasetPath) return 'ready';
+    if (transient?.status === 'building') return 'building';
+    if (transient?.status === 'failed') return 'failed';
+    if (dataset.embeddingConfig.enabled) return 'configured';
+    return 'disabled';
+  }
+
+  function getEmbeddingStatusLabel(dataset: DatasetRecord | null) {
+    const status = getEmbeddingUiStatus(dataset);
+    if (status === 'ready') return t('embedding_ready');
+    if (status === 'building') return t('embedding_building_short');
+    if (status === 'failed') return t('embedding_build_failed_short');
+    if (status === 'configured') return t('embedding_configured_only');
+    return t('embedding_disabled_short');
+  }
+
+  async function buildEmbeddingDataset(datasetId: string, datasetSnapshot?: DatasetRecord) {
+    const target = datasetSnapshot || datasets.find((dataset) => dataset.datasetId === datasetId);
+    if (
+      !target ||
+      !target.embeddingConfig.enabled ||
+      target.embeddingDataset?.datasetPath ||
+      embeddingBuilds[datasetId]?.status === 'building'
+    ) {
+      return;
+    }
+
+    setEmbeddingBuilds((current) => ({
+      ...current,
+      [datasetId]: { status: 'building' },
+    }));
+    setDatasetMessage({
+      kind: 'info',
+      text: t('embedding_build_started', { name: target.name }),
     });
-    setDatasets((current) => [record, ...current]);
-    setSelectedDatasetId(record.datasetId);
-    setPendingImport(null);
-    setImportMessage(null);
-    setDatasetMessage({ kind: 'info', text: t('dataset_saved_message') });
-    setView('analyze');
+
+    try {
+      const buildResult = await api('/api/v1/runs/embedding-build', {
+        method: 'POST',
+        body: JSON.stringify(createEmbeddingBuildPayload(target)),
+      });
+      const embeddingDataset = extractEmbeddingDatasetRecord(buildResult);
+      const result = asRecord(buildResult.result);
+
+      setDatasets((current) =>
+        current.map((dataset) => {
+          if (dataset.datasetId !== datasetId) return dataset;
+          return {
+            ...dataset,
+            embeddingDataset,
+            embeddingConfig: {
+              ...dataset.embeddingConfig,
+              provider:
+                typeof result?.provider === 'string' ? result.provider : dataset.embeddingConfig.provider,
+              model: typeof result?.model === 'string' ? result.model : dataset.embeddingConfig.model,
+              templateVersion:
+                typeof result?.template_version === 'string'
+                  ? result.template_version
+                  : dataset.embeddingConfig.templateVersion,
+              vectorColumn:
+                typeof result?.vector_column === 'string'
+                  ? result.vector_column
+                  : dataset.embeddingConfig.vectorColumn,
+            },
+          };
+        })
+      );
+      setEmbeddingBuilds((current) => {
+        const next = { ...current };
+        delete next[datasetId];
+        return next;
+      });
+      setDatasetMessage({
+        kind: 'info',
+        text: t('embedding_build_succeeded', { name: target.name }),
+      });
+      if (selectedDatasetId === datasetId) {
+        setHybridMessage({ kind: 'info', text: t('hybrid_ready_after_embedding_build') });
+      }
+    } catch (error) {
+      const message = String(error);
+      setEmbeddingBuilds((current) => ({
+        ...current,
+        [datasetId]: { status: 'failed', error: message },
+      }));
+      setDatasetMessage({
+        kind: 'error',
+        text: t('embedding_build_failed', { error: message }),
+      });
+      if (selectedDatasetId === datasetId) {
+        setHybridMessage({ kind: 'error', text: t('embedding_build_failed', { error: message }) });
+      }
+    }
+  }
+
+  async function saveImportDataset() {
+    if (!pendingImport) return;
+    const embeddingConfig = embeddingFormToConfig(importForm);
+    const importOptions = {
+      delimiter: importForm.delimiter,
+      columns: importForm.inputType === 'json' ? importForm.columns.trim() : '',
+      mappings: importForm.inputType === 'line' ? importForm.columns.trim() : '',
+      regexPattern: importForm.regexPattern.trim(),
+      lineMode: importForm.regexPattern.trim() ? 'regex' : 'split',
+      jsonFormat: importForm.jsonFormat,
+    };
+
+    setSavingDataset(true);
+    setDatasetMessage(null);
+    setImportMessage({
+      kind: 'info',
+      text: embeddingConfig.enabled ? t('embedding_building') : t('dataset_saving'),
+    });
+    try {
+      const record = createDatasetRecord({
+        name: pendingImport.dataset.name,
+        sourceType: pendingImport.dataset.source_type,
+        sourcePath: pendingImport.dataset.source_path,
+        preview: pendingImport.preview,
+        kind: 'imported',
+        importOptions,
+        embeddingConfig,
+        embeddingDataset: null,
+      });
+      setDatasets((current) => [record, ...current]);
+      setSelectedDatasetId(record.datasetId);
+      setPendingImport(null);
+      setImportMessage(null);
+      setDatasetMessage({
+        kind: 'info',
+        text: embeddingConfig.enabled
+          ? t('dataset_saved_with_embedding_message')
+          : t('dataset_saved_message'),
+      });
+      setView('analyze');
+      if (embeddingConfig.enabled) {
+        void buildEmbeddingDataset(record.datasetId, record);
+      }
+    } catch (error) {
+      setImportMessage({
+        kind: 'error',
+        text: embeddingConfig.enabled
+          ? t('embedding_build_failed', { error: String(error) })
+          : t('dataset_save_failed', { error: String(error) }),
+      });
+    } finally {
+      setSavingDataset(false);
+    }
   }
 
   function removeDataset(datasetId: string) {
@@ -682,6 +1014,11 @@ export function App() {
     const confirmed = window.confirm(t('confirm_remove_dataset', { name: target.name }));
     if (!confirmed) return;
     setDatasets((current) => current.filter((dataset) => dataset.datasetId !== datasetId));
+    setEmbeddingBuilds((current) => {
+      const next = { ...current };
+      delete next[datasetId];
+      return next;
+    });
     setDatasetMessage({
       kind: 'info',
       text: t('dataset_removed_message', { name: target.name }),
@@ -712,8 +1049,7 @@ export function App() {
     }));
   }
 
-  async function runAnalysis(event: React.FormEvent) {
-    event.preventDefault();
+  async function runAnalysis() {
     setAnalysisResultHtml(`<div class="empty">${escapeHtml(t('running_analysis'))}</div>`);
     try {
       const payload = {
@@ -745,39 +1081,80 @@ export function App() {
         </div>
         ${renderPreviewTable(runDetail.preview, t('no_preview_rows'))}
       `);
+      setLastResult({
+        kind: 'sql',
+        title: t('run_detail'),
+        html: `
+          <div class="meta">
+            <span>${escapeHtml(runPayload.run.status)}</span>
+            <span>${escapeHtml(runPayload.run.run_id)}</span>
+            <span>${escapeHtml(t('rows_count', { count: runDetail.preview.row_count || '—' }))}</span>
+          </div>
+          ${renderPreviewTable(runDetail.preview, t('no_preview_rows'))}
+        `,
+      });
       await refreshRuns(runPayload.run_id);
     } catch (error) {
       setSelectedRunDetail(null);
-      setAnalysisResultHtml(`<div class="empty">${escapeHtml(t('run_failed', { error: String(error) }))}</div>`);
+      const html = `<div class="empty">${escapeHtml(t('run_failed', { error: String(error) }))}</div>`;
+      setAnalysisResultHtml(html);
+      setLastResult({
+        kind: 'sql',
+        title: t('run_detail'),
+        html,
+      });
     }
   }
 
-  async function runHybridSearch(event: React.FormEvent) {
-    event.preventDefault();
-    if (!currentDataset) return;
+  async function runHybridSearch() {
+    if (!currentDataset) {
+      const html = `<div class="empty">${escapeHtml(t('no_dataset_for_analyze'))}</div>`;
+      setHybridResultHtml(html);
+      setLastResult({
+        kind: 'hybrid',
+        title: t('hybrid_results'),
+        html,
+      });
+      return;
+    }
+    const datasetPath = currentDataset.embeddingDataset?.datasetPath || '';
+    if (!hybridSearchReady || !datasetPath) {
+      const message = t('hybrid_requires_embedding_dataset');
+      const html = `<div class="empty">${escapeHtml(message)}</div>`;
+      setHybridResultHtml(html);
+      setLastResult({
+        kind: 'hybrid',
+        title: t('hybrid_results'),
+        html,
+      });
+      setHybridMessage({ kind: 'error', text: message });
+      return;
+    }
     const queryText = hybridSearch.queryText.trim();
     if (!queryText) {
-      setHybridMessage({ kind: 'error', text: t('hybrid_query_required') });
+      const message = t('hybrid_query_required');
+      const html = `<div class="empty">${escapeHtml(message)}</div>`;
+      setHybridResultHtml(html);
+      setLastResult({
+        kind: 'hybrid',
+        title: t('hybrid_results'),
+        html,
+      });
+      setHybridMessage({ kind: 'error', text: message });
       return;
     }
     setHybridMessage({ kind: 'info', text: t('hybrid_loading') });
     setHybridResultHtml(`<div class="empty">${escapeHtml(t('hybrid_loading'))}</div>`);
     try {
+      const whereSql = sqlStructure.where?.trim() || '';
       const payload = {
-        input_path: currentDataset.sourcePath,
-        input_type: currentDataset.sourceType,
-        delimiter: currentDataset.importOptions.delimiter,
-        columns: currentDataset.importOptions.columns || undefined,
-        mappings: currentDataset.importOptions.mappings || undefined,
-        regex_pattern: currentDataset.importOptions.regexPattern || undefined,
-        line_mode: currentDataset.importOptions.lineMode,
-        json_format: currentDataset.importOptions.jsonFormat,
+        dataset_path: datasetPath,
         query_text: queryText,
-        text_columns: csvToList(hybridSearch.textColumns),
         provider: hybridSearch.provider.trim() || undefined,
         model: hybridSearch.model.trim() || undefined,
         template_version: hybridSearch.templateVersion.trim() || undefined,
         top_k: Number(hybridSearch.topK) || 10,
+        where_sql: whereSql || undefined,
         vector_column: hybridSearch.vectorColumn.trim() || 'embedding',
       };
       const result = await api('/api/v1/runs/hybrid-search', {
@@ -786,18 +1163,35 @@ export function App() {
       });
       const preview = extractHybridPreview(result);
       const explain = extractHybridExplain(result);
-      setHybridResultHtml(`
+      const metric = String((asRecord(result.result)?.metric as string | undefined) || 'cosine');
+      const effectiveWhere = String((asRecord(result.result)?.where_sql as string | undefined) || whereSql);
+      const html = `
         <div class="meta">
           <span>${escapeHtml(t('rows_count', { count: preview.row_count ?? preview.rows?.length ?? '—' }))}</span>
+          <span>${escapeHtml(metric)}</span>
+          <span>${escapeHtml(effectiveWhere ? t('hybrid_filter_applied') : t('hybrid_filter_none'))}</span>
           <span>${escapeHtml(hybridSearch.vectorColumn.trim() || 'embedding')}</span>
           <span>${escapeHtml(hybridSearch.provider.trim() || '—')}</span>
         </div>
+        ${effectiveWhere ? `<div class="helper">${escapeHtml(t('hybrid_filter_sql', { where: effectiveWhere }))}</div>` : ''}
         ${explain ? `<pre class="explain-block">${escapeHtml(explain)}</pre>` : ''}
-        ${renderPreviewTable(preview, t('hybrid_no_result'))}
-      `);
+        ${renderHybridPreviewTable(preview, t('hybrid_no_result'), metric)}
+      `;
+      setHybridResultHtml(html);
+      setLastResult({
+        kind: 'hybrid',
+        title: t('hybrid_results'),
+        html,
+      });
       setHybridMessage(null);
     } catch (error) {
-      setHybridResultHtml(`<div class="empty">${escapeHtml(t('hybrid_failed', { error: String(error) }))}</div>`);
+      const html = `<div class="empty">${escapeHtml(t('hybrid_failed', { error: String(error) }))}</div>`;
+      setHybridResultHtml(html);
+      setLastResult({
+        kind: 'hybrid',
+        title: t('hybrid_results'),
+        html,
+      });
       setHybridMessage({ kind: 'error', text: t('hybrid_failed', { error: String(error) }) });
     }
   }
@@ -828,18 +1222,13 @@ export function App() {
     try {
       const runPayload = await api(`/api/v1/runs/${encodeURIComponent(runId)}`);
       const runDir = String(runPayload.run?.run_dir || '');
-      let removedDatasetCount = 0;
-      if (runDir) {
-        setDatasets((current) => {
-          const next = current.filter((dataset) => {
-            const shouldRemove = isDatasetBackedByRun(dataset, runDir);
-            if (shouldRemove) removedDatasetCount += 1;
-            return !shouldRemove;
-          });
-          return next;
-        });
-      }
+      const removedDatasetCount = runDir
+        ? datasets.filter((dataset) => isDatasetBackedByRun(dataset, runDir)).length
+        : 0;
       await api(`/api/v1/runs/${encodeURIComponent(runId)}`, { method: 'DELETE' });
+      if (runDir) {
+        setDatasets((current) => current.filter((dataset) => !isDatasetBackedByRun(dataset, runDir)));
+      }
       await refreshRuns(selectedRunId === runId ? null : selectedRunId);
       if (selectedRunId === runId) {
         setSelectedRunDetail(null);
@@ -888,9 +1277,7 @@ export function App() {
   }
 
   const datasetCards = visibleDatasets.map((dataset) => {
-    const embeddingStatus = dataset.embeddingConfig.enabled
-      ? t('embedding_ready')
-      : t('embedding_disabled_short');
+    const embeddingStatus = getEmbeddingStatusLabel(dataset);
     return (
       <div
         key={dataset.datasetId}
@@ -928,12 +1315,38 @@ export function App() {
     ['sql_part_limit', sqlStructure.limit],
   ] as const;
 
+  const currentEmbeddingStatus = getEmbeddingUiStatus(currentDataset);
+  const currentEmbeddingBuild = currentDataset ? embeddingBuilds[currentDataset.datasetId] : null;
   const datasetKindLabel = currentDataset
     ? t(currentDataset.kind === 'result' ? 'kind_result' : 'kind_imported')
     : '—';
-  const currentEmbeddingSummary = currentDataset?.embeddingConfig.enabled
+  const currentEmbeddingSummary = currentDataset?.embeddingDataset?.datasetPath
     ? `${currentDataset.embeddingConfig.textColumns.join(', ') || '—'} · ${currentDataset.embeddingConfig.provider || '—'} · ${currentDataset.embeddingConfig.model || '—'}`
-    : t('embedding_disabled');
+    : currentEmbeddingStatus === 'building'
+      ? `${t('embedding_building_short')} · ${currentDataset?.embeddingConfig.textColumns.join(', ') || '—'}`
+      : currentEmbeddingStatus === 'failed'
+        ? `${t('embedding_build_failed_short')} · ${currentDataset?.embeddingConfig.textColumns.join(', ') || '—'}`
+        : currentDataset?.embeddingConfig.enabled
+      ? `${t('embedding_configured_only')} · ${currentDataset.embeddingConfig.textColumns.join(', ') || '—'}`
+      : t('embedding_disabled');
+  const currentEmbeddingDatasetValue = currentDataset?.embeddingDataset?.datasetPath || '';
+  const currentEmbeddingDatasetPath =
+    currentEmbeddingStatus === 'ready'
+      ? currentEmbeddingDatasetValue
+      : currentEmbeddingStatus === 'building'
+        ? t('embedding_dataset_building')
+        : currentEmbeddingStatus === 'failed'
+          ? t('embedding_dataset_failed')
+          : t('embedding_dataset_missing');
+  const hybridSearchReady = currentEmbeddingStatus === 'ready';
+  const datasetListEmptyMessage =
+    view === 'analyze' ? t('no_dataset_for_analyze') : t('no_datasets_available');
+  const datasetCardEmptyMessage =
+    currentDataset == null ? t('dataset_detail_empty') : null;
+  const showBuildEmbeddingAction =
+    currentDataset != null &&
+    (currentEmbeddingStatus === 'configured' || currentEmbeddingStatus === 'failed');
+  const isBuildingEmbedding = currentEmbeddingStatus === 'building';
 
   return (
     <div className="shell">
@@ -1037,7 +1450,7 @@ export function App() {
                       >
                         <div className="item-head">
                           <h4>{dataset.name}</h4>
-                          <span className="badge">{dataset.embeddingConfig.enabled ? t('embedding_ready') : t('embedding_disabled_short')}</span>
+                          <span className="badge">{getEmbeddingStatusLabel(dataset)}</span>
                         </div>
                         <div className="meta">
                           <span>{dataset.sourceType}</span>
@@ -1202,7 +1615,7 @@ export function App() {
                       <div className="field-grid">
                         <label>
                           <span>{t('embedding_model')}</span>
-                          <input
+                          <select
                             value={importForm.embeddingModel}
                             onChange={(event) =>
                               setImportForm((current) => ({
@@ -1210,13 +1623,18 @@ export function App() {
                                 embeddingModel: event.target.value,
                               }))
                             }
-                            placeholder={t('embedding_model_placeholder')}
                             disabled={!importForm.embeddingEnabled}
-                          />
+                          >
+                            {EMBEDDING_MODEL_OPTIONS.map((model) => (
+                              <option key={model} value={model}>
+                                {model}
+                              </option>
+                            ))}
+                          </select>
                         </label>
                         <label>
                           <span>{t('embedding_template_version')}</span>
-                          <input
+                          <select
                             value={importForm.embeddingTemplateVersion}
                             onChange={(event) =>
                               setImportForm((current) => ({
@@ -1224,9 +1642,14 @@ export function App() {
                                 embeddingTemplateVersion: event.target.value,
                               }))
                             }
-                            placeholder={t('embedding_template_placeholder')}
                             disabled={!importForm.embeddingEnabled}
-                          />
+                          >
+                            {EMBEDDING_TEMPLATE_OPTIONS.map((template) => (
+                              <option key={template} value={template}>
+                                {template}
+                              </option>
+                            ))}
+                          </select>
                         </label>
                       </div>
                       <label>
@@ -1259,7 +1682,11 @@ export function App() {
                           <span>{pendingImport.dataset.name}</span>
                           <span>{pendingImport.dataset.source_type}</span>
                           <span>{t('rows_count', { count: pendingImport.preview.row_count ?? '—' })}</span>
-                          <span>{importForm.embeddingEnabled ? t('embedding_ready') : t('embedding_disabled_short')}</span>
+                          <span>
+                            {importForm.embeddingEnabled
+                              ? t('embedding_configured_only')
+                              : t('embedding_disabled_short')}
+                          </span>
                         </div>
                         <div
                           dangerouslySetInnerHTML={{
@@ -1272,7 +1699,7 @@ export function App() {
                     )}
                   </div>
                   <div className="actions">
-                    <button onClick={saveImportDataset} disabled={!pendingImport}>
+                    <button onClick={saveImportDataset} disabled={!pendingImport || savingDataset}>
                       {t('save_as_dataset')}
                     </button>
                   </div>
@@ -1299,9 +1726,7 @@ export function App() {
                         <div className="item-head">
                           <h4>{dataset.name}</h4>
                           <div className="inline-actions">
-                            <span className="badge">
-                              {dataset.embeddingConfig.enabled ? t('embedding_ready') : t('embedding_disabled_short')}
-                            </span>
+                            <span className="badge">{getEmbeddingStatusLabel(dataset)}</span>
                             <button
                               type="button"
                               className="ghost danger-button"
@@ -1368,6 +1793,34 @@ export function App() {
                           <div>{datasetKindLabel}</div>
                         </div>
                       </div>
+                      {showBuildEmbeddingAction && (
+                        <div className="notice">
+                          <div>{t('embedding_build_needed_hint')}</div>
+                          <div className="actions notice-actions">
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => {
+                                void buildEmbeddingDataset(currentDataset.datasetId);
+                              }}
+                            >
+                              {t(
+                                currentEmbeddingStatus === 'failed'
+                                  ? 'embedding_build_retry'
+                                  : 'embedding_build_action'
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                      {isBuildingEmbedding && (
+                        <div className="notice">{t('embedding_building_hint')}</div>
+                      )}
+                      {currentEmbeddingStatus === 'failed' && currentEmbeddingBuild?.error && (
+                        <div className="notice error">
+                          {t('embedding_build_failed', { error: currentEmbeddingBuild.error })}
+                        </div>
+                      )}
                       <div
                         dangerouslySetInnerHTML={{
                           __html: renderPreviewTable(currentDataset.preview, t('no_preview_rows')),
@@ -1384,81 +1837,6 @@ export function App() {
         {view === 'analyze' && (
           <section className="section active">
             <div className="stack">
-              <div className="summary-band">
-                <section className="compact-panel">
-                  <h3>{t('datasets')}</h3>
-                  <input
-                    className="analyze-search"
-                    placeholder={t('analysis_dataset_search')}
-                    value={datasetSearch}
-                    onChange={(event) => setDatasetSearch(event.target.value)}
-                  />
-                  <div className="analyze-dataset-list" style={{ maxHeight: 220, overflow: 'auto' }}>
-                    {datasetCards}
-                    {!datasetCards.length && <div className="empty">{t('no_datasets_available')}</div>}
-                  </div>
-                </section>
-
-                <section className="compact-panel">
-                  <div className="actions" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-                    <h3>{t('dataset_context')}</h3>
-                    <button
-                      type="button"
-                      className="ghost"
-                      onClick={() => setSqlUnderstandingExpanded((value) => !value)}
-                    >
-                      {t(sqlUnderstandingExpanded ? 'collapse' : 'expand')}
-                    </button>
-                  </div>
-                  <label>
-                    <span>{t('dataset_label')}</span>
-                    <select
-                      value={selectedDatasetId || ''}
-                      onChange={(event) => setSelectedDatasetId(event.target.value)}
-                      disabled={!visibleDatasets.length}
-                    >
-                      {visibleDatasets.length ? (
-                        visibleDatasets.map((dataset) => (
-                          <option key={dataset.datasetId} value={dataset.datasetId}>
-                            {dataset.name}
-                          </option>
-                        ))
-                      ) : (
-                        <option value="">{t('no_dataset_option')}</option>
-                      )}
-                    </select>
-                  </label>
-                  <div className="compact-grid">
-                    <div className="compact-card">
-                      <strong>{t('field_source')}</strong>
-                      <div className="mono">{currentDataset?.sourcePath || '—'}</div>
-                    </div>
-                    <div className="compact-card">
-                      <strong>{t('field_schema')}</strong>
-                      <div>{currentDataset?.schema.join(', ') || '—'}</div>
-                    </div>
-                    <div className="compact-card">
-                      <strong>{t('field_embedding')}</strong>
-                      <div>{currentEmbeddingSummary}</div>
-                    </div>
-                    <div className="compact-card">
-                      <strong>{t('field_kind')}</strong>
-                      <div>{datasetKindLabel}</div>
-                    </div>
-                  </div>
-                  {sqlUnderstandingExpanded && (
-                    <div className="compact-grid">
-                      {sqlCards.map(([labelKey, value]) => (
-                        <div key={labelKey} className="compact-card">
-                          <strong>{t(labelKey)}</strong>
-                          <div>{value || t('sql_part_not_set')}</div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </section>
-              </div>
-
               <section className="panel">
                 <div className="panel-head">
                   <h2>{t('analyze_workspace')}</h2>
@@ -1468,7 +1846,138 @@ export function App() {
                   </div>
                 </div>
                 <div className="panel-body stack">
-                  <form onSubmit={runAnalysis}>
+                  {datasets.length ? (
+                    <div className="summary-band analyze-summary-band">
+                      <div className="subsection-card">
+                        <div className="subsection-head">
+                          <h3>{t('datasets')}</h3>
+                        </div>
+                        <div className="stack">
+                          <input
+                            className="analyze-search"
+                            placeholder={t('analysis_dataset_search')}
+                            value={datasetSearch}
+                            onChange={(event) => setDatasetSearch(event.target.value)}
+                          />
+                          <div className="analyze-dataset-list" style={{ maxHeight: 220, overflow: 'auto' }}>
+                            {datasetCards}
+                            {!datasetCards.length && <div className="empty">{datasetListEmptyMessage}</div>}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="subsection-card">
+                        <div className="subsection-head">
+                          <h3>{t('dataset_context')}</h3>
+                          <div className="actions">
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => setSqlUnderstandingExpanded((value) => !value)}
+                              disabled={!currentDataset}
+                            >
+                              {t(sqlUnderstandingExpanded ? 'collapse' : 'expand')}
+                            </button>
+                          </div>
+                        </div>
+                        <div className="stack">
+                          <label>
+                            <span>{t('dataset_label')}</span>
+                            <select
+                              value={selectedDatasetId || ''}
+                              onChange={(event) => setSelectedDatasetId(event.target.value)}
+                              disabled={!visibleDatasets.length}
+                            >
+                              {visibleDatasets.length ? (
+                                visibleDatasets.map((dataset) => (
+                                  <option key={dataset.datasetId} value={dataset.datasetId}>
+                                    {dataset.name}
+                                  </option>
+                                ))
+                              ) : (
+                                <option value="">{t('no_dataset_option')}</option>
+                              )}
+                            </select>
+                          </label>
+                          {currentDataset ? (
+                            <>
+                              <div className="compact-grid">
+                                <div className="compact-card">
+                                  <strong>{t('field_source')}</strong>
+                                  <div className="mono">{currentDataset.sourcePath}</div>
+                                </div>
+                                <div className="compact-card">
+                                  <strong>{t('field_embedding_dataset')}</strong>
+                                  <div className="mono">{currentEmbeddingDatasetPath || '—'}</div>
+                                </div>
+                                <div className="compact-card">
+                                  <strong>{t('field_schema')}</strong>
+                                  <div>{currentDataset.schema.join(', ') || '—'}</div>
+                                </div>
+                                <div className="compact-card">
+                                  <strong>{t('field_embedding')}</strong>
+                                  <div>{currentEmbeddingSummary}</div>
+                                </div>
+                                <div className="compact-card">
+                                  <strong>{t('field_kind')}</strong>
+                                  <div>{datasetKindLabel}</div>
+                                </div>
+                              </div>
+                              {showBuildEmbeddingAction && (
+                                <div className="notice">
+                                  <div>{t('embedding_build_needed_hint')}</div>
+                                  <div className="actions notice-actions">
+                                    <button
+                                      type="button"
+                                      className="ghost"
+                                      onClick={() => {
+                                        void buildEmbeddingDataset(currentDataset.datasetId);
+                                      }}
+                                    >
+                                      {t(
+                                        currentEmbeddingStatus === 'failed'
+                                          ? 'embedding_build_retry'
+                                          : 'embedding_build_action'
+                                      )}
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+                              {isBuildingEmbedding && (
+                                <div className="notice">{t('embedding_building_hint')}</div>
+                              )}
+                              {currentEmbeddingStatus === 'failed' && currentEmbeddingBuild?.error && (
+                                <div className="notice error">
+                                  {t('embedding_build_failed', { error: currentEmbeddingBuild.error })}
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <div className="compact-empty-card">
+                              <div className="empty">{datasetCardEmptyMessage}</div>
+                            </div>
+                          )}
+                          {sqlUnderstandingExpanded && currentDataset && (
+                            <div className="compact-grid">
+                              {sqlCards.map(([labelKey, value]) => (
+                                <div key={labelKey} className="compact-card">
+                                  <strong>{t(labelKey)}</strong>
+                                  <div>{value || t('sql_part_not_set')}</div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="compact-empty-card">
+                      <div className="empty">{t('no_dataset_for_analyze')}</div>
+                    </div>
+                  )}
+
+                  <div className="workbench-stack">
+                  <div className="workbench-form">
                     <div className="query-toolbar">
                       <label className="field">
                         <span>{t('input_path')}</span>
@@ -1569,6 +2078,82 @@ export function App() {
                         </button>
                       </div>
                     </div>
+                    <div className="hybrid-inline-block">
+                    <div className="helper">{t('hybrid_search_inline_hint')}</div>
+                    {hybridMessage && (
+                      <div className={`notice ${hybridMessage.kind === 'error' ? 'error' : ''}`}>
+                        {hybridMessage.text}
+                      </div>
+                    )}
+                    {!hybridSearchReady && currentDataset && currentEmbeddingStatus === 'disabled' && (
+                      <div className="notice error">{t('hybrid_requires_embedding_enabled')}</div>
+                    )}
+                    {!hybridSearchReady && currentDataset && currentEmbeddingStatus === 'configured' && (
+                      <div className="notice">
+                        <div>{t('hybrid_requires_embedding_dataset')}</div>
+                        <div className="actions notice-actions">
+                          <button
+                            type="button"
+                            className="ghost"
+                            onClick={() => {
+                              void buildEmbeddingDataset(currentDataset.datasetId);
+                            }}
+                          >
+                            {t('embedding_build_action')}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {!hybridSearchReady && currentDataset && currentEmbeddingStatus === 'building' && (
+                      <div className="notice">{t('embedding_building_hint')}</div>
+                    )}
+                    {!hybridSearchReady && currentDataset && currentEmbeddingStatus === 'failed' && (
+                      <div className="notice error">
+                        <div>{t('hybrid_requires_embedding_dataset')}</div>
+                        <div className="actions notice-actions">
+                          <button
+                            type="button"
+                            className="ghost"
+                            onClick={() => {
+                              void buildEmbeddingDataset(currentDataset.datasetId);
+                            }}
+                          >
+                            {t('embedding_build_retry')}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    <div className="hybrid-inline-form">
+                      <label>
+                        <span>{t('hybrid_query')}</span>
+                        <input
+                          value={hybridSearch.queryText}
+                          onChange={(event) =>
+                            setHybridSearch((current) => ({ ...current, queryText: event.target.value }))
+                          }
+                          placeholder={t('hybrid_query_placeholder')}
+                          disabled={!currentDataset}
+                        />
+                      </label>
+                      <div className="helper">{t('hybrid_locked_config_hint', {
+                        columns: currentDataset?.embeddingConfig.textColumns.join(', ') || '—',
+                        provider: currentDataset?.embeddingConfig.provider || '—',
+                        model: currentDataset?.embeddingConfig.model || '—',
+                      })}</div>
+                      <div className="field-grid">
+                        <label>
+                          <span>{t('hybrid_top_k')}</span>
+                          <input
+                            value={hybridSearch.topK}
+                            onChange={(event) =>
+                              setHybridSearch((current) => ({ ...current, topK: event.target.value }))
+                            }
+                            disabled={!currentDataset}
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  </div>
                     <label>
                       <span>{t('sql_query')}</span>
                       <div className="editor-shell">
@@ -1586,161 +2171,21 @@ export function App() {
                         />
                       </div>
                     </label>
-                    <div className="actions">
-                      <button
-                        type="button"
-                        className="ghost"
-                        onClick={async () => {
-                          const path = await window.velariaShell.pickFile();
-                          if (path) {
-                            setAnalysisState((current) => ({ ...current, inputPath: path }));
-                          }
-                        }}
-                      >
-                        {t('choose_file')}
-                      </button>
-                      <button type="submit">{t('run_analysis')}</button>
-                      <button
-                        type="button"
-                        className="ghost"
-                        disabled={!selectedRunId}
-                        onClick={() => setView('runs')}
-                      >
-                        {t('open_run_detail')}
-                      </button>
-                      <button
-                        type="button"
-                        className="ghost"
-                        disabled={!selectedRunDetail}
-                        onClick={exportCurrentRunArtifact}
-                      >
-                        {t('export_result_file')}
-                      </button>
-                      <button
-                        type="button"
-                        className="ghost"
-                        disabled={!selectedRunDetail}
-                        onClick={() => saveRunDetailAsDataset('data')}
-                      >
-                        {t('save_result_as_dataset')}
+                    <div className="actions primary-actions">
+                      <button type="button" onClick={() => void runAnalysis()}>{t('run_analysis')}</button>
+                      <button type="button" onClick={() => void runHybridSearch()} disabled={!currentDataset || !hybridSearchReady}>
+                        {t('run_hybrid_search')}
                       </button>
                     </div>
-                  </form>
+                  </div>
+                  </div>
 
-                  <div className="result-dual-grid">
-                    <div className="result-stack">
-                      <div className="helper">{t('run_detail')}</div>
-                      <div
-                        className="result-box"
-                        dangerouslySetInnerHTML={{ __html: analysisResultHtml }}
-                      />
-                    </div>
-
-                    <div className="result-stack">
-                      <div className="helper">{t('hybrid_results')}</div>
-                      {hybridMessage && (
-                        <div className={`notice ${hybridMessage.kind === 'error' ? 'error' : ''}`}>
-                          {hybridMessage.text}
-                        </div>
-                      )}
-                      <form className="subsection-card" onSubmit={runHybridSearch}>
-                        <div className="subsection-head">
-                          <div>
-                            <h3>{t('hybrid_search_title')}</h3>
-                            <div className="helper">{t('hybrid_search_hint')}</div>
-                          </div>
-                          <button type="submit" disabled={!currentDataset}>
-                            {t('run_hybrid_search')}
-                          </button>
-                        </div>
-                        <label>
-                          <span>{t('hybrid_query')}</span>
-                          <input
-                            value={hybridSearch.queryText}
-                            onChange={(event) =>
-                              setHybridSearch((current) => ({ ...current, queryText: event.target.value }))
-                            }
-                            placeholder={t('hybrid_query_placeholder')}
-                            disabled={!currentDataset}
-                          />
-                        </label>
-                        <div className="field-grid">
-                          <label>
-                            <span>{t('embedding_text_columns')}</span>
-                            <input
-                              value={hybridSearch.textColumns}
-                              onChange={(event) =>
-                                setHybridSearch((current) => ({ ...current, textColumns: event.target.value }))
-                              }
-                              placeholder={t('embedding_columns_placeholder')}
-                              disabled={!currentDataset}
-                            />
-                          </label>
-                          <label>
-                            <span>{t('hybrid_top_k')}</span>
-                            <input
-                              value={hybridSearch.topK}
-                              onChange={(event) =>
-                                setHybridSearch((current) => ({ ...current, topK: event.target.value }))
-                              }
-                              disabled={!currentDataset}
-                            />
-                          </label>
-                        </div>
-                        <div className="field-grid">
-                          <label>
-                            <span>{t('embedding_provider')}</span>
-                            <input
-                              value={hybridSearch.provider}
-                              onChange={(event) =>
-                                setHybridSearch((current) => ({ ...current, provider: event.target.value }))
-                              }
-                              placeholder={t('embedding_provider_placeholder')}
-                              disabled={!currentDataset}
-                            />
-                          </label>
-                          <label>
-                            <span>{t('embedding_model')}</span>
-                            <input
-                              value={hybridSearch.model}
-                              onChange={(event) =>
-                                setHybridSearch((current) => ({ ...current, model: event.target.value }))
-                              }
-                              placeholder={t('embedding_model_placeholder')}
-                              disabled={!currentDataset}
-                            />
-                          </label>
-                        </div>
-                        <div className="field-grid">
-                          <label>
-                            <span>{t('embedding_template_version')}</span>
-                            <input
-                              value={hybridSearch.templateVersion}
-                              onChange={(event) =>
-                                setHybridSearch((current) => ({ ...current, templateVersion: event.target.value }))
-                              }
-                              placeholder={t('embedding_template_placeholder')}
-                              disabled={!currentDataset}
-                            />
-                          </label>
-                          <label>
-                            <span>{t('embedding_vector_column')}</span>
-                            <input
-                              value={hybridSearch.vectorColumn}
-                              onChange={(event) =>
-                                setHybridSearch((current) => ({ ...current, vectorColumn: event.target.value }))
-                              }
-                              placeholder={t('embedding_vector_placeholder')}
-                              disabled={!currentDataset}
-                            />
-                          </label>
-                        </div>
-                      </form>
-                      <div
-                        className="result-box"
-                        dangerouslySetInnerHTML={{ __html: hybridResultHtml }}
-                      />
-                    </div>
+                  <div className="result-stack">
+                    <div className="helper">{lastResult.title}</div>
+                    <div
+                      className="result-box"
+                      dangerouslySetInnerHTML={{ __html: lastResult.html }}
+                    />
                   </div>
                 </div>
               </section>

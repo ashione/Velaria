@@ -17,6 +17,7 @@ velaria_cli = "velaria.cli:main"
 [project.optional-dependencies]
 embedding = [
     "sentence-transformers>=5.3.0",
+    "socksio>=1.0.0",
 ]
 
 [build-system]

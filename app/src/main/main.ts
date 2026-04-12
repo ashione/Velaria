@@ -48,6 +48,8 @@ function startSidecar() {
         'run',
         '--project',
         path.join(root, 'python_api'),
+        '--extra',
+        'embedding',
         'python',
         path.join(root, 'python_api', 'velaria_service.py'),
         '--port',

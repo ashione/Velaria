@@ -21,6 +21,25 @@ const char* scalarFindByte(const char* begin, const char* end, char needle) {
   return nullptr;
 }
 
+const char* scalarFindFirstOf(const char* begin, const char* end, const char* needles,
+                              std::size_t needle_count, char* matched_needle) {
+  if (begin == nullptr || end == nullptr || begin >= end || needles == nullptr ||
+      needle_count == 0) {
+    return nullptr;
+  }
+  for (const char* ptr = begin; ptr < end; ++ptr) {
+    for (std::size_t i = 0; i < needle_count; ++i) {
+      if (*ptr == needles[i]) {
+        if (matched_needle != nullptr) {
+          *matched_needle = needles[i];
+        }
+        return ptr;
+      }
+    }
+  }
+  return nullptr;
+}
+
 bool matchesCompare(double lhs, double rhs, NumericCompareOp op) {
   switch (op) {
     case NumericCompareOp::Eq:
@@ -119,6 +138,7 @@ const SimdKernelDispatch kScalarDispatch = {
     SimdBackendKind::Scalar,
     simdBackendName(SimdBackendKind::Scalar),
     &scalarFindByte,
+    &scalarFindFirstOf,
     &scalarSelectDouble,
     &scalarSumDouble,
     &scalarAccumulateDouble,

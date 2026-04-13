@@ -48,6 +48,71 @@ const char* neonFindByte(const char* begin, const char* end, char needle) {
 #endif
 }
 
+const char* neonFindFirstOf(const char* begin, const char* end, const char* needles,
+                            std::size_t needle_count, char* matched_needle) {
+#if defined(__ARM_NEON) || defined(__aarch64__)
+  if (begin == nullptr || end == nullptr || begin >= end || needles == nullptr ||
+      needle_count == 0) {
+    return nullptr;
+  }
+  const std::size_t compare_count = std::min<std::size_t>(needle_count, 4);
+  const uint8x16_t needle0 = vdupq_n_u8(static_cast<uint8_t>(compare_count > 0 ? needles[0] : 0));
+  const uint8x16_t needle1 = vdupq_n_u8(static_cast<uint8_t>(compare_count > 1 ? needles[1] : 0));
+  const uint8x16_t needle2 = vdupq_n_u8(static_cast<uint8_t>(compare_count > 2 ? needles[2] : 0));
+  const uint8x16_t needle3 = vdupq_n_u8(static_cast<uint8_t>(compare_count > 3 ? needles[3] : 0));
+  const char* ptr = begin;
+  for (; ptr + kNeonByteLaneCount <= end; ptr += kNeonByteLaneCount) {
+    const uint8x16_t bytes = vld1q_u8(reinterpret_cast<const uint8_t*>(ptr));
+    uint8x16_t matches = vceqq_u8(bytes, needle0);
+    if (compare_count > 1) {
+      matches = vorrq_u8(matches, vceqq_u8(bytes, needle1));
+    }
+    if (compare_count > 2) {
+      matches = vorrq_u8(matches, vceqq_u8(bytes, needle2));
+    }
+    if (compare_count > 3) {
+      matches = vorrq_u8(matches, vceqq_u8(bytes, needle3));
+    }
+#if defined(__aarch64__)
+    const uint64x2_t lanes = vreinterpretq_u64_u8(matches);
+    if ((vgetq_lane_u64(lanes, 0) | vgetq_lane_u64(lanes, 1)) != 0) {
+      for (std::size_t i = 0; i < kNeonByteLaneCount; ++i) {
+        const char value = ptr[i];
+        for (std::size_t needle_index = 0; needle_index < needle_count; ++needle_index) {
+          if (value == needles[needle_index]) {
+            if (matched_needle != nullptr) {
+              *matched_needle = value;
+            }
+            return ptr + i;
+          }
+        }
+      }
+    }
+#else
+    uint8_t tmp[kNeonByteLaneCount];
+    vst1q_u8(tmp, matches);
+    for (std::size_t i = 0; i < kNeonByteLaneCount; ++i) {
+      if (tmp[i] == 0) {
+        continue;
+      }
+      const char value = ptr[i];
+      for (std::size_t needle_index = 0; needle_index < needle_count; ++needle_index) {
+        if (value == needles[needle_index]) {
+          if (matched_needle != nullptr) {
+            *matched_needle = value;
+          }
+          return ptr + i;
+        }
+      }
+    }
+#endif
+  }
+  return scalarDispatch().find_first_of(ptr, end, needles, needle_count, matched_needle);
+#else
+  return scalarDispatch().find_first_of(begin, end, needles, needle_count, matched_needle);
+#endif
+}
+
 NumericSelectionResult neonSelectDouble(const double* values, const uint8_t* is_null,
                                         std::size_t row_count, double rhs,
                                         NumericCompareOp op, std::size_t max_selected) {
@@ -112,6 +177,7 @@ const SimdKernelDispatch kNeonDispatch = {
     SimdBackendKind::Neon,
     simdBackendName(SimdBackendKind::Neon),
     &neonFindByte,
+    &neonFindFirstOf,
     &neonSelectDouble,
     &neonSumDouble,
     &neonAccumulateDouble,

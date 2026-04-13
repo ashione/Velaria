@@ -781,8 +781,13 @@ class JsonCursor {
     ParsedScalar parsed;
     if (ch == '"') {
       auto text = parseStringRef();
-      parsed.text = text.owned.empty() ? text.view : std::string_view();
-      parsed.owned_text = std::move(text.owned);
+      if (text.owned.empty()) {
+        parsed.text = text.view;
+        parsed.owned_text.reset();
+      } else {
+        parsed.text = std::string_view();
+        parsed.owned_text = std::move(text.owned);
+      }
       return parsed;
     }
     if (ch == '-' || std::isdigit(static_cast<unsigned char>(ch))) {

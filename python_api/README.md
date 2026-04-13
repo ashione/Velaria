@@ -110,7 +110,8 @@ File reader mapping:
 - all four file readers share the same source materialization knobs:
   `materialization`, `materialization_dir`, and `materialization_format`
 - all four file readers also support `cache_in_memory=True` to retain the projected source snapshot
-  inside the current session for repeated same-session queries
+  inside the current session for repeated same-session queries; it is a reuse-oriented tradeoff,
+  not a pure free cache hint, because it can bypass source pushdown on the first query
 - `velaria-cli file-sql` defaults to `--input-type auto` and registers batch sources through `CREATE TABLE ... OPTIONS(path: '...')`
 - versioned embedding datasets written as Parquet / Arrow should be loaded through `pyarrow` plus `Session.create_dataframe_from_arrow(...)` or `load_embedding_dataframe(...)`, not `Session.read(...)`
 

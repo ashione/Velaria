@@ -141,7 +141,9 @@ def hardcode_groupby_count_max_once(csv_path: pathlib.Path):
             if latency > grouped[key]["max_latency_ms"]:
                 grouped[key]["max_latency_ms"] = latency
     ended = time.perf_counter()
-    return {"elapsed": ended - started, "row_count": len(grouped)}
+    # Keep the hardcode baseline semantically aligned with the scenario SQL:
+    # SELECT ... GROUP BY ... LIMIT 1000
+    return {"elapsed": ended - started, "row_count": min(len(grouped), 1000)}
 
 
 def hardcode_filter_lower_limit_once(csv_path: pathlib.Path):
@@ -303,14 +305,22 @@ def write_report(summary: dict, outdir: pathlib.Path, csv_path: pathlib.Path, qu
     lines.append("")
     lines.append("## Ratios")
     if "hardcode" in summary:
-        lines.append(
-            f"- velaria_full.total / hardcode = "
-            f"{summary['velaria_full']['total']['avg'] / summary['hardcode']['elapsed']['avg']:.2f}x"
-        )
-        lines.append(
-            f"- velaria_reuse.total / hardcode = "
-            f"{summary['velaria_reuse']['total']['avg'] / summary['hardcode']['elapsed']['avg']:.2f}x"
-        )
+        hardcode_row_counts = summary["hardcode"]["row_counts"]
+        full_row_counts = summary["velaria_full"]["row_counts"]
+        reuse_row_counts = summary["velaria_reuse"]["row_counts"]
+        if hardcode_row_counts and full_row_counts and reuse_row_counts and (
+            hardcode_row_counts[0] == full_row_counts[0] == reuse_row_counts[0]
+        ):
+            lines.append(
+                f"- velaria_full.total / hardcode = "
+                f"{summary['velaria_full']['total']['avg'] / summary['hardcode']['elapsed']['avg']:.2f}x"
+            )
+            lines.append(
+                f"- velaria_reuse.total / hardcode = "
+                f"{summary['velaria_reuse']['total']['avg'] / summary['hardcode']['elapsed']['avg']:.2f}x"
+            )
+        else:
+            lines.append("- hardcode baseline = row-count mismatch; ratios skipped")
     else:
         lines.append("- hardcode baseline = skipped")
     lines.append(

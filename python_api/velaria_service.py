@@ -2,20 +2,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import threading
 import traceback
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import pyarrow as pa
 import pyarrow.ipc as pa_ipc
 import pyarrow.parquet as pq
 import velaria.cli as cli_impl
 from velaria import (
+    BitableClient,
     Session,
     __version__,
     DEFAULT_LOCAL_CHINESE_EMBEDDING_MODEL,
@@ -26,6 +29,7 @@ from velaria import (
 from velaria.workspace.artifact_index import RunDeleteConflictError
 from velaria.workspace import (
     ArtifactIndex,
+    append_progress_snapshot,
     append_stderr,
     create_run,
     finalize_run,
@@ -34,6 +38,13 @@ from velaria.workspace import (
     write_explain,
     write_inputs,
 )
+
+
+_EXCEL_SUFFIXES = {".xlsx", ".xlsm", ".xls"}
+_PARQUET_SUFFIXES = {".parquet", ".pq"}
+_ARROW_SUFFIXES = {".arrow", ".ipc", ".feather"}
+_BITABLE_TIMEOUT_SECONDS = 30
+_BITABLE_PAGE_SIZE = 200
 
 
 def _json_dumps(payload: Any) -> bytes:
@@ -48,6 +59,94 @@ def _parse_csv_list(raw: str | None) -> list[str]:
     if not raw:
         return []
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _resolve_auto_input_payload(session: Session, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    input_type = str(payload.get("input_type") or "auto").lower()
+    effective_input_type = "parquet" if input_type == "bitable" else input_type
+    resolved = dict(payload)
+    if input_type != "auto":
+        return input_type, resolved
+
+    input_path = _normalize_path(payload["input_path"])
+    suffix = input_path.suffix.lower()
+    if suffix in _EXCEL_SUFFIXES:
+        return "excel", resolved
+    if suffix in _PARQUET_SUFFIXES:
+        return "parquet", resolved
+    if suffix in _ARROW_SUFFIXES:
+        return "arrow", resolved
+
+    if not hasattr(session, "probe"):
+        return "auto", resolved
+    try:
+        probe = session.probe(str(input_path))
+    except Exception:
+        return "auto", resolved
+
+    kind = str(probe.get("kind") or "auto").lower()
+    if kind == "csv":
+        resolved.setdefault("delimiter", probe.get("delimiter") or ",")
+        return "csv", resolved
+    if kind == "json":
+        columns = probe.get("columns") or probe.get("schema") or []
+        if columns and not resolved.get("columns"):
+            resolved["columns"] = ",".join(str(item) for item in columns)
+        resolved.setdefault("json_format", probe.get("format") or probe.get("final_format") or "json_lines")
+        return "json", resolved
+    if kind == "line":
+        mappings = probe.get("mappings") or []
+        if mappings and not resolved.get("mappings"):
+            resolved["mappings"] = [
+                {
+                    "name": item["column"],
+                    "index": item["source_index"],
+                }
+                for item in mappings
+            ]
+        resolved.setdefault("line_mode", probe.get("mode") or "split")
+        if resolved.get("line_mode") == "split":
+            resolved.setdefault("delimiter", probe.get("delimiter") or "|")
+        return "line", resolved
+    return "auto", resolved
+
+
+def _timestamp_suffix() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+
+def _default_bitable_dataset_name(bitable_url: str) -> str:
+    try:
+        _, table_id, _ = BitableClient("placeholder", "placeholder").parse_bitable_url(bitable_url)
+        return f"bitable-{table_id}"
+    except Exception:
+        return "bitable"
+
+
+def _normalize_bitable_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _normalize_bitable_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
+        normalized.append({str(key): _normalize_bitable_value(value) for key, value in row.items()})
+    return normalized
+
+
+def _resolve_bitable_credentials(payload: dict[str, Any]) -> tuple[str, str]:
+    app_id = str(payload.get("app_id") or payload.get("bitable_app_id") or "").strip() or os.environ.get(
+        "FEISHU_BITABLE_APP_ID", ""
+    )
+    app_secret = (
+        str(payload.get("app_secret") or payload.get("bitable_app_secret") or "").strip()
+        or os.environ.get("FEISHU_BITABLE_APP_SECRET", "")
+    )
+    if not app_id or not app_secret:
+        raise ValueError("bitable app_id and app_secret are required")
+    return app_id, app_secret
 
 
 class ApiRouteNotFoundError(FileNotFoundError):
@@ -140,47 +239,51 @@ def _enrich_run(index: ArtifactIndex, run: dict[str, Any]) -> dict[str, Any]:
 
 
 def _load_dataframe(session: Session, payload: dict[str, Any]):
-    input_type = (payload.get("input_type") or "auto").lower()
-    input_path = _normalize_path(payload["input_path"])
+    input_type, resolved_payload = _resolve_auto_input_payload(session, payload)
+    input_path = _normalize_path(resolved_payload["input_path"])
     suffix = input_path.suffix.lower()
     if input_type == "excel":
         return read_excel(
             session,
             str(input_path),
-            sheet_name=int(payload.get("sheet_name", 0)),
-            date_format=payload.get("date_format", "%Y-%m-%d"),
+            sheet_name=int(resolved_payload.get("sheet_name", 0)),
+            date_format=resolved_payload.get("date_format", "%Y-%m-%d"),
         )
     if input_type == "parquet":
         return session.create_dataframe_from_arrow(_load_arrow_table(input_path))
     if input_type == "arrow":
         return session.create_dataframe_from_arrow(_load_arrow_table(input_path))
+    if input_type == "bitable":
+        if suffix in _PARQUET_SUFFIXES | _ARROW_SUFFIXES:
+            return session.create_dataframe_from_arrow(_load_arrow_table(input_path))
+        raise ValueError("bitable input expects a local parquet/arrow artifact path")
     if input_type == "auto":
         if suffix in {".parquet", ".pq", ".arrow", ".ipc", ".feather"}:
           return session.create_dataframe_from_arrow(_load_arrow_table(input_path))
         return session.read(str(input_path))
     if input_type == "csv":
-        delimiter = (payload.get("delimiter") or ",")[:1]
+        delimiter = (resolved_payload.get("delimiter") or ",")[:1]
         return session.read_csv(str(input_path), delimiter=delimiter)
     if input_type == "json":
-        columns = _parse_csv_list(payload.get("columns"))
+        columns = _parse_csv_list(resolved_payload.get("columns"))
         if not columns:
             raise ValueError("json input requires columns")
         return session.read_json(
             str(input_path),
             columns=columns,
-            format=payload.get("json_format", "json_lines"),
+            format=resolved_payload.get("json_format", "json_lines"),
         )
     if input_type == "line":
-        mappings = _parse_mappings(payload.get("mappings"))
+        mappings = _parse_mappings(resolved_payload.get("mappings"))
         if not mappings:
             raise ValueError("line input requires mappings")
         kwargs: dict[str, Any] = {"mappings": mappings}
-        mode = payload.get("line_mode", "split")
+        mode = resolved_payload.get("line_mode", "split")
         if mode == "regex":
             kwargs["mode"] = "regex"
-            kwargs["regex_pattern"] = payload.get("regex_pattern") or ""
+            kwargs["regex_pattern"] = resolved_payload.get("regex_pattern") or ""
         else:
-            kwargs["split_delimiter"] = payload.get("delimiter", "|")
+            kwargs["split_delimiter"] = resolved_payload.get("delimiter", "|")
         return session.read_line_file(str(input_path), **kwargs)
     raise ValueError(f"unsupported input_type: {input_type}")
 
@@ -240,9 +343,9 @@ def _execute_embedding_build(payload: dict[str, Any], run_dir: Path, *, provider
         model=resolved_model,
         template_version=template_version,
         text_columns=text_columns,
-        input_type=input_type,
+        input_type=effective_input_type,
         delimiter=(payload.get("delimiter") or ",")[:1],
-        json_columns=_resolve_json_columns(payload, text_columns) if input_type == "json" else None,
+        json_columns=_resolve_json_columns(payload, text_columns) if effective_input_type == "json" else None,
         json_format=str(payload.get("json_format") or "json_lines"),
         mappings=payload.get("mappings") or payload.get("columns"),
         line_mode=str(payload.get("line_mode") or "split"),
@@ -342,6 +445,107 @@ def _execute_hybrid_search(payload: dict[str, Any], run_dir: Path, *, provider: 
     }
 
 
+def _execute_bitable_import(payload: dict[str, Any], run_dir: Path, *, run_id: str | None = None) -> dict[str, Any]:
+    bitable_url = str(payload.get("bitable_url") or payload.get("input_path") or "").strip()
+    if not bitable_url:
+        raise ValueError("bitable_url is required")
+
+    app_id, app_secret = _resolve_bitable_credentials(payload)
+
+    client = BitableClient(
+        app_id=app_id,
+        app_secret=app_secret,
+        request_timeout_seconds=int(payload.get("timeout_seconds", _BITABLE_TIMEOUT_SECONDS)),
+    )
+    fetched_pages = 0
+
+    def _on_page(fetched_rows: int, page_rows: int) -> None:
+        nonlocal fetched_pages
+        fetched_pages += 1
+        if run_id:
+            _update_run_progress(
+                run_id,
+                progress_phase="fetching_bitable",
+                fetched_rows=fetched_rows,
+                pages_fetched=fetched_pages,
+                last_page_rows=page_rows,
+            )
+
+    rows = client.list_records_from_url(
+        bitable_url,
+        page_size=int(payload.get("page_size", _BITABLE_PAGE_SIZE)),
+        on_page=_on_page,
+    )
+    normalized_rows = _normalize_bitable_rows(rows)
+    table = pa.Table.from_pylist(normalized_rows)
+    output_path = (
+        _normalize_path(payload["output_path"])
+        if payload.get("output_path")
+        else run_dir / "artifacts" / "bitable_dataset.parquet"
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, str(output_path))
+
+    preview_limit = int(payload.get("preview_limit", 50))
+    preview = cli_impl._preview_payload_from_table(table, limit=preview_limit)
+    preview["schema"] = table.schema.names
+    preview["row_count"] = table.num_rows
+    dataset_name = str(payload.get("dataset_name") or "").strip() or _default_bitable_dataset_name(bitable_url)
+    artifacts = [_register_artifacts_preview_table(output_path, table)]
+    return {
+        "payload": {
+            "dataset_name": dataset_name,
+            "source_type": "bitable",
+            "source_path": str(output_path),
+            "source_label": bitable_url,
+            "row_count": table.num_rows,
+            "schema": table.schema.names,
+            "imported_at": _timestamp_suffix(),
+            "fetched_rows": table.num_rows,
+            "pages_fetched": fetched_pages,
+        },
+        "preview": preview,
+        "artifacts": artifacts,
+    }
+
+
+def _preview_bitable_import(payload: dict[str, Any]) -> dict[str, Any]:
+    bitable_url = str(payload.get("bitable_url") or payload.get("input_path") or "").strip()
+    if not bitable_url:
+        raise ValueError("bitable_url is required")
+    app_id, app_secret = _resolve_bitable_credentials(payload)
+    client = BitableClient(
+        app_id=app_id,
+        app_secret=app_secret,
+        request_timeout_seconds=int(payload.get("timeout_seconds", _BITABLE_TIMEOUT_SECONDS)),
+    )
+    preview_limit = int(payload.get("limit", payload.get("preview_limit", 100)))
+    rows = client.list_records_from_url(
+        bitable_url,
+        page_size=min(max(preview_limit, 1), 100),
+        max_rows=preview_limit,
+    )
+    normalized_rows = _normalize_bitable_rows(rows)
+    table = pa.Table.from_pylist(normalized_rows)
+    preview = cli_impl._preview_payload_from_table(table, limit=preview_limit)
+    preview["schema"] = table.schema.names
+    preview["row_count"] = table.num_rows
+    dataset_name = str(payload.get("dataset_name") or "").strip() or _default_bitable_dataset_name(bitable_url)
+    return {
+        "dataset": {
+            "name": dataset_name,
+            "source_type": "bitable",
+            "source_path": bitable_url,
+            "source_label": bitable_url,
+        },
+        "preview": preview,
+    }
+
+
+def _register_artifacts_preview_table(path: Path, table: pa.Table) -> dict[str, Any]:
+    return cli_impl._table_artifact(path, table, ["dataset", "bitable-import", "result"])
+
+
 def _execute_file_sql(payload: dict[str, Any], run_id: str, run_dir: Path) -> dict[str, Any]:
     session = Session()
     input_df = _load_dataframe(session, payload)
@@ -392,6 +596,64 @@ def _register_artifacts(index: ArtifactIndex, run_id: str, artifacts: list[dict[
         index.insert_artifact(record)
         created.append(record)
     return created
+
+
+def _update_run_progress(run_id: str, **details: Any) -> None:
+    current = read_run(run_id)
+    merged_details = {
+        **(current.get("details") or {}),
+        **details,
+    }
+    updated = update_run(run_id, details=merged_details)
+    append_progress_snapshot(
+        run_id,
+        json.dumps(
+            {
+                "event": "progress",
+                "run_id": run_id,
+                **merged_details,
+            },
+            ensure_ascii=False,
+        ),
+    )
+    index = ArtifactIndex()
+    try:
+        index.upsert_run(updated)
+    finally:
+        index.close()
+
+
+def _finalize_bitable_import_run(
+    *,
+    run_id: str,
+    run_dir: Path,
+    action_args: dict[str, Any],
+) -> None:
+    index = ArtifactIndex()
+    try:
+        index.upsert_run(read_run(run_id))
+        result = _execute_bitable_import(action_args, run_dir, run_id=run_id)
+        created_artifacts = _register_artifacts(index, run_id, result.get("artifacts", []))
+        result_payload = result.get("payload") or {}
+        if created_artifacts:
+            result_payload = {
+                **result_payload,
+                "artifact_uri": created_artifacts[0].get("uri", ""),
+                "artifact_id": created_artifacts[0].get("artifact_id", ""),
+            }
+        finalized = finalize_run(run_id, "succeeded", details=result_payload)
+        index.upsert_run(finalized)
+    except Exception as exc:
+        append_stderr(run_id, traceback.format_exc())
+        finalized = finalize_run(
+            run_id,
+            "failed",
+            error=str(exc),
+            details=cli_impl._error_payload_from_exception(exc),
+        )
+        index.upsert_run(finalized)
+    finally:
+        index.close()
 
 
 def _api_parts(path: str) -> tuple[str, ...] | None:
@@ -623,7 +885,18 @@ class VelariaService:
                     if parts is None:
                         raise ApiRouteNotFoundError(f"unknown endpoint: {path}")
                     if parts == ("import", "preview"):
+                        if str(payload.get("input_type") or "auto").lower() == "bitable":
+                            preview_payload = _preview_bitable_import(payload)
+                            self._send_json(
+                                HTTPStatus.OK,
+                                {
+                                    "ok": True,
+                                    **preview_payload,
+                                },
+                            )
+                            return
                         session = Session()
+                        resolved_input_type, _ = _resolve_auto_input_payload(session, payload)
                         df = _load_dataframe(session, payload)
                         preview = _preview_from_dataframe(df, limit=int(payload.get("limit", 50)))
                         self._send_json(
@@ -633,13 +906,75 @@ class VelariaService:
                                 "dataset": {
                                     "name": payload.get("dataset_name")
                                     or Path(payload["input_path"]).stem,
-                                    "source_type": payload.get("input_type", "auto"),
+                                    "source_type": resolved_input_type,
                                     "source_path": str(_normalize_path(payload["input_path"])),
                                 },
                                 "preview": preview,
                             },
                         )
                         return
+                    if parts == ("runs", "bitable-import"):
+                        tags = payload.get("tags") or []
+                        if isinstance(tags, str):
+                            tags = _parse_csv_list(tags)
+                        request_app_secret = payload.get("app_secret") or payload.get("bitable_app_secret")
+                        action_args = {
+                            "bitable_url": payload.get("bitable_url") or payload.get("input_path"),
+                            "app_id": payload.get("app_id") or payload.get("bitable_app_id"),
+                            "dataset_name": payload.get("dataset_name"),
+                            "output_path": payload.get("output_path"),
+                            "preview_limit": int(payload.get("preview_limit", 50)),
+                            "timeout_seconds": int(payload.get("timeout_seconds", _BITABLE_TIMEOUT_SECONDS)),
+                            "page_size": int(payload.get("page_size", _BITABLE_PAGE_SIZE)),
+                        }
+                        worker_args = {
+                            **action_args,
+                            "app_secret": request_app_secret,
+                        }
+                        run_id, run_dir = create_run(
+                            "bitable-import",
+                            action_args,
+                            __version__,
+                            run_name=payload.get("run_name") or f"bitable-import-{_timestamp_suffix()}",
+                            description=payload.get("description") or "Bitable import run",
+                            tags=tags,
+                        )
+                        write_inputs(
+                            run_id,
+                            {
+                                "action": "bitable-import",
+                                "action_args": action_args,
+                                "run_name": payload.get("run_name"),
+                                "description": payload.get("description"),
+                                "tags": tags,
+                            },
+                        )
+                        index = ArtifactIndex()
+                        try:
+                            created = read_run(run_id)
+                            index.upsert_run(created)
+                            worker = threading.Thread(
+                                target=_finalize_bitable_import_run,
+                                kwargs={
+                                    "run_id": run_id,
+                                    "run_dir": run_dir,
+                                    "action_args": worker_args,
+                                },
+                                daemon=True,
+                            )
+                            worker.start()
+                            self._send_json(
+                                HTTPStatus.ACCEPTED,
+                                {
+                                    "ok": True,
+                                    "run_id": run_id,
+                                    "run": _enrich_run(index, created),
+                                    "run_dir": str(run_dir),
+                                },
+                            )
+                            return
+                        finally:
+                            index.close()
                     if parts == ("runs", "file-sql"):
                         tags = payload.get("tags") or []
                         if isinstance(tags, str):

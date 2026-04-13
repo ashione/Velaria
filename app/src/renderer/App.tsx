@@ -74,12 +74,12 @@ type RunSummary = {
 
 type RunDetailPayload = {
   run: RunSummary & Record<string, unknown>;
-  artifact: {
+  artifact?: {
     artifact_id: string;
     uri: string;
     format: string;
     schema_json?: string[];
-  };
+  } | null;
   preview: PreviewData;
 };
 
@@ -88,6 +88,7 @@ type ImportPreviewPayload = {
     name: string;
     source_type: string;
     source_path: string;
+    source_label?: string;
   };
   preview: PreviewData;
 };
@@ -97,7 +98,12 @@ type ServiceInfo = {
   packaged: boolean;
 };
 
-type ViewKey = 'home' | 'data' | 'analyze' | 'runs';
+type AppConfig = {
+  bitableAppId: string;
+  bitableAppSecret: string;
+};
+
+type ViewKey = 'home' | 'data' | 'analyze' | 'runs' | 'settings';
 
 type AnalyzeState = {
   inputPath: string;
@@ -126,6 +132,8 @@ type ImportFormState = {
   columns: string;
   regexPattern: string;
   datasetName: string;
+  bitableAppId: string;
+  bitableAppSecret: string;
   jsonFormat: string;
   embeddingEnabled: boolean;
   embeddingTextColumns: string;
@@ -176,6 +184,8 @@ const defaultImportForm: ImportFormState = {
   columns: '',
   regexPattern: '',
   datasetName: '',
+  bitableAppId: '',
+  bitableAppSecret: '',
   jsonFormat: 'json_lines',
   embeddingEnabled: false,
   embeddingTextColumns: '',
@@ -209,6 +219,7 @@ const viewMeta = {
   data: { titleKey: 'view_data_title', subtitleKey: 'view_data_subtitle' },
   analyze: { titleKey: 'view_analyze_title', subtitleKey: 'view_analyze_subtitle' },
   runs: { titleKey: 'view_runs_title', subtitleKey: 'view_runs_subtitle' },
+  settings: { titleKey: 'view_settings_title', subtitleKey: 'view_settings_subtitle' },
 } as const;
 
 function decodeFileUri(uri: string): string {
@@ -325,6 +336,7 @@ function createDatasetRecord(payload: {
   preview: PreviewData;
   kind: DatasetRecord['kind'];
   description?: string;
+  sourceLabel?: string;
   importOptions?: Partial<ImportOptions>;
   embeddingConfig?: Partial<EmbeddingConfig>;
   embeddingDataset?: EmbeddingDatasetRecord | null;
@@ -341,7 +353,7 @@ function createDatasetRecord(payload: {
     kind: payload.kind,
     createdAt: new Date().toISOString(),
     description: payload.description || '',
-    sourceLabel: '',
+    sourceLabel: payload.sourceLabel || '',
     importOptions,
     embeddingConfig,
     embeddingDataset: payload.embeddingDataset || null,
@@ -634,18 +646,73 @@ function isDatasetBackedByRun(dataset: DatasetRecord, runDir: string): boolean {
   return dataset.kind === 'result' && dataset.sourcePath.startsWith(`${runDir}/`);
 }
 
+function formatDatasetTimestamp(date = new Date()): string {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(
+    date.getHours()
+  )}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+}
+
+function buildSavedDatasetName(dataset: ImportPreviewPayload['dataset']): string {
+  const base = dataset.name.trim() || 'dataset';
+  if (dataset.source_type !== 'bitable') return base;
+  return `${base}-${formatDatasetTimestamp()}`;
+}
+
+function maskSecret(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  if (trimmed.length <= 6) return `${trimmed.slice(0, 1)}***${trimmed.slice(-1)}`;
+  return `${trimmed.slice(0, 3)}***${trimmed.slice(-3)}`;
+}
+
+function importPreviewFromRunPayload(payload: unknown): ImportPreviewPayload {
+  const record = asRecord(payload);
+  const run = asRecord(record?.run);
+  const details = asRecord(run?.details);
+  const artifact = asRecord(record?.artifact);
+  return {
+    dataset: {
+      name:
+        typeof details?.dataset_name === 'string' && details.dataset_name
+          ? details.dataset_name
+          : typeof run?.run_name === 'string' && run.run_name
+            ? run.run_name
+            : 'bitable',
+      source_type:
+        typeof details?.source_type === 'string' && details.source_type ? details.source_type : 'bitable',
+      source_path:
+        typeof details?.source_path === 'string' && details.source_path
+          ? details.source_path
+          : decodeFileUri(typeof artifact?.uri === 'string' ? artifact.uri : ''),
+      source_label: typeof details?.source_label === 'string' ? details.source_label : '',
+    },
+    preview: normalizePreview(record?.preview),
+  };
+}
+
+function isTerminalRunStatus(status: string | undefined): boolean {
+  return status === 'succeeded' || status === 'failed' || status === 'cancelled';
+}
+
 export function App() {
   const [locale, setLocale] = useState<Locale>(() => (window.localStorage.getItem(LOCALE_KEY) as Locale) || 'zh');
   const [view, setView] = useState<ViewKey>('home');
   const [serviceInfo, setServiceInfo] = useState<ServiceInfo | null>(null);
   const [serviceStatus, setServiceStatus] = useState('status_bootstrapping');
   const [serviceMeta, setServiceMeta] = useState('status_waiting');
+  const [configForm, setConfigForm] = useState<AppConfig>({
+    bitableAppId: '',
+    bitableAppSecret: '',
+  });
+  const [configMessage, setConfigMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
   const [datasets, setDatasets] = useState<DatasetRecord[]>(() => loadDatasets());
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
   const [datasetSearch, setDatasetSearch] = useState('');
   const [pendingImport, setPendingImport] = useState<ImportPreviewPayload | null>(null);
   const [importForm, setImportForm] = useState<ImportFormState>(defaultImportForm);
   const [importMessage, setImportMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
+  const [importRunId, setImportRunId] = useState<string | null>(null);
   const [datasetMessage, setDatasetMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [runsPage, setRunsPage] = useState(1);
@@ -760,7 +827,17 @@ export function App() {
   async function bootstrap() {
     try {
       const info = await window.velariaShell.getServiceInfo();
+      const config = await window.velariaShell.getConfig();
       setServiceInfo(info);
+      setConfigForm({
+        bitableAppId: config.bitableAppId || '',
+        bitableAppSecret: config.bitableAppSecret || '',
+      });
+      setImportForm((current) => ({
+        ...current,
+        bitableAppId: current.bitableAppId || config.bitableAppId || '',
+        bitableAppSecret: current.bitableAppSecret || config.bitableAppSecret || '',
+      }));
       const health = await fetch(`${info.baseUrl}/health`).then((r) => r.json());
       setServiceStatus(t('status_ready_on', { port: health.port }));
       setServiceMeta(t('status_packaged', { packaged: info.packaged, version: health.version }));
@@ -770,13 +847,30 @@ export function App() {
         setSelectedRunId(runsPayload.runs[0].run_id);
       }
     } catch (error) {
-      setServiceStatus(t('status_bootstrap_failed'));
+      setServiceStatus(t('status_waiting'));
       setServiceMeta(String(error));
+      throw error;
     }
   }
 
   useEffect(() => {
-    void bootstrap();
+    let cancelled = false;
+    let timer: number | null = null;
+    const attemptBootstrap = async () => {
+      try {
+        await bootstrap();
+      } catch {
+        if (cancelled) return;
+        timer = window.setTimeout(() => {
+          void attemptBootstrap();
+        }, 1000);
+      }
+    };
+    void attemptBootstrap();
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -821,11 +915,68 @@ export function App() {
     }
   }
 
+  async function saveConfig() {
+    try {
+      const saved = await window.velariaShell.saveConfig({
+        bitableAppId: configForm.bitableAppId.trim() || undefined,
+        bitableAppSecret: configForm.bitableAppSecret.trim() || undefined,
+      });
+      setConfigForm({
+        bitableAppId: saved.bitableAppId || '',
+        bitableAppSecret: saved.bitableAppSecret || '',
+      });
+      setImportForm((current) => ({
+        ...current,
+        bitableAppId: current.bitableAppId || saved.bitableAppId || '',
+        bitableAppSecret: current.bitableAppSecret || saved.bitableAppSecret || '',
+      }));
+      setConfigMessage({ kind: 'info', text: t('settings_saved') });
+    } catch (error) {
+      setConfigMessage({ kind: 'error', text: t('settings_save_failed', { error: String(error) }) });
+    }
+  }
+
+  async function waitForRunCompletion(runId: string, timeoutMs = 120_000) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const runPayload = await api(`/api/v1/runs/${encodeURIComponent(runId)}`);
+      const run = asRecord(runPayload.run);
+      const status = typeof run?.status === 'string' ? run.status : '';
+      if (status === 'succeeded') {
+        return api(`/api/v1/runs/${encodeURIComponent(runId)}/result?limit=50`);
+      }
+      if (status === 'failed' || status === 'cancelled') {
+        throw new Error(typeof run?.error === 'string' && run.error ? run.error : `run ${runId} failed`);
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    }
+    throw new Error(`run ${runId} timed out`);
+  }
+
   async function previewImport(event: React.FormEvent) {
     event.preventDefault();
     setImportMessage({ kind: 'info', text: t('loading_preview') });
     setDatasetMessage(null);
+    setPendingImport(null);
     try {
+      if (importForm.inputType === 'bitable') {
+        const payload: Record<string, unknown> = {
+          input_type: 'bitable',
+          bitable_url: importForm.inputPath.trim(),
+          app_id: importForm.bitableAppId.trim() || configForm.bitableAppId.trim() || undefined,
+          app_secret:
+            importForm.bitableAppSecret.trim() || configForm.bitableAppSecret.trim() || undefined,
+          dataset_name: importForm.datasetName.trim(),
+          limit: 100,
+        };
+        const result = (await api('/api/v1/import/preview', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        })) as ImportPreviewPayload;
+        setPendingImport(result);
+        setImportMessage(null);
+        return;
+      }
       const payload: Record<string, unknown> = {
         input_path: importForm.inputPath.trim(),
         input_type: importForm.inputType,
@@ -850,6 +1001,7 @@ export function App() {
       setPendingImport(result);
       setImportMessage(null);
     } catch (error) {
+      setImportRunId(null);
       setPendingImport(null);
       setImportMessage({ kind: 'error', text: t('preview_failed', { error: String(error) }) });
     }
@@ -956,6 +1108,7 @@ export function App() {
   async function saveImportDataset() {
     if (!pendingImport) return;
     const embeddingConfig = embeddingFormToConfig(importForm);
+    let handedOffBitableImport = false;
     const importOptions = {
       delimiter: importForm.delimiter,
       columns: importForm.inputType === 'json' ? importForm.columns.trim() : '',
@@ -972,10 +1125,71 @@ export function App() {
       text: embeddingConfig.enabled ? t('embedding_building') : t('dataset_saving'),
     });
     try {
+      if (pendingImport.dataset.source_type === 'bitable') {
+        const datasetName = buildSavedDatasetName(pendingImport.dataset);
+        const payload: Record<string, unknown> = {
+          bitable_url: pendingImport.dataset.source_path || pendingImport.dataset.source_label || importForm.inputPath.trim(),
+          app_id: importForm.bitableAppId.trim() || configForm.bitableAppId.trim() || undefined,
+          app_secret:
+            importForm.bitableAppSecret.trim() || configForm.bitableAppSecret.trim() || undefined,
+          dataset_name: datasetName,
+          run_name: `bitable-import-${new Date().toISOString()}`,
+          description: 'Desktop workbench bitable import',
+        };
+        const started = await api('/api/v1/runs/bitable-import', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+        const runId = typeof started?.run_id === 'string' ? started.run_id : '';
+        if (!runId) {
+          throw new Error('bitable import response missing run_id');
+        }
+        setImportRunId(runId);
+        setPendingImport(null);
+        setImportMessage({ kind: 'info', text: t('bitable_import_started') });
+        await refreshRuns(runId);
+        handedOffBitableImport = true;
+        void (async () => {
+          try {
+            const completed = importPreviewFromRunPayload(await waitForRunCompletion(runId));
+            const record = createDatasetRecord({
+              name: completed.dataset.name,
+              sourceType: completed.dataset.source_type,
+              sourcePath: completed.dataset.source_path,
+              sourceLabel: completed.dataset.source_label,
+              preview: completed.preview,
+              kind: 'imported',
+              importOptions,
+              embeddingConfig,
+              embeddingDataset: null,
+            });
+            setDatasets((current) => [record, ...current]);
+            setSelectedDatasetId(record.datasetId);
+            setDatasetMessage({
+              kind: 'info',
+              text: embeddingConfig.enabled
+                ? t('dataset_saved_with_embedding_message')
+                : t('dataset_saved_message'),
+            });
+            setView('analyze');
+            if (embeddingConfig.enabled) {
+              void buildEmbeddingDataset(record.datasetId, record);
+            }
+            await refreshRuns(runId);
+          } catch (error) {
+            setImportMessage({ kind: 'error', text: t('preview_failed', { error: String(error) }) });
+          } finally {
+            setImportRunId(null);
+            setSavingDataset(false);
+          }
+        })();
+        return;
+      }
       const record = createDatasetRecord({
-        name: pendingImport.dataset.name,
+        name: buildSavedDatasetName(pendingImport.dataset),
         sourceType: pendingImport.dataset.source_type,
         sourcePath: pendingImport.dataset.source_path,
+        sourceLabel: pendingImport.dataset.source_label,
         preview: pendingImport.preview,
         kind: 'imported',
         importOptions,
@@ -1004,7 +1218,9 @@ export function App() {
           : t('dataset_save_failed', { error: String(error) }),
       });
     } finally {
-      setSavingDataset(false);
+      if (!handedOffBitableImport) {
+        setSavingDataset(false);
+      }
     }
   }
 
@@ -1198,6 +1414,26 @@ export function App() {
 
   async function loadRunDetail(runId: string) {
     try {
+      const runPayload = await api(`/api/v1/runs/${encodeURIComponent(runId)}`);
+      const runRecord = asRecord(runPayload.run);
+      const runStatus = typeof runRecord?.status === 'string' ? runRecord.status : '';
+      if (!isTerminalRunStatus(runStatus)) {
+        setSelectedRunDetail({
+          run: ((runPayload.run as RunSummary & Record<string, unknown>) || {
+            run_id: runId,
+            status: runStatus || 'running',
+            action: typeof runRecord?.action === 'string' ? runRecord.action : 'run',
+          }),
+          artifact: null,
+          preview: {
+            schema: [],
+            rows: [],
+            row_count: 0,
+          },
+        });
+        setRunMessage({ kind: 'info', text: t('run_detail_running') });
+        return;
+      }
       const payload = (await api(`/api/v1/runs/${encodeURIComponent(runId)}/result?limit=20`)) as RunDetailPayload;
       setSelectedRunDetail(payload);
       setRunMessage(null);
@@ -1212,6 +1448,17 @@ export function App() {
       void loadRunDetail(selectedRunId);
     }
   }, [selectedRunId, view]);
+
+  useEffect(() => {
+    if (view !== 'runs' || !selectedRunId) return;
+    if (selectedRunDetail?.run?.run_id !== selectedRunId) return;
+    if (isTerminalRunStatus(selectedRunDetail.run.status)) return;
+    const timer = window.setTimeout(() => {
+      void refreshRuns(selectedRunId);
+      void loadRunDetail(selectedRunId);
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [selectedRunDetail, selectedRunId, view]);
 
   async function deleteRun(runId: string) {
     const target = runs.find((run) => run.run_id === runId);
@@ -1362,7 +1609,7 @@ export function App() {
           </button>
         </div>
         <nav className="nav">
-          {(['home', 'data', 'analyze', 'runs'] as ViewKey[]).map((key) => (
+          {(['home', 'data', 'analyze', 'runs', 'settings'] as ViewKey[]).map((key) => (
             <button
               key={key}
               className={view === key ? 'active' : ''}
@@ -1476,30 +1723,38 @@ export function App() {
                 <div className="panel-body">
                   <form onSubmit={previewImport}>
                     <label>
-                      <span>{t('input_path')}</span>
+                      <span>{importForm.inputType === 'bitable' ? t('bitable_url') : t('input_path')}</span>
                       <input
                         value={importForm.inputPath}
                         onChange={(event) =>
                           setImportForm((current) => ({ ...current, inputPath: event.target.value }))
                         }
-                        placeholder={t('input_placeholder')}
+                        placeholder={
+                          importForm.inputType === 'bitable'
+                            ? t('bitable_url_placeholder')
+                            : t('input_placeholder')
+                        }
                         required
                       />
                     </label>
                     <div className="actions">
-                      <button
-                        type="button"
-                        className="ghost"
-                        onClick={async () => {
-                          const path = await window.velariaShell.pickFile();
-                          if (path) {
-                            setImportForm((current) => ({ ...current, inputPath: path }));
-                          }
-                        }}
-                      >
-                        {t('choose_file')}
+                      {importForm.inputType !== 'bitable' && (
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={async () => {
+                            const path = await window.velariaShell.pickFile();
+                            if (path) {
+                              setImportForm((current) => ({ ...current, inputPath: path }));
+                            }
+                          }}
+                        >
+                          {t('choose_file')}
+                        </button>
+                      )}
+                      <button type="submit" disabled={importRunId !== null}>
+                        {t('preview_import')}
                       </button>
-                      <button type="submit">{t('preview_import')}</button>
                     </div>
                     <div className="field-grid">
                       <label>
@@ -1514,51 +1769,84 @@ export function App() {
                           <option value="csv">csv</option>
                           <option value="json">json</option>
                           <option value="line">line</option>
+                          <option value="bitable">bitable</option>
                           <option value="excel">excel</option>
                           <option value="parquet">parquet</option>
                           <option value="arrow">arrow</option>
                         </select>
                       </label>
-                      <label>
-                        <span>{t('delimiter_label')}</span>
-                        <input
-                          value={importForm.delimiter}
-                          onChange={(event) =>
-                            setImportForm((current) => ({ ...current, delimiter: event.target.value }))
-                          }
-                        />
-                      </label>
+                      {importForm.inputType !== 'bitable' && (
+                        <label>
+                          <span>{t('delimiter_label')}</span>
+                          <input
+                            value={importForm.delimiter}
+                            onChange={(event) =>
+                              setImportForm((current) => ({ ...current, delimiter: event.target.value }))
+                            }
+                          />
+                        </label>
+                      )}
                     </div>
-                    <div className="field-grid">
-                      <label>
-                        <span>{t('columns_or_mappings')}</span>
-                        <input
-                          value={importForm.columns}
-                          onChange={(event) =>
-                            setImportForm((current) => ({ ...current, columns: event.target.value }))
-                          }
-                          placeholder={t('columns_placeholder')}
-                        />
-                      </label>
-                      <label>
-                        <span>{t('regex_pattern')}</span>
-                        <input
-                          value={importForm.regexPattern}
-                          onChange={(event) =>
-                            setImportForm((current) => ({ ...current, regexPattern: event.target.value }))
-                          }
-                          placeholder={t('regex_placeholder')}
-                        />
-                      </label>
-                    </div>
+                    {importForm.inputType === 'bitable' ? (
+                      <div className="field-grid">
+                        <label>
+                          <span>{t('bitable_app_id')}</span>
+                          <input
+                            value={importForm.bitableAppId}
+                            onChange={(event) =>
+                              setImportForm((current) => ({ ...current, bitableAppId: event.target.value }))
+                            }
+                            placeholder={t('bitable_app_id_placeholder')}
+                          />
+                        </label>
+                        <label>
+                          <span>{t('bitable_app_secret')}</span>
+                          <input
+                            type="password"
+                            value={importForm.bitableAppSecret}
+                            onChange={(event) =>
+                              setImportForm((current) => ({ ...current, bitableAppSecret: event.target.value }))
+                            }
+                            placeholder={t('bitable_app_secret_placeholder')}
+                          />
+                        </label>
+                      </div>
+                    ) : (
+                      <div className="field-grid">
+                        <label>
+                          <span>{t('columns_or_mappings')}</span>
+                          <input
+                            value={importForm.columns}
+                            onChange={(event) =>
+                              setImportForm((current) => ({ ...current, columns: event.target.value }))
+                            }
+                            placeholder={t('columns_placeholder')}
+                          />
+                        </label>
+                        <label>
+                          <span>{t('regex_pattern')}</span>
+                          <input
+                            value={importForm.regexPattern}
+                            onChange={(event) =>
+                              setImportForm((current) => ({ ...current, regexPattern: event.target.value }))
+                            }
+                            placeholder={t('regex_placeholder')}
+                          />
+                        </label>
+                      </div>
+                    )}
                     <label>
                       <span>{t('dataset_name')}</span>
-                      <input
-                        value={importForm.datasetName}
-                        onChange={(event) =>
-                          setImportForm((current) => ({ ...current, datasetName: event.target.value }))
+                        <input
+                          value={importForm.datasetName}
+                          onChange={(event) =>
+                            setImportForm((current) => ({ ...current, datasetName: event.target.value }))
+                          }
+                        placeholder={
+                          importForm.inputType === 'bitable'
+                            ? t('bitable_dataset_name_placeholder')
+                            : t('dataset_name_placeholder')
                         }
-                        placeholder={t('dataset_name_placeholder')}
                       />
                     </label>
 
@@ -2000,6 +2288,7 @@ export function App() {
                           <option value="csv">csv</option>
                           <option value="json">json</option>
                           <option value="line">line</option>
+                          <option value="bitable">bitable</option>
                           <option value="excel">excel</option>
                           <option value="parquet">parquet</option>
                           <option value="arrow">arrow</option>
@@ -2245,44 +2534,72 @@ export function App() {
                               <span>{String(selectedRunDetail.run.action)}</span>
                               <span>{t('rows_count', { count: selectedRunDetail.preview.row_count ?? '—' })}</span>
                             </div>
+                            {!isTerminalRunStatus(String(selectedRunDetail.run.status)) && (
+                              <div className="notice">
+                                <div>{t('run_detail_running')}</div>
+                                <div>
+                                  {t('run_detail_running_rows', {
+                                    count:
+                                      typeof asRecord(selectedRunDetail.run.details)?.fetched_rows === 'number'
+                                        ? Number(asRecord(selectedRunDetail.run.details)?.fetched_rows)
+                                        : '—',
+                                  })}
+                                </div>
+                              </div>
+                            )}
                             <div className="mono">
                               <strong>{t('field_run_id')}:</strong> {String(selectedRunDetail.run.run_id)}
                             </div>
-                            <div className="mono">
-                              <strong>{t('field_artifact_id')}:</strong> {selectedRunDetail.artifact.artifact_id}
-                            </div>
-                            <div className="mono">
-                              <strong>{t('field_artifact_uri')}:</strong> {selectedRunDetail.artifact.uri}
-                            </div>
-                            <div className="actions">
-                              <button className="ghost" onClick={exportCurrentRunArtifact}>
-                                {t('export_file')}
-                              </button>
-                              <button className="ghost" onClick={() => saveRunDetailAsDataset('data')}>
-                                {t('save_result_action')}
-                              </button>
-                              <button
-                                className="ghost"
-                                onClick={() => {
-                                  saveRunDetailAsDataset('analyze');
-                                }}
-                              >
-                                {t('analyze_action')}
-                              </button>
-                              <button
-                                className="ghost danger-button"
-                                onClick={() => {
-                                  void deleteRun(run.run_id);
-                                }}
-                              >
-                                {t('delete_run')}
-                              </button>
-                            </div>
-                            <div
-                              dangerouslySetInnerHTML={{
-                                __html: renderPreviewTable(selectedRunDetail.preview, t('no_preview_rows')),
-                              }}
-                            />
+                            {selectedRunDetail.artifact ? (
+                              <>
+                                <div className="mono">
+                                  <strong>{t('field_artifact_id')}:</strong> {selectedRunDetail.artifact.artifact_id}
+                                </div>
+                                <div className="mono">
+                                  <strong>{t('field_artifact_uri')}:</strong> {selectedRunDetail.artifact.uri}
+                                </div>
+                                <div className="actions">
+                                  <button className="ghost" onClick={exportCurrentRunArtifact}>
+                                    {t('export_file')}
+                                  </button>
+                                  <button className="ghost" onClick={() => saveRunDetailAsDataset('data')}>
+                                    {t('save_result_action')}
+                                  </button>
+                                  <button
+                                    className="ghost"
+                                    onClick={() => {
+                                      saveRunDetailAsDataset('analyze');
+                                    }}
+                                  >
+                                    {t('analyze_action')}
+                                  </button>
+                                  <button
+                                    className="ghost danger-button"
+                                    onClick={() => {
+                                      void deleteRun(run.run_id);
+                                    }}
+                                  >
+                                    {t('delete_run')}
+                                  </button>
+                                </div>
+                                <div
+                                  dangerouslySetInnerHTML={{
+                                    __html: renderPreviewTable(selectedRunDetail.preview, t('no_preview_rows')),
+                                  }}
+                                />
+                              </>
+                            ) : (
+                              <div className="actions">
+                                <button
+                                  className="ghost danger-button"
+                                  onClick={() => {
+                                    void deleteRun(run.run_id);
+                                  }}
+                                >
+                                  {t('delete_run')}
+                                </button>
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>
@@ -2307,6 +2624,59 @@ export function App() {
                 </div>
               </div>
             </section>
+          </section>
+        )}
+
+        {view === 'settings' && (
+          <section className="section active">
+            <div className="grid">
+              <section className="panel half">
+                <div className="panel-head">
+                  <h2>{t('settings_title')}</h2>
+                </div>
+                <div className="panel-body stack">
+                  <div className="helper">{t('settings_hint')}</div>
+                  {configMessage && (
+                    <div className={`notice ${configMessage.kind === 'error' ? 'error' : ''}`}>
+                      {configMessage.text}
+                    </div>
+                  )}
+                  <label>
+                    <span>{t('bitable_app_id')}</span>
+                    <input
+                      value={configForm.bitableAppId}
+                      onChange={(event) => {
+                        setConfigForm((current) => ({ ...current, bitableAppId: event.target.value }));
+                        setConfigMessage(null);
+                      }}
+                      placeholder={t('bitable_app_id_placeholder')}
+                    />
+                  </label>
+                  <label>
+                    <span>{t('bitable_app_secret')}</span>
+                    <input
+                      type="password"
+                      value={configForm.bitableAppSecret}
+                      onChange={(event) => {
+                        setConfigForm((current) => ({ ...current, bitableAppSecret: event.target.value }));
+                        setConfigMessage(null);
+                      }}
+                      placeholder={t('bitable_app_secret_placeholder')}
+                    />
+                  </label>
+                  <div className="helper">
+                    {configForm.bitableAppSecret
+                      ? t('settings_secret_preview', { value: maskSecret(configForm.bitableAppSecret) })
+                      : t('settings_secret_empty')}
+                  </div>
+                  <div className="actions">
+                    <button type="button" onClick={() => void saveConfig()}>
+                      {t('settings_save')}
+                    </button>
+                  </div>
+                </div>
+              </section>
+            </div>
           </section>
         )}
       </main>

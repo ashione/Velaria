@@ -63,6 +63,22 @@ int main() {
     expect(tsv_probe.kind == dataflow::FileSourceKind::Csv, "tsv probe kind mismatch");
     expect(tsv_probe.csv_delimiter == '\t', "tsv probe delimiter mismatch");
 
+    const auto csv_no_header_path = make_temp_file("velaria-probe-csv-no-header", ".csv");
+    write_file(csv_no_header_path, "1,alice\n2,bob\n");
+    const auto csv_no_header_probe = session.probe(csv_no_header_path);
+    expect(csv_no_header_probe.kind == dataflow::FileSourceKind::Csv,
+           "csv no-header probe kind mismatch");
+    expect(csv_no_header_probe.format_name == "csv", "csv no-header format mismatch");
+    expect(csv_no_header_probe.csv_delimiter == ',', "csv no-header delimiter mismatch");
+
+    const auto pseudo_csv_line_path = make_temp_file("velaria-probe-pseudo-csv-line", ".csv");
+    write_file(pseudo_csv_line_path, "1001|ok|12.5\n1002|fail|9.5\n");
+    const auto pseudo_csv_line_probe = session.probe(pseudo_csv_line_path);
+    expect(pseudo_csv_line_probe.kind == dataflow::FileSourceKind::Line,
+           "pipe-delimited .csv should prefer line probe");
+    expect(pseudo_csv_line_probe.format_name == "line_split",
+           "pipe-delimited .csv format mismatch");
+
     const auto jsonl_path = make_temp_file("velaria-probe-jsonl");
     write_file(jsonl_path, "{\"user_id\":1,\"name\":\"alice\"}\n{\"user_id\":2,\"name\":\"bob\"}\n");
     const auto jsonl_probe = session.probe(jsonl_path);
@@ -78,6 +94,22 @@ int main() {
     expect(jsonl_table.rowCount() == 2, "jsonl auto row count mismatch");
     expect(jsonl_table.rows[0][1].asString() == "alice", "jsonl auto row mismatch");
 
+    const auto jsonl_no_ext_path = make_temp_file("velaria-probe-jsonl-no-ext");
+    write_file(jsonl_no_ext_path, "{\"user_id\":3,\"name\":\"carol\"}\n{\"user_id\":4,\"name\":\"dave\"}\n");
+    const auto jsonl_no_ext_probe = session.probe(jsonl_no_ext_path);
+    expect(jsonl_no_ext_probe.kind == dataflow::FileSourceKind::Json,
+           "jsonl without extension probe kind mismatch");
+    expect(jsonl_no_ext_probe.format_name == "json_lines",
+           "jsonl without extension format mismatch");
+
+    const auto jsonl_json_ext_path = make_temp_file("velaria-probe-jsonl-json-ext", ".json");
+    write_file(jsonl_json_ext_path, "{\"user_id\":5,\"name\":\"eve\"}\n{\"user_id\":6,\"name\":\"frank\"}\n");
+    const auto jsonl_json_ext_probe = session.probe(jsonl_json_ext_path);
+    expect(jsonl_json_ext_probe.kind == dataflow::FileSourceKind::Json,
+           "jsonl with .json extension probe kind mismatch");
+    expect(jsonl_json_ext_probe.format_name == "json_lines",
+           "jsonl with .json extension format mismatch");
+
     const auto json_array_path = make_temp_file("velaria-probe-json-array");
     write_file(json_array_path, "[{\"event\":\"open\",\"cost\":1.5},{\"event\":\"close\",\"cost\":2}]\n");
     const auto json_array_probe = session.probe(json_array_path);
@@ -90,14 +122,27 @@ int main() {
     expect(json_array_table.rowCount() == 2, "json array auto row count mismatch");
     expect(json_array_table.rows[1][0].asString() == "close", "json array auto row mismatch");
 
+    const auto json_nested_path = make_temp_file("velaria-probe-json-nested");
+    write_file(json_nested_path,
+               "[{\"a\":1,\"b\":{\"b1\":1}},{\"a\":2,\"b\":{\"b1\":2,\"b2\":[\"x\",3,null]}}]\n");
+    dataflow::JsonFileOptions nested_options;
+    nested_options.format = dataflow::JsonFileFormat::JsonArray;
+    nested_options.columns = {"a", "b"};
+    auto json_nested_table = session.read_json(json_nested_path, nested_options).toTable();
+    expect(json_nested_table.rowCount() == 2, "json nested object row count mismatch");
+    expect(json_nested_table.rows[0][0].asInt64() == 1, "json nested first scalar mismatch");
+    expect(json_nested_table.rows[0][1].asString() == "{\"b1\":1}",
+           "json nested first object string mismatch");
+    expect(json_nested_table.rows[1][1].asString() == "{\"b1\":2,\"b2\":[\"x\",3,null]}",
+           "json nested second object string mismatch");
+
     const auto line_path = make_temp_file("velaria-probe-line");
     write_file(line_path, "1001|ok|12.5\n1002|fail|9.5\n");
     const auto line_probe = session.probe(line_path);
     expect(line_probe.kind == dataflow::FileSourceKind::Line, "line probe kind mismatch");
     expect(line_probe.format_name == "line_split", "line probe format mismatch");
-    expect(line_probe.confidence == "low", "line probe confidence mismatch");
+    expect(line_probe.confidence == "medium", "line probe confidence mismatch");
     expect(line_probe.candidates.size() >= 1, "line probe candidate count mismatch");
-    expect(!line_probe.warnings.empty(), "line probe warnings missing");
     expect(line_probe.line_options.mode == dataflow::LineParseMode::Split,
            "line probe mode mismatch");
     expect(line_probe.line_options.split_delimiter == '|', "line probe delimiter mismatch");

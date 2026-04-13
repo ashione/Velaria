@@ -754,6 +754,9 @@ class JsonCursor {
       expectKeyword("null");
       return Value();
     }
+    if (ch == '{') {
+      return Value(captureValueLiteral());
+    }
     if (ch == '[') {
       return parseNumericArray();
     }
@@ -823,6 +826,10 @@ class JsonCursor {
       parsed.is_null = true;
       return parsed;
     }
+    if (ch == '{') {
+      parsed.owned_text = captureValueLiteral();
+      return parsed;
+    }
     if (ch == '[') {
       parsed.has_full_value = true;
       parsed.full_value = parseNumericArray();
@@ -872,11 +879,66 @@ class JsonCursor {
       expectKeyword("null");
       return;
     }
+    if (ch == '{') {
+      skipObject();
+      return;
+    }
     if (ch == '[') {
-      (void)parseNumericArray();
+      skipArray();
       return;
     }
     throw std::runtime_error("unsupported json value kind");
+  }
+
+  std::string captureValueLiteral() {
+    skipWhitespace();
+    const std::size_t start = pos_;
+    skipValue();
+    return std::string(payload_.substr(start, pos_ - start));
+  }
+
+  void skipObject() {
+    if (!consume('{')) {
+      throw std::runtime_error("json object expected");
+    }
+    skipWhitespace();
+    if (consume('}')) {
+      return;
+    }
+    while (true) {
+      (void)parseStringRef();
+      if (!consume(':')) {
+        throw std::runtime_error("json object missing ':'");
+      }
+      skipValue();
+      skipWhitespace();
+      if (consume('}')) {
+        break;
+      }
+      if (!consume(',')) {
+        throw std::runtime_error("json object missing ','");
+      }
+    }
+  }
+
+  void skipArray() {
+    if (!consume('[')) {
+      throw std::runtime_error("json array expected");
+    }
+    skipWhitespace();
+    if (consume(']')) {
+      return;
+    }
+    while (true) {
+      skipValue();
+      skipWhitespace();
+      if (consume(']')) {
+        break;
+      }
+      if (!consume(',')) {
+        throw std::runtime_error("json array missing ','");
+      }
+    }
   }
 
   template <typename Fn>
@@ -1173,6 +1235,25 @@ bool looksLikeIdentifierList(const std::vector<std::string_view>& tokens) {
   return true;
 }
 
+bool looksLikeJsonObjectLines(const std::vector<std::string>& lines) {
+  if (lines.empty()) {
+    return false;
+  }
+  for (const auto& line : lines) {
+    if (line.empty() || line.front() != '{' || line.back() != '}') {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool looksLikeJsonArrayPayload(const std::vector<std::string>& lines) {
+  if (lines.empty()) {
+    return false;
+  }
+  return lines.front().front() == '[';
+}
+
 std::optional<char> chooseDelimitedFormat(const std::vector<std::string>& lines, bool* csv_header) {
   if (csv_header != nullptr) {
     *csv_header = false;
@@ -1268,10 +1349,11 @@ std::vector<FileSourceProbeCandidate> buildProbeCandidates(
   const bool tsv_ext = lower_path.ends_with(".tsv");
   const bool json_ext = lower_path.ends_with(".json");
   const bool jsonl_ext = lower_path.ends_with(".jsonl") || lower_path.ends_with(".ndjson");
+  const bool line_ext = lower_path.ends_with(".log") || lower_path.ends_with(".txt") ||
+                        lower_path.ends_with(".lines");
 
   if (!lines.empty()) {
-    const char first = lines.front().empty() ? '\0' : lines.front().front();
-    if (first == '{') {
+    if (looksLikeJsonObjectLines(lines)) {
       candidates.push_back(makeCandidate(
           "json_lines", FileSourceKind::Json, 92 + (json_ext || jsonl_ext ? 8 : 0),
           jsonl_ext
@@ -1279,7 +1361,7 @@ std::vector<FileSourceProbeCandidate> buildProbeCandidates(
                                          "jsonl/ndjson extension"}
               : std::vector<std::string>{"content starts with object",
                                          "newline-delimited objects"}));
-    } else if (first == '[') {
+    } else if (looksLikeJsonArrayPayload(lines)) {
       candidates.push_back(makeCandidate(
           "json_array", FileSourceKind::Json, 94 + (json_ext ? 8 : 0),
           json_ext ? std::vector<std::string>{"content starts with array", "json extension"}
@@ -1292,9 +1374,11 @@ std::vector<FileSourceProbeCandidate> buildProbeCandidates(
       const auto columns = splitByDelimiter(lines.front(), *delimiter).size();
       const int base_score = static_cast<int>(40 + std::min<std::size_t>(columns, 12) * 3);
       const int header_bonus = csv_header ? 25 : 0;
-      const int line_bonus = csv_header ? -10 : 15;
-      const int ext_bonus =
-          ((*delimiter == ',' && csv_ext) || (*delimiter == '\t' && tsv_ext)) ? 20 : 0;
+      const bool matching_tabular_ext =
+          ((*delimiter == ',' && csv_ext) || (*delimiter == '\t' && tsv_ext));
+      const bool delimiter_prefers_line = *delimiter != ',' && *delimiter != '\t';
+      const int ext_bonus = matching_tabular_ext ? 20 : 0;
+      const int line_bonus = csv_header ? -10 : (delimiter_prefers_line ? 24 : 8);
       if (csv_header) {
         candidates.push_back(makeCandidate(delimiterFormatName(*delimiter, true),
                                            FileSourceKind::Csv,
@@ -1302,13 +1386,26 @@ std::vector<FileSourceProbeCandidate> buildProbeCandidates(
                                            {delimiterReason(*delimiter, columns, true),
                                             ext_bonus > 0 ? "matching delimited extension"
                                                           : "header-shaped first row"}));
+      } else if (matching_tabular_ext) {
+        candidates.push_back(makeCandidate(delimiterFormatName(*delimiter, true),
+                                           FileSourceKind::Csv,
+                                           base_score + 28 + ext_bonus,
+                                           {delimiterReason(*delimiter, columns, false),
+                                            "stable delimited columns with matching extension"}));
+      }
+      std::vector<std::string> line_evidence = {
+          delimiterReason(*delimiter, columns, false),
+          csv_header ? "header not trusted for line fallback"
+                     : "stable split columns without header",
+      };
+      if (line_ext && delimiter_prefers_line) {
+        line_evidence.push_back("line-oriented extension");
       }
       candidates.push_back(makeCandidate(delimiterFormatName(*delimiter, false),
                                          FileSourceKind::Line,
-                                         base_score + line_bonus + (csv_header ? 0 : ext_bonus / 2),
-                                         {delimiterReason(*delimiter, columns, false),
-                                          csv_header ? "header not trusted for line fallback"
-                                                     : "stable split columns without header"}));
+                                         base_score + line_bonus + (csv_header ? 0 : ext_bonus / 2) +
+                                             (line_ext && delimiter_prefers_line ? 8 : 0),
+                                         std::move(line_evidence)));
     } else {
       candidates.push_back(makeCandidate("line_split", FileSourceKind::Line, 15,
                                          {"no stable delimiter match",

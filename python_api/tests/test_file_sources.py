@@ -10,9 +10,15 @@ class FileSourcePythonApiTest(unittest.TestCase):
         session = velaria.Session()
         with tempfile.TemporaryDirectory(prefix="velaria-py-probe-json-") as tmp:
             json_path = pathlib.Path(tmp) / "events.jsonl"
+            json_no_ext_path = pathlib.Path(tmp) / "events"
             json_path.write_text(
                 '{"user_id":1,"name":"alice","score":1.5}\n'
                 '{"user_id":2,"name":"bob","score":2.5}\n',
+                encoding="utf-8",
+            )
+            json_no_ext_path.write_text(
+                '{"user_id":3,"name":"carol","score":3.5}\n'
+                '{"user_id":4,"name":"dave","score":4.5}\n',
                 encoding="utf-8",
             )
 
@@ -38,6 +44,28 @@ class FileSourcePythonApiTest(unittest.TestCase):
             rows = auto_df.to_rows()
             self.assertEqual(rows["schema"], ["user_id", "name", "score"])
             self.assertEqual(rows["rows"], [[1, "alice", 1.5], [2, "bob", 2.5]])
+
+            no_ext_probe = session.probe(str(json_no_ext_path))
+            self.assertEqual(no_ext_probe["kind"], "json")
+            self.assertEqual(no_ext_probe["final_format"], "json_lines")
+            no_ext_rows = session.read(str(json_no_ext_path)).to_rows()
+            self.assertEqual(no_ext_rows["rows"], [[3, "carol", 3.5], [4, "dave", 4.5]])
+
+    def test_probe_and_read_auto_prefer_line_for_pipe_delimited_csv_extension(self):
+        session = velaria.Session()
+        with tempfile.TemporaryDirectory(prefix="velaria-py-probe-line-") as tmp:
+            path = pathlib.Path(tmp) / "events.csv"
+            path.write_text("1001|ok|12.5\n1002|fail|9.5\n", encoding="utf-8")
+
+            probe = session.probe(str(path))
+            self.assertEqual(probe["kind"], "line")
+            self.assertEqual(probe["final_format"], "line_split")
+            self.assertEqual(probe["mode"], "split")
+            self.assertEqual(probe["delimiter"], "|")
+
+            rows = session.read(str(path)).to_rows()
+            self.assertEqual(rows["schema"], ["c0", "c1", "c2"])
+            self.assertEqual(rows["rows"], [[1001, "ok", 12.5], [1002, "fail", 9.5]])
 
     def test_read_line_file_supports_split_and_regex_modes(self):
         session = velaria.Session()
@@ -143,6 +171,25 @@ class FileSourcePythonApiTest(unittest.TestCase):
             ).to_rows()
             self.assertEqual(json_complex_rows["rows"][0], [3, 'al"ice', True, "line\nnext", None])
             self.assertEqual(json_complex_rows["rows"][1], [4, "tab\tuser", False, r"C:\logs", 7])
+
+            json_nested_path = root / "events_nested.json"
+            json_nested_path.write_text(
+                '[{"a":1,"b":{"b1":1}},{"a":2,"b":{"b1":2,"b2":["x",3,null]}}]',
+                encoding="utf-8",
+            )
+            json_nested_rows = session.read_json(
+                str(json_nested_path),
+                columns=["a", "b"],
+                format="json_array",
+            ).to_rows()
+            self.assertEqual(json_nested_rows["schema"], ["a", "b"])
+            self.assertEqual(
+                json_nested_rows["rows"],
+                [
+                    [1, '{"b1":1}'],
+                    [2, '{"b1":2,"b2":["x",3,null]}'],
+                ],
+            )
 
 
 if __name__ == "__main__":

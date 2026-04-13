@@ -154,7 +154,62 @@ json_df = session.read_json(
     columns=["user_id", "action", "latency"],
     format="json_lines",
 )
+
+json_array_df = session.read_json(
+    "events.json",
+    columns=["event", "cost"],
+    format="json_array",
+)
+
+nested_json_df = session.read_json(
+    "events_nested.json",
+    columns=["a", "b"],
+    format="json_array",
+)
+
+# JSON reader notes:
+# - top-level rows must still be JSON objects
+# - nested object fields are preserved as raw JSON strings
+# - numeric JSON arrays are still parsed as vector values when read directly as a field
 ```
+
+JSON source examples:
+
+```json
+{"user_id":1,"action":"open","latency":12.5}
+{"user_id":2,"action":"close","latency":9.0}
+```
+
+```json
+[
+  {"event":"open","cost":1.5},
+  {"event":"close","cost":2}
+]
+```
+
+```json
+[
+  {"a":1,"b":{"b1":1}},
+  {"a":2,"b":{"b1":2,"b2":["x",3,null]}}
+]
+```
+
+Nested-object result shape with `columns=["a", "b"]`:
+
+```text
+[1, "{\"b1\":1}"]
+[2, "{\"b1\":2,\"b2\":[\"x\",3,null]}"]
+```
+
+Current JSON limits:
+
+- `json_lines` and `json_array` are supported
+- each top-level row must be a JSON object
+- `columns=[...]` is required for explicit JSON reads
+- nested object values are returned as JSON text, not flattened columns
+- a top-level scalar array such as `["a", "b"]` is not supported as a table source
+- nested arrays inside an object string are preserved inside that JSON text
+- direct field values that are numeric JSON arrays still map to vector values
 
 Embedding pipeline example:
 

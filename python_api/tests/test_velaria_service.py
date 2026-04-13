@@ -5,6 +5,7 @@ import pathlib
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 from unittest import mock
@@ -67,6 +68,256 @@ class VelariaServiceTest(unittest.TestCase):
             f"{base_url}/api/v1/runs/embedding-build",
             payload,
         )
+
+    def test_resolve_auto_input_payload_prefers_excel_suffix(self):
+        session = mock.Mock()
+        resolved_type, resolved = velaria_service._resolve_auto_input_payload(
+            session,
+            {
+                "input_path": "/tmp/employee_import.xlsx",
+                "input_type": "auto",
+            },
+        )
+        self.assertEqual(resolved_type, "excel")
+        self.assertEqual(resolved["input_path"], "/tmp/employee_import.xlsx")
+        session.probe.assert_not_called()
+
+    def test_resolve_auto_input_payload_uses_probe_details_for_json_line_and_csv(self):
+        session = mock.Mock()
+
+        session.probe.return_value = {
+            "kind": "json",
+            "columns": ["user_id", "name"],
+            "format": "json_lines",
+        }
+        resolved_type, resolved = velaria_service._resolve_auto_input_payload(
+            session,
+            {
+                "input_path": "/tmp/events",
+                "input_type": "auto",
+            },
+        )
+        self.assertEqual(resolved_type, "json")
+        self.assertEqual(resolved["columns"], "user_id,name")
+        self.assertEqual(resolved["json_format"], "json_lines")
+
+        session.probe.return_value = {
+            "kind": "line",
+            "mode": "split",
+            "delimiter": "|",
+            "mappings": [
+                {"column": "c0", "source_index": 0},
+                {"column": "c1", "source_index": 1},
+            ],
+        }
+        resolved_type, resolved = velaria_service._resolve_auto_input_payload(
+            session,
+            {
+                "input_path": "/tmp/events.log",
+                "input_type": "auto",
+            },
+        )
+        self.assertEqual(resolved_type, "line")
+        self.assertEqual(resolved["line_mode"], "split")
+        self.assertEqual(resolved["delimiter"], "|")
+        self.assertEqual(
+            resolved["mappings"],
+            [
+                {"name": "c0", "index": 0},
+                {"name": "c1", "index": 1},
+            ],
+        )
+
+        session.probe.return_value = {
+            "kind": "csv",
+            "delimiter": ",",
+        }
+        resolved_type, resolved = velaria_service._resolve_auto_input_payload(
+            session,
+            {
+                "input_path": "/tmp/input.data",
+                "input_type": "auto",
+            },
+        )
+        self.assertEqual(resolved_type, "csv")
+        self.assertEqual(resolved["delimiter"], ",")
+
+    def test_resolve_auto_input_payload_preserves_explicit_fields_and_safe_fallback(self):
+        session = mock.Mock()
+        session.probe.return_value = {
+            "kind": "json",
+            "columns": ["user_id", "name"],
+            "format": "json_lines",
+        }
+        resolved_type, resolved = velaria_service._resolve_auto_input_payload(
+            session,
+            {
+                "input_path": "/tmp/events.jsonl",
+                "input_type": "auto",
+                "columns": "custom_id,custom_name",
+                "json_format": "json_array",
+            },
+        )
+        self.assertEqual(resolved_type, "json")
+        self.assertEqual(resolved["columns"], "custom_id,custom_name")
+        self.assertEqual(resolved["json_format"], "json_array")
+
+        session.probe.side_effect = RuntimeError("probe failed")
+        resolved_type, resolved = velaria_service._resolve_auto_input_payload(
+            session,
+            {
+                "input_path": "/tmp/unknown.data",
+                "input_type": "auto",
+            },
+        )
+        self.assertEqual(resolved_type, "auto")
+        self.assertEqual(resolved["input_path"], "/tmp/unknown.data")
+
+    def test_import_preview_reports_resolved_source_type_for_auto_inputs(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-service-preview-auto-type-") as tmp:
+            xlsx_path = pathlib.Path(tmp) / "people.xlsx"
+            xlsx_path.write_text("placeholder", encoding="utf-8")
+            server, thread, base_url = self._start_server()
+            try:
+                with mock.patch.object(velaria_service, "Session", return_value=mock.Mock()):
+                    with mock.patch.object(
+                        velaria_service,
+                        "_resolve_auto_input_payload",
+                        return_value=("excel", {"input_path": str(xlsx_path), "input_type": "auto"}),
+                    ):
+                        with mock.patch.object(velaria_service, "_load_dataframe", return_value=object()):
+                            with mock.patch.object(
+                                velaria_service,
+                                "_preview_from_dataframe",
+                                return_value={"schema": ["name"], "rows": [{"name": "alice"}], "row_count": 1},
+                            ):
+                                status, payload = self._request_json(
+                                    "POST",
+                                    f"{base_url}/api/v1/import/preview",
+                                    {
+                                        "input_path": str(xlsx_path),
+                                        "input_type": "auto",
+                                    },
+                                )
+                self.assertEqual(status, 200)
+                self.assertEqual(payload["dataset"]["source_type"], "excel")
+                self.assertEqual(payload["dataset"]["source_path"], str(xlsx_path.resolve()))
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_execute_bitable_import_materializes_local_parquet_dataset(self):
+        fake_client = mock.Mock()
+        fake_client.list_records_from_url.return_value = [
+            {"Name": "alice", "Score": 1, "Meta": {"owner": "ops"}},
+            {"Name": "bob", "Score": 2, "Tags": ["p0", "triage"]},
+        ]
+        with tempfile.TemporaryDirectory(prefix="velaria-service-bitable-exec-") as tmp:
+            run_dir = pathlib.Path(tmp) / "run"
+            run_dir.mkdir(parents=True)
+            with mock.patch.object(velaria_service, "BitableClient", return_value=fake_client):
+                result = velaria_service._execute_bitable_import(
+                    {
+                        "bitable_url": "https://example.feishu.cn/base/app123/tables/tbl456",
+                        "app_id": "cli-app",
+                        "app_secret": "cli-secret",
+                        "dataset_name": "ops-board",
+                    },
+                    run_dir,
+                )
+            self.assertEqual(result["payload"]["source_type"], "bitable")
+            self.assertEqual(result["payload"]["dataset_name"], "ops-board")
+            self.assertEqual(result["preview"]["row_count"], 2)
+            self.assertEqual(result["preview"]["rows"][0]["Meta"], '{"owner":"ops"}')
+            self.assertTrue(pathlib.Path(result["payload"]["source_path"]).exists())
+
+    def test_preview_bitable_import_reads_first_100_rows_only(self):
+        fake_client = mock.Mock()
+        fake_client.list_records_from_url.return_value = [
+            {"Name": f"user-{i}", "Score": i}
+            for i in range(100)
+        ]
+        with mock.patch.object(velaria_service, "BitableClient", return_value=fake_client):
+            result = velaria_service._preview_bitable_import(
+                {
+                    "input_type": "bitable",
+                    "bitable_url": "https://example.feishu.cn/base/app123/tables/tbl456",
+                    "app_id": "cli-app",
+                    "app_secret": "cli-secret",
+                    "dataset_name": "ops-board-preview",
+                    "limit": 100,
+                }
+            )
+        self.assertEqual(result["dataset"]["source_type"], "bitable")
+        self.assertEqual(result["dataset"]["source_path"], "https://example.feishu.cn/base/app123/tables/tbl456")
+        self.assertEqual(result["preview"]["row_count"], 100)
+        self.assertEqual(result["preview"]["rows"][0]["Name"], "user-0")
+        fake_client.list_records_from_url.assert_called_once()
+        _, kwargs = fake_client.list_records_from_url.call_args
+        self.assertEqual(kwargs["page_size"], 100)
+        self.assertEqual(kwargs["max_rows"], 100)
+
+    def test_bitable_import_run_is_async_and_persists_result_artifact(self):
+        fake_client = mock.Mock()
+        def _fake_list_records_from_url(*args, **kwargs):
+            callback = kwargs.get("on_page")
+            rows = [
+                {"Name": "alice", "Score": 1},
+                {"Name": "bob", "Score": 2},
+            ]
+            if callback is not None:
+                callback(len(rows), len(rows))
+            return rows
+
+        fake_client.list_records_from_url.side_effect = _fake_list_records_from_url
+        with tempfile.TemporaryDirectory(prefix="velaria-service-bitable-run-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                server, thread, base_url = self._start_server()
+                try:
+                    with mock.patch.object(velaria_service, "BitableClient", return_value=fake_client):
+                        status, payload = self._request_json(
+                            "POST",
+                            f"{base_url}/api/v1/runs/bitable-import",
+                            {
+                                "bitable_url": "https://example.feishu.cn/base/app123/tables/tbl456",
+                                "app_id": "cli-app",
+                                "app_secret": "cli-secret",
+                                "dataset_name": "ops-board",
+                            },
+                        )
+                        self.assertEqual(status, 202)
+                        self.assertTrue(payload["ok"])
+                        run_id = payload["run_id"]
+
+                        run_status = 0
+                        run_payload = {}
+                        for _ in range(20):
+                            run_status, run_payload = self._request_json(
+                                "GET",
+                                f"{base_url}/api/v1/runs/{run_id}",
+                            )
+                            if run_status == 200 and run_payload["run"]["status"] == "succeeded":
+                                break
+                            time.sleep(0.1)
+                        self.assertEqual(run_status, 200)
+                        self.assertEqual(run_payload["run"]["status"], "succeeded")
+                        self.assertEqual(run_payload["run"]["details"]["source_type"], "bitable")
+                        self.assertEqual(run_payload["run"]["details"]["fetched_rows"], 2)
+                        self.assertEqual(run_payload["run"]["details"]["pages_fetched"], 1)
+
+                        result_status, result_payload = self._request_json(
+                            "GET",
+                            f"{base_url}/api/v1/runs/{run_id}/result?limit=20",
+                        )
+                        self.assertEqual(result_status, 200)
+                        self.assertEqual(result_payload["preview"]["row_count"], 2)
+                        self.assertEqual(result_payload["preview"]["rows"][0]["Name"], "alice")
+                        self.assertTrue(pathlib.Path(run_payload["run"]["details"]["source_path"]).exists())
+                finally:
+                    server.shutdown()
+                    thread.join(timeout=5)
+                    server.server_close()
 
     def test_versioned_hybrid_search_creates_run_and_delete_removes_run_dir(self):
         provider = StaticEmbeddingProvider(

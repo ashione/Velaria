@@ -1,6 +1,6 @@
 {
   "name": "velaria-electron-prototype",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "Velaria desktop prototype with Electron + Python sidecar",
   "main": "dist/electron/main/main.js",
   "license": "MIT",

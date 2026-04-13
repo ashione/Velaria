@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import path from 'node:path';
+import os from 'node:os';
 import fs from 'node:fs/promises';
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
@@ -8,8 +9,13 @@ const DEFAULT_PORT = Number.parseInt(process.env.VELARIA_SERVICE_PORT || '37491'
 
 let mainWindow: BrowserWindow | null = null;
 type SidecarProcess = ChildProcessByStdio<null, Readable, Readable>;
+type AppConfig = {
+  bitableAppId?: string;
+  bitableAppSecret?: string;
+};
 
 let sidecarProcess: SidecarProcess | null = null;
+let embeddingPrepProcess: SidecarProcess | null = null;
 
 function repoRoot() {
   return path.resolve(__dirname, '..', '..', '..', '..');
@@ -24,6 +30,52 @@ function sidecarExecutablePath() {
     return path.join(process.resourcesPath, 'bin', 'velaria-service', 'velaria-service');
   }
   return null;
+}
+
+function configDir() {
+  return path.join(os.homedir(), '.velaria');
+}
+
+function configPath() {
+  return path.join(configDir(), 'config.json');
+}
+
+async function readAppConfig(): Promise<AppConfig> {
+  try {
+    const raw = await fs.readFile(configPath(), 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+    return {
+      bitableAppId:
+        typeof parsed.bitableAppId === 'string' && parsed.bitableAppId.trim()
+          ? parsed.bitableAppId.trim()
+          : undefined,
+      bitableAppSecret:
+        typeof parsed.bitableAppSecret === 'string' && parsed.bitableAppSecret.trim()
+          ? parsed.bitableAppSecret.trim()
+          : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+async function writeAppConfig(payload: AppConfig): Promise<AppConfig> {
+  const next: AppConfig = {
+    bitableAppId:
+      typeof payload.bitableAppId === 'string' && payload.bitableAppId.trim()
+        ? payload.bitableAppId.trim()
+        : undefined,
+    bitableAppSecret:
+      typeof payload.bitableAppSecret === 'string' && payload.bitableAppSecret.trim()
+        ? payload.bitableAppSecret.trim()
+        : undefined,
+  };
+  await fs.mkdir(configDir(), { recursive: true });
+  await fs.writeFile(configPath(), `${JSON.stringify(next, null, 2)}\n`, 'utf-8');
+  return next;
 }
 
 function startSidecar() {
@@ -48,8 +100,6 @@ function startSidecar() {
         'run',
         '--project',
         path.join(root, 'python_api'),
-        '--extra',
-        'embedding',
         'python',
         path.join(root, 'python_api', 'velaria_service.py'),
         '--port',
@@ -78,6 +128,78 @@ function startSidecar() {
   });
   sidecarProcess = processRef;
   return processRef;
+}
+
+function startBackgroundEmbeddingPrep() {
+  if (app.isPackaged || embeddingPrepProcess) {
+    return embeddingPrepProcess;
+  }
+  const root = repoRoot();
+  const syncRef = spawn(
+    'uv',
+    ['sync', '--project', path.join(root, 'python_api'), '--extra', 'embedding'],
+    {
+      cwd: root,
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: '1',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }
+  );
+  syncRef.stdout.on('data', (chunk) => {
+    process.stdout.write(`[velaria-embedding] ${chunk}`);
+  });
+  syncRef.stderr.on('data', (chunk) => {
+    process.stderr.write(`[velaria-embedding] ${chunk}`);
+  });
+  syncRef.on('exit', (code) => {
+    if (code !== 0) {
+      console.warn(`[velaria-embedding] sync exited code=${code}`);
+      embeddingPrepProcess = null;
+      return;
+    }
+    const warmupRef = spawn(
+      'uv',
+      [
+        'run',
+        '--project',
+        path.join(root, 'python_api'),
+        '--extra',
+        'embedding',
+        'python',
+        '-c',
+        [
+          'from velaria import DEFAULT_LOCAL_CHINESE_EMBEDDING_MODEL, SentenceTransformerEmbeddingProvider;',
+          'provider = SentenceTransformerEmbeddingProvider(model_name=DEFAULT_LOCAL_CHINESE_EMBEDDING_MODEL);',
+          'provider.warmup(model=DEFAULT_LOCAL_CHINESE_EMBEDDING_MODEL)',
+        ].join(' '),
+      ],
+      {
+        cwd: root,
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: '1',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
+    warmupRef.stdout.on('data', (chunk) => {
+      process.stdout.write(`[velaria-embedding] ${chunk}`);
+    });
+    warmupRef.stderr.on('data', (chunk) => {
+      process.stderr.write(`[velaria-embedding] ${chunk}`);
+    });
+    warmupRef.on('exit', (warmupCode) => {
+      if (warmupCode !== 0) {
+        console.warn(`[velaria-embedding] warmup exited code=${warmupCode}`);
+      }
+      embeddingPrepProcess = null;
+    });
+    embeddingPrepProcess = warmupRef;
+  });
+  embeddingPrepProcess = syncRef;
+  return embeddingPrepProcess;
 }
 
 async function waitForServiceReady() {
@@ -120,8 +242,11 @@ function createWindow() {
 
 async function bootstrap() {
   startSidecar();
-  await waitForServiceReady();
   createWindow();
+  void waitForServiceReady().catch((error) => {
+    console.error(`[velaria-service] startup wait failed: ${String(error)}`);
+  });
+  void startBackgroundEmbeddingPrep();
 }
 
 app.whenReady().then(async () => {
@@ -161,6 +286,10 @@ ipcMain.handle('shell:get-service-info', async () => ({
   baseUrl: serviceBaseUrl(),
   packaged: app.isPackaged,
 }));
+
+ipcMain.handle('shell:get-config', async () => readAppConfig());
+
+ipcMain.handle('shell:save-config', async (_event, payload: AppConfig) => writeAppConfig(payload));
 
 ipcMain.handle('shell:export-file', async (_event, payload: { sourcePath?: string; suggestedName?: string }) => {
   const sourcePath = payload?.sourcePath;

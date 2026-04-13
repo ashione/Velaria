@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <fstream>
 #include <limits>
 #include <unordered_set>
 
 #include "src/dataflow/core/execution/arrow_format.h"
 #include "src/dataflow/core/execution/columnar_batch.h"
+#include "src/dataflow/core/execution/runtime/simd_dispatch.h"
 
 namespace dataflow {
 
@@ -196,6 +198,21 @@ void appendRejectedCandidate(std::vector<std::string>* rejected, const std::stri
   rejected->push_back(value);
 }
 
+bool sampleContainsByte(const std::string& path, char needle, std::size_t sample_bytes) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input.is_open()) {
+    return true;
+  }
+  std::string sample(sample_bytes, '\0');
+  input.read(sample.data(), static_cast<std::streamsize>(sample.size()));
+  const auto read = static_cast<std::size_t>(input.gcount());
+  if (read == 0) {
+    return false;
+  }
+  const auto& dispatch = simdDispatch();
+  return dispatch.find_byte(sample.data(), sample.data() + read, needle) != nullptr;
+}
+
 }  // namespace
 
 PredicatePattern analyzePredicatePattern(const PlanNodePtr& plan) {
@@ -226,6 +243,45 @@ LimitExecutionPattern analyzeLimitExecution(const LimitPlan& plan) {
     pattern.use_topn = true;
     pattern.order_by = static_cast<const OrderByPlan*>(plan.child.get());
   }
+  return pattern;
+}
+
+SourceExecutionPattern analyzeSourceExecution(const FileSourceConnectorSpec& spec,
+                                             const Schema& schema,
+                                             const SourcePushdownSpec& pushdown) {
+  SourceExecutionPattern pattern;
+  if (spec.kind != FileSourceKind::Csv) {
+    pattern.reason = "non-csv source keeps the generic scalar scan path";
+    return pattern;
+  }
+
+  if (pushdown.has_aggregate) {
+    pattern.decode_mode = SourceDecodeMode::ParseAggregateColumnsOnly;
+    pattern.reason = "csv aggregate pushdown keeps scalar tokenizer until simd aggregate scan proves faster";
+    return pattern;
+  } else if (!pushdown.filters.empty() || pushdown.predicate_expr) {
+    pattern.decode_mode = SourceDecodeMode::ParseFilterColumnsOnly;
+  } else {
+    pattern.decode_mode = SourceDecodeMode::ParseCapturedCells;
+  }
+
+  if (simdDispatch().backend == SimdBackendKind::Scalar) {
+    pattern.reason = "active simd backend is scalar; keep scalar tokenizer";
+    return pattern;
+  }
+
+  constexpr std::size_t kCsvStrategySampleBytes = 1 << 15;
+  pattern.sample_has_quotes = sampleContainsByte(spec.path, '"', kCsvStrategySampleBytes);
+  if (spec.csv_delimiter == '"' || pattern.sample_has_quotes || schema.fields.empty()) {
+    pattern.tokenizer_mode = SourceTokenizerMode::ScalarStateMachine;
+    pattern.reason = pattern.sample_has_quotes
+                         ? "sample includes quoted fields; keep scalar csv state machine"
+                         : "csv scan falls back to scalar path";
+    return pattern;
+  }
+
+  pattern.tokenizer_mode = SourceTokenizerMode::SimdFastUnquoted;
+  pattern.reason = "csv sample has no quotes; use simd fast tokenizer and scalar fallback on quotes";
   return pattern;
 }
 

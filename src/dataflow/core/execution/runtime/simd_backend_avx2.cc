@@ -32,6 +32,47 @@ const char* avx2FindByte(const char* begin, const char* end, char needle) {
 #endif
 }
 
+const char* avx2FindFirstOf(const char* begin, const char* end, const char* needles,
+                            std::size_t needle_count, char* matched_needle) {
+#if defined(__AVX2__)
+  if (begin == nullptr || end == nullptr || begin >= end || needles == nullptr ||
+      needle_count == 0) {
+    return nullptr;
+  }
+  constexpr std::size_t kLaneCount = 32;
+  const std::size_t compare_count = std::min<std::size_t>(needle_count, 4);
+  const __m256i needle0 = _mm256_set1_epi8(compare_count > 0 ? needles[0] : 0);
+  const __m256i needle1 = _mm256_set1_epi8(compare_count > 1 ? needles[1] : 0);
+  const __m256i needle2 = _mm256_set1_epi8(compare_count > 2 ? needles[2] : 0);
+  const __m256i needle3 = _mm256_set1_epi8(compare_count > 3 ? needles[3] : 0);
+  const char* ptr = begin;
+  for (; ptr + kLaneCount <= end; ptr += kLaneCount) {
+    const __m256i bytes = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
+    __m256i matches = _mm256_cmpeq_epi8(bytes, needle0);
+    if (compare_count > 1) {
+      matches = _mm256_or_si256(matches, _mm256_cmpeq_epi8(bytes, needle1));
+    }
+    if (compare_count > 2) {
+      matches = _mm256_or_si256(matches, _mm256_cmpeq_epi8(bytes, needle2));
+    }
+    if (compare_count > 3) {
+      matches = _mm256_or_si256(matches, _mm256_cmpeq_epi8(bytes, needle3));
+    }
+    const uint32_t mask = static_cast<uint32_t>(_mm256_movemask_epi8(matches));
+    if (mask != 0) {
+      const char* matched_ptr = ptr + __builtin_ctz(mask);
+      if (matched_needle != nullptr) {
+        *matched_needle = *matched_ptr;
+      }
+      return matched_ptr;
+    }
+  }
+  return scalarDispatch().find_first_of(ptr, end, needles, needle_count, matched_needle);
+#else
+  return scalarDispatch().find_first_of(begin, end, needles, needle_count, matched_needle);
+#endif
+}
+
 NumericSelectionResult avx2SelectDouble(const double* values, const uint8_t* is_null,
                                         std::size_t row_count, double rhs,
                                         NumericCompareOp op, std::size_t max_selected) {
@@ -140,6 +181,7 @@ const SimdKernelDispatch kAvx2Dispatch = {
     SimdBackendKind::Avx2,
     simdBackendName(SimdBackendKind::Avx2),
     &avx2FindByte,
+    &avx2FindFirstOf,
     &avx2SelectDouble,
     &avx2SumDouble,
     &avx2AccumulateDouble,

@@ -137,18 +137,17 @@ bool rowMatchesAllFilters(std::span<const BoundFilter> filters, std::size_t row_
   return true;
 }
 
-std::vector<std::string> splitKey(const std::string& key) {
-  std::vector<std::string> out;
-  std::string cur;
-  for (char c : key) {
-    if (c == kGroupDelim) {
-      out.push_back(cur);
-      cur.clear();
-    } else {
-      cur.push_back(c);
+std::vector<std::string_view> splitKeyViews(std::string_view key) {
+  std::vector<std::string_view> out;
+  std::size_t begin = 0;
+  for (std::size_t index = 0; index < key.size(); ++index) {
+    if (key[index] != kGroupDelim) {
+      continue;
     }
+    out.push_back(key.substr(begin, index - begin));
+    begin = index + 1;
   }
-  out.push_back(cur);
+  out.push_back(key.substr(begin));
   return out;
 }
 
@@ -171,6 +170,20 @@ struct AggregateAccumulator {
   std::vector<Value> maxVal;
   std::vector<uint8_t> hasMax;
 };
+
+std::size_t reserveAggregateGroupCount(const AggregateExecutionPattern& aggregate_pattern,
+                                       std::size_t row_count) {
+  if (aggregate_pattern.shape == AggregateExecutionShape::GenericNoKey) {
+    return 1;
+  }
+  if (aggregate_pattern.exec_spec.expected_groups != 0) {
+    return std::max<std::size_t>(aggregate_pattern.exec_spec.expected_groups, 64);
+  }
+  if (aggregate_pattern.exec_spec.properties.low_cardinality) {
+    return std::min<std::size_t>(row_count, 4096);
+  }
+  return std::min<std::size_t>(row_count, 16384);
+}
 
 struct Int64AggregateKey {
   bool is_null = true;
@@ -844,6 +857,23 @@ bool cacheCoversProjectedColumns(const std::vector<std::size_t>& cached_columns,
   return true;
 }
 
+bool sourceCacheCoversPushdown(const SourcePlan& node, const SourcePushdownSpec& pushdown) {
+  std::lock_guard<std::mutex> lock(node.cached_table_mu);
+  if (!node.cached_table) {
+    return false;
+  }
+  return cacheCoversProjectedColumns(node.cached_projected_indices, pushdown.projected_columns);
+}
+
+bool shouldUseSourcePushdown(const SourcePlan& node, const SourcePushdownSpec& pushdown) {
+  if (node.options.materialization.enabled || node.options.cache_in_memory) {
+    return false;
+  }
+  // Once the current session already holds a compatible source snapshot, prefer
+  // in-memory execution over rescanning the file through source pushdown.
+  return !sourceCacheCoversPushdown(node, pushdown);
+}
+
 std::vector<std::size_t> requestedSourceColumns(const SourcePlan& node,
                                                 const SourceRequirementMap& requirements) {
   auto it = requirements.find(&node);
@@ -1199,7 +1229,7 @@ BorrowedOrOwnedTable borrowOrExecute(const LocalExecutor& executor, const PlanNo
   const SourcePlan* pushed_source = nullptr;
   SourcePushdownSpec pushed_spec;
   if (buildSourcePushdownSpec(plan, requirements, &pushed_source, &pushed_spec) &&
-      !pushed_source->options.materialization.enabled) {
+      shouldUseSourcePushdown(*pushed_source, pushed_spec)) {
     Table loaded;
     if (tryExecuteSourcePushdown(*pushed_source, pushed_spec, false, &loaded)) {
       auto owned = std::make_shared<Table>(std::move(loaded));
@@ -1301,12 +1331,14 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
 
   if (aggregate_pattern.shape == AggregateExecutionShape::GenericSingleStringKey) {
     const auto key_column = viewValueColumn(input, key_indices[0]);
+    const auto reserve_groups =
+        reserveAggregateGroupCount(aggregate_pattern, input.rowCount());
     std::unordered_map<std::string_view, std::size_t, std::hash<std::string_view>> key_to_index;
     std::vector<AggregateAccumulator> ordered_states;
     std::vector<std::string_view> ordered_key_views;
-    key_to_index.reserve(input.rowCount());
-    ordered_key_views.reserve(input.rowCount());
-    ordered_states.reserve(input.rowCount());
+    key_to_index.reserve(reserve_groups);
+    ordered_key_views.reserve(reserve_groups);
+    ordered_states.reserve(reserve_groups);
     for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
       const auto key = singleStringKeyAt(*key_column.buffer, row_index);
       auto it = key_to_index.find(key);
@@ -1341,12 +1373,14 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
 
   if (aggregate_pattern.shape == AggregateExecutionShape::GenericSingleInt64Key) {
     const auto key_column = viewValueColumn(input, key_indices[0]);
+    const auto reserve_groups =
+        reserveAggregateGroupCount(aggregate_pattern, input.rowCount());
     std::unordered_map<Int64AggregateKey, std::size_t, Int64AggregateKeyHash> key_to_index;
     std::vector<AggregateAccumulator> ordered_states;
     std::vector<Int64AggregateKey> ordered_key_values;
-    key_to_index.reserve(input.rowCount());
-    ordered_key_values.reserve(input.rowCount());
-    ordered_states.reserve(input.rowCount());
+    key_to_index.reserve(reserve_groups);
+    ordered_key_values.reserve(reserve_groups);
+    ordered_states.reserve(reserve_groups);
     for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
       const Int64AggregateKey key{valueColumnIsNullAt(*key_column.buffer, row_index),
                                   valueColumnIsNullAt(*key_column.buffer, row_index)
@@ -1385,12 +1419,14 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
   if (aggregate_pattern.shape == AggregateExecutionShape::GenericDoubleInt64Key) {
     const auto first_key = viewValueColumn(input, key_indices[0]);
     const auto second_key = viewValueColumn(input, key_indices[1]);
+    const auto reserve_groups =
+        reserveAggregateGroupCount(aggregate_pattern, input.rowCount());
     std::unordered_map<Int64PairAggregateKey, std::size_t, Int64PairAggregateKeyHash> key_to_index;
     std::vector<AggregateAccumulator> ordered_states;
     std::vector<Int64PairAggregateKey> ordered_key_values;
-    key_to_index.reserve(input.rowCount());
-    ordered_key_values.reserve(input.rowCount());
-    ordered_states.reserve(input.rowCount());
+    key_to_index.reserve(reserve_groups);
+    ordered_key_values.reserve(reserve_groups);
+    ordered_states.reserve(reserve_groups);
     for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
       const Int64PairAggregateKey key{
           {valueColumnIsNullAt(*first_key.buffer, row_index),
@@ -1501,12 +1537,14 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
       has_k2 = true;
     }
 
+    const auto reserve_groups =
+        reserveAggregateGroupCount(aggregate_pattern, input.rowCount());
     std::unordered_map<PackedAggregateKey, std::size_t, PackedAggregateKeyHash> key_to_index;
     std::vector<AggregateAccumulator> ordered_states;
     std::vector<PackedAggregateKey> ordered_keys;
-    key_to_index.reserve(input.rowCount());
-    ordered_states.reserve(input.rowCount());
-    ordered_keys.reserve(input.rowCount());
+    key_to_index.reserve(reserve_groups);
+    ordered_states.reserve(reserve_groups);
+    ordered_keys.reserve(reserve_groups);
 
     auto packAt = [&](const ValueColumnView& col, std::size_t row, uint8_t idx,
                       PackedAggregateKey* out_key) -> bool {
@@ -1653,17 +1691,20 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
     }
   }
 
-  std::vector<std::string> ordered_keys;
-  std::unordered_map<std::string, std::size_t> key_to_index;
+  std::vector<std::string_view> ordered_key_views;
+  std::unordered_map<std::string_view, std::size_t, std::hash<std::string_view>> key_to_index;
   std::vector<AggregateAccumulator> ordered_states;
-  key_to_index.reserve(input.rowCount());
-  ordered_states.reserve(input.rowCount());
+  const auto reserve_groups =
+      reserveAggregateGroupCount(aggregate_pattern, input.rowCount());
+  key_to_index.reserve(reserve_groups);
+  ordered_key_views.reserve(reserve_groups);
+  ordered_states.reserve(reserve_groups);
   const auto serialized_keys = materializeSerializedKeys(input, key_indices);
   for (std::size_t row_index = 0; row_index < serialized_keys.size(); ++row_index) {
-    const std::string& key = serialized_keys[row_index];
+    const std::string_view key = serialized_keys[row_index];
     auto it = key_to_index.find(key);
     if (it == key_to_index.end()) {
-      ordered_keys.push_back(key);
+      ordered_key_views.push_back(key);
       ordered_states.push_back(initAccumulator(aggs));
       const auto index = ordered_states.size() - 1;
       it = key_to_index.emplace(key, index).first;
@@ -1676,17 +1717,17 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
   cache->schema = out.schema;
   cache->columns.resize(out.schema.fields.size());
   cache->arrow_formats.resize(out.schema.fields.size());
-  cache->row_count = ordered_keys.size();
+  cache->row_count = ordered_key_views.size();
   for (auto& column : cache->columns) {
-    column.values.reserve(ordered_keys.size());
+    column.values.reserve(ordered_key_views.size());
   }
 
-  for (std::size_t index = 0; index < ordered_keys.size(); ++index) {
-    const auto& key = ordered_keys[index];
+  for (std::size_t index = 0; index < ordered_key_views.size(); ++index) {
+    const auto key = ordered_key_views[index];
     const auto& acc = ordered_states[index];
     std::size_t out_column_index = 0;
-    for (const auto& k : splitKey(key)) {
-      cache->columns[out_column_index++].values.push_back(Value(k));
+    for (const auto key_part : splitKeyViews(key)) {
+      cache->columns[out_column_index++].values.push_back(Value(std::string(key_part)));
     }
     appendAggregateValues(cache.get(), &out_column_index, acc, aggs);
   }
@@ -1746,7 +1787,7 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
       const SourcePlan* pushed_source = nullptr;
       SourcePushdownSpec pushed_spec;
       if (buildSourcePushdownSpec(plan, requirements, &pushed_source, &pushed_spec) &&
-          !pushed_source->options.materialization.enabled) {
+          shouldUseSourcePushdown(*pushed_source, pushed_spec)) {
         Table pushed;
         if (tryExecuteSourcePushdown(*pushed_source, pushed_spec, false, &pushed)) {
           return pushed;
@@ -1783,7 +1824,7 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
       const SourcePlan* pushed_source = nullptr;
       SourcePushdownSpec pushed_spec;
       if (buildSourcePushdownSpec(plan, requirements, &pushed_source, &pushed_spec) &&
-          !pushed_source->options.materialization.enabled) {
+          shouldUseSourcePushdown(*pushed_source, pushed_spec)) {
         Table pushed;
         if (tryExecuteSourcePushdown(*pushed_source, pushed_spec, false, &pushed)) {
           return pushed;
@@ -1831,7 +1872,7 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
       const SourcePlan* pushed_source = nullptr;
       SourcePushdownSpec pushed_spec;
       if (buildSourcePushdownSpec(plan, requirements, &pushed_source, &pushed_spec) &&
-          !pushed_source->options.materialization.enabled) {
+          shouldUseSourcePushdown(*pushed_source, pushed_spec)) {
         Table pushed;
         if (tryExecuteSourcePushdown(*pushed_source, pushed_spec, false, &pushed)) {
           return pushed;

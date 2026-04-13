@@ -3,11 +3,14 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstring>
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <fstream>
 #include <limits>
+#include <memory_resource>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -15,6 +18,7 @@
 #include <unordered_map>
 
 #include "src/dataflow/core/execution/columnar_batch.h"
+#include "src/dataflow/core/execution/runtime/simd_dispatch.h"
 
 namespace dataflow {
 
@@ -23,16 +27,14 @@ namespace {
 constexpr std::size_t kReadAllColumns = static_cast<std::size_t>(-1);
 constexpr std::size_t kCsvReadChunkSize = 1 << 16;
 constexpr std::size_t kCsvSampleBytes = 1 << 15;
+constexpr std::string_view kTrueLower = "true";
+constexpr std::string_view kTrueUpper = "TRUE";
+constexpr std::string_view kFalseLower = "false";
+constexpr std::string_view kFalseUpper = "FALSE";
 
-bool isIntLexically(std::string_view s) {
-  if (s.empty()) return false;
-  std::size_t pos = 0;
-  if (s[0] == '-' || s[0] == '+') pos = 1;
-  if (pos >= s.size()) return false;
-  for (; pos < s.size(); ++pos) {
-    if (s[pos] < '0' || s[pos] > '9') return false;
-  }
-  return true;
+bool useSimdCsvTokenizer(const SourceExecutionPattern* execution_pattern) {
+  return execution_pattern != nullptr &&
+         execution_pattern->tokenizer_mode == SourceTokenizerMode::SimdFastUnquoted;
 }
 
 bool hasSignificantLeadingZero(std::string_view s) {
@@ -72,7 +74,7 @@ enum class Int64ParseStatus {
 
 struct ParsedCell {
   std::string_view text;
-  std::string owned_text;
+  std::optional<std::string> owned_text;
   bool is_null = false;
   bool is_bool = false;
   bool bool_value = false;
@@ -88,11 +90,11 @@ const ParsedCell& emptyParsedCell() {
 }
 
 std::string_view parsedCellText(const ParsedCell& parsed) {
-  return parsed.owned_text.empty() ? parsed.text : std::string_view(parsed.owned_text);
+  return parsed.owned_text.has_value() ? std::string_view(*parsed.owned_text) : parsed.text;
 }
 
 Int64ParseStatus parseInt64(std::string_view s, int64_t* out) {
-  if (!isIntLexically(s)) {
+  if (s.empty()) {
     return Int64ParseStatus::NotInteger;
   }
   const auto result = std::from_chars(s.data(), s.data() + s.size(), *out);
@@ -107,6 +109,15 @@ Int64ParseStatus parseInt64(std::string_view s, int64_t* out) {
 
 bool parseDouble(std::string_view s, double* out) {
   if (s.empty()) return false;
+  constexpr std::size_t kStackBufferSize = 128;
+  if (s.size() < kStackBufferSize) {
+    std::array<char, kStackBufferSize> buffer{};
+    std::memcpy(buffer.data(), s.data(), s.size());
+    buffer[s.size()] = '\0';
+    char* end = nullptr;
+    *out = std::strtod(buffer.data(), &end);
+    return end != buffer.data() && *end == '\0';
+  }
   std::string owned(s);
   char* end = nullptr;
   *out = std::strtod(owned.c_str(), &end);
@@ -115,8 +126,8 @@ bool parseDouble(std::string_view s, double* out) {
 
 Value parseCell(std::string_view cell) {
   if (cell.empty()) return Value();
-  if (cell == "true" || cell == "TRUE") return Value(true);
-  if (cell == "false" || cell == "FALSE") return Value(false);
+  if (cell == kTrueLower || cell == kTrueUpper) return Value(true);
+  if (cell == kFalseLower || cell == kFalseUpper) return Value(false);
   if (hasSignificantLeadingZero(cell)) return Value(std::string(cell));
   if (cell.size() >= 2 && cell.front() == '[' && cell.back() == ']') {
     const auto vec = Value::parseFixedVector(std::string(cell));
@@ -149,12 +160,12 @@ ParsedCell parseParsedCell(std::string_view cell) {
     parsed.is_null = true;
     return parsed;
   }
-  if (cell == "true" || cell == "TRUE") {
+  if (cell == kTrueLower || cell == kTrueUpper) {
     parsed.is_bool = true;
     parsed.bool_value = true;
     return parsed;
   }
-  if (cell == "false" || cell == "FALSE") {
+  if (cell == kFalseLower || cell == kFalseUpper) {
     parsed.is_bool = true;
     parsed.bool_value = false;
     return parsed;
@@ -190,7 +201,7 @@ ParsedCell parseParsedCell(std::string_view cell) {
 ParsedCell persistParsedCell(ParsedCell parsed) {
   if (!parsed.is_null && !parsed.is_bool && !parsed.is_int64 && !parsed.is_double &&
       !parsedCellText(parsed).empty()) {
-    parsed.owned_text = std::string(parsedCellText(parsed));
+    parsed.owned_text.emplace(parsedCellText(parsed));
     parsed.text = std::string_view();
   }
   return parsed;
@@ -201,7 +212,7 @@ void resetParsedCell(ParsedCell* parsed) {
     return;
   }
   parsed->text = std::string_view();
-  parsed->owned_text.clear();
+  parsed->owned_text.reset();
   parsed->is_null = false;
   parsed->is_bool = false;
   parsed->bool_value = false;
@@ -455,7 +466,8 @@ void assignNullBackingsForUncapturedColumns(const std::vector<uint8_t>& output_m
 template <typename RowStartFn, typename CellFn, typename RowEndFn>
 void scanCsvCells(std::istream* input, char delimiter, std::size_t capture_until_column,
                   const std::vector<uint8_t>* capture_mask, RowStartFn&& on_row_start,
-                  CellFn&& on_cell, RowEndFn&& on_row_end) {
+                  CellFn&& on_cell, RowEndFn&& on_row_end,
+                  const SourceExecutionPattern* execution_pattern = nullptr) {
   if (input == nullptr) {
     throw std::invalid_argument("csv input is null");
   }
@@ -469,6 +481,8 @@ void scanCsvCells(std::istream* input, char delimiter, std::size_t capture_until
   std::size_t column_index = 0;
   bool keep_cell = shouldCaptureColumn(column_index, capture_until_column, capture_mask);
   const char* segment_start = nullptr;
+  const bool enable_simd_fast_tokenizer = useSimdCsvTokenizer(execution_pattern);
+  const std::array<char, 4> special_bytes = {delimiter, '"', '\n', '\r'};
   on_row_start();
 
   auto flush_segment_to_scratch = [&](const char* segment_end) {
@@ -539,11 +553,24 @@ void scanCsvCells(std::istream* input, char delimiter, std::size_t capture_until
     }
     const char* chunk_begin = chunk.data();
     const char* chunk_end = chunk_begin + read;
-    for (const char* ptr = chunk_begin; ptr != chunk_end; ++ptr) {
+    const char* ptr = chunk_begin;
+    while (ptr != chunk_end) {
+      if (enable_simd_fast_tokenizer && !keep_cell && !in_quotes && !pending_quote &&
+          !skip_next_lf && !scratch_active) {
+        char matched = '\0';
+        const char* special = simdDispatch().find_first_of(
+            ptr, chunk_end, special_bytes.data(), special_bytes.size(), &matched);
+        if (special == nullptr) {
+          ptr = chunk_end;
+          break;
+        }
+        ptr = special;
+      }
       const char ch = *ptr;
       if (skip_next_lf) {
         skip_next_lf = false;
         if (ch == '\n') {
+          ++ptr;
           continue;
         }
       }
@@ -554,6 +581,7 @@ void scanCsvCells(std::istream* input, char delimiter, std::size_t capture_until
             activate_scratch(ptr);
             scratch.push_back('"');
           }
+          ++ptr;
           continue;
         }
         in_quotes = false;
@@ -566,12 +594,14 @@ void scanCsvCells(std::istream* input, char delimiter, std::size_t capture_until
           in_quotes = true;
           activate_scratch(ptr);
         }
+        ++ptr;
         continue;
       }
       if (!in_quotes && ch == delimiter) {
         if (!emit_cell(ptr)) {
           return;
         }
+        ++ptr;
         continue;
       }
       if (!in_quotes && (ch == '\n' || ch == '\r')) {
@@ -581,9 +611,11 @@ void scanCsvCells(std::istream* input, char delimiter, std::size_t capture_until
         if (ch == '\r') {
           skip_next_lf = true;
         }
+        ++ptr;
         continue;
       }
       if (!keep_cell) {
+        ++ptr;
         continue;
       }
       if (scratch_active) {
@@ -591,6 +623,7 @@ void scanCsvCells(std::istream* input, char delimiter, std::size_t capture_until
       } else if (segment_start == nullptr) {
         segment_start = ptr;
       }
+      ++ptr;
     }
     if (keep_cell && segment_start != nullptr) {
       activate_scratch(chunk_end);
@@ -738,13 +771,14 @@ Table load_csv_projected(const std::string& path, const Schema& schema,
 
 bool execute_csv_source_pushdown(const std::string& path, const Schema& schema,
                                  const SourcePushdownSpec& pushdown,
-                                 char delimiter, bool materialize_rows, Table* out) {
+                                 char delimiter, bool materialize_rows, Table* out,
+                                 const SourceExecutionPattern* execution_pattern) {
   if (out == nullptr) {
     throw std::invalid_argument("csv source pushdown output is null");
   }
   const bool has_filters = !pushdown.filters.empty() || static_cast<bool>(pushdown.predicate_expr);
   if (pushdown.has_aggregate) {
-    if (!try_execute_csv_aggregate(path, schema, pushdown, delimiter, out)) {
+    if (!try_execute_csv_aggregate(path, schema, pushdown, delimiter, out, execution_pattern)) {
       return false;
     }
     if (pushdown.limit != 0 && out->rowCount() > pushdown.limit) {
@@ -917,7 +951,8 @@ bool execute_csv_source_pushdown(const std::string& path, const Schema& schema,
           return false;
         }
         return true;
-      });
+      },
+      execution_pattern);
 
   if (table.columnar_cache->row_count > 0) {
     assignNullBackingsForUncapturedColumns(output_mask, table.columnar_cache.get());
@@ -949,7 +984,8 @@ Table makeCsvAggregateResultTable(const Schema& schema,
 
 bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
                                const SourcePushdownSpec& pushdown,
-                               char delimiter, Table* out) {
+                               char delimiter, Table* out,
+                               const SourceExecutionPattern* execution_pattern) {
   if (out == nullptr) {
     throw std::invalid_argument("csv aggregate output is null");
   }
@@ -1036,7 +1072,8 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           }
           ++sampled_rows;
           return sampled_rows < kFilterSampleRows;
-        });
+        },
+        execution_pattern);
     if (sampled_rows > 0 && matched_sample_rows * 10 <= sampled_rows) {
       use_sparse_filter_bitmap = true;
     }
@@ -1069,7 +1106,8 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           }
           matched_rows.push_back(current_match ? 1 : 0);
           return true;
-        });
+        },
+        execution_pattern);
     const bool has_match = std::any_of(matched_rows.begin(), matched_rows.end(),
                                        [](uint8_t value) { return value != 0; });
     if (!has_match) {
@@ -1096,9 +1134,9 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
     bool current_row_selected = true;
     bool key_seen = false;
     std::string current_key;
-    current_key.reserve(32);
-    std::unordered_map<std::string, std::size_t> key_to_index;
-    std::vector<std::string> ordered_keys;
+    std::pmr::monotonic_buffer_resource key_resource;
+    std::unordered_map<std::string_view, std::size_t, std::hash<std::string_view>> key_to_index;
+    std::pmr::vector<std::pmr::string> ordered_keys(&key_resource);
     std::vector<std::size_t> counts;
     key_to_index.reserve(64);
     ordered_keys.reserve(64);
@@ -1119,7 +1157,7 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
             return true;
           }
           if (column_index == key_indices.front()) {
-            current_key.assign(cell);
+            current_key = cell;
             key_seen = true;
           }
           if (column_index < filter_positions_by_column.size() &&
@@ -1149,15 +1187,16 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           auto it = key_to_index.find(current_key);
           if (it == key_to_index.end()) {
             const std::size_t index = ordered_keys.size();
-            ordered_keys.push_back(current_key);
+            ordered_keys.emplace_back(current_key.data(), current_key.size());
             counts.push_back(1);
-            key_to_index.emplace(ordered_keys.back(), index);
+            key_to_index.emplace(std::string_view(ordered_keys.back()), index);
           } else {
             counts[it->second] += 1;
           }
           ++logical_row_index;
           return true;
-        });
+        },
+        execution_pattern);
 
     Table result = makeCsvAggregateResultTable(schema, key_indices, aggs);
     result.columnar_cache->row_count = ordered_keys.size();
@@ -1210,10 +1249,10 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
     double numeric_value = 0.0;
     bool numeric_is_int = false;
     int64_t int_value = 0;
-    std::string current_key;
-    current_key.reserve(32);
-    std::unordered_map<std::string, std::size_t> key_to_index;
-    std::vector<std::string> ordered_keys;
+    std::string_view current_key;
+    std::pmr::monotonic_buffer_resource key_resource;
+    std::unordered_map<std::string_view, std::size_t, std::hash<std::string_view>> key_to_index;
+    std::pmr::vector<std::pmr::string> ordered_keys(&key_resource);
     std::vector<NumericAggregateState> states;
     key_to_index.reserve(64);
     ordered_keys.reserve(64);
@@ -1231,14 +1270,14 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           numeric_value = 0.0;
           numeric_is_int = false;
           int_value = 0;
-          current_key.clear();
+          current_key = std::string_view();
         },
         [&](std::size_t column_index, std::string_view cell) {
           if (!current_row_selected) {
             return true;
           }
           if (column_index == key_indices.front()) {
-            current_key.assign(cell);
+            current_key = cell;
             key_seen = true;
           }
           const bool has_filter = column_index < filter_positions_by_column.size() &&
@@ -1284,9 +1323,9 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           auto it = key_to_index.find(current_key);
           if (it == key_to_index.end()) {
             const std::size_t index = ordered_keys.size();
-            ordered_keys.push_back(current_key);
+            ordered_keys.emplace_back(current_key.data(), current_key.size());
             states.push_back(NumericAggregateState{});
-            it = key_to_index.emplace(ordered_keys.back(), index).first;
+            it = key_to_index.emplace(std::string_view(ordered_keys.back()), index).first;
           }
           auto& state = states[it->second];
           switch (agg.function) {
@@ -1322,7 +1361,8 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           }
           ++logical_row_index;
           return true;
-        });
+        },
+        execution_pattern);
 
     Table result = makeCsvAggregateResultTable(schema, key_indices, aggs);
     result.columnar_cache->row_count = ordered_keys.size();
@@ -1393,14 +1433,239 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
     return state;
   };
 
+  if (key_indices.size() == 1) {
+    const std::size_t key_column_index = key_indices.front();
+    std::vector<uint8_t> capture_mask(last_required_column + 1, static_cast<uint8_t>(0));
+    capture_mask[key_column_index] = 1;
+    std::vector<std::vector<std::size_t>> filter_positions_by_column(last_required_column + 1);
+    for (std::size_t i = 0; i < filters.size(); ++i) {
+      capture_mask[filters[i].column_index] = 1;
+      filter_positions_by_column[filters[i].column_index].push_back(i);
+    }
+    for (const auto column_index : predicate_schema_indices) {
+      capture_mask[column_index] = 1;
+    }
+    std::vector<std::vector<std::size_t>> agg_positions_by_column(last_required_column + 1);
+    for (std::size_t i = 0; i < aggs.size(); ++i) {
+      if (aggs[i].function == AggregateFunction::Count) {
+        continue;
+      }
+      capture_mask[aggs[i].value_index] = 1;
+      agg_positions_by_column[aggs[i].value_index].push_back(i);
+    }
+
+    bool skip_header = true;
+    bool filter_match = filters.empty();
+    std::size_t logical_row_index = 0;
+    bool current_row_selected = true;
+    bool key_seen = false;
+    std::string current_key;
+    std::vector<double> numeric_values(aggs.size(), 0.0);
+    std::vector<bool> numeric_is_int(aggs.size(), false);
+    std::vector<int64_t> int_values(aggs.size(), 0);
+    std::vector<ParsedCell> predicate_values(predicate_schema_indices.size());
+    std::vector<std::size_t> numeric_generations(aggs.size(), 0);
+    std::vector<std::size_t> predicate_generations(predicate_schema_indices.size(), 0);
+    std::size_t row_generation = 0;
+
+    std::pmr::monotonic_buffer_resource key_resource;
+    std::pmr::vector<std::pmr::string> ordered_keys(&key_resource);
+    std::unordered_map<std::string_view, std::size_t, std::hash<std::string_view>> key_to_index;
+    std::vector<AggregateState> ordered_states;
+    ordered_keys.reserve(64);
+    key_to_index.reserve(64);
+    ordered_states.reserve(64);
+
+    scanCsvCells(
+        &input, delimiter, last_required_column, &capture_mask,
+        [&]() {
+          ++row_generation;
+          current_row_selected = matched_rows.empty() ||
+                                 (logical_row_index < matched_rows.size() &&
+                                  matched_rows[logical_row_index] != 0);
+          filter_match = current_row_selected;
+          key_seen = false;
+          current_key.clear();
+        },
+        [&](std::size_t column_index, std::string_view cell) {
+          if (!current_row_selected) {
+            return true;
+          }
+          if (column_index == key_column_index) {
+            current_key.assign(cell.data(), cell.size());
+            key_seen = true;
+          }
+          ParsedCell parsed;
+          bool parsed_ready = false;
+          const bool has_filter = column_index < filter_positions_by_column.size() &&
+                                  !filter_positions_by_column[column_index].empty();
+          const bool needed_for_predicate =
+              column_index < predicate_local_by_schema.size() &&
+              predicate_local_by_schema[column_index] >= 0;
+          const bool needed_for_numeric =
+              column_index < agg_positions_by_column.size() &&
+              !agg_positions_by_column[column_index].empty();
+          if (has_filter || needed_for_predicate || needed_for_numeric) {
+            parsed = parseParsedCell(cell);
+            parsed_ready = true;
+          }
+          if (has_filter) {
+            for (const auto filter_index : filter_positions_by_column[column_index]) {
+              const auto& filter = filters[filter_index];
+              filter_match =
+                  filter_match && tryMatchesParsedCellFilter(parsed, filter.value, filter.op);
+            }
+          }
+          if (needed_for_numeric) {
+            for (const auto agg_index : agg_positions_by_column[column_index]) {
+              if (parsed_ready && parsed.is_int64) {
+                numeric_values[agg_index] = static_cast<double>(parsed.int64_value);
+                numeric_generations[agg_index] = row_generation;
+                numeric_is_int[agg_index] = true;
+                int_values[agg_index] = parsed.int64_value;
+              } else if (parsed_ready && parsed.is_double) {
+                numeric_values[agg_index] = parsed.double_value;
+                numeric_generations[agg_index] = row_generation;
+                numeric_is_int[agg_index] = false;
+              }
+            }
+          }
+          if (needed_for_predicate) {
+            const auto predicate_local =
+                static_cast<std::size_t>(predicate_local_by_schema[column_index]);
+            predicate_values[predicate_local] = persistParsedCell(std::move(parsed));
+            predicate_generations[predicate_local] = row_generation;
+          }
+          return true;
+        },
+        [&](std::size_t total_columns) {
+          if (skip_header) {
+            skip_header = false;
+            return true;
+          }
+          if (!matched_rows.empty() && !current_row_selected) {
+            ++logical_row_index;
+            return true;
+          }
+          if (total_columns < last_required_column + 1 || !filter_match || !key_seen ||
+              !evaluatePredicateExprParsed(predicate_values, predicate_generations, row_generation,
+                                           predicate_local_by_schema, pushdown.predicate_expr)) {
+            ++logical_row_index;
+            return true;
+          }
+          const std::string_view current_key_view(current_key);
+          auto it = key_to_index.find(current_key_view);
+          if (it == key_to_index.end()) {
+            const std::size_t index = ordered_keys.size();
+            ordered_keys.emplace_back(current_key.data(), current_key.size());
+            ordered_states.push_back(init_state());
+            it = key_to_index.emplace(std::string_view(ordered_keys.back()), index).first;
+          }
+          auto& state = ordered_states[it->second];
+          for (std::size_t i = 0; i < aggs.size(); ++i) {
+            const auto& agg = aggs[i];
+            const bool has_numeric = numeric_generations[i] == row_generation;
+            switch (agg.function) {
+              case AggregateFunction::Count:
+                state.counts[i] += 1;
+                break;
+              case AggregateFunction::Sum:
+              case AggregateFunction::Avg:
+                if (has_numeric) {
+                  state.sums[i] += numeric_values[i];
+                  state.counts[i] += 1;
+                }
+                break;
+              case AggregateFunction::Min:
+                if (has_numeric &&
+                    (!state.has_min[i] || numeric_values[i] < state.mins[i])) {
+                  state.mins[i] = numeric_values[i];
+                  state.has_min[i] = true;
+                  state.min_is_int[i] = numeric_is_int[i];
+                  state.min_ints[i] = int_values[i];
+                }
+                break;
+              case AggregateFunction::Max:
+                if (has_numeric &&
+                    (!state.has_max[i] || numeric_values[i] > state.maxs[i])) {
+                  state.maxs[i] = numeric_values[i];
+                  state.has_max[i] = true;
+                  state.max_is_int[i] = numeric_is_int[i];
+                  state.max_ints[i] = int_values[i];
+                }
+                break;
+            }
+          }
+          ++logical_row_index;
+          return true;
+        },
+        execution_pattern);
+
+    Table result;
+    result.schema.fields.push_back(schema.fields[key_column_index]);
+    for (const auto& agg : aggs) {
+      result.schema.fields.push_back(agg.output_name);
+    }
+    for (std::size_t i = 0; i < result.schema.fields.size(); ++i) {
+      result.schema.index[result.schema.fields[i]] = i;
+    }
+    auto cache = std::make_shared<ColumnarTable>();
+    cache->schema = result.schema;
+    cache->columns.resize(result.schema.fields.size());
+    cache->arrow_formats.resize(result.schema.fields.size());
+    cache->row_count = ordered_keys.size();
+    for (auto& column : cache->columns) {
+      column.values.reserve(ordered_keys.size());
+    }
+    for (std::size_t index = 0; index < ordered_keys.size(); ++index) {
+      cache->columns[0].values.push_back(parseCell(std::string_view(ordered_keys[index])));
+      const auto& state = ordered_states[index];
+      for (std::size_t i = 0; i < aggs.size(); ++i) {
+        Value value;
+        switch (aggs[i].function) {
+          case AggregateFunction::Count:
+            value = Value(static_cast<int64_t>(state.counts[i]));
+            break;
+          case AggregateFunction::Sum:
+            value = Value(state.sums[i]);
+            break;
+          case AggregateFunction::Avg:
+            value = Value(state.counts[i] == 0 ? 0.0
+                                               : state.sums[i] / static_cast<double>(state.counts[i]));
+            break;
+          case AggregateFunction::Min:
+            value = !state.has_min[i]
+                        ? Value()
+                        : (state.min_is_int[i] ? Value(state.min_ints[i]) : Value(state.mins[i]));
+            break;
+          case AggregateFunction::Max:
+            value = !state.has_max[i]
+                        ? Value()
+                        : (state.max_is_int[i] ? Value(state.max_ints[i]) : Value(state.maxs[i]));
+            break;
+        }
+        cache->columns[1 + i].values.push_back(std::move(value));
+      }
+    }
+    result.columnar_cache = std::move(cache);
+    *out = std::move(result);
+    return true;
+  }
+
   struct AggregateEntry {
     std::vector<Value> key_values;
     AggregateState state;
   };
 
-  std::unordered_map<std::string, std::size_t> entry_index;
+  std::pmr::monotonic_buffer_resource key_resource;
+  std::unordered_map<std::string_view, std::size_t, std::hash<std::string_view>>
+      single_key_entry_index;
+  std::unordered_map<std::string, std::size_t> multi_key_entry_index;
+  std::pmr::vector<std::pmr::string> single_key_storage(&key_resource);
   std::vector<AggregateEntry> ordered_entries;
-  entry_index.reserve(64);
+  single_key_entry_index.reserve(64);
+  multi_key_entry_index.reserve(64);
+  single_key_storage.reserve(64);
   ordered_entries.reserve(64);
   std::vector<uint8_t> capture_mask(last_required_column + 1, static_cast<uint8_t>(0));
   std::vector<std::size_t> key_position_by_column(last_required_column + 1,
@@ -1530,22 +1795,26 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           return true;
         }
 
-        std::unordered_map<std::string, std::size_t>::iterator it;
+        std::size_t entry_pos = 0;
         if (key_cells.size() == 1) {
-          const std::string key_text(parsedCellText(key_cells.front()));
-          it = entry_index.find(key_text);
-          if (it == entry_index.end()) {
+          const auto key_text = parsedCellText(key_cells.front());
+          auto it = single_key_entry_index.find(key_text);
+          if (it == single_key_entry_index.end()) {
             AggregateEntry entry;
             entry.key_values.reserve(1);
             entry.key_values.push_back(parsedCellToValue(key_cells.front()));
             entry.state = init_state();
             ordered_entries.push_back(std::move(entry));
-            it = entry_index.emplace(key_text, ordered_entries.size() - 1).first;
+            entry_pos = ordered_entries.size() - 1;
+            single_key_storage.emplace_back(key_text.data(), key_text.size());
+            single_key_entry_index.emplace(std::string_view(single_key_storage.back()), entry_pos);
+          } else {
+            entry_pos = it->second;
           }
         } else {
           encodeParsedGroupKeyRow(key_cells, &encoded_key_scratch);
-          it = entry_index.find(encoded_key_scratch);
-          if (it == entry_index.end()) {
+          auto it = multi_key_entry_index.find(encoded_key_scratch);
+          if (it == multi_key_entry_index.end()) {
             AggregateEntry entry;
             entry.key_values.reserve(key_cells.size());
             for (const auto& key_cell : key_cells) {
@@ -1553,10 +1822,13 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
             }
             entry.state = init_state();
             ordered_entries.push_back(std::move(entry));
-            it = entry_index.emplace(encoded_key_scratch, ordered_entries.size() - 1).first;
+            entry_pos = ordered_entries.size() - 1;
+            multi_key_entry_index.emplace(encoded_key_scratch, entry_pos);
+          } else {
+            entry_pos = it->second;
           }
         }
-        auto& state = ordered_entries[it->second].state;
+        auto& state = ordered_entries[entry_pos].state;
         for (std::size_t i = 0; i < aggs.size(); ++i) {
           const auto& agg = aggs[i];
           const bool has_numeric = numeric_generations[i] == row_generation;
@@ -1593,7 +1865,8 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
         }
         ++logical_row_index;
         return true;
-      });
+      },
+      execution_pattern);
 
   Table result;
   for (const auto key_index : key_indices) {

@@ -24,6 +24,35 @@ SCENARIO_QUERIES = {
     "filter_lower_limit": FILTER_LOWER_LIMIT_QUERY,
 }
 
+STAGE_NOTES = {
+    "read_csv": (
+        "Measures Session.read_csv(...) handle construction only. "
+        "In this harness the file scan/parse work happens later at the first materialization point."
+    ),
+    "create_temp_view": "Measures temp-view registration only.",
+    "sql": (
+        "Measures Session.sql(...) planning only. "
+        "It does not include execution for the lazy DataFrame returned by batch SQL."
+    ),
+    "to_arrow": (
+        "First materialization point in this harness. "
+        "This stage includes execution plus Arrow table export."
+    ),
+    "to_pylist": "Python-side conversion from the already materialized Arrow table into Python rows.",
+    "to_arrow_pylist": "Combined materialization, Arrow export, and Python row conversion.",
+    "reuse_prep.read_csv_once": (
+        "Measures construction of the reusable source DataFrame handle, "
+        "not a file preload into memory."
+    ),
+    "hardcode": (
+        "Scenario-specific Python stdlib baseline built with csv.DictReader and manual aggregation/filtering. "
+        "Useful for this harness, but not a native C/C++ kernel upper bound."
+    ),
+    "packaged_cli": (
+        "Packaged one-file CLI startup is outside this harness and should be measured separately."
+    ),
+}
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -57,6 +86,11 @@ def parse_args():
     parser.add_argument(
         "--materialization-dir",
         help="materialization cache directory; defaults to <outdir>/materialization-cache when format is set",
+    )
+    parser.add_argument(
+        "--cache-in-memory",
+        action="store_true",
+        help="cache projected source columns in memory for repeated same-session queries",
     )
     return parser.parse_args()
 
@@ -107,7 +141,9 @@ def hardcode_groupby_count_max_once(csv_path: pathlib.Path):
             if latency > grouped[key]["max_latency_ms"]:
                 grouped[key]["max_latency_ms"] = latency
     ended = time.perf_counter()
-    return {"elapsed": ended - started, "row_count": len(grouped)}
+    # Keep the hardcode baseline semantically aligned with the scenario SQL:
+    # SELECT ... GROUP BY ... LIMIT 1000
+    return {"elapsed": ended - started, "row_count": min(len(grouped), 1000)}
 
 
 def hardcode_filter_lower_limit_once(csv_path: pathlib.Path):
@@ -149,18 +185,22 @@ def resolve_query_and_hardcode(args) -> tuple[str, Callable[[pathlib.Path], dict
     raise SystemExit(f"unsupported scenario: {args.scenario}")
 
 
-def build_read_csv_kwargs(args, outdir: pathlib.Path):
+def build_read_csv_kwargs(args, outdir: pathlib.Path, *, include_cache_in_memory: bool):
+    out = {}
+    if include_cache_in_memory:
+        out["cache_in_memory"] = args.cache_in_memory
     if not args.materialization_format:
-        return {}
+        return out
     cache_dir = (pathlib.Path(args.materialization_dir)
                  if args.materialization_dir
                  else outdir / "materialization-cache")
     cache_dir.mkdir(parents=True, exist_ok=True)
-    return {
+    out.update({
         "materialization": True,
         "materialization_dir": str(cache_dir),
         "materialization_format": args.materialization_format,
-    }
+    })
+    return out
 
 
 def velaria_full_once(csv_path: pathlib.Path, query: str, read_csv_kwargs: dict):
@@ -230,6 +270,18 @@ def write_report(summary: dict, outdir: pathlib.Path, csv_path: pathlib.Path, qu
         f"- query={query}",
         f"- scenario={summary['metadata']['scenario']}",
         "",
+        "## Interpretation Notes",
+        "",
+        f"- read_csv: {STAGE_NOTES['read_csv']}",
+        f"- create_temp_view: {STAGE_NOTES['create_temp_view']}",
+        f"- sql: {STAGE_NOTES['sql']}",
+        f"- to_arrow: {STAGE_NOTES['to_arrow']}",
+        f"- to_pylist: {STAGE_NOTES['to_pylist']}",
+        f"- to_arrow_pylist: {STAGE_NOTES['to_arrow_pylist']}",
+        f"- reuse_prep.read_csv_once: {STAGE_NOTES['reuse_prep.read_csv_once']}",
+        f"- hardcode: {STAGE_NOTES['hardcode']}",
+        f"- packaged_cli: {STAGE_NOTES['packaged_cli']}",
+        "",
     ]
     sections = ["velaria_full", "velaria_reuse"]
     if "hardcode" in summary:
@@ -253,14 +305,22 @@ def write_report(summary: dict, outdir: pathlib.Path, csv_path: pathlib.Path, qu
     lines.append("")
     lines.append("## Ratios")
     if "hardcode" in summary:
-        lines.append(
-            f"- velaria_full.total / hardcode = "
-            f"{summary['velaria_full']['total']['avg'] / summary['hardcode']['elapsed']['avg']:.2f}x"
-        )
-        lines.append(
-            f"- velaria_reuse.total / hardcode = "
-            f"{summary['velaria_reuse']['total']['avg'] / summary['hardcode']['elapsed']['avg']:.2f}x"
-        )
+        hardcode_row_counts = summary["hardcode"]["row_counts"]
+        full_row_counts = summary["velaria_full"]["row_counts"]
+        reuse_row_counts = summary["velaria_reuse"]["row_counts"]
+        if hardcode_row_counts and full_row_counts and reuse_row_counts and (
+            hardcode_row_counts[0] == full_row_counts[0] == reuse_row_counts[0]
+        ):
+            lines.append(
+                f"- velaria_full.total / hardcode = "
+                f"{summary['velaria_full']['total']['avg'] / summary['hardcode']['elapsed']['avg']:.2f}x"
+            )
+            lines.append(
+                f"- velaria_reuse.total / hardcode = "
+                f"{summary['velaria_reuse']['total']['avg'] / summary['hardcode']['elapsed']['avg']:.2f}x"
+            )
+        else:
+            lines.append("- hardcode baseline = row-count mismatch; ratios skipped")
     else:
         lines.append("- hardcode baseline = skipped")
     lines.append(
@@ -292,13 +352,18 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
     query, hardcode_once = resolve_query_and_hardcode(args)
     csv_path = ensure_csv(args.csv_path, outdir, args.rows, args.caller_psm_count)
-    read_csv_kwargs = build_read_csv_kwargs(args, outdir)
+    full_read_csv_kwargs = build_read_csv_kwargs(
+        args, outdir, include_cache_in_memory=False
+    )
+    reuse_read_csv_kwargs = build_read_csv_kwargs(
+        args, outdir, include_cache_in_memory=True
+    )
 
-    velaria_full_runs = [velaria_full_once(csv_path, query, read_csv_kwargs) for _ in range(args.rounds)]
+    velaria_full_runs = [velaria_full_once(csv_path, query, full_read_csv_kwargs) for _ in range(args.rounds)]
 
     session = Session()
     t0 = time.perf_counter()
-    df = session.read_csv(str(csv_path), **read_csv_kwargs)
+    df = session.read_csv(str(csv_path), **reuse_read_csv_kwargs)
     t1 = time.perf_counter()
     reuse_prep = {"read_csv_once": t1 - t0}
     velaria_reuse_runs = [velaria_reuse_once(session, df, query) for _ in range(args.rounds)]
@@ -319,8 +384,10 @@ def main():
             "rounds": args.rounds,
             "rows": args.rows,
             "caller_psm_count": args.caller_psm_count,
-            "read_csv_kwargs": read_csv_kwargs,
+            "velaria_full_read_csv_kwargs": full_read_csv_kwargs,
+            "velaria_reuse_read_csv_kwargs": reuse_read_csv_kwargs,
             "hardcode_enabled": hardcode_once is not None,
+            "stage_notes": STAGE_NOTES,
         },
     }
     if hardcode_once is not None:

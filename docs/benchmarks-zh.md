@@ -67,6 +67,13 @@ perf report
 - 本轮 follow-up 数据覆盖了 actor execution optimizer 拆分、C++20 热路径更新（`std::span` / `<bit>`）、枚举化 filter compare，以及 numeric window-key-sum fast path
 - 对重复测量的 batch case，表中使用 3 次串行复测的中位数
 
+解释边界：
+
+- `file_source_benchmark` 是原生 C++ benchmark，不包含 Python API 层开销，也不包含打包 CLI 的启动时间。
+- `python_api/benchmarks/bench_stage_paths.py` 是另一套 Python API benchmark。在那套 harness 里，`Session.sql(...)` 只统计建计划，第一次 `to_arrow()` 才会把执行和 Arrow 导出一起触发。
+- Python stage benchmark 里的 `hardcode` 是针对特定场景的 Python 标准库基线，使用 `csv.DictReader` 加手写聚合/过滤逻辑；它适合做该 harness 内部对比，但不是原生内核的性能上限。
+- 打包后的 `./dist/velaria-cli` 启动时间需要单独测量。当前单文件 CLI 由 PyInstaller `--onefile` 打包，冷启动会额外包含 Python/bootstrap 开销，而不只是内核执行时间。
+
 ## TPCH-Like Batch Suite
 
 当前 `simd` 快照：

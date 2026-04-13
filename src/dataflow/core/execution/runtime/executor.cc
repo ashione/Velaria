@@ -844,6 +844,23 @@ bool cacheCoversProjectedColumns(const std::vector<std::size_t>& cached_columns,
   return true;
 }
 
+bool sourceCacheCoversPushdown(const SourcePlan& node, const SourcePushdownSpec& pushdown) {
+  std::lock_guard<std::mutex> lock(node.cached_table_mu);
+  if (!node.cached_table) {
+    return false;
+  }
+  return cacheCoversProjectedColumns(node.cached_projected_indices, pushdown.projected_columns);
+}
+
+bool shouldUseSourcePushdown(const SourcePlan& node, const SourcePushdownSpec& pushdown) {
+  if (node.options.materialization.enabled || node.options.cache_in_memory) {
+    return false;
+  }
+  // Once the current session already holds a compatible source snapshot, prefer
+  // in-memory execution over rescanning the file through source pushdown.
+  return !sourceCacheCoversPushdown(node, pushdown);
+}
+
 std::vector<std::size_t> requestedSourceColumns(const SourcePlan& node,
                                                 const SourceRequirementMap& requirements) {
   auto it = requirements.find(&node);
@@ -1199,7 +1216,7 @@ BorrowedOrOwnedTable borrowOrExecute(const LocalExecutor& executor, const PlanNo
   const SourcePlan* pushed_source = nullptr;
   SourcePushdownSpec pushed_spec;
   if (buildSourcePushdownSpec(plan, requirements, &pushed_source, &pushed_spec) &&
-      !pushed_source->options.materialization.enabled) {
+      shouldUseSourcePushdown(*pushed_source, pushed_spec)) {
     Table loaded;
     if (tryExecuteSourcePushdown(*pushed_source, pushed_spec, false, &loaded)) {
       auto owned = std::make_shared<Table>(std::move(loaded));
@@ -1746,7 +1763,7 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
       const SourcePlan* pushed_source = nullptr;
       SourcePushdownSpec pushed_spec;
       if (buildSourcePushdownSpec(plan, requirements, &pushed_source, &pushed_spec) &&
-          !pushed_source->options.materialization.enabled) {
+          shouldUseSourcePushdown(*pushed_source, pushed_spec)) {
         Table pushed;
         if (tryExecuteSourcePushdown(*pushed_source, pushed_spec, false, &pushed)) {
           return pushed;
@@ -1783,7 +1800,7 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
       const SourcePlan* pushed_source = nullptr;
       SourcePushdownSpec pushed_spec;
       if (buildSourcePushdownSpec(plan, requirements, &pushed_source, &pushed_spec) &&
-          !pushed_source->options.materialization.enabled) {
+          shouldUseSourcePushdown(*pushed_source, pushed_spec)) {
         Table pushed;
         if (tryExecuteSourcePushdown(*pushed_source, pushed_spec, false, &pushed)) {
           return pushed;
@@ -1831,7 +1848,7 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
       const SourcePlan* pushed_source = nullptr;
       SourcePushdownSpec pushed_spec;
       if (buildSourcePushdownSpec(plan, requirements, &pushed_source, &pushed_spec) &&
-          !pushed_source->options.materialization.enabled) {
+          shouldUseSourcePushdown(*pushed_source, pushed_spec)) {
         Table pushed;
         if (tryExecuteSourcePushdown(*pushed_source, pushed_spec, false, &pushed)) {
           return pushed;

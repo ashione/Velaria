@@ -67,6 +67,13 @@ Current clean-`main` comparison snapshot for representative file-source cases:
 - Latest follow-up numbers below include the actor execution optimizer split, C++20 hot-path updates (`std::span` / `<bit>`), enum-bound filter comparisons, and the numeric window-key-sum fast path
 - For rerun-heavy batch cases, the table uses the median of three serial runs
 
+Interpretation boundaries:
+
+- `file_source_benchmark` is a native C++ benchmark. It does not include Python API overhead or packaged CLI startup.
+- `python_api/benchmarks/bench_stage_paths.py` is a separate Python API harness. In that harness, `Session.sql(...)` is planning-only, and the first `to_arrow()` call includes execution plus Arrow export.
+- The `hardcode` row in the Python stage benchmark is a scenario-specific Python stdlib baseline built with `csv.DictReader`; it is not a native-kernel upper bound.
+- Packaged `./dist/velaria-cli` startup is measured separately again. The current single-file CLI is built with PyInstaller `--onefile`, so cold start includes bootstrap overhead outside the native engine.
+
 ## TPCH-Like Batch Suite
 
 Current `simd` snapshot:

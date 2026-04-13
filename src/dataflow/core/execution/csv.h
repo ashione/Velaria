@@ -3,8 +3,8 @@
 #include <string>
 #include <vector>
 
-#include "src/dataflow/core/logical/planner/plan.h"
 #include "src/dataflow/core/execution/table.h"
+#include "src/dataflow/core/execution/runtime/execution_optimizer.h"
 
 namespace dataflow {
 
@@ -15,10 +15,12 @@ Table load_csv_projected(const std::string& path, const Schema& schema,
                          char delimiter = ',', bool materialize_rows = false);
 bool execute_csv_source_pushdown(const std::string& path, const Schema& schema,
                                  const SourcePushdownSpec& pushdown,
-                                 char delimiter, bool materialize_rows, Table* out);
+                                 char delimiter, bool materialize_rows, Table* out,
+                                 const SourceExecutionPattern* execution_pattern = nullptr);
 bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
                                const SourcePushdownSpec& pushdown,
-                               char delimiter, Table* out);
+                               char delimiter, Table* out,
+                               const SourceExecutionPattern* execution_pattern = nullptr);
 void save_csv(const Table& table, const std::string& path);
 
 }  // namespace dataflow

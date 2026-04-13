@@ -17,6 +17,24 @@ struct PredicatePattern {
   bool is_conjunctive = false;
 };
 
+enum class SourceTokenizerMode {
+  ScalarStateMachine = 0,
+  SimdFastUnquoted = 1,
+};
+
+enum class SourceDecodeMode {
+  ParseCapturedCells = 0,
+  ParseFilterColumnsOnly = 1,
+  ParseAggregateColumnsOnly = 2,
+};
+
+struct SourceExecutionPattern {
+  SourceTokenizerMode tokenizer_mode = SourceTokenizerMode::ScalarStateMachine;
+  SourceDecodeMode decode_mode = SourceDecodeMode::ParseCapturedCells;
+  bool sample_has_quotes = false;
+  std::string reason;
+};
+
 enum class AggregateExecutionShape {
   GenericSerializedKeys = 0,
   GenericNoKey = 1,
@@ -47,6 +65,9 @@ struct LimitExecutionPattern {
 
 PredicatePattern analyzePredicatePattern(const PlanNodePtr& plan);
 LimitExecutionPattern analyzeLimitExecution(const LimitPlan& plan);
+SourceExecutionPattern analyzeSourceExecution(const FileSourceConnectorSpec& spec,
+                                             const Schema& schema,
+                                             const SourcePushdownSpec& pushdown);
 const char* aggregateExecKindName(AggImplKind kind);
 const char* aggregatePartialLayoutName(AggregatePartialLayoutKind kind);
 const char* aggregateExecutionShapeName(AggregateExecutionShape shape);

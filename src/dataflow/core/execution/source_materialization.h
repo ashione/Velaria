@@ -37,6 +37,7 @@ struct SourceMaterializationOptions {
 
 struct SourceOptions {
   SourceMaterializationOptions materialization;
+  bool cache_in_memory = false;
 };
 
 std::string default_source_materialization_root();

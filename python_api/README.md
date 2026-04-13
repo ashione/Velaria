@@ -109,6 +109,8 @@ File reader mapping:
 - `Session.read_json(path, columns=[...], ...)` maps to the native JSON lines / JSON array source connector
 - all four file readers share the same source materialization knobs:
   `materialization`, `materialization_dir`, and `materialization_format`
+- all four file readers also support `cache_in_memory=True` to retain the projected source snapshot
+  inside the current session for repeated same-session queries
 - `velaria-cli file-sql` defaults to `--input-type auto` and registers batch sources through `CREATE TABLE ... OPTIONS(path: '...')`
 - versioned embedding datasets written as Parquet / Arrow should be loaded through `pyarrow` plus `Session.create_dataframe_from_arrow(...)` or `load_embedding_dataframe(...)`, not `Session.read(...)`
 
@@ -494,12 +496,26 @@ Benchmark scenario controls:
 - set `VELARIA_STAGE_BENCH_SCENARIO=groupby_count_max` for the `caller_psm / count / max(latency)` path
 - set `VELARIA_STAGE_BENCH_SCENARIO=filter_lower_limit` for the `LOWER(method) + filter + LIMIT` path
 - set `VELARIA_STAGE_BENCH_QUERY="..."` only when you intentionally want a custom Velaria query
+- pass `--cache-in-memory` to `python_api/benchmarks/bench_stage_paths.py` when you want the
+  reuse path to retain projected source columns in the current session
 - when `VELARIA_STAGE_BENCH_QUERY` does not match the selected scenario query, also set
   `VELARIA_STAGE_BENCH_SKIP_HARDCODE=1`; otherwise the benchmark rejects the run
 
 `hardcode` is only reported when it is semantically aligned with the selected scenario.
 The benchmark now enforces row-count parity between the hardcode baseline and Velaria result
 before it prints ratios.
+
+Interpretation guardrails for the stage benchmark:
+
+- `Session.read_csv(...)` and `Session.sql(...)` are setup/planning calls in this harness; they do not
+  represent file scan or query execution time by themselves
+- `DataFrame.to_arrow()` is the first materialization point in this harness, so its stage includes
+  execution plus Arrow export
+- `to_pylist()` only measures the Python-side conversion from the already materialized Arrow table
+- the `hardcode` baseline in `python_api/benchmarks/bench_stage_paths.py` is a scenario-specific
+  Python stdlib baseline built with `csv.DictReader` and manual logic; it is useful for relative
+  comparison inside this harness, but it is not a native C/C++ kernel upper bound
+- packaged CLI startup is a separate measurement surface from the Python API stage benchmark
 
 ## Packaging
 
@@ -524,6 +540,9 @@ Single-file CLI packaging:
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
 ```
+
+That single-file CLI is packaged with PyInstaller `--onefile`, so cold-start measurements include
+Python/bootstrap overhead in addition to engine work.
 
 The CLI is part of the ecosystem layer. For supported paths, it should delegate to the same native session contract as Python and C++.
 
@@ -688,7 +707,11 @@ Guidance:
 
 - prefer Arrow/native columnar paths over `to_rows()` when benchmarking or integrating large results
 - treat `to_rows()` as a convenience/debugging surface
-- when profiling Python API performance, separate `sql()` cost from `to_arrow()` / `to_rows()` export cost
+- `Session.sql(...)` returns a lazy batch `DataFrame` handle
+- `to_arrow()` / `to_rows()` trigger materialization; the first materialization stage includes execution
+  plus conversion to the requested result form
+- if you need pandas, use `session.sql(...).to_arrow().to_pandas()`; there is no direct
+  `DataFrame.to_pandas()` helper in the current API
 
 Supported Arrow ingestion inputs:
 

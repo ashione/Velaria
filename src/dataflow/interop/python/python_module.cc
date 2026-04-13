@@ -77,6 +77,60 @@ static PyTypeObject PyVelariaDataFrameType = {PyVarObject_HEAD_INIT(nullptr, 0)}
 static PyTypeObject PyVelariaStreamingDataFrameType = {PyVarObject_HEAD_INIT(nullptr, 0)};
 static PyTypeObject PyVelariaStreamingQueryType = {PyVarObject_HEAD_INIT(nullptr, 0)};
 
+struct PyArrowInteropCache {
+  PyObject* pyarrow = nullptr;
+  PyObject* record_batch_type = nullptr;
+  PyObject* table_type = nullptr;
+  PyObject* table_fn = nullptr;
+  PyObject* table_from_batches = nullptr;
+  PyObject* record_batch_import_from_capsule = nullptr;
+};
+
+PyArrowInteropCache& pyArrowInteropCache() {
+  static PyArrowInteropCache cache;
+  return cache;
+}
+
+bool ensurePyArrowInteropCache() {
+  auto& cache = pyArrowInteropCache();
+  if (cache.pyarrow != nullptr) {
+    return true;
+  }
+  PyObject* pyarrow = PyImport_ImportModule("pyarrow");
+  if (pyarrow == nullptr) {
+    return false;
+  }
+  PyObject* record_batch_type = PyObject_GetAttrString(pyarrow, "RecordBatch");
+  PyObject* table_type = PyObject_GetAttrString(pyarrow, "Table");
+  PyObject* table_fn = PyObject_GetAttrString(pyarrow, "table");
+  if (record_batch_type == nullptr || table_type == nullptr || table_fn == nullptr) {
+    Py_XDECREF(record_batch_type);
+    Py_XDECREF(table_type);
+    Py_XDECREF(table_fn);
+    Py_DECREF(pyarrow);
+    return false;
+  }
+  PyObject* table_from_batches = PyObject_GetAttrString(table_type, "from_batches");
+  PyObject* import_from_capsule =
+      PyObject_GetAttrString(record_batch_type, "_import_from_c_capsule");
+  if (table_from_batches == nullptr || import_from_capsule == nullptr) {
+    Py_XDECREF(table_from_batches);
+    Py_XDECREF(import_from_capsule);
+    Py_DECREF(record_batch_type);
+    Py_DECREF(table_type);
+    Py_DECREF(table_fn);
+    Py_DECREF(pyarrow);
+    return false;
+  }
+  cache.pyarrow = pyarrow;
+  cache.record_batch_type = record_batch_type;
+  cache.table_type = table_type;
+  cache.table_fn = table_fn;
+  cache.table_from_batches = table_from_batches;
+  cache.record_batch_import_from_capsule = import_from_capsule;
+  return true;
+}
+
 struct OwnedArrowSchema {
   std::string format;
   std::string name;
@@ -177,7 +231,8 @@ df::MaterializationDataFormat parseMaterializationDataFormat(const char* text) {
 }
 
 df::SourceOptions parseSourceOptions(int materialization_enabled, const char* materialization_dir,
-                                     const char* materialization_format) {
+                                     const char* materialization_format,
+                                     int cache_in_memory_enabled) {
   df::SourceOptions options;
   options.materialization.enabled =
       materialization_enabled != 0 || materialization_dir != nullptr ||
@@ -188,6 +243,7 @@ df::SourceOptions parseSourceOptions(int materialization_enabled, const char* ma
   if (materialization_format != nullptr) {
     options.materialization.data_format = parseMaterializationDataFormat(materialization_format);
   }
+  options.cache_in_memory = cache_in_memory_enabled != 0;
   return options;
 }
 
@@ -630,39 +686,21 @@ bool tryTableFromArrowCapsules(PyObject* obj, df::Table* table) {
 }
 
 df::Table tableFromArrowSlow(PyObject* obj) {
-  PyObject* pyarrow = PyImport_ImportModule("pyarrow");
-  if (pyarrow == nullptr) {
+  if (!ensurePyArrowInteropCache()) {
     throw std::runtime_error("pyarrow is required for create_dataframe_from_arrow()");
   }
-  PyObject* record_batch_type = PyObject_GetAttrString(pyarrow, "RecordBatch");
-  PyObject* table_type = PyObject_GetAttrString(pyarrow, "Table");
-  PyObject* table_fn = PyObject_GetAttrString(pyarrow, "table");
-  if (record_batch_type == nullptr || table_type == nullptr || table_fn == nullptr) {
-    Py_XDECREF(record_batch_type);
-    Py_XDECREF(table_type);
-    Py_XDECREF(table_fn);
-    Py_DECREF(pyarrow);
-    throw std::runtime_error("failed to resolve pyarrow table helpers");
-  }
+  auto& cache = pyArrowInteropCache();
 
   PyObject* table_obj = nullptr;
-  if (PyObject_IsInstance(obj, record_batch_type) == 1) {
-    PyObject* from_batches = PyObject_GetAttrString(table_type, "from_batches");
-    if (from_batches != nullptr) {
-      PyObject* batches = PyList_New(1);
-      Py_INCREF(obj);
-      PyList_SET_ITEM(batches, 0, obj);
-      table_obj = PyObject_CallFunctionObjArgs(from_batches, batches, nullptr);
-      Py_DECREF(batches);
-      Py_DECREF(from_batches);
-    }
+  if (PyObject_IsInstance(obj, cache.record_batch_type) == 1) {
+    PyObject* batches = PyList_New(1);
+    Py_INCREF(obj);
+    PyList_SET_ITEM(batches, 0, obj);
+    table_obj = PyObject_CallFunctionObjArgs(cache.table_from_batches, batches, nullptr);
+    Py_DECREF(batches);
   } else {
-    table_obj = PyObject_CallFunctionObjArgs(table_fn, obj, nullptr);
+    table_obj = PyObject_CallFunctionObjArgs(cache.table_fn, obj, nullptr);
   }
-  Py_DECREF(record_batch_type);
-  Py_DECREF(table_type);
-  Py_DECREF(table_fn);
-  Py_DECREF(pyarrow);
   if (table_obj == nullptr) {
     throw std::runtime_error("failed to normalize input as pyarrow.Table");
   }
@@ -833,10 +871,10 @@ std::vector<df::Table> tablesFromArrowObject(PyObject* obj) {
     return tables;
   }
 
-  PyObject* pyarrow = PyImport_ImportModule("pyarrow");
-  if (pyarrow == nullptr) {
+  if (!ensurePyArrowInteropCache()) {
     throw std::runtime_error("pyarrow is required for create_stream_from_arrow()");
   }
+  PyObject* pyarrow = pyArrowInteropCache().pyarrow;
 
   PyObject* reader = importRecordBatchReaderFromArrowObject(pyarrow, obj);
   if (reader != nullptr) {
@@ -849,7 +887,6 @@ std::vector<df::Table> tablesFromArrowObject(PyObject* obj) {
           break;
         }
         Py_DECREF(reader);
-        Py_DECREF(pyarrow);
         throw std::runtime_error("failed to read next RecordBatch from Arrow stream");
       }
       df::Table table;
@@ -860,11 +897,9 @@ std::vector<df::Table> tablesFromArrowObject(PyObject* obj) {
       Py_DECREF(batch);
     }
     Py_DECREF(reader);
-    Py_DECREF(pyarrow);
     return tables;
   }
 
-  Py_DECREF(pyarrow);
   df::Table table;
   if (!tryTableFromArrowCapsules(obj, &table)) {
     table = tableFromArrowSlow(obj);
@@ -1577,16 +1612,20 @@ PyObject* sessionReadCsv(PyVelariaSession* self, PyObject* args, PyObject* kwarg
     int materialization_enabled = 0;
     const char* materialization_dir = nullptr;
     const char* materialization_format = nullptr;
+    int cache_in_memory_enabled = 0;
     static const char* kwlist[] = {"path", "delimiter", "materialization",
-                                   "materialization_dir", "materialization_format", nullptr};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|spzz", const_cast<char**>(kwlist), &path,
+                                   "materialization_dir", "materialization_format",
+                                   "cache_in_memory", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|spzzp", const_cast<char**>(kwlist), &path,
                                      &delimiter_text, &materialization_enabled,
-                                     &materialization_dir, &materialization_format)) {
+                                     &materialization_dir, &materialization_format,
+                                     &cache_in_memory_enabled)) {
       return nullptr;
     }
     const auto delimiter = parseDelimiter(delimiter_text);
     df::SourceOptions options = parseSourceOptions(materialization_enabled, materialization_dir,
-                                                   materialization_format);
+                                                   materialization_format,
+                                                   cache_in_memory_enabled);
     std::unique_ptr<df::DataFrame> out;
     {
       AllowThreads allow;
@@ -1618,15 +1657,17 @@ PyObject* sessionReadAuto(PyVelariaSession* self, PyObject* args, PyObject* kwar
     int materialization_enabled = 0;
     const char* materialization_dir = nullptr;
     const char* materialization_format = nullptr;
+    int cache_in_memory_enabled = 0;
     static const char* kwlist[] = {"path", "materialization", "materialization_dir",
-                                   "materialization_format", nullptr};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|pzz", const_cast<char**>(kwlist), &path,
+                                   "materialization_format", "cache_in_memory", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|pzzp", const_cast<char**>(kwlist), &path,
                                      &materialization_enabled, &materialization_dir,
-                                     &materialization_format)) {
+                                     &materialization_format, &cache_in_memory_enabled)) {
       return nullptr;
     }
     df::SourceOptions options = parseSourceOptions(materialization_enabled, materialization_dir,
-                                                   materialization_format);
+                                                   materialization_format,
+                                                   cache_in_memory_enabled);
     std::unique_ptr<df::DataFrame> out;
     {
       AllowThreads allow;
@@ -1647,16 +1688,17 @@ PyObject* sessionReadLineFile(PyVelariaSession* self, PyObject* args, PyObject* 
     int materialization_enabled = 0;
     const char* materialization_dir = nullptr;
     const char* materialization_format = nullptr;
+    int cache_in_memory_enabled = 0;
     static const char* kwlist[] = {"path",       "mappings",
                                    "mode",       "split_delimiter",
                                    "regex_pattern", "skip_empty_lines",
                                    "materialization", "materialization_dir",
-                                   "materialization_format", nullptr};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "sO|sssppzz",
+                                   "materialization_format", "cache_in_memory", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "sO|sssppzzp",
                                      const_cast<char**>(kwlist), &path, &mappings, &mode,
                                      &split_delimiter, &regex_pattern, &skip_empty_lines,
                                      &materialization_enabled, &materialization_dir,
-                                     &materialization_format)) {
+                                     &materialization_format, &cache_in_memory_enabled)) {
       return nullptr;
     }
     df::LineFileOptions options;
@@ -1666,7 +1708,8 @@ PyObject* sessionReadLineFile(PyVelariaSession* self, PyObject* args, PyObject* 
     options.mappings = parseLineMappings(mappings);
     options.skip_empty_lines = skip_empty_lines != 0;
     df::SourceOptions source_options = parseSourceOptions(
-        materialization_enabled, materialization_dir, materialization_format);
+        materialization_enabled, materialization_dir, materialization_format,
+        cache_in_memory_enabled);
     std::unique_ptr<df::DataFrame> out;
     {
       AllowThreads allow;
@@ -1685,18 +1728,22 @@ PyObject* sessionReadJson(PyVelariaSession* self, PyObject* args, PyObject* kwar
     int materialization_enabled = 0;
     const char* materialization_dir = nullptr;
     const char* materialization_format = nullptr;
+    int cache_in_memory_enabled = 0;
     static const char* kwlist[] = {"path", "columns", "format", "materialization",
-                                   "materialization_dir", "materialization_format", nullptr};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "sO|spzz", const_cast<char**>(kwlist), &path,
+                                   "materialization_dir", "materialization_format",
+                                   "cache_in_memory", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "sO|spzzp", const_cast<char**>(kwlist), &path,
                                      &columns, &format, &materialization_enabled,
-                                     &materialization_dir, &materialization_format)) {
+                                     &materialization_dir, &materialization_format,
+                                     &cache_in_memory_enabled)) {
       return nullptr;
     }
     df::JsonFileOptions options;
     options.format = parseJsonFileFormat(format);
     options.columns = parseStringList(columns, "columns");
     df::SourceOptions source_options = parseSourceOptions(
-        materialization_enabled, materialization_dir, materialization_format);
+        materialization_enabled, materialization_dir, materialization_format,
+        cache_in_memory_enabled);
     std::unique_ptr<df::DataFrame> out;
     {
       AllowThreads allow;
@@ -2065,11 +2112,11 @@ PyObject* dataFrameArrowCapsules(PyVelariaDataFrame* self, PyObject* args, PyObj
 
 PyObject* dataFrameToArrow(PyVelariaDataFrame* self, PyObject*) {
   return withExceptionTranslation([&]() -> PyObject* {
-    PyObject* pyarrow = PyImport_ImportModule("pyarrow");
-    if (pyarrow == nullptr) {
+    if (!ensurePyArrowInteropCache()) {
       PyErr_SetString(PyExc_ImportError, "pyarrow is required for DataFrame.to_arrow()");
       return nullptr;
     }
+    auto& cache = pyArrowInteropCache();
     const df::Table* native_table = nullptr;
     {
       AllowThreads allow;
@@ -2077,48 +2124,19 @@ PyObject* dataFrameToArrow(PyVelariaDataFrame* self, PyObject*) {
     }
     PyObject* capsules = exportArrowCapsules(*native_table);
     if (capsules == nullptr) {
-      Py_DECREF(pyarrow);
-      return nullptr;
-    }
-    PyObject* record_batch_type = PyObject_GetAttrString(pyarrow, "RecordBatch");
-    if (record_batch_type == nullptr) {
-      Py_DECREF(capsules);
-      Py_DECREF(pyarrow);
-      return nullptr;
-    }
-    PyObject* import_from_capsule =
-        PyObject_GetAttrString(record_batch_type, "_import_from_c_capsule");
-    Py_DECREF(record_batch_type);
-    if (import_from_capsule == nullptr) {
-      Py_DECREF(capsules);
-      Py_DECREF(pyarrow);
       return nullptr;
     }
     PyObject* batch =
-        PyObject_CallFunctionObjArgs(import_from_capsule, PyTuple_GET_ITEM(capsules, 0),
+        PyObject_CallFunctionObjArgs(cache.record_batch_import_from_capsule,
+                                     PyTuple_GET_ITEM(capsules, 0),
                                      PyTuple_GET_ITEM(capsules, 1), nullptr);
-    Py_DECREF(import_from_capsule);
     Py_DECREF(capsules);
     if (batch == nullptr) {
-      Py_DECREF(pyarrow);
-      return nullptr;
-    }
-    PyObject* table_type = PyObject_GetAttrString(pyarrow, "Table");
-    Py_DECREF(pyarrow);
-    if (table_type == nullptr) {
-      Py_DECREF(batch);
-      return nullptr;
-    }
-    PyObject* from_batches = PyObject_GetAttrString(table_type, "from_batches");
-    Py_DECREF(table_type);
-    if (from_batches == nullptr) {
-      Py_DECREF(batch);
       return nullptr;
     }
     PyObject* batches = PyList_New(1);
     PyList_SET_ITEM(batches, 0, batch);
-    PyObject* table = PyObject_CallFunctionObjArgs(from_batches, batches, nullptr);
-    Py_DECREF(from_batches);
+    PyObject* table = PyObject_CallFunctionObjArgs(cache.table_from_batches, batches, nullptr);
     Py_DECREF(batches);
     Py_DECREF(batch);
     return table;

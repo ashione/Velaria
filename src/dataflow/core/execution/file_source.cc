@@ -4,6 +4,7 @@
 #include <array>
 #include <charconv>
 #include <cctype>
+#include <cstring>
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
@@ -18,6 +19,7 @@
 
 #include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/csv.h"
+#include "src/dataflow/core/execution/runtime/execution_optimizer.h"
 #include "src/dataflow/core/execution/runtime/simd_dispatch.h"
 #include "src/dataflow/core/logical/planner/plan.h"
 
@@ -25,13 +27,17 @@ namespace dataflow {
 namespace {
 
 constexpr std::size_t kTextRowSampleBytes = 1 << 15;
+constexpr std::string_view kTrueLower = "true";
+constexpr std::string_view kTrueUpper = "TRUE";
+constexpr std::string_view kFalseLower = "false";
+constexpr std::string_view kFalseUpper = "FALSE";
 
 bool matchesCompareOp(int compare_result, const std::string& op);
 bool compareValueSafe(const Value& lhs, const Value& rhs, const std::string& op);
 
 struct ParsedScalar {
   std::string_view text;
-  std::string owned_text;
+  std::optional<std::string> owned_text;
   bool is_null = false;
   bool is_bool = false;
   bool bool_value = false;
@@ -105,6 +111,15 @@ bool parseInt64Scalar(std::string_view raw_view, int64_t* out) {
 bool parseDoubleScalar(std::string_view raw_view, double* out) {
   if (raw_view.empty() || out == nullptr) {
     return false;
+  }
+  constexpr std::size_t kStackBufferSize = 128;
+  if (raw_view.size() < kStackBufferSize) {
+    std::array<char, kStackBufferSize> buffer{};
+    std::memcpy(buffer.data(), raw_view.data(), raw_view.size());
+    buffer[raw_view.size()] = '\0';
+    char* end = nullptr;
+    *out = std::strtod(buffer.data(), &end);
+    return end != buffer.data() && *end == '\0';
   }
   const std::string raw(raw_view);
   char* end = nullptr;
@@ -299,12 +314,12 @@ LineParsedScalar parseLineParsedScalar(std::string_view raw_view) {
     parsed.is_null = true;
     return parsed;
   }
-  if (raw_view == "true" || raw_view == "TRUE") {
+  if (raw_view == kTrueLower || raw_view == kTrueUpper) {
     parsed.is_bool = true;
     parsed.bool_value = true;
     return parsed;
   }
-  if (raw_view == "false" || raw_view == "FALSE") {
+  if (raw_view == kFalseLower || raw_view == kFalseUpper) {
     parsed.is_bool = true;
     parsed.bool_value = false;
     return parsed;
@@ -321,7 +336,7 @@ LineParsedScalar parseLineParsedScalar(std::string_view raw_view) {
 }
 
 std::string_view parsedScalarText(const ParsedScalar& parsed) {
-  return parsed.owned_text.empty() ? parsed.text : std::string_view(parsed.owned_text);
+  return parsed.owned_text.has_value() ? std::string_view(*parsed.owned_text) : parsed.text;
 }
 
 void resetParsedScalarLight(ParsedScalar* parsed) {
@@ -329,7 +344,7 @@ void resetParsedScalarLight(ParsedScalar* parsed) {
     return;
   }
   parsed->text = std::string_view();
-  parsed->owned_text.clear();
+  parsed->owned_text.reset();
   parsed->is_null = false;
   parsed->is_bool = false;
   parsed->bool_value = false;
@@ -3776,8 +3791,9 @@ bool execute_file_source_pushdown(const FileSourceConnectorSpec& spec, const Sch
     throw std::invalid_argument("source pushdown output cannot be null");
   }
   if (spec.kind == FileSourceKind::Csv) {
+    const auto execution_pattern = analyzeSourceExecution(spec, schema, pushdown);
     return execute_csv_source_pushdown(spec.path, schema, pushdown, spec.csv_delimiter,
-                                       materialize_rows, out);
+                                       materialize_rows, out, &execution_pattern);
   }
   if (pushdown.has_aggregate) {
     if (spec.kind == FileSourceKind::Line) {

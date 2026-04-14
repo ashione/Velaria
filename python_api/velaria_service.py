@@ -729,36 +729,75 @@ def _execute_bitable_import(payload: dict[str, Any], run_dir: Path, *, run_id: s
                 last_page_rows=page_rows,
             )
 
-    rows = client.list_records_from_url(
-        bitable_url,
-        page_size=int(payload.get("page_size", _BITABLE_PAGE_SIZE)),
-        on_page=_on_page,
-    )
-    normalized_rows = _normalize_bitable_rows(rows)
-    table = pa.Table.from_pylist(normalized_rows)
     output_path = (
         _normalize_path(payload["output_path"])
         if payload.get("output_path")
         else run_dir / "artifacts" / "bitable_dataset.parquet"
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(table, str(output_path))
-
     preview_limit = int(payload.get("preview_limit", 50))
-    preview = cli_impl._preview_payload_from_table(table, limit=preview_limit)
-    preview["schema"] = table.schema.names
-    preview["row_count"] = table.num_rows
+    preview_rows: list[dict[str, Any]] = []
+    schema: pa.Schema | None = None
+    writer: pq.ParquetWriter | None = None
+    total_rows = 0
+    try:
+        try:
+            page_iter = client.iter_record_pages_from_url(
+                bitable_url,
+                page_size=int(payload.get("page_size", _BITABLE_PAGE_SIZE)),
+                on_page=_on_page,
+            )
+            iterator = iter(page_iter)
+        except TypeError:
+            rows = client.list_records_from_url(
+                bitable_url,
+                page_size=int(payload.get("page_size", _BITABLE_PAGE_SIZE)),
+                on_page=_on_page,
+            )
+            iterator = iter([rows])
+
+        for page_rows in iterator:
+            normalized_rows = _normalize_bitable_rows(page_rows)
+            page_table = pa.Table.from_pylist(normalized_rows)
+            if writer is None:
+                writer = pq.ParquetWriter(str(output_path), page_table.schema)
+                schema = page_table.schema
+            writer.write_table(page_table)
+            total_rows += page_table.num_rows
+            if len(preview_rows) < preview_limit:
+                remaining = preview_limit - len(preview_rows)
+                preview_rows.extend(normalized_rows[:remaining])
+    finally:
+        if writer is not None:
+            writer.close()
+
+    if schema is None:
+        raise ValueError("bitable import returned no rows")
+
+    preview_table = pa.Table.from_pylist(preview_rows, schema=schema) if preview_rows else pa.Table.from_arrays([], schema=schema)
+
+    preview = cli_impl._preview_payload_from_table(preview_table, limit=preview_limit)
+    preview["schema"] = schema.names
+    preview["row_count"] = total_rows
     dataset_name = str(payload.get("dataset_name") or "").strip() or _default_bitable_dataset_name(bitable_url)
-    artifacts = [_register_artifacts_preview_table(output_path, table)]
+    artifacts = [{
+        "type": "file",
+        "uri": cli_impl._uri_from_path(output_path),
+        "format": "parquet",
+        "row_count": total_rows,
+        "schema_json": schema.names,
+        "preview_json": preview,
+        "tags_json": ["dataset", "bitable-import", "result"],
+    }]
     result_payload: dict[str, Any] = {
         "dataset_name": dataset_name,
         "source_type": "bitable",
         "source_path": str(output_path),
         "source_label": bitable_url,
-        "row_count": table.num_rows,
-        "schema": table.schema.names,
+        "row_count": total_rows,
+        "schema": schema.names,
         "imported_at": _timestamp_suffix(),
-        "fetched_rows": table.num_rows,
+        "fetched_rows": total_rows,
         "pages_fetched": fetched_pages,
     }
 
@@ -815,7 +854,7 @@ def _execute_bitable_import(payload: dict[str, Any], run_dir: Path, *, run_id: s
                         embedding_last_batch_rows=batch_rows,
                     )
 
-            embedding_source_table = annotate_source_arrow_table(table, source_label=output_path.stem)
+            embedding_source_table = annotate_source_arrow_table(pq.read_table(str(output_path)), source_label=output_path.stem)
             embedding_meta = stream_mixed_text_embeddings_to_parquet(
                 embedding_source_table,
                 provider=provider,

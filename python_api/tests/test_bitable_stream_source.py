@@ -124,6 +124,14 @@ class BitableStreamSourceTest(unittest.TestCase):
         self.assertIn("page_token=page_1", client.calls[1][1])
         self.assertEqual(client.calls[1][2]["page_token"], "page_1")
 
+    def test_iter_record_pages_pagination(self):
+        client = _FakeBitableClient()
+        pages = list(client.iter_record_pages("app_token", "table_id", view_id=None, page_size=2))
+        self.assertEqual(len(pages), 2)
+        self.assertEqual([len(page) for page in pages], [2, 1])
+        self.assertEqual(pages[0][0]["负责人"], "Alice")
+        self.assertEqual(pages[1][0]["负责人"], "Bob")
+
     def test_view_access_error_mentions_base_view_read(self):
         class _ViewDeniedClient(BitableClient):
             def __init__(self):

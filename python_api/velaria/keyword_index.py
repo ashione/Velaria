@@ -130,29 +130,35 @@ def _build_doc_rows(
     analyzer: str = "jieba",
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    token_rows: list[list[str]] = []
     labels = list(source_labels) if source_labels is not None else []
     for table_index, table in enumerate(tables):
         label = labels[table_index] if table_index < len(labels) else f"dataset_{table_index + 1}"
-        for row_index, row in enumerate(table.to_pylist()):
-            doc = dict(row)
-            text_parts = []
-            for column in text_columns:
-                value = _normalize_text_value(doc.get(column))
-                if value:
-                    text_parts.append(value)
-            text = "\n".join(text_parts)
-            tokens = tokenize_keyword_text(text, analyzer=analyzer)
-            doc_id = _normalize_text_value(doc.get(doc_id_field))
-            if not doc_id:
-                doc_id = f"doc-{len(rows) + 1}"
-            doc["doc_id"] = doc_id
-            doc["__doc_id"] = len(rows)
-            doc["__source_dataset"] = label
-            doc["__source_row_id"] = row_index
-            doc["__doc_join_key"] = f"{label}:{row_index}"
-            doc["__doc_length"] = len(tokens)
-            rows.append(doc)
-    return rows
+        row_offset = 0
+        for batch in table.to_batches():
+            for row_index, row in enumerate(batch.to_pylist()):
+                doc = dict(row)
+                text_parts = []
+                for column in text_columns:
+                    value = _normalize_text_value(doc.get(column))
+                    if value:
+                        text_parts.append(value)
+                text = "\n".join(text_parts)
+                tokens = tokenize_keyword_text(text, analyzer=analyzer)
+                doc_id = _normalize_text_value(doc.get(doc_id_field))
+                if not doc_id:
+                    doc_id = f"doc-{len(rows) + 1}"
+                source_row_id = row_offset + row_index
+                doc["doc_id"] = doc_id
+                doc["__doc_id"] = len(rows)
+                doc["__source_dataset"] = label
+                doc["__source_row_id"] = source_row_id
+                doc["__doc_join_key"] = f"{label}:{source_row_id}"
+                doc["__doc_length"] = len(tokens)
+                rows.append(doc)
+                token_rows.append(tokens)
+            row_offset += batch.num_rows
+    return rows, token_rows
 
 
 def build_keyword_index(
@@ -172,7 +178,7 @@ def build_keyword_index(
     output_path = pathlib.Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    doc_rows = _build_doc_rows(
+    doc_rows, token_rows = _build_doc_rows(
         tables,
         text_columns=text_columns,
         source_labels=source_labels,
@@ -188,13 +194,7 @@ def build_keyword_index(
     document_frequency: Counter[str] = Counter()
     postings_rows: list[dict[str, Any]] = []
 
-    for doc in doc_rows:
-        text_parts = []
-        for column in text_columns:
-            value = _normalize_text_value(doc.get(column))
-            if value:
-                text_parts.append(value)
-        tokens = tokenize_keyword_text("\n".join(text_parts), analyzer=analyzer)
+    for doc, tokens in zip(doc_rows, token_rows):
         term_freq = Counter(tokens)
         for term, tf in term_freq.items():
             if term not in term_to_id:
@@ -271,36 +271,51 @@ def search_keyword_index(
         raise ValueError("top_k must be positive")
     loaded = load_keyword_index(index_dir)
     docs = loaded["docs"]
-    postings = loaded["postings"].to_pylist()
-    terms_rows = loaded["terms"].to_pylist()
+    postings = loaded["postings"]
+    terms = loaded["terms"]
     analyzer = str(loaded["manifest"].get("analyzer") or "jieba")
     query_terms = tokenize_keyword_text(query_text, analyzer=analyzer)
     if not query_terms:
         raise ValueError("query_text must contain at least one token")
 
-    term_to_meta = {row["term"]: row for row in terms_rows}
+    term_strings = terms.column("term").to_pylist()
+    term_ids_list = terms.column("term_id").to_pylist()
+    term_df_list = terms.column("df").to_pylist()
+    term_to_meta = {
+        str(term): {"term_id": int(term_id), "df": int(df)}
+        for term, term_id, df in zip(term_strings, term_ids_list, term_df_list)
+    }
     query_meta = [term_to_meta[term] for term in dict.fromkeys(query_terms) if term in term_to_meta]
     if not query_meta:
         return pa.Table.from_pylist([])
 
-    docs_rows = docs.to_pylist()
-    if allowed_doc_ids is not None:
-        docs_rows = [row for row in docs_rows if int(row["__doc_id"]) in allowed_doc_ids]
-    doc_length = {int(row["__doc_id"]): int(row.get("__doc_length") or 0) for row in docs_rows}
+    doc_ids_col = docs.column("__doc_id").to_pylist()
+    doc_lengths_col = docs.column("__doc_length").to_pylist()
+    doc_row_positions: dict[int, int] = {}
+    doc_length: dict[int, int] = {}
+    for row_pos, (doc_id, doc_length_value) in enumerate(zip(doc_ids_col, doc_lengths_col)):
+        normalized_doc_id = int(doc_id)
+        if allowed_doc_ids is not None and normalized_doc_id not in allowed_doc_ids:
+            continue
+        doc_row_positions[normalized_doc_id] = row_pos
+        doc_length[normalized_doc_id] = int(doc_length_value or 0)
     doc_count = len(doc_length)
     avg_doc_length = (sum(doc_length.values()) / doc_count) if doc_count else 0.0
     term_ids = {int(row["term_id"]) for row in query_meta}
 
     per_doc_tf: dict[int, dict[int, int]] = {}
     subset_df: Counter[int] = Counter()
-    for row in postings:
-        term_id = int(row["term_id"])
-        doc_id = int(row["doc_id"])
+    posting_term_ids = postings.column("term_id").to_pylist()
+    posting_doc_ids = postings.column("doc_id").to_pylist()
+    posting_tf = postings.column("tf").to_pylist()
+    for term_id_raw, doc_id_raw, tf_raw in zip(posting_term_ids, posting_doc_ids, posting_tf):
+        term_id = int(term_id_raw)
+        doc_id = int(doc_id_raw)
         if term_id not in term_ids:
             continue
         if allowed_doc_ids is not None and doc_id not in allowed_doc_ids:
             continue
-        per_doc_tf.setdefault(doc_id, {})[term_id] = int(row["tf"])
+        per_doc_tf.setdefault(doc_id, {})[term_id] = int(tf_raw)
     for tf_map in per_doc_tf.values():
         for term_id in tf_map:
             subset_df[term_id] += 1
@@ -323,10 +338,10 @@ def search_keyword_index(
             scored_rows.append((doc_id, score))
 
     scored_rows.sort(key=lambda item: (-item[1], item[0]))
-    doc_by_id = {int(row["__doc_id"]): row for row in docs_rows}
-    out_rows = []
-    for doc_id, score in scored_rows[:top_k]:
-        row = dict(doc_by_id[doc_id])
-        row["keyword_score"] = score
-        out_rows.append(row)
-    return pa.Table.from_pylist(out_rows)
+    selected_doc_ids = [doc_id for doc_id, _ in scored_rows[:top_k]]
+    if not selected_doc_ids:
+        return pa.Table.from_pylist([])
+    take_indices = pa.array([doc_row_positions[doc_id] for doc_id in selected_doc_ids], type=pa.int64())
+    out_table = docs.take(take_indices)
+    keyword_scores = pa.array([score for _, score in scored_rows[:top_k]], type=pa.float64())
+    return out_table.append_column("keyword_score", keyword_scores)

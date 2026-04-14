@@ -202,7 +202,7 @@ class BitableClient:
             request_body["page_token"] = page_token
         return self._request_with_token("POST", endpoint, request_body)
 
-    def list_records(
+    def iter_record_pages(
         self,
         app_token: str,
         table_id: str,
@@ -211,7 +211,7 @@ class BitableClient:
         page_size: int = 100,
         on_page: Optional[Callable[[int, int], None]] = None,
         max_rows: Optional[int] = None,
-    ) -> List[Dict[str, object]]:
+    ) -> Iterable[List[Dict[str, object]]]:
         if view_id:
             self._ensure_view_access(app_token, table_id, view_id)
         endpoint_base = self._RECORD_SEARCH_TEMPLATE.format(
@@ -219,9 +219,9 @@ class BitableClient:
             table_id=urllib.parse.quote(table_id),
         )
 
-        all_records: List[Dict[str, object]] = []
         page_token: Optional[str] = None
         checked_view_effectiveness = False
+        fetched_rows = 0
         while True:
             data = self._request_records_page(
                 endpoint_base,
@@ -263,17 +263,45 @@ class BitableClient:
                     )
                 checked_view_effectiveness = True
 
+            page_rows: List[Dict[str, object]] = []
             for item in raw_items:
-                all_records.append(self._normalize_row(item))
-                if max_rows is not None and len(all_records) >= max_rows:
-                    return all_records[:max_rows]
+                page_rows.append(self._normalize_row(item))
+                fetched_rows += 1
+                if max_rows is not None and fetched_rows >= max_rows:
+                    if on_page is not None:
+                        on_page(fetched_rows, len(page_rows))
+                    yield page_rows
+                    return
             if on_page is not None:
-                on_page(len(all_records), len(raw_items))
+                on_page(fetched_rows, len(page_rows))
+            if page_rows:
+                yield page_rows
 
             has_more = bool(payload.get("has_more"))
             page_token = payload.get("page_token")
             if not has_more or not page_token:
                 break
+
+    def list_records(
+        self,
+        app_token: str,
+        table_id: str,
+        *,
+        view_id: Optional[str] = None,
+        page_size: int = 100,
+        on_page: Optional[Callable[[int, int], None]] = None,
+        max_rows: Optional[int] = None,
+    ) -> List[Dict[str, object]]:
+        all_records: List[Dict[str, object]] = []
+        for page_rows in self.iter_record_pages(
+            app_token,
+            table_id,
+            view_id=view_id,
+            page_size=page_size,
+            on_page=on_page,
+            max_rows=max_rows,
+        ):
+            all_records.extend(page_rows)
 
         return all_records
 
@@ -287,6 +315,24 @@ class BitableClient:
     ) -> List[Dict[str, object]]:
         app_token, table_id, view_id = self.parse_bitable_url(bitable_url)
         return self.list_records(
+            app_token,
+            table_id,
+            view_id=view_id,
+            page_size=page_size,
+            on_page=on_page,
+            max_rows=max_rows,
+        )
+
+    def iter_record_pages_from_url(
+        self,
+        bitable_url: str,
+        *,
+        page_size: int = 100,
+        on_page: Optional[Callable[[int, int], None]] = None,
+        max_rows: Optional[int] = None,
+    ) -> Iterable[List[Dict[str, object]]]:
+        app_token, table_id, view_id = self.parse_bitable_url(bitable_url)
+        return self.iter_record_pages(
             app_token,
             table_id,
             view_id=view_id,

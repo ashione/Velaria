@@ -16,7 +16,9 @@ enum class LogicalStepKind {
   Scan,
   Filter,
   PredicateFilter,
+  KeywordSearch,
   HybridSearch,
+  Union,
   Join,
   Aggregate,
   Having,
@@ -35,9 +37,15 @@ struct LogicalPlanStep {
   std::string filter_op;
   Value filter_value;
   std::shared_ptr<PredicateExpr> predicate_expr;
+  std::vector<std::string> keyword_columns;
+  std::string keyword_query_text;
+  std::size_t keyword_top_k = 10;
   std::string hybrid_vector_column;
   std::vector<float> hybrid_query_vector;
   HybridSearchOptions hybrid_options;
+
+  DataFrame union_right;
+  bool union_distinct = false;
 
   std::string join_left_column;
   std::string join_right_column;

@@ -197,7 +197,10 @@ cc_library(
         "src/dataflow/core/contract/source_sink_abi.h",
         "src/dataflow/core/execution/stream/stream.h",
     ],
-    deps = ["@nanoarrow_src//:nanoarrow"],
+    deps = [
+        "@cppjieba_src//:cppjieba",
+        "@nanoarrow_src//:nanoarrow",
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -440,7 +443,18 @@ cc_test(
 cc_test(
     name = "sql_regression_test",
     srcs = ["src/dataflow/tests/sql_regression_test.cc"],
+    data = [
+        "@cppjieba_src//:dict_files",
+        "@cppjieba_src//:dict/jieba.dict.utf8",
+        "@cppjieba_src//:dict/hmm_model.utf8",
+        "@cppjieba_src//:dict/user.dict.utf8",
+        "@cppjieba_src//:dict/idf.utf8",
+        "@cppjieba_src//:dict/stop_words.utf8",
+    ],
     deps = [":dataflow_core"],
+    env = {
+        "VELARIA_JIEBA_DICT_DIR": "$(rootpath @cppjieba_src//:dict/jieba.dict.utf8)",
+    },
 )
 
 cc_test(

@@ -41,8 +41,7 @@ class CustomArrowStreamSource:
         )
         self.options.validate()
 
-    def to_arrow_batches(self, rows: Iterable[RowType]) -> List[pa.Table]:
-        batches: List[pa.Table] = []
+    def iter_arrow_batches(self, rows: Iterable[RowType]):
         buffer: List[RowType] = []
         window_start = time.monotonic()
 
@@ -51,12 +50,17 @@ class CustomArrowStreamSource:
             now = time.monotonic()
             elapsed = now - window_start
             if len(buffer) >= self.options.emit_rows or elapsed >= self.options.emit_interval_seconds:
-                batches.append(self._build_table(buffer))
+                yield self._build_table(buffer)
                 buffer = []
                 window_start = now
 
         if buffer:
-            batches.append(self._build_table(buffer))
+            yield self._build_table(buffer)
+
+    def to_arrow_batches(self, rows: Iterable[RowType]) -> List[pa.Table]:
+        batches: List[pa.Table] = []
+        for batch in self.iter_arrow_batches(rows):
+            batches.append(batch)
         return batches
 
     def to_stream_dataframe(self, session, rows: Iterable[RowType]):

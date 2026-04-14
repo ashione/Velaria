@@ -202,7 +202,9 @@ bool isUnaryStep(LogicalStepKind kind) {
 }
 
 bool isBarrierStep(LogicalStepKind kind) {
-  return kind == LogicalStepKind::Scan || kind == LogicalStepKind::Join ||
+  return kind == LogicalStepKind::Scan || kind == LogicalStepKind::KeywordSearch ||
+         kind == LogicalStepKind::Union ||
+         kind == LogicalStepKind::Join ||
          kind == LogicalStepKind::Aggregate || kind == LogicalStepKind::OrderBy;
 }
 
@@ -327,7 +329,34 @@ std::string joinStrings(const std::vector<std::string>& values, const std::strin
   return out.str();
 }
 
+void validateUnionCompatibility(const Schema& left, const Schema& right) {
+  if (left.fields.size() != right.fields.size()) {
+    throw SQLSemanticError("UNION requires the same number of projected columns");
+  }
+}
+
+void validateUnionBranchQuery(const SqlQuery& query) {
+  if (!query.order_by.empty()) {
+    throwUnsupportedSqlV1("UNION does not support ORDER BY in branch query");
+  }
+  if (query.limit.has_value()) {
+    throwUnsupportedSqlV1("UNION does not support LIMIT in branch query");
+  }
+  if (query.hybrid_search.has_value()) {
+    throwUnsupportedSqlV1("UNION does not support HYBRID SEARCH in branch query");
+  }
+  if (query.window.has_value()) {
+    throwUnsupportedSqlV1("UNION does not support WINDOW in branch query");
+  }
+}
+
 void ensureSingleTableStreamQuery(const SqlQuery& query) {
+  if (!query.union_terms.empty()) {
+    throwUnsupportedSqlV1("stream SQL does not support UNION");
+  }
+  if (query.keyword_search.has_value()) {
+    throwUnsupportedSqlV1("stream SQL does not support KEYWORD SEARCH");
+  }
   if (!query.has_from) {
     throw SQLSemanticError("stream SQL requires FROM");
   }
@@ -628,6 +657,18 @@ std::vector<ComputedColumnArg> resolveStringFunctionArgs(const StringFunctionExp
   return args;
 }
 
+std::vector<std::string> resolveKeywordColumns(const KeywordSearchSpec& keyword,
+                                               RelationContext& ctx,
+                                               const Schema& schema) {
+  std::vector<std::string> columns;
+  columns.reserve(keyword.columns.size());
+  for (const auto& column : keyword.columns) {
+    const auto idx = ctx.resolveColumn(column, nullptr);
+    columns.push_back(schema.fields[idx]);
+  }
+  return columns;
+}
+
 std::vector<ComputedColumnArg> resolveStreamStringFunctionArgs(const StringFunctionExpr& function,
                                                               const FromItem& from) {
   ensureStringFunctionSupported(function);
@@ -864,8 +905,20 @@ std::vector<bool> resolveOrderDirections(const SqlQuery& query) {
 }  // namespace
 
 LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalog& catalog) const {
+  if (!query.union_terms.empty()) {
+    validateUnionBranchQuery(query);
+    for (const auto& term : query.union_terms) {
+      if (!term.query) {
+        throw SQLSemanticError("UNION branch is missing query");
+      }
+      validateUnionBranchQuery(*term.query);
+    }
+  }
   if (query.window.has_value()) {
     throwUnsupportedSqlV1("WINDOW BY ... EVERY ... AS ... is only supported in stream SQL");
+  }
+  if (query.keyword_search.has_value() && query.join.has_value()) {
+    throw SQLSemanticError("KEYWORD SEARCH does not support JOIN queries");
   }
   if (query.hybrid_search.has_value() && query.join.has_value()) {
     throw SQLSemanticError("HYBRID SEARCH does not support JOIN queries");
@@ -876,7 +929,8 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
   LogicalPlan logical;
 
   if (!query.has_from) {
-    if (query.join.has_value() || query.where || !query.group_by.empty() ||
+    if (query.join.has_value() || query.where || query.keyword_search.has_value() ||
+        query.hybrid_search.has_value() || !query.group_by.empty() ||
         query.having) {
       throw SQLSemanticError("SELECT without FROM only supports literal projection");
     }
@@ -1008,6 +1062,9 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
       !query.group_by.empty() ||
       std::any_of(query.select_items.begin(), query.select_items.end(),
                   [](const SelectItem& item) { return item.is_aggregate; });
+  if (query.keyword_search.has_value() && hasAggregateQuery) {
+    throw SQLSemanticError("KEYWORD SEARCH does not support aggregate queries");
+  }
   if (query.hybrid_search.has_value() && hasAggregateQuery) {
     throw SQLSemanticError("HYBRID SEARCH does not support aggregate queries");
   }
@@ -1020,6 +1077,21 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
                   [](const SelectItem& item) { return item.is_string_function; }) &&
       hasAggregateQuery) {
     throwUnsupportedSqlV1("string functions are not supported in aggregate queries");
+  }
+
+  if (query.keyword_search.has_value()) {
+    const auto& keyword = *query.keyword_search;
+    LogicalPlanStep keyword_step;
+    keyword_step.kind = LogicalStepKind::KeywordSearch;
+    keyword_step.keyword_columns = resolveKeywordColumns(keyword, ctx, current.schema());
+    keyword_step.keyword_query_text = keyword.query_text;
+    keyword_step.keyword_top_k = keyword.top_k;
+    logical.steps.push_back(keyword_step);
+    current = current.keywordSearch(keyword_step.keyword_columns,
+                                    keyword_step.keyword_query_text,
+                                    keyword_step.keyword_top_k);
+    ctx.clear();
+    ctx.addRelation(query.from, current.schema(), 0);
   }
 
   if (query.hybrid_search.has_value()) {
@@ -1269,6 +1341,20 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
     current = current.limit(*query.limit);
   }
 
+  for (const auto& union_term : query.union_terms) {
+    if (!union_term.query) {
+      throw SQLSemanticError("UNION branch is missing query");
+    }
+    auto right = plan(*union_term.query, catalog);
+    validateUnionCompatibility(current.schema(), right.schema());
+    LogicalPlanStep union_step;
+    union_step.kind = LogicalStepKind::Union;
+    union_step.union_right = right;
+    union_step.union_distinct = !union_term.all;
+    logical.steps.push_back(union_step);
+    current = current.unionWith(right, union_step.union_distinct);
+  }
+
   return optimizeLogical(logical);
 }
 
@@ -1302,9 +1388,16 @@ std::string SqlPlanner::explainLogicalPlan(const LogicalPlan& logical) const {
       case LogicalStepKind::PredicateFilter:
         out << "PredicateFilter";
         break;
+      case LogicalStepKind::KeywordSearch:
+        out << "KeywordSearch columns=" << step.keyword_columns.size()
+            << " top_k=" << step.keyword_top_k;
+        break;
       case LogicalStepKind::HybridSearch:
         out << "HybridSearch column=" << step.hybrid_vector_column
             << " top_k=" << step.hybrid_options.top_k;
+        break;
+      case LogicalStepKind::Union:
+        out << "Union distinct=" << (step.union_distinct ? "true" : "false");
         break;
       case LogicalStepKind::Join:
         out << "Join left=" << step.join_left_column << " right=" << step.join_right_column;
@@ -1374,10 +1467,18 @@ DataFrame SqlPlanner::materializeFromPhysical(const PhysicalPlan& physical) cons
       case LogicalStepKind::PredicateFilter:
         current = current.filterPredicate(toPlanPredicateExpr(step.logical.predicate_expr));
         break;
+      case LogicalStepKind::KeywordSearch:
+        current = current.keywordSearch(step.logical.keyword_columns,
+                                        step.logical.keyword_query_text,
+                                        step.logical.keyword_top_k);
+        break;
       case LogicalStepKind::HybridSearch:
         current = current.hybridSearch(step.logical.hybrid_vector_column,
                                        step.logical.hybrid_query_vector,
                                        step.logical.hybrid_options);
+        break;
+      case LogicalStepKind::Union:
+        current = current.unionWith(step.logical.union_right, step.logical.union_distinct);
         break;
       case LogicalStepKind::Join:
         current =

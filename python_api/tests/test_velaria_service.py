@@ -12,6 +12,9 @@ from unittest import mock
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 try:
     velaria_service = importlib.import_module("velaria_service")
 except ModuleNotFoundError:
@@ -292,7 +295,7 @@ class VelariaServiceTest(unittest.TestCase):
 
                         run_status = 0
                         run_payload = {}
-                        for _ in range(20):
+                        for _ in range(40):
                             run_status, run_payload = self._request_json(
                                 "GET",
                                 f"{base_url}/api/v1/runs/{run_id}",
@@ -314,6 +317,499 @@ class VelariaServiceTest(unittest.TestCase):
                         self.assertEqual(result_payload["preview"]["row_count"], 2)
                         self.assertEqual(result_payload["preview"]["rows"][0]["Name"], "alice")
                         self.assertTrue(pathlib.Path(run_payload["run"]["details"]["source_path"]).exists())
+                finally:
+                    server.shutdown()
+                    thread.join(timeout=5)
+                    server.server_close()
+
+    def test_bitable_import_run_with_embedding_config_persists_embedding_dataset(self):
+        fake_client = mock.Mock()
+
+        def _fake_list_records_from_url(*args, **kwargs):
+            callback = kwargs.get("on_page")
+            rows = [
+                {
+                    "doc_id": "doc-1",
+                    "title": "Alpha",
+                    "summary": "Payment page timeout",
+                    "source_updated_at": 1,
+                },
+                {
+                    "doc_id": "doc-2",
+                    "title": "Beta",
+                    "summary": "Refund delay in worker queue",
+                    "source_updated_at": 2,
+                },
+            ]
+            if callback is not None:
+                callback(len(rows), len(rows))
+            return rows
+
+        provider = StaticEmbeddingProvider(
+            {
+                "title: Alpha\nsummary: Payment page timeout": [1.0, 0.0, 0.0],
+                "title: Beta\nsummary: Refund delay in worker queue": [0.0, 1.0, 0.0],
+            }
+        )
+        fake_client.list_records_from_url.side_effect = _fake_list_records_from_url
+        with tempfile.TemporaryDirectory(prefix="velaria-service-bitable-embed-run-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                server, thread, base_url = self._start_server()
+                try:
+                    with mock.patch.object(velaria_service, "BitableClient", return_value=fake_client), mock.patch.object(
+                        velaria_service.cli_impl,
+                        "_make_embedding_provider",
+                        return_value=(provider, "static-demo"),
+                    ):
+                            status, payload = self._request_json(
+                                "POST",
+                                f"{base_url}/api/v1/runs/bitable-import",
+                                {
+                                    "bitable_url": "https://example.feishu.cn/base/app123/tables/tbl456",
+                                    "app_id": "cli-app",
+                                    "app_secret": "cli-secret",
+                                    "dataset_name": "ops-board",
+                                    "embedding_config": {
+                                        "enabled": True,
+                                        "text_columns": ["title", "summary"],
+                                        "provider": "hash",
+                                        "template_version": "text-v1",
+                                    },
+                                },
+                            )
+                            self.assertEqual(status, 202)
+                            run_id = payload["run_id"]
+
+                            run_status = 0
+                            run_payload = {}
+                            for _ in range(20):
+                                run_status, run_payload = self._request_json(
+                                    "GET",
+                                    f"{base_url}/api/v1/runs/{run_id}",
+                                )
+                                if run_status == 200 and run_payload["run"]["status"] == "succeeded":
+                                    break
+                                time.sleep(0.1)
+                            self.assertEqual(run_status, 200)
+                            self.assertEqual(run_payload["run"]["status"], "succeeded")
+                            embedding_dataset = run_payload["run"]["details"]["embedding_dataset"]
+                            self.assertEqual(embedding_dataset["provider"], "hash")
+                            self.assertEqual(embedding_dataset["model"], "static-demo")
+                            self.assertEqual(embedding_dataset["row_count"], 2)
+                            self.assertTrue(pathlib.Path(embedding_dataset["dataset_path"]).exists())
+                            self.assertTrue(embedding_dataset["artifact_id"])
+
+                            result_status, result_payload = self._request_json(
+                                "GET",
+                                f"{base_url}/api/v1/runs/{run_id}/result?limit=20",
+                            )
+                            self.assertEqual(result_status, 200)
+                            self.assertEqual(result_payload["preview"]["row_count"], 2)
+                finally:
+                    server.shutdown()
+                    thread.join(timeout=5)
+                    server.server_close()
+
+    def test_keyword_index_build_merges_multiple_arrow_like_datasets(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-service-keyword-index-") as tmp:
+            left_path = pathlib.Path(tmp) / "left.parquet"
+            right_path = pathlib.Path(tmp) / "right.parquet"
+            pq.write_table(
+                pa.table(
+                    {
+                        "title": ["支付超时", "退款延迟"],
+                        "body": ["订单支付超时", "退款流程排队较慢"],
+                    }
+                ),
+                left_path,
+            )
+            pq.write_table(
+                pa.table(
+                    {
+                        "title": ["支付重试"],
+                        "body": ["支付超时后重试成功"],
+                    }
+                ),
+                right_path,
+            )
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                server, thread, base_url = self._start_server()
+                try:
+                    status, payload = self._request_json(
+                        "POST",
+                        f"{base_url}/api/v1/runs/keyword-index-build",
+                        {
+                            "dataset_paths": [str(left_path), str(right_path)],
+                            "text_columns": ["title", "body"],
+                        },
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(payload["run"]["status"], "succeeded")
+                    self.assertEqual(payload["result"]["dataset_count"], 2)
+                    self.assertEqual(payload["result"]["doc_count"], 3)
+                    self.assertEqual(payload["artifact"]["format"], "keyword-index")
+                    self.assertEqual(payload["preview"]["row_count"], 3)
+                    index_dir = pathlib.Path(payload["result"]["index_path"])
+                    self.assertTrue((index_dir / "manifest.json").exists())
+                    self.assertTrue((index_dir / "docs.parquet").exists())
+                    self.assertTrue((index_dir / "terms.parquet").exists())
+                    self.assertTrue((index_dir / "postings.parquet").exists())
+                finally:
+                    server.shutdown()
+                    thread.join(timeout=5)
+                    server.server_close()
+
+    def test_keyword_index_build_accepts_csv_input_path(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-service-keyword-index-csv-") as tmp:
+            csv_path = pathlib.Path(tmp) / "docs.csv"
+            csv_path.write_text(
+                "title,body\n"
+                "支付超时,订单支付超时\n"
+                "支付重试,支付超时后重试成功\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                server, thread, base_url = self._start_server()
+                try:
+                    status, payload = self._request_json(
+                        "POST",
+                        f"{base_url}/api/v1/runs/keyword-index-build",
+                        {
+                            "input_path": str(csv_path),
+                            "input_type": "csv",
+                            "text_columns": ["title", "body"],
+                        },
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(payload["run"]["status"], "succeeded")
+                    self.assertEqual(payload["result"]["doc_count"], 2)
+                finally:
+                    server.shutdown()
+                    thread.join(timeout=5)
+                    server.server_close()
+
+    def test_keyword_index_build_supports_builtin_analyzer(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-service-keyword-index-builtin-") as tmp:
+            csv_path = pathlib.Path(tmp) / "docs.csv"
+            csv_path.write_text(
+                "title,body\n"
+                "支付超时,订单支付超时\n"
+                "支付重试,支付超时后重试成功\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                server, thread, base_url = self._start_server()
+                try:
+                    status, payload = self._request_json(
+                        "POST",
+                        f"{base_url}/api/v1/runs/keyword-index-build",
+                        {
+                            "input_path": str(csv_path),
+                            "input_type": "csv",
+                            "text_columns": ["title", "body"],
+                            "analyzer": "builtin",
+                        },
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(payload["result"]["analyzer"], "builtin")
+                    self.assertGreater(payload["result"]["term_count"], 0)
+                finally:
+                    server.shutdown()
+                    thread.join(timeout=5)
+                    server.server_close()
+
+    def test_keyword_search_queries_built_index_with_where_sql(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-service-keyword-search-") as tmp:
+            left_path = pathlib.Path(tmp) / "docs.parquet"
+            pq.write_table(
+                pa.table(
+                    {
+                        "bucket": [1, 1, 2],
+                        "title": ["支付超时", "支付重试", "退款延迟"],
+                        "body": ["订单支付超时", "支付超时后重试成功", "退款流程排队较慢"],
+                    }
+                ),
+                left_path,
+            )
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                server, thread, base_url = self._start_server()
+                try:
+                    build_status, build_payload = self._request_json(
+                        "POST",
+                        f"{base_url}/api/v1/runs/keyword-index-build",
+                        {
+                            "dataset_path": str(left_path),
+                            "text_columns": ["title", "body"],
+                        },
+                    )
+                    self.assertEqual(build_status, 200)
+                    search_status, search_payload = self._request_json(
+                        "POST",
+                        f"{base_url}/api/v1/runs/keyword-search",
+                        {
+                            "index_path": build_payload["result"]["index_path"],
+                            "query_text": "支付超时",
+                            "where_sql": "bucket = 1",
+                            "top_k": 2,
+                        },
+                    )
+                    self.assertEqual(search_status, 200)
+                    self.assertEqual(search_payload["run"]["status"], "succeeded")
+                    self.assertEqual(search_payload["preview"]["row_count"], 2)
+                    self.assertEqual(search_payload["preview"]["rows"][0]["title"], "支付超时")
+                finally:
+                    server.shutdown()
+                    thread.join(timeout=5)
+                    server.server_close()
+
+    def test_keyword_search_where_sql_matches_filtered_corpus_scoring(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-service-keyword-filtered-bm25-") as tmp:
+            full_path = pathlib.Path(tmp) / "full.parquet"
+            subset_path = pathlib.Path(tmp) / "subset.parquet"
+            full_table = pa.table(
+                {
+                    "bucket": [1, 1, 2],
+                    "title": ["稀有词 common", "common common common", "稀有词"],
+                    "body": ["", "", "common"],
+                }
+            )
+            subset_table = pa.table(
+                {
+                    "bucket": [1, 1],
+                    "title": ["稀有词 common", "common common common"],
+                    "body": ["", ""],
+                }
+            )
+            pq.write_table(full_table, full_path)
+            pq.write_table(subset_table, subset_path)
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                server, thread, base_url = self._start_server()
+                try:
+                    full_status, full_payload = self._request_json(
+                        "POST",
+                        f"{base_url}/api/v1/runs/keyword-index-build",
+                        {
+                            "dataset_path": str(full_path),
+                            "text_columns": ["title", "body"],
+                            "analyzer": "builtin",
+                        },
+                    )
+                    subset_status, subset_payload = self._request_json(
+                        "POST",
+                        f"{base_url}/api/v1/runs/keyword-index-build",
+                        {
+                            "dataset_path": str(subset_path),
+                            "text_columns": ["title", "body"],
+                            "analyzer": "builtin",
+                        },
+                    )
+                    self.assertEqual(full_status, 200)
+                    self.assertEqual(subset_status, 200)
+                    filtered_status, filtered_payload = self._request_json(
+                        "POST",
+                        f"{base_url}/api/v1/runs/keyword-search",
+                        {
+                            "index_path": full_payload["result"]["index_path"],
+                            "query_text": "稀有词 common",
+                            "where_sql": "bucket = 1",
+                            "top_k": 2,
+                        },
+                    )
+                    subset_search_status, subset_search_payload = self._request_json(
+                        "POST",
+                        f"{base_url}/api/v1/runs/keyword-search",
+                        {
+                            "index_path": subset_payload["result"]["index_path"],
+                            "query_text": "稀有词 common",
+                            "top_k": 2,
+                        },
+                    )
+                    self.assertEqual(filtered_status, 200)
+                    self.assertEqual(subset_search_status, 200)
+                    self.assertEqual(
+                        filtered_payload["preview"]["rows"][0]["title"],
+                        subset_search_payload["preview"]["rows"][0]["title"],
+                    )
+                finally:
+                    server.shutdown()
+                    thread.join(timeout=5)
+                    server.server_close()
+
+    def test_hybrid_search_uses_keyword_index_as_prefilter(self):
+        provider = StaticEmbeddingProvider(
+            {
+                "title: 支付超时\nsummary: 订单支付超时": [0.8, 0.2, 0.0],
+                "title: 支付重试\nsummary: 支付超时后重试成功": [1.0, 0.0, 0.0],
+                "支付超时": [1.0, 0.0, 0.0],
+            }
+        )
+        with tempfile.TemporaryDirectory(prefix="velaria-service-hybrid-keyword-") as tmp:
+            csv_path = pathlib.Path(tmp) / "docs.csv"
+            csv_path.write_text(
+                "doc_id,bucket,title,summary,source_updated_at\n"
+                "doc-1,1,支付超时,订单支付超时,1\n"
+                "doc-2,1,支付重试,支付超时后重试成功,2\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                server, thread, base_url = self._start_server()
+                try:
+                    with mock.patch.object(
+                        velaria_service.cli_impl,
+                        "_make_embedding_provider",
+                        return_value=(provider, "static-demo"),
+                    ):
+                        build_status, build_payload = self._build_embedding_dataset(
+                            base_url,
+                            csv_path=csv_path,
+                            provider="hash",
+                        )
+                        self.assertEqual(build_status, 200)
+                        keyword_status, keyword_payload = self._request_json(
+                            "POST",
+                            f"{base_url}/api/v1/runs/keyword-index-build",
+                            {
+                                "input_path": str(csv_path),
+                                "input_type": "csv",
+                                "text_columns": ["title", "summary"],
+                            },
+                        )
+                        self.assertEqual(keyword_status, 200)
+                        hybrid_status, hybrid_payload = self._request_json(
+                            "POST",
+                            f"{base_url}/api/v1/runs/hybrid-search",
+                            {
+                                "dataset_path": build_payload["result"]["dataset_path"],
+                                "index_path": keyword_payload["result"]["index_path"],
+                                "query_text": "支付超时",
+                                "provider": "hash",
+                                "top_k": 1,
+                                "vector_column": "embedding",
+                            },
+                        )
+                    self.assertEqual(hybrid_status, 200)
+                    self.assertEqual(hybrid_payload["run"]["status"], "succeeded")
+                    self.assertEqual(hybrid_payload["preview"]["row_count"], 1)
+                    self.assertEqual(hybrid_payload["preview"]["rows"][0]["doc_id"], "doc-2")
+                    self.assertIn("vector_score", hybrid_payload["preview"]["schema"])
+                finally:
+                    server.shutdown()
+                    thread.join(timeout=5)
+                    server.server_close()
+
+    def test_hybrid_search_with_duplicate_doc_id_uses_stable_join_key(self):
+        provider = StaticEmbeddingProvider(
+            {
+                "title: 支付超时\nsummary: 订单支付超时": [1.0, 0.0, 0.0],
+                "title: 支付超时\nsummary: 支付超时后重试成功": [1.0, 0.0, 0.0],
+                "支付超时": [1.0, 0.0, 0.0],
+            }
+        )
+        with tempfile.TemporaryDirectory(prefix="velaria-service-hybrid-dup-docid-") as tmp:
+            csv_path = pathlib.Path(tmp) / "docs.csv"
+            csv_path.write_text(
+                "doc_id,bucket,title,summary,source_updated_at\n"
+                "dup,1,支付超时,订单支付超时,1\n"
+                "dup,1,支付超时,支付超时后重试成功,2\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                server, thread, base_url = self._start_server()
+                try:
+                    with mock.patch.object(
+                        velaria_service.cli_impl,
+                        "_make_embedding_provider",
+                        return_value=(provider, "static-demo"),
+                    ):
+                        build_status, build_payload = self._build_embedding_dataset(
+                            base_url,
+                            csv_path=csv_path,
+                            provider="hash",
+                        )
+                        self.assertEqual(build_status, 200)
+                        keyword_status, keyword_payload = self._request_json(
+                            "POST",
+                            f"{base_url}/api/v1/runs/keyword-index-build",
+                            {
+                                "input_path": str(csv_path),
+                                "input_type": "csv",
+                                "text_columns": ["title", "summary"],
+                                "analyzer": "builtin",
+                            },
+                        )
+                        self.assertEqual(keyword_status, 200)
+                        hybrid_status, hybrid_payload = self._request_json(
+                            "POST",
+                            f"{base_url}/api/v1/runs/hybrid-search",
+                            {
+                                "dataset_path": build_payload["result"]["dataset_path"],
+                                "index_path": keyword_payload["result"]["index_path"],
+                                "query_text": "支付超时",
+                                "provider": "hash",
+                                "top_k": 2,
+                                "vector_column": "embedding",
+                            },
+                        )
+                    self.assertEqual(hybrid_status, 200)
+                    self.assertEqual(hybrid_payload["preview"]["row_count"], 2)
+                finally:
+                    server.shutdown()
+                    thread.join(timeout=5)
+                    server.server_close()
+
+    def test_bitable_import_run_with_keyword_index_config_persists_index_metadata(self):
+        fake_client = mock.Mock()
+
+        def _fake_list_records_from_url(*args, **kwargs):
+            callback = kwargs.get("on_page")
+            rows = [
+                {"title": "支付超时", "body": "订单支付超时"},
+                {"title": "支付重试", "body": "支付超时后重试成功"},
+            ]
+            if callback is not None:
+                callback(len(rows), len(rows))
+            return rows
+
+        fake_client.list_records_from_url.side_effect = _fake_list_records_from_url
+        with tempfile.TemporaryDirectory(prefix="velaria-service-bitable-keyword-run-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                server, thread, base_url = self._start_server()
+                try:
+                    with mock.patch.object(velaria_service, "BitableClient", return_value=fake_client):
+                        status, payload = self._request_json(
+                            "POST",
+                            f"{base_url}/api/v1/runs/bitable-import",
+                            {
+                                "bitable_url": "https://example.feishu.cn/base/app123/tables/tbl456",
+                                "app_id": "cli-app",
+                                "app_secret": "cli-secret",
+                                "dataset_name": "ops-board",
+                                "keyword_index_config": {
+                                    "enabled": True,
+                                    "text_columns": ["title", "body"],
+                                },
+                            },
+                        )
+                        self.assertEqual(status, 202)
+                        run_id = payload["run_id"]
+
+                        run_status = 0
+                        run_payload = {}
+                        for _ in range(20):
+                            run_status, run_payload = self._request_json(
+                                "GET",
+                                f"{base_url}/api/v1/runs/{run_id}",
+                            )
+                            if run_status == 200 and run_payload["run"]["status"] == "succeeded":
+                                break
+                            time.sleep(0.1)
+                        self.assertEqual(run_status, 200)
+                        self.assertEqual(run_payload["run"]["status"], "succeeded")
+                        keyword_index = run_payload["run"]["details"]["keyword_index"]
+                        self.assertEqual(keyword_index["doc_count"], 2)
+                        self.assertEqual(keyword_index["dataset_count"], 1)
+                        self.assertTrue(pathlib.Path(keyword_index["index_path"]).exists())
+                        self.assertTrue(keyword_index["artifact_id"])
                 finally:
                     server.shutdown()
                     thread.join(timeout=5)

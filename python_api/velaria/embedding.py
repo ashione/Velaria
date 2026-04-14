@@ -13,6 +13,7 @@ import pyarrow as pa
 import pyarrow.ipc as pa_ipc
 import pyarrow.parquet as pq
 
+from .custom_stream import CustomArrowStreamSource
 from .excel import read_excel
 
 
@@ -247,6 +248,18 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def annotate_source_arrow_table(table: pa.Table, *, source_label: str) -> pa.Table:
+    row_count = table.num_rows
+    if "__source_dataset" not in table.column_names:
+        table = table.append_column("__source_dataset", pa.array([source_label] * row_count, type=pa.string()))
+    if "__source_row_id" not in table.column_names:
+        table = table.append_column("__source_row_id", pa.array(list(range(row_count)), type=pa.int64()))
+    if "__doc_join_key" not in table.column_names:
+        keys = [f"{source_label}:{index}" for index in range(row_count)]
+        table = table.append_column("__doc_join_key", pa.array(keys, type=pa.string()))
+    return table
+
+
 def _normalize_scalar(value: Any) -> Any:
     if isinstance(value, pathlib.Path):
         return str(value)
@@ -445,6 +458,99 @@ def materialize_mixed_text_embeddings(
     )
 
 
+def materialize_mixed_text_embeddings_stream(
+    records: Any,
+    *,
+    provider: EmbeddingProvider,
+    model: str,
+    template_version: str,
+    text_fields: Sequence[str] = _DEFAULT_TEMPLATE_FIELDS,
+    text_field: str = "text",
+    doc_id_field: str = "doc_id",
+    source_updated_at_field: str = "source_updated_at",
+    output_path: str | pathlib.Path | None = None,
+    embedding_version: str | None = None,
+    batch_size: int = 128,
+    embedded_at: str | None = None,
+    include_text: bool = False,
+    on_batch: Callable[[int, int], None] | None = None,
+) -> pa.Table:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+
+    def iter_records() -> Iterable[Mapping[str, Any]]:
+        if isinstance(records, pa.Table):
+            for batch in records.to_batches(max_chunksize=batch_size):
+                for row in batch.to_pylist():
+                    yield row
+            return
+        if isinstance(records, pa.RecordBatchReader):
+            for batch in records:
+                for row in batch.to_pylist():
+                    yield row
+            return
+        for row in records:
+            yield row
+
+    source = CustomArrowStreamSource(
+        emit_rows=batch_size,
+        # Batch size is the dominant flush policy here; time-based flushing is disabled in practice.
+        emit_interval_seconds=24 * 60 * 60,
+    )
+    output_file = pathlib.Path(output_path) if output_path is not None else None
+    writer: pq.ParquetWriter | None = None
+    tables: list[pa.Table] = []
+    emitted_rows = 0
+    embedded_at_value = embedded_at or _utc_now()
+    wrote_streaming_parquet = output_file is not None and output_file.suffix.lower() == ".parquet"
+
+    try:
+        for batch in source.iter_arrow_batches(iter_records()):
+            chunk_rows = build_mixed_text_embedding_rows(
+                batch.to_pylist(),
+                template_version=template_version,
+                text_fields=text_fields,
+                text_field=text_field,
+                doc_id_field=doc_id_field,
+                source_updated_at_field=source_updated_at_field,
+            )
+            chunk_table = materialize_embeddings(
+                chunk_rows,
+                provider=provider,
+                model=model,
+                embedding_version=embedding_version,
+                batch_size=batch_size,
+                embedded_at=embedded_at_value,
+                include_text=include_text,
+            )
+            if output_file is not None and output_file.suffix.lower() == ".parquet":
+                output_file.parent.mkdir(parents=True, exist_ok=True)
+                if writer is None:
+                    writer = pq.ParquetWriter(output_file, chunk_table.schema)
+                writer.write_table(chunk_table)
+            if not wrote_streaming_parquet:
+                tables.append(chunk_table)
+            emitted_rows += chunk_table.num_rows
+            if on_batch is not None:
+                on_batch(emitted_rows, chunk_table.num_rows)
+    finally:
+        if writer is not None:
+            writer.close()
+
+    if emitted_rows == 0:
+        raise ValueError("records must not be empty")
+
+    if wrote_streaming_parquet and output_file is not None:
+        table = read_embedding_table(output_file)
+    else:
+        table = pa.concat_tables(tables, promote_options="default") if len(tables) > 1 else tables[0]
+    if output_file is not None and output_file.suffix.lower() != ".parquet":
+        _write_embedding_table(table, output_file)
+    if output_file is not None and emitted_rows != table.num_rows:
+        raise ValueError("stream embedding row count mismatch")
+    return table
+
+
 def _load_input_dataframe(
     session: Any,
     input_path: str | pathlib.Path,
@@ -562,6 +668,7 @@ def build_file_embeddings(
     embedded_at: str | None = None,
     include_text: bool = False,
 ) -> pa.Table:
+    source_path = pathlib.Path(input_path)
     source_df = _load_input_dataframe(
         session,
         input_path,
@@ -576,8 +683,9 @@ def build_file_embeddings(
         date_format=date_format,
     )
     source_table = source_df.to_arrow()
-    return materialize_mixed_text_embeddings(
-        source_table.to_pylist(),
+    source_table = annotate_source_arrow_table(source_table, source_label=source_path.stem)
+    return materialize_mixed_text_embeddings_stream(
+        source_table,
         provider=provider,
         model=model,
         template_version=template_version,

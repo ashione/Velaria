@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import pathlib
 import subprocess
 import sys
@@ -24,6 +25,7 @@ from .embedding import (
     build_embedding_rows,
     build_file_embeddings,
     build_mixed_text_embedding_rows,
+    annotate_source_arrow_table,
     default_embedding_model_dir,
     download_embedding_model,
     embed_query_text,
@@ -32,6 +34,7 @@ from .embedding import (
     load_embedding_dataframe,
     materialize_embeddings,
     materialize_mixed_text_embeddings,
+    materialize_mixed_text_embeddings_stream,
     query_file_embeddings,
     read_embedding_table,
     render_text_template,
@@ -41,8 +44,27 @@ from .embedding import (
     select_embedding_updates,
 )
 from .excel import read_excel
+from .keyword_index import build_keyword_index, load_keyword_index, search_keyword_index, tokenize_keyword_text
 from .bitable import BitableClient, group_rows_by_field, group_rows_count_by_field
 from ._version import __version__
+
+
+def _configure_jieba_dict_env() -> None:
+    if os.environ.get("VELARIA_JIEBA_DICT_DIR"):
+        return
+    dict_dir = pathlib.Path(__file__).resolve().parent / "jieba_dict"
+    required = [
+        "jieba.dict.utf8",
+        "hmm_model.utf8",
+        "user.dict.utf8",
+        "idf.utf8",
+        "stop_words.utf8",
+    ]
+    if all((dict_dir / name).exists() for name in required):
+        os.environ["VELARIA_JIEBA_DICT_DIR"] = str(dict_dir)
+
+
+_configure_jieba_dict_env()
 
 
 def _is_frozen_runtime():
@@ -175,6 +197,7 @@ __all__ = [
     "build_embedding_rows",
     "build_file_embeddings",
     "build_mixed_text_embedding_rows",
+    "annotate_source_arrow_table",
     "default_embedding_model_dir",
     "download_embedding_model",
     "embed_query_text",
@@ -183,6 +206,7 @@ __all__ = [
     "load_embedding_dataframe",
     "materialize_embeddings",
     "materialize_mixed_text_embeddings",
+    "materialize_mixed_text_embeddings_stream",
     "query_file_embeddings",
     "read_embedding_table",
     "render_text_template",
@@ -190,6 +214,10 @@ __all__ = [
     "run_file_mixed_text_hybrid_search",
     "run_mixed_text_hybrid_search",
     "select_embedding_updates",
+    "build_keyword_index",
+    "load_keyword_index",
+    "search_keyword_index",
+    "tokenize_keyword_text",
     "read_excel",
     "BitableClient",
     "group_rows_by_field",

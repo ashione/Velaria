@@ -62,6 +62,64 @@ cc_library(
     ],
 )
 
+http_archive(
+    name = "cppjieba_src",
+    build_file_content = """load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "cppjieba",
+    hdrs = glob([
+        "include/cppjieba/**/*.hpp",
+        "dict/**",
+    ]),
+    includes = ["include"],
+    deps = ["@limonp_src//:limonp"],
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "dict_files",
+    srcs = glob(["dict/**"]),
+    visibility = ["//visibility:public"],
+)
+
+exports_files([
+    "dict/jieba.dict.utf8",
+    "dict/hmm_model.utf8",
+    "dict/user.dict.utf8",
+    "dict/idf.utf8",
+    "dict/stop_words.utf8",
+], visibility = ["//visibility:public"])
+""",
+    sha256 = "2f58f88608a5521b47057cc5d46a79c93283c619d81d3d8956c33b8e9cdd84fb",
+    strip_prefix = "cppjieba-5.6.3",
+    type = "tar.gz",
+    urls = [
+        "https://codeload.github.com/yanyiwu/cppjieba/tar.gz/refs/tags/v5.6.3",
+    ],
+)
+
+http_archive(
+    name = "limonp_src",
+    build_file_content = """load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "limonp",
+    hdrs = glob(["include/limonp/**/*.hpp"]),
+    includes = ["include"],
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "60f5e896affef9736cce83e79887ae6ad2a6c5cc4435740a7b845ec9dffeecfb",
+    strip_prefix = "limonp-master",
+    type = "tar.gz",
+    urls = [
+        "https://codeload.github.com/yanyiwu/limonp/tar.gz/refs/heads/master",
+    ],
+)
+
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(python_version = "3.12")
 use_repo(python, "python_3_12")

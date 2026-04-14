@@ -1173,10 +1173,18 @@ std::string DataflowSession::explainSql(const std::string& sql_text) {
         current = planner.materializeFromPhysical(
             sql::PhysicalPlan{current, std::vector<sql::PhysicalPlanStep>{step}});
         break;
+      case sql::LogicalStepKind::KeywordSearch:
+        current = current.keywordSearch(step.logical.keyword_columns,
+                                        step.logical.keyword_query_text,
+                                        step.logical.keyword_top_k);
+        break;
       case sql::LogicalStepKind::HybridSearch:
         current = current.hybridSearch(step.logical.hybrid_vector_column,
                                        step.logical.hybrid_query_vector,
                                        step.logical.hybrid_options);
+        break;
+      case sql::LogicalStepKind::Union:
+        current = current.unionWith(step.logical.union_right, step.logical.union_distinct);
         break;
       case sql::LogicalStepKind::Join:
         current =

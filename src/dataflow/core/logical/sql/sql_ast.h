@@ -123,9 +123,22 @@ struct HybridSearchSpec {
   std::optional<double> score_threshold;
 };
 
+struct KeywordSearchSpec {
+  std::vector<ColumnRef> columns;
+  std::string query_text;
+  std::size_t top_k = 10;
+};
+
 struct SqlColumnDef {
   std::string name;
   std::string type;
+};
+
+struct SqlQuery;
+
+struct SqlUnionTerm {
+  bool all = false;
+  std::shared_ptr<SqlQuery> query;
 };
 
 struct SqlQuery {
@@ -134,12 +147,14 @@ struct SqlQuery {
   FromItem from;
   std::optional<JoinItem> join;
   std::shared_ptr<PredicateExpr> where;
+  std::optional<KeywordSearchSpec> keyword_search;
   std::optional<HybridSearchSpec> hybrid_search;
   std::optional<WindowSpec> window;
   std::vector<ColumnRef> group_by;
   std::shared_ptr<PredicateExpr> having;
   std::vector<OrderByItem> order_by;
   std::optional<std::size_t> limit;
+  std::vector<SqlUnionTerm> union_terms;
 };
 
 enum class SqlStatementKind { Select, CreateTable, InsertValues, InsertSelect };

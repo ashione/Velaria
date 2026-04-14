@@ -551,6 +551,107 @@ def materialize_mixed_text_embeddings_stream(
     return table
 
 
+def stream_mixed_text_embeddings_to_parquet(
+    records: Any,
+    *,
+    provider: EmbeddingProvider,
+    model: str,
+    template_version: str,
+    output_path: str | pathlib.Path,
+    text_fields: Sequence[str] = _DEFAULT_TEMPLATE_FIELDS,
+    text_field: str = "text",
+    doc_id_field: str = "doc_id",
+    source_updated_at_field: str = "source_updated_at",
+    embedding_version: str | None = None,
+    batch_size: int = 128,
+    embedded_at: str | None = None,
+    include_text: bool = False,
+    preview_limit: int = 50,
+    on_batch: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+
+    def iter_records() -> Iterable[Mapping[str, Any]]:
+        if isinstance(records, pa.Table):
+            for batch in records.to_batches(max_chunksize=batch_size):
+                for row in batch.to_pylist():
+                    yield row
+            return
+        if isinstance(records, pa.RecordBatchReader):
+            for batch in records:
+                for row in batch.to_pylist():
+                    yield row
+            return
+        for row in records:
+            yield row
+
+    source = CustomArrowStreamSource(
+        emit_rows=batch_size,
+        emit_interval_seconds=24 * 60 * 60,
+    )
+    output_file = pathlib.Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    writer: pq.ParquetWriter | None = None
+    emitted_rows = 0
+    embedded_at_value = embedded_at or _utc_now()
+    preview_tables: list[pa.Table] = []
+    preview_rows_remaining = max(0, preview_limit)
+    schema: pa.Schema | None = None
+
+    try:
+        for batch in source.iter_arrow_batches(iter_records()):
+            chunk_rows = build_mixed_text_embedding_rows(
+                batch.to_pylist(),
+                template_version=template_version,
+                text_fields=text_fields,
+                text_field=text_field,
+                doc_id_field=doc_id_field,
+                source_updated_at_field=source_updated_at_field,
+            )
+            chunk_table = materialize_embeddings(
+                chunk_rows,
+                provider=provider,
+                model=model,
+                embedding_version=embedding_version,
+                batch_size=batch_size,
+                embedded_at=embedded_at_value,
+                include_text=include_text,
+            )
+            if writer is None:
+                writer = pq.ParquetWriter(output_file, chunk_table.schema)
+                schema = chunk_table.schema
+            writer.write_table(chunk_table)
+            emitted_rows += chunk_table.num_rows
+            if preview_rows_remaining > 0:
+                keep_rows = min(preview_rows_remaining, chunk_table.num_rows)
+                preview_tables.append(chunk_table.slice(0, keep_rows))
+                preview_rows_remaining -= keep_rows
+            if on_batch is not None:
+                on_batch(emitted_rows, chunk_table.num_rows)
+    finally:
+        if writer is not None:
+            writer.close()
+
+    if emitted_rows == 0 or schema is None:
+        raise ValueError("records must not be empty")
+
+    if preview_tables:
+        preview_table = (
+            pa.concat_tables(preview_tables, promote_options="default")
+            if len(preview_tables) > 1
+            else preview_tables[0]
+        )
+    else:
+        preview_table = pa.Table.from_arrays([], schema=pa.schema([]))
+    return {
+        "output_path": str(output_file),
+        "schema": schema.names,
+        "row_count": emitted_rows,
+        "preview_table": preview_table,
+    }
+
+
 def _load_input_dataframe(
     session: Any,
     input_path: str | pathlib.Path,

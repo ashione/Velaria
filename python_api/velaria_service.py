@@ -28,6 +28,7 @@ from velaria import (
     load_keyword_index,
     read_embedding_table,
     search_keyword_index,
+    stream_mixed_text_embeddings_to_parquet,
     materialize_mixed_text_embeddings_stream,
     query_file_embeddings,
     read_excel,
@@ -815,26 +816,34 @@ def _execute_bitable_import(payload: dict[str, Any], run_dir: Path, *, run_id: s
                     )
 
             embedding_source_table = annotate_source_arrow_table(table, source_label=output_path.stem)
-            embedding_table = materialize_mixed_text_embeddings_stream(
+            embedding_meta = stream_mixed_text_embeddings_to_parquet(
                 embedding_source_table,
                 provider=provider,
                 model=resolved_model,
                 template_version=template_version,
-                text_fields=text_columns,
                 output_path=embedding_output_path,
+                text_fields=text_columns,
                 batch_size=embedding_batch_size,
+                preview_limit=int(payload.get("preview_limit", 50)),
                 on_batch=_on_batch,
             )
             embedding_result = {
-                "artifact": cli_impl._table_artifact(
-                    embedding_output_path,
-                    embedding_table,
-                    ["dataset", "bitable-import", "embedding-build"],
-                ),
+                "artifact": {
+                    "type": "file",
+                    "uri": cli_impl._uri_from_path(Path(embedding_meta["output_path"])),
+                    "format": "parquet",
+                    "row_count": embedding_meta["row_count"],
+                    "schema_json": embedding_meta["schema"],
+                    "preview_json": cli_impl._preview_payload_from_table(
+                        embedding_meta["preview_table"],
+                        limit=int(payload.get("preview_limit", 50)),
+                    ),
+                    "tags_json": ["dataset", "bitable-import", "embedding-build"],
+                },
                 "payload": {
-                    "dataset_path": str(embedding_output_path),
-                    "schema": embedding_table.schema.names,
-                    "row_count": embedding_table.num_rows,
+                    "dataset_path": embedding_meta["output_path"],
+                    "schema": embedding_meta["schema"],
+                    "row_count": embedding_meta["row_count"],
                     "provider": provider_name,
                     "model": resolved_model,
                     "template_version": template_version,
@@ -846,7 +855,7 @@ def _execute_bitable_import(payload: dict[str, Any], run_dir: Path, *, run_id: s
                 _update_run_progress(
                     run_id,
                     progress_phase="embedding_ready",
-                    embedding_rows=embedding_table.num_rows,
+                    embedding_rows=embedding_meta["row_count"],
                 )
         except BaseException as exc:  # noqa: BLE001
             record_worker_error(exc)

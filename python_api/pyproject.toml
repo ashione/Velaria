@@ -32,7 +32,7 @@ include-package-data = true
 include = ["velaria", "velaria.*"]
 
 [tool.setuptools.package-data]
-velaria = ["_velaria.so", "jieba_dict/*.utf8"]
+velaria = ["_velaria.so"]
 
 [tool.setuptools.dynamic]
 version = {attr = "velaria._version.__version__"}

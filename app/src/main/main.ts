@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
 
@@ -36,7 +37,8 @@ function jiebaDictDir() {
   if (app.isPackaged) {
     return path.join(process.resourcesPath, 'bin', 'velaria-service', '_internal', 'velaria', 'jieba_dict');
   }
-  return path.join(repoRoot(), 'python_api', 'velaria', 'jieba_dict');
+  const devPath = path.join(repoRoot(), 'python_api', 'velaria', 'jieba_dict');
+  return existsSync(devPath) ? devPath : '';
 }
 
 function configDir() {
@@ -99,7 +101,7 @@ function startSidecar() {
     processRef = spawn(execPath, ['--port', String(DEFAULT_PORT)], {
       env: {
         ...process.env,
-        VELARIA_JIEBA_DICT_DIR: jiebaDictDir(),
+        ...(jiebaDictDir() ? { VELARIA_JIEBA_DICT_DIR: jiebaDictDir() } : {}),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -121,7 +123,7 @@ function startSidecar() {
         env: {
           ...process.env,
           PYTHONUNBUFFERED: '1',
-          VELARIA_JIEBA_DICT_DIR: jiebaDictDir(),
+          ...(jiebaDictDir() ? { VELARIA_JIEBA_DICT_DIR: jiebaDictDir() } : {}),
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       }

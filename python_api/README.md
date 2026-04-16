@@ -30,6 +30,7 @@ The supported Python ecosystem includes:
 - custom source / custom sink adapters
 - vector search and vector explain APIs
 - offline embedding pipeline helpers for versioned vector assets
+- offline keyword-index build helpers and reusable BM25 keyword-search assets
 
 ### Examples
 
@@ -85,6 +86,8 @@ Main `Session` API:
 - `load_embedding_dataframe(...)`
 - `embed_query_text(...)`
 - `SentenceTransformerEmbeddingProvider(...)`
+- `build_keyword_index(...)`
+- `search_keyword_index(...)`
 
 Additional ecosystem helpers:
 
@@ -114,6 +117,7 @@ File reader mapping:
   not a pure free cache hint, because it can bypass source pushdown on the first query
 - `velaria-cli file-sql` defaults to `--input-type auto` and registers batch sources through `CREATE TABLE ... OPTIONS(path: '...')`
 - versioned embedding datasets written as Parquet / Arrow should be loaded through `pyarrow` plus `Session.create_dataframe_from_arrow(...)` or `load_embedding_dataframe(...)`, not `Session.read(...)`
+- reusable keyword indexes are directory artifacts built from Arrow / Parquet or batch file inputs and should be queried through the service / helper APIs, not treated as plain table files
 
 Regex line usage:
 
@@ -369,15 +373,39 @@ uv run --project python_api python python_api/velaria_cli.py embedding-query \
   --top-k 5
 ```
 
+Reusable keyword-index build and BM25 keyword search through the service:
+
+```bash
+curl -sS http://127.0.0.1:37491/api/v1/runs/keyword-index-build \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "input_path": "/tmp/docs.csv",
+    "input_type": "csv",
+    "text_columns": ["title", "body"],
+    "analyzer": "jieba"
+  }'
+
+curl -sS http://127.0.0.1:37491/api/v1/runs/keyword-search \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "index_path": "/tmp/keyword_index",
+    "query_text": "payment timeout",
+    "where_sql": "bucket = 1",
+    "top_k": 10
+  }'
+```
+
 Current SQL mapping carried by Python:
 
 - `Session.sql(...)` maps to core SQL v1 batch semantics:
   - `CREATE TABLE`, `CREATE SOURCE TABLE`, `CREATE SINK TABLE`
   - `INSERT INTO ... VALUES`
   - `INSERT INTO ... SELECT`
-  - `SELECT` with projection/alias, `WHERE`, `GROUP BY`, `ORDER BY`, `LIMIT`, and the current minimal `JOIN`
+  - `SELECT` with projection/alias, `WHERE`, `GROUP BY`, `ORDER BY`, `LIMIT`, `UNION` / `UNION ALL`, and the current minimal `JOIN`
   - batch `WHERE` supports single predicates plus `AND` / `OR` expressions
+  - batch `KEYWORD SEARCH(title, body) QUERY '...' TOP_K ...` on single-table non-aggregate queries
   - batch `HYBRID SEARCH ... QUERY ...` on single-table non-aggregate queries
+  - current Python service can combine reusable keyword-index recall with vector rerank by passing both `index_path` and `dataset_path` to `hybrid-search`
 - batch builtins currently exposed through the same core path:
   - `LOWER`, `UPPER`, `TRIM`, `LTRIM`, `RTRIM`
   - `LENGTH`, `LEN`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, `REVERSE`
@@ -389,6 +417,16 @@ Current SQL mapping carried by Python:
   - only the current stream-stable projection, filter, window, stateful aggregate, and bounded-source `ORDER BY` shapes are accepted
 - current SQL v1 keeps `ORDER BY` scoped to columns present in the `SELECT` output
 - unsupported SQL shapes are expected to surface as explicit parse / semantic / unsupported SQL v1 / table-kind errors from the core path, not Python-only behavior
+
+Desktop / service import behavior:
+
+- local file import preview still only inspects schema + preview rows
+- when saving a dataset from the desktop app, embedding build and keyword-index build can both be configured and will run asynchronously in the background
+- bitable import can build:
+  - a reusable embedding dataset from selected text columns
+  - a reusable keyword index from selected keyword columns
+  - both in parallel within the same background import run
+- packaged sidecar builds copy jieba dictionaries from the resolved Bazel `cppjieba` dependency at build time; the source repo does not need to carry those dictionary files
 
 ## Repository Layout
 

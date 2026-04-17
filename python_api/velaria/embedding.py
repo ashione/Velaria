@@ -571,6 +571,8 @@ def stream_mixed_text_embeddings_to_parquet(
 ) -> dict[str, Any]:
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
+    if pathlib.Path(output_path).suffix.lower() != ".parquet":
+        raise ValueError("stream_mixed_text_embeddings_to_parquet requires a .parquet output path")
 
     def iter_records() -> Iterable[Mapping[str, Any]]:
         if isinstance(records, pa.Table):

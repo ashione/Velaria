@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import pathlib
 from collections import Counter
 from typing import Any, Iterable, Sequence
@@ -128,7 +129,7 @@ def _build_doc_rows(
     source_labels: Sequence[str] | None = None,
     doc_id_field: str = "doc_id",
     analyzer: str = "jieba",
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[list[str]]]:
     rows: list[dict[str, Any]] = []
     token_rows: list[list[str]] = []
     labels = list(source_labels) if source_labels is not None else []
@@ -331,7 +332,7 @@ def search_keyword_index(
             if tf <= 0:
                 continue
             df = float(subset_df[term_id] if allowed_doc_ids is not None else term["df"])
-            idf = float(__import__("math").log(1.0 + ((doc_count - df + 0.5) / (df + 0.5))))
+            idf = float(math.log(1.0 + ((doc_count - df + 0.5) / (df + 0.5))))
             length_norm = (1.0 - b + b * (doc_length.get(doc_id, 0) / avg_doc_length)) if avg_doc_length > 0 else 1.0
             score += idf * ((tf * (k1 + 1.0)) / (tf + k1 * length_norm))
         if score > 0.0:

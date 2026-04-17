@@ -166,9 +166,12 @@ std::string_view singleStringKeyAt(const ValueColumnBuffer& column, std::size_t 
 std::string serializeUnionRow(const Row& row) {
   std::string key;
   for (const auto& value : row) {
+    const auto encoded = value.toString();
     key += std::to_string(static_cast<int>(value.type()));
     key.push_back('\x1e');
-    key += value.toString();
+    key += std::to_string(encoded.size());
+    key.push_back('\x1e');
+    key += encoded;
     key.push_back(kGroupDelim);
   }
   return key;

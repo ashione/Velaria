@@ -9,6 +9,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
@@ -358,30 +359,28 @@ std::vector<std::string> tokenizeKeywordText(const std::string& text) {
   };
   auto loadJieba = []() -> cppjieba::Jieba* {
     static std::unique_ptr<cppjieba::Jieba> jieba;
-    static bool attempted = false;
-    if (attempted) {
-      return jieba.get();
-    }
-    attempted = true;
-    try {
-      const char* dict_dir = std::getenv("VELARIA_JIEBA_DICT_DIR");
-      if (dict_dir != nullptr && dict_dir[0] != '\0') {
-        std::filesystem::path base(dict_dir);
-        if (base.extension() == ".utf8") {
-          base = base.parent_path();
+    static std::once_flag once;
+    std::call_once(once, []() {
+      try {
+        const char* dict_dir = std::getenv("VELARIA_JIEBA_DICT_DIR");
+        if (dict_dir != nullptr && dict_dir[0] != '\0') {
+          std::filesystem::path base(dict_dir);
+          if (base.extension() == ".utf8") {
+            base = base.parent_path();
+          }
+          jieba = std::make_unique<cppjieba::Jieba>(
+              (base / "jieba.dict.utf8").string(),
+              (base / "hmm_model.utf8").string(),
+              (base / "user.dict.utf8").string(),
+              (base / "idf.utf8").string(),
+              (base / "stop_words.utf8").string());
+        } else {
+          jieba = std::make_unique<cppjieba::Jieba>();
         }
-        jieba = std::make_unique<cppjieba::Jieba>(
-            (base / "jieba.dict.utf8").string(),
-            (base / "hmm_model.utf8").string(),
-            (base / "user.dict.utf8").string(),
-            (base / "idf.utf8").string(),
-            (base / "stop_words.utf8").string());
-      } else {
-        jieba = std::make_unique<cppjieba::Jieba>();
+      } catch (...) {
+        jieba.reset();
       }
-    } catch (...) {
-      jieba.reset();
-    }
+    });
     return jieba.get();
   };
 
@@ -916,6 +915,7 @@ DataFrame DataFrame::keywordSearch(const std::vector<std::string>& textColumns,
     throw std::invalid_argument("keywordSearch query text cannot be empty");
   }
   const auto& input = materialize();
+  Table materialized_input = input;
   const auto query_terms = tokenizeKeywordText(queryText);
   if (query_terms.empty()) {
     throw std::invalid_argument("keywordSearch query must contain at least one token");
@@ -939,13 +939,13 @@ DataFrame DataFrame::keywordSearch(const std::vector<std::string>& textColumns,
   }
 
   std::vector<std::unordered_map<std::string, std::size_t>> row_term_freqs;
-  row_term_freqs.reserve(input.rowCount());
+  row_term_freqs.reserve(materialized_input.rowCount());
   std::vector<std::size_t> row_lengths;
-  row_lengths.reserve(input.rowCount());
+  row_lengths.reserve(materialized_input.rowCount());
   std::vector<std::size_t> document_frequency(unique_terms.size(), 0);
 
-  materializeRows(const_cast<Table*>(&input));
-  for (const auto& row : input.rows) {
+  materializeRows(&materialized_input);
+  for (const auto& row : materialized_input.rows) {
     std::unordered_map<std::string, std::size_t> term_freq;
     std::size_t doc_length = 0;
     for (const auto column_index : column_indices) {
@@ -968,7 +968,7 @@ DataFrame DataFrame::keywordSearch(const std::vector<std::string>& textColumns,
     row_term_freqs.push_back(std::move(term_freq));
   }
 
-  const double row_count = static_cast<double>(input.rowCount());
+  const double row_count = static_cast<double>(materialized_input.rowCount());
   const double total_length = std::accumulate(row_lengths.begin(), row_lengths.end(), 0.0);
   const double avg_doc_length = row_count > 0.0 ? total_length / row_count : 0.0;
   constexpr double k1 = 1.2;
@@ -979,7 +979,7 @@ DataFrame DataFrame::keywordSearch(const std::vector<std::string>& textColumns,
     double score = 0.0;
   };
   std::vector<KeywordHit> hits;
-  hits.reserve(input.rowCount());
+  hits.reserve(materialized_input.rowCount());
   for (std::size_t row_index = 0; row_index < row_term_freqs.size(); ++row_index) {
     const auto& term_freq = row_term_freqs[row_index];
     if (term_freq.empty()) {
@@ -1019,7 +1019,7 @@ DataFrame DataFrame::keywordSearch(const std::vector<std::string>& textColumns,
     row_indices.push_back(hits[index].row_index);
     scores.emplace_back(hits[index].score);
   }
-  return DataFrame(gatherKeywordSearchRows(input, row_indices, std::move(scores)));
+  return DataFrame(gatherKeywordSearchRows(materialized_input, row_indices, std::move(scores)));
 }
 
 DataFrame DataFrame::hybridSearch(const std::string& vectorColumn,

@@ -6,12 +6,10 @@ import sys
 import threading
 import time
 
-import pyarrow as pa
-
 import velaria
 
 
-def run_once(iteration: int) -> None:
+def run_once(iteration: int, *, mode: str) -> None:
     session = velaria.Session()
     source = session.create_realtime_stream_source(["event_time", "event_type", "source_key", "payload_json"])
     stream_df = session.read_realtime_stream_source(source)
@@ -27,16 +25,35 @@ def run_once(iteration: int) -> None:
     worker = threading.Thread(target=lambda: query.await_termination(max_batches=2), daemon=True)
     worker.start()
     try:
-        source.push_arrow(
-            pa.table(
-                {
-                    "event_time": ["2026-01-01T00:00:00Z", "2026-01-01T00:00:01Z"],
-                    "event_type": ["tick", "tick"],
-                    "source_key": ["BTC", "BTC"],
-                    "payload_json": ["{}", "{}"],
-                }
+        rows = [
+            {
+                "event_time": "2026-01-01T00:00:00Z",
+                "event_type": "tick",
+                "source_key": "BTC",
+                "payload_json": "{}",
+            },
+            {
+                "event_time": "2026-01-01T00:00:01Z",
+                "event_type": "tick",
+                "source_key": "BTC",
+                "payload_json": "{}",
+            },
+        ]
+        if mode == "arrow":
+            import pyarrow as pa
+
+            source.push_arrow(
+                pa.table(
+                    {
+                        "event_time": [row["event_time"] for row in rows],
+                        "event_type": [row["event_type"] for row in rows],
+                        "source_key": [row["source_key"] for row in rows],
+                        "payload_json": [row["payload_json"] for row in rows],
+                    }
+                )
             )
-        )
+        else:
+            source.push_rows(rows)
         deadline = time.time() + 5.0
         while time.time() < deadline:
             batch = sink.poll_arrow()
@@ -53,10 +70,11 @@ def run_once(iteration: int) -> None:
 def main(argv: list[str] | None = None) -> int:
     argv = list(argv or sys.argv[1:])
     iterations = int(argv[0]) if argv else 200
+    mode = argv[1] if len(argv) >= 2 else "rows"
     for index in range(iterations):
-        run_once(index)
+        run_once(index, mode=mode)
         gc.collect()
-    print(json.dumps({"ok": True, "iterations": iterations}, ensure_ascii=False))
+    print(json.dumps({"ok": True, "iterations": iterations, "mode": mode}, ensure_ascii=False))
     return 0
 
 

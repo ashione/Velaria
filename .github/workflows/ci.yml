@@ -117,9 +117,10 @@ jobs:
         run: |
           echo "VELARIA_PYTHON_BIN=$(which python)" >> "$GITHUB_ENV"
 
-      - name: Python Wrapper Sanitizer Smoke
+      - name: Python Wrapper Sanitizer Smoke (rows ownership gate)
         env:
           VELARIA_WRAPPER_STRESS_ITERATIONS: "1"
+          VELARIA_WRAPPER_MODES: "rows"
         run: |
           chmod +x ./scripts/run_python_wrapper_sanitizer.sh
           ./scripts/run_python_wrapper_sanitizer.sh

@@ -249,6 +249,42 @@ class ArrowStreamIngestionTest(unittest.TestCase):
             query.stop()
             worker.join(timeout=5)
 
+    def test_realtime_stream_source_and_sink_support_python_row_ingest(self):
+        session = velaria.Session()
+        source = session.create_realtime_stream_source(["ts", "key", "value"])
+        stream_df = session.read_realtime_stream_source(source)
+        session.create_temp_view("realtime_events_rows", stream_df)
+        sink = session.create_realtime_stream_sink()
+        query_df = session.stream_sql(
+            "SELECT key, COUNT(*) AS event_count "
+            "FROM realtime_events_rows "
+            "GROUP BY key HAVING event_count >= 2"
+        )
+        query = query_df.write_stream_queue_sink(sink, trigger_interval_ms=0)
+        query.start()
+        worker = threading.Thread(target=lambda: query.await_termination(max_batches=2), daemon=True)
+        worker.start()
+        try:
+            source.push_rows(
+                [
+                    {"ts": "2026-03-29T10:00:00", "key": "u1", "value": 1},
+                    {"ts": "2026-03-29T10:00:10", "key": "u1", "value": 2},
+                ]
+            )
+            observed = None
+            for _ in range(50):
+                batch = sink.poll_arrow()
+                if batch is not None:
+                    observed = batch
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(observed)
+            self.assertEqual(observed.to_pylist(), [{"key": "u1", "event_count": 2}])
+        finally:
+            source.close()
+            query.stop()
+            worker.join(timeout=5)
+
 
 if __name__ == "__main__":
     unittest.main()

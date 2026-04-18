@@ -27,7 +27,10 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 STRESS_ITERATIONS="${VELARIA_WRAPPER_STRESS_ITERATIONS:-1}"
-MODES="${VELARIA_WRAPPER_MODES:-rows arrow}"
+# Linux ASan/LSan is the ownership gate for our wrapper/runtime boundary.
+# Keep it focused on the py->C++ rows path so third-party import-time
+# allocations from pyarrow/numpy do not drown out regressions in our code.
+MODES="${VELARIA_WRAPPER_MODES:-rows}"
 
 bazel build --config=asan //:velaria_pyext //python_api:bench_realtime_wrapper_stress
 bazel run --config=asan //python_api:sync_native_extension

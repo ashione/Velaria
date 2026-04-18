@@ -420,6 +420,56 @@ df::Value valueFromPy(PyObject* obj) {
   throw std::runtime_error("value must be None, int, float, bool, or string");
 }
 
+df::Table tableFromPyRows(PyObject* rows_obj, const df::Schema& schema) {
+  PyObject* seq = PySequence_Fast(rows_obj, "rows must be a sequence");
+  if (seq == nullptr) {
+    throw std::runtime_error("rows must be a sequence");
+  }
+  df::Table table;
+  table.schema = schema;
+  const Py_ssize_t count = PySequence_Fast_GET_SIZE(seq);
+  table.rows.reserve(static_cast<std::size_t>(count));
+  PyObject** items = PySequence_Fast_ITEMS(seq);
+  for (Py_ssize_t i = 0; i < count; ++i) {
+    PyObject* item = items[i];
+    df::Row row;
+    row.reserve(schema.fields.size());
+    if (PyDict_Check(item)) {
+      for (const auto& field : schema.fields) {
+        PyObject* value = PyDict_GetItemString(item, field.c_str());
+        if (value == nullptr) {
+          row.push_back(df::Value());
+        } else {
+          row.push_back(valueFromPy(value));
+        }
+      }
+    } else if (PyList_Check(item) || PyTuple_Check(item)) {
+      PyObject* row_seq = PySequence_Fast(item, "row must be a sequence");
+      if (row_seq == nullptr) {
+        Py_DECREF(seq);
+        throw std::runtime_error("row must be a sequence");
+      }
+      const Py_ssize_t width = PySequence_Fast_GET_SIZE(row_seq);
+      if (static_cast<std::size_t>(width) != schema.fields.size()) {
+        Py_DECREF(row_seq);
+        Py_DECREF(seq);
+        throw std::runtime_error("row width does not match realtime source schema");
+      }
+      PyObject** row_items = PySequence_Fast_ITEMS(row_seq);
+      for (Py_ssize_t c = 0; c < width; ++c) {
+        row.push_back(valueFromPy(row_items[c]));
+      }
+      Py_DECREF(row_seq);
+    } else {
+      Py_DECREF(seq);
+      throw std::runtime_error("rows must contain dicts or sequences");
+    }
+    table.rows.push_back(std::move(row));
+  }
+  Py_DECREF(seq);
+  return table;
+}
+
 PyObject* pyProbeFromNative(const df::FileSourceProbeResult& probe) {
   PyObject* out = PyDict_New();
   const char* kind = "csv";
@@ -2474,6 +2524,19 @@ PyObject* realtimeStreamSourcePushArrow(PyVelariaRealtimeStreamSource* self, PyO
   });
 }
 
+PyObject* realtimeStreamSourcePushRows(PyVelariaRealtimeStreamSource* self, PyObject* args) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    PyObject* rows_obj = nullptr;
+    if (!PyArg_ParseTuple(args, "O", &rows_obj)) {
+      return nullptr;
+    }
+    const auto schema = self->source_ptr->get()->schema();
+    auto table = tableFromPyRows(rows_obj, schema);
+    self->source_ptr->get()->push(std::move(table));
+    Py_RETURN_NONE;
+  });
+}
+
 PyObject* realtimeStreamSourceClose(PyVelariaRealtimeStreamSource* self, PyObject*) {
   return withExceptionTranslation([&]() -> PyObject* {
     self->source_ptr->get()->closeInput();
@@ -2606,6 +2669,8 @@ PyMethodDef streamingQueryMethods[] = {
 PyMethodDef realtimeStreamSourceMethods[] = {
     {"push_arrow", reinterpret_cast<PyCFunction>(realtimeStreamSourcePushArrow), METH_VARARGS,
      "Push an Arrow batch or table into the realtime stream source."},
+    {"push_rows", reinterpret_cast<PyCFunction>(realtimeStreamSourcePushRows), METH_VARARGS,
+     "Push Python rows (dicts or sequences) into the realtime stream source."},
     {"close", reinterpret_cast<PyCFunction>(realtimeStreamSourceClose), METH_NOARGS,
      "Close the realtime stream source input."},
     {nullptr, nullptr, 0, nullptr},

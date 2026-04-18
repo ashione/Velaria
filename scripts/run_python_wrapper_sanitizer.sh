@@ -20,6 +20,7 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 STRESS_ITERATIONS="${VELARIA_WRAPPER_STRESS_ITERATIONS:-1}"
+MODES="${VELARIA_WRAPPER_MODES:-rows arrow}"
 
 bazel build --config=asan //:velaria_pyext //python_api:bench_realtime_wrapper_stress
 bazel run --config=asan //python_api:sync_native_extension
@@ -40,7 +41,9 @@ if [[ "$(uname -s)" == "Linux" ]]; then
   fi
 fi
 
-PYTHONPATH="${PYTHONPATH:-${ROOT}/python_api}" \
-  "${PYTHON_BIN}" python_api/benchmarks/bench_realtime_wrapper_stress.py "${STRESS_ITERATIONS}"
+for mode in ${MODES}; do
+  PYTHONPATH="${PYTHONPATH:-${ROOT}/python_api}" \
+    "${PYTHON_BIN}" python_api/benchmarks/bench_realtime_wrapper_stress.py "${STRESS_ITERATIONS}" "${mode}"
+done
 
 echo "[summary] python wrapper sanitizer smoke ok"

@@ -25,14 +25,19 @@ bazel run //python_api:sync_native_extension
 uv sync --project python_api --python "${VELARIA_PYTHON_BIN}"
 
 STRESS_ITERATIONS="${VELARIA_WRAPPER_STRESS_ITERATIONS:-1}"
+MODES="${VELARIA_WRAPPER_MODES:-rows arrow}"
 PYTHON_BIN="${ROOT}/python_api/.venv/bin/python"
 
-PYTHONPATH="${PYTHONPATH:-${ROOT}/python_api}" \
-  "${PYTHON_BIN}" python_api/benchmarks/bench_realtime_wrapper_stress.py "${STRESS_ITERATIONS}"
+for mode in ${MODES}; do
+  PYTHONPATH="${PYTHONPATH:-${ROOT}/python_api}" \
+    "${PYTHON_BIN}" python_api/benchmarks/bench_realtime_wrapper_stress.py "${STRESS_ITERATIONS}" "${mode}"
+done
 
 if command -v leaks >/dev/null 2>&1; then
   LEAK_ITERATIONS="${VELARIA_WRAPPER_LEAK_ITERATIONS:-1}"
-  leaks -atExit -- "${PYTHON_BIN}" python_api/benchmarks/bench_realtime_wrapper_stress.py "${LEAK_ITERATIONS}"
+  for mode in ${MODES}; do
+    leaks -atExit -- "${PYTHON_BIN}" python_api/benchmarks/bench_realtime_wrapper_stress.py "${LEAK_ITERATIONS}" "${mode}"
+  done
 else
   echo "[summary] leaks not available; skipped process leak smoke"
 fi

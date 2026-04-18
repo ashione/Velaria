@@ -1,0 +1,2 @@
+leak:libarrow_compute.so
+leak:_compute.cpython

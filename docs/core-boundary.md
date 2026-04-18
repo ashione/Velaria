@@ -67,6 +67,7 @@ Python ecosystem owns:
 - wheel, native wheel, and CLI packaging
 - Excel and Bitable adapters
 - custom source / custom sink adapters
+- realtime queue-backed stream source / sink projections for local agentic service use
 - Python-facing demos in `python_api/examples`
 - Python-facing benchmarks in `python_api/benchmarks`
 
@@ -142,6 +143,7 @@ Repository view:
 - SQL stays an ingress surface. It does not back-drive runtime design.
 - batch file probing and file registration semantics remain owned by the core kernel even when projected through Python CLI/API
 - Python remains supported, but cannot become the execution core.
+- agentic monitor, signal, and focus-event product semantics belong to the Python ecosystem / local service layer and must reuse the core execution contract instead of redefining it.
 - Vector search remains a core local capability, not a new subsystem.
 - Same-host actor/rpc stays experimental, even when it is featureful.
 - `sql_demo / df_demo / stream_demo` are the single-node baseline and must remain intact.

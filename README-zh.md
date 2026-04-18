@@ -117,14 +117,17 @@ Arrow / CSV / Python ingress
   - `single-process` 和 `local-workers`
   - query-local backpressure、progress snapshot、checkpoint path
   - 基础 stream operators 与 stateful grouped aggregates
+  - fixed tumbling 与 fixed sliding window assignment
 - stream SQL 子集：
   - `streamSql(...)` 接收 `SELECT`
   - `explainStreamSql(...)` 接收 `SELECT` 或 `INSERT INTO <sink> SELECT ...`
   - `startStreamSql(...)` 接收 `INSERT INTO <sink> SELECT ...`
   - stream source 必须是 source table，stream target 必须是 sink table
+  - 支持 `WINDOW BY ... EVERY ... [SLIDE ...] AS ...` 的固定 tumbling/sliding 窗口
   - unbounded-source `ORDER BY` 会被显式拒绝
 - fixed-dimension `float32` 的本地 exact vector search
 - Python Arrow 输入/输出与 workspace-backed run tracking
+- Python 侧支持 realtime queue-backed stream source/sink，可把 Arrow batch 直接写入长运行本地流查询
 - 面向 Arrow / Parquet 数据集的可复用 keyword index 资产，以及桌面导入流里的异步索引构建
 - `app/` 下的本地桌面原型，由 `velaria-service` 提供本地服务
 - 桌面端导入流可以在保存同一份数据集后，异步构建可复用的 embedding 数据集与 keyword index

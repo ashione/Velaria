@@ -125,6 +125,13 @@ py_binary(
 )
 
 py_binary(
+    name = "bench_realtime_wrapper_stress",
+    srcs = ["benchmarks/bench_realtime_wrapper_stress.py"],
+    main = "benchmarks/bench_realtime_wrapper_stress.py",
+    deps = [":velaria_py_pkg"],
+)
+
+py_binary(
     name = "velaria_cli",
     srcs = ["velaria_cli.py"],
     main = "velaria_cli.py",

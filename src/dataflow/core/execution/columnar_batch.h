@@ -125,7 +125,8 @@ std::vector<Value> vectorizedWindowStart(const ValueColumnBuffer& input, uint64_
 std::vector<Value> vectorizedWindowStart(const ValueColumnView& input, uint64_t window_ms);
 Table assignSlidingWindow(const Table& table, std::size_t time_column_index, uint64_t window_ms,
                           uint64_t slide_ms, const std::string& output_column,
-                          bool materialize_rows = false);
+                          bool materialize_rows = false,
+                          bool format_window_as_timestamp = false);
 std::vector<Value> vectorizedStringLength(const StringColumnBuffer& input);
 std::vector<Value> vectorizedStringLower(const StringColumnBuffer& input);
 std::vector<Value> vectorizedStringUpper(const StringColumnBuffer& input);

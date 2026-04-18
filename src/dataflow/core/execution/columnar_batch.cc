@@ -1609,7 +1609,7 @@ std::vector<Value> vectorizedWindowStart(const ValueColumnView& input, uint64_t 
 
 Table assignSlidingWindow(const Table& table, std::size_t time_column_index, uint64_t window_ms,
                           uint64_t slide_ms, const std::string& output_column,
-                          bool materialize_rows) {
+                          bool materialize_rows, bool format_window_as_timestamp) {
   if (window_ms == 0) {
     throw std::runtime_error("window size cannot be zero");
   }
@@ -1621,16 +1621,19 @@ Table assignSlidingWindow(const Table& table, std::size_t time_column_index, uin
   }
   if (slide_ms == window_ms) {
     Table out = table;
-    if (!out.schema.has(output_column)) {
-      const auto input = viewValueColumn(out, time_column_index);
-      auto bucket_values = vectorizedWindowStart(input, window_ms);
+    if (out.schema.has(output_column)) {
+      throw std::runtime_error("window output column already exists: " + output_column);
+    }
+    const auto input = viewValueColumn(out, time_column_index);
+    auto bucket_values = vectorizedWindowStart(input, window_ms);
+    if (format_window_as_timestamp) {
       for (auto& value : bucket_values) {
         if (!value.isNull()) {
           value = Value(formatTimestampMillis(value.asInt64()));
         }
       }
-      appendNamedColumn(&out, output_column, std::move(bucket_values), false);
     }
+    appendNamedColumn(&out, output_column, std::move(bucket_values), false);
     if (materialize_rows && out.rows.empty()) {
       materializeRows(&out);
     }
@@ -1641,10 +1644,11 @@ Table assignSlidingWindow(const Table& table, std::size_t time_column_index, uin
   materializeRows(&materialized);
   Table out;
   out.schema = materialized.schema;
-  if (!out.schema.has(output_column)) {
-    out.schema.fields.push_back(output_column);
-    out.schema.index.emplace(output_column, out.schema.fields.size() - 1);
+  if (out.schema.has(output_column)) {
+    throw std::runtime_error("window output column already exists: " + output_column);
   }
+  out.schema.fields.push_back(output_column);
+  out.schema.index.emplace(output_column, out.schema.fields.size() - 1);
 
   const auto windows_per_row = std::max<uint64_t>(1, (window_ms + slide_ms - 1) / slide_ms);
   out.rows.reserve(materialized.rows.size() * static_cast<std::size_t>(windows_per_row));
@@ -1668,7 +1672,8 @@ Table assignSlidingWindow(const Table& table, std::size_t time_column_index, uin
       const int64_t start = last_start - static_cast<int64_t>(i) * slide;
       if (ts_ms >= start && ts_ms < start + window) {
         auto new_row = row;
-        new_row.push_back(Value(formatTimestampMillis(start)));
+        new_row.push_back(format_window_as_timestamp ? Value(formatTimestampMillis(start))
+                                                    : Value(start));
         out.rows.push_back(std::move(new_row));
         emitted = true;
       }

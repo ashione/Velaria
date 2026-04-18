@@ -291,6 +291,7 @@ def execute_monitor_once(store: AgenticStore, monitor_id: str) -> dict[str, Any]
         store.upsert_monitor_state(monitor_id, {"status": "running", "last_run_at": now, "last_error": None})
         session = Session()
         artifacts: list[str] = []
+        current_end: datetime | None = None
         if source_binding["kind"] == "external_event":
             source_id = source_binding.get("source_id") or source_binding.get("binding")
             source = store.get_source(str(source_id))
@@ -341,51 +342,58 @@ def execute_monitor_once(store: AgenticStore, monitor_id: str) -> dict[str, Any]
         else:
             input_view_name = f"input_table_{monitor_id}_{run_id[-8:]}"
             session.create_temp_view(input_view_name, session.create_dataframe_from_arrow(current_table))
-        compiled_rule = dict((monitor["compiled_rules"] or [])[0])
-        query_sql = compiled_rule["sql"]
-        if monitor["execution_mode"] != "batch":
-            query_sql = query_sql.replace("input_table", input_view_name)
-        result_table = _run_query_table(session, query_sql)
-        result_path = run_dir / "artifacts" / "result.parquet"
-        pq.write_table(result_table, result_path)
-        result_artifact = cli_impl._table_artifact(result_path, result_table, ["result", "focus-event-monitor"])
-        result_artifact["artifact_id"] = cli_impl._new_artifact_id()
-        result_artifact["run_id"] = run_id
-        result_artifact["created_at"] = cli_impl._utc_now()
-        index.insert_artifact(result_artifact)
-        artifacts.append(result_artifact["artifact_id"])
-        result_rows = coerce_result_rows(result_table.to_pylist())
-        emitted = process_signal_rows(
-            store,
-            monitor=monitor,
-            compiled_rule=compiled_rule,
-            result_rows=result_rows,
-            run_id=run_id,
-            artifact_ids=artifacts,
-        )
-        signal = emitted["signal"]
-        generated_events = emitted["focus_events"]
+        generated_events: list[dict[str, Any]] = []
+        signal_records: list[dict[str, Any]] = []
+        for compiled_rule in (monitor["compiled_rules"] or []):
+            compiled_rule = dict(compiled_rule)
+            query_sql = compiled_rule["sql"]
+            if monitor["execution_mode"] != "batch":
+                query_sql = query_sql.replace("input_table", input_view_name)
+            result_table = _run_query_table(session, query_sql)
+            result_path = run_dir / "artifacts" / f"result_{compiled_rule['rule_id']}.parquet"
+            pq.write_table(result_table, result_path)
+            result_artifact = cli_impl._table_artifact(result_path, result_table, ["result", "focus-event-monitor", compiled_rule["rule_id"]])
+            result_artifact["artifact_id"] = cli_impl._new_artifact_id()
+            result_artifact["run_id"] = run_id
+            result_artifact["created_at"] = cli_impl._utc_now()
+            index.insert_artifact(result_artifact)
+            rule_artifact_ids = [*artifacts, result_artifact["artifact_id"]]
+            artifacts.append(result_artifact["artifact_id"])
+            result_rows = coerce_result_rows(result_table.to_pylist())
+            emitted = process_signal_rows(
+                store,
+                monitor=monitor,
+                compiled_rule=compiled_rule,
+                result_rows=result_rows,
+                run_id=run_id,
+                artifact_ids=rule_artifact_ids,
+            )
+            signal_records.append(emitted["signal"])
+            generated_events.extend(emitted["focus_events"])
         explain = {
             "monitor_id": monitor_id,
             "execution_mode": monitor["execution_mode"],
-            "signal_rows": len(result_rows),
+            "signal_rows": len(signal_records),
             "focus_events": len(generated_events),
         }
         write_explain(run_id, explain)
-        finalized = finalize_run(run_id, "succeeded", details={"focus_event_count": len(generated_events), "signal_id": signal["signal_id"]})
+        finalized = finalize_run(
+            run_id,
+            "succeeded",
+            details={
+                "focus_event_count": len(generated_events),
+                "signal_ids": [signal["signal_id"] for signal in signal_records],
+            },
+        )
         index.upsert_run(finalized)
         state_updates = {"status": "idle", "last_success_at": now, "last_snapshot_id": current_artifact_id, "last_error": None}
         if monitor["execution_mode"] == "stream":
-            state = store.get_monitor_state(monitor_id) or {}
-            window = (((monitor["validation"].get("execution_spec") or {}).get("window") or {}))
-            size_seconds = _parse_duration_seconds(window.get("size") or "60s")
-            slide_seconds = _parse_duration_seconds(window.get("slide") or size_seconds)
-            last_end = _parse_time(state.get("last_emitted_window_end")) or datetime.now(timezone.utc)
-            state_updates["last_emitted_window_end"] = (last_end + timedelta(seconds=slide_seconds)).isoformat().replace("+00:00", "Z")
+            if current_end is not None:
+                state_updates["last_emitted_window_end"] = current_end.isoformat().replace("+00:00", "Z")
         store.upsert_monitor_state(monitor_id, state_updates)
         return {
             "run_id": run_id,
-            "signal": signal,
+            "signals": signal_records,
             "focus_events": generated_events,
             "artifacts": [index.get_artifact(artifact_id) for artifact_id in artifacts if index.get_artifact(artifact_id) is not None],
         }

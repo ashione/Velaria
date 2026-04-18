@@ -12,7 +12,7 @@ from .workspace.paths import get_velaria_home
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _json_dumps(payload: Any) -> str:
@@ -713,13 +713,28 @@ class AgenticStore:
         else:
             cursor = self._conn.execute("SELECT * FROM event_cursors WHERE consumer_id = ?", (consumer_id,)).fetchone()
             after_time = cursor["last_seen_at"] if cursor is not None else None
+            after_event_id = cursor["last_seen_event_id"] if cursor is not None else None
         if after_time:
-            rows = self._conn.execute(
-                "SELECT event_id FROM focus_events WHERE triggered_at > ? ORDER BY triggered_at ASC LIMIT ?",
-                (after_time, limit),
-            ).fetchall()
+            if after_event_id:
+                rows = self._conn.execute(
+                    """
+                    SELECT event_id FROM focus_events
+                    WHERE triggered_at > ? OR (triggered_at = ? AND event_id > ?)
+                    ORDER BY triggered_at ASC, event_id ASC
+                    LIMIT ?
+                    """,
+                    (after_time, after_time, after_event_id, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT event_id FROM focus_events WHERE triggered_at > ? ORDER BY triggered_at ASC, event_id ASC LIMIT ?",
+                    (after_time, limit),
+                ).fetchall()
         else:
-            rows = self._conn.execute("SELECT event_id FROM focus_events ORDER BY triggered_at ASC LIMIT ?", (limit,)).fetchall()
+            rows = self._conn.execute(
+                "SELECT event_id FROM focus_events ORDER BY triggered_at ASC, event_id ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
         events = [self.get_focus_event(str(row["event_id"])) for row in rows]
         if events:
             self._conn.execute(

@@ -1526,8 +1526,6 @@ QueueStreamSource::QueueStreamSource(Schema schema) : schema_(std::move(schema))
 
 void QueueStreamSource::open(const StreamSourceContext&) {
   std::lock_guard<std::mutex> lock(mu_);
-  consumed_offset_ = 0;
-  closed_ = false;
 }
 
 bool QueueStreamSource::nextBatch(const StreamPullContext&, Table& batch) {
@@ -1535,7 +1533,7 @@ bool QueueStreamSource::nextBatch(const StreamPullContext&, Table& batch) {
   if (queue_.empty()) {
     return false;
   }
-  batch = std::move(queue_.front());
+  batch = std::move(queue_.front().second);
   queue_.pop_front();
   consumed_offset_ += 1;
   return true;
@@ -1558,6 +1556,9 @@ bool QueueStreamSource::restoreOffsetToken(const std::string& token) {
   const auto next = static_cast<std::size_t>(std::stoull(token));
   std::lock_guard<std::mutex> lock(mu_);
   consumed_offset_ = next;
+  while (!queue_.empty() && queue_.front().first <= consumed_offset_) {
+    queue_.pop_front();
+  }
   return true;
 }
 
@@ -1570,8 +1571,8 @@ void QueueStreamSource::push(Table batch) {
     throw std::runtime_error("queue stream source schema mismatch");
   }
   std::lock_guard<std::mutex> lock(mu_);
-  queue_.push_back(std::move(batch));
   next_offset_ += 1;
+  queue_.push_back({next_offset_, std::move(batch)});
 }
 
 void QueueStreamSource::closeInput() {
@@ -1929,7 +1930,7 @@ StreamingDataFrame StreamingDataFrame::window(const std::string& timeColumn, uin
           appendNamedColumn(&out, outputColumn, std::move(bucket_values), false);
           return out;
         }
-        return assignSlidingWindow(input, idx, windowMs, slideMs, outputColumn, false);
+        return assignSlidingWindow(input, idx, windowMs, slideMs, outputColumn, false, true);
       },
       StreamTransformMode::PartitionLocal, false, "window");
   return StreamingDataFrame(source_, std::move(t), state_);

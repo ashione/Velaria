@@ -55,3 +55,40 @@ class AgenticStoreTest(unittest.TestCase):
                     payload = store.poll_focus_events(consumer_id="agent", limit=10)
                     self.assertEqual(payload["consumer_id"], "agent")
                     self.assertEqual(len(payload["events"]), 1)
+
+    def test_focus_event_poll_same_timestamp_uses_event_id_tiebreak(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-agentic-cursor-tie-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                with AgenticStore() as store:
+                    first = store.add_focus_event(
+                        {
+                            "event_id": "focus_a",
+                            "triggered_at": "2026-01-01T00:00:00Z",
+                            "monitor_id": "m1",
+                            "rule_id": "r1",
+                            "title": "a",
+                            "summary": "a",
+                            "key_fields": {},
+                            "sample_rows": [],
+                            "artifact_ids": [],
+                            "context_json": {},
+                        }
+                    )
+                    second = store.add_focus_event(
+                        {
+                            "event_id": "focus_b",
+                            "triggered_at": "2026-01-01T00:00:00Z",
+                            "monitor_id": "m1",
+                            "rule_id": "r1",
+                            "title": "b",
+                            "summary": "b",
+                            "key_fields": {},
+                            "sample_rows": [],
+                            "artifact_ids": [],
+                            "context_json": {},
+                        }
+                    )
+                    first_poll = store.poll_focus_events(consumer_id="agent", limit=1)
+                    self.assertEqual([item["event_id"] for item in first_poll["events"]], [first["event_id"]])
+                    second_poll = store.poll_focus_events(consumer_id="agent", limit=10)
+                    self.assertEqual([item["event_id"] for item in second_poll["events"]], [second["event_id"]])

@@ -2234,7 +2234,6 @@ PyObject* pyArrowTableFromNative(const df::Table& native_table) {
   PyList_SET_ITEM(batches, 0, batch);
   PyObject* table = PyObject_CallFunctionObjArgs(cache.table_from_batches, batches, nullptr);
   Py_DECREF(batches);
-  Py_DECREF(batch);
   return table;
 }
 

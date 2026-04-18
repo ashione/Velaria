@@ -23,13 +23,19 @@ int main() {
                                   {dataflow::Value(int64_t(17000)), dataflow::Value(int64_t(5))}});
 
   dataflow::PlanNodePtr plan = std::make_shared<dataflow::SourcePlan>("memory", source);
-  plan = std::make_shared<dataflow::WindowAssignPlan>(plan, 0, 5000, "window_start");
+  plan = std::make_shared<dataflow::WindowAssignPlan>(plan, 0, 5000, 5000, "window_start");
   plan = std::make_shared<dataflow::SinkPlan>(plan, "file_append");
 
   const auto encoded = dataflow::serializePlan(plan);
   const auto decoded = dataflow::deserializePlan(encoded);
   expect(decoded != nullptr, "decoded plan should not be null");
   expect(decoded->kind == dataflow::PlanKind::Sink, "root should remain sink");
+  const auto* decoded_sink = static_cast<const dataflow::SinkPlan*>(decoded.get());
+  expect(decoded_sink->child->kind == dataflow::PlanKind::WindowAssign,
+         "child should remain window assign");
+  const auto* decoded_window = static_cast<const dataflow::WindowAssignPlan*>(decoded_sink->child.get());
+  expect(decoded_window->window_ms == 5000, "window assign should preserve window_ms");
+  expect(decoded_window->slide_ms == 5000, "window assign should preserve slide_ms");
 
   dataflow::LocalExecutor executor;
   auto out = executor.execute(decoded);

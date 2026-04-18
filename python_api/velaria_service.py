@@ -1465,7 +1465,7 @@ class VelariaService:
             monitor = store.get_monitor(runner["monitor_id"])
             if monitor is None:
                 return
-            compiled_rule = dict((monitor["compiled_rules"] or [])[0])
+            compiled_rule = dict(runner["compiled_rule"])
             result_rows = coerce_result_rows(batch.to_pylist())
             if not result_rows:
                 return
@@ -1524,7 +1524,7 @@ class VelariaService:
             source_meta = store.get_source(source_id)
             if source_meta is None:
                 raise FileNotFoundError(f"source not found: {source_id}")
-            if monitor.get("monitor_id") in self._realtime_runners:
+            if any(runner["monitor_id"] == monitor_id for runner in self._realtime_runners.values()):
                 return
             columns = [
                 "event_time",
@@ -1536,83 +1536,100 @@ class VelariaService:
                 *list((source_meta.get("schema_binding") or {}).get("field_mappings", {}).keys()),
             ]
         import velaria
-        session = velaria.Session()
-        source = session.create_realtime_stream_source(columns)
-        stream_df = session.read_realtime_stream_source(source)
-        view_name = f"input_table_{monitor_id}"
-        session.create_temp_view(view_name, stream_df)
-        sink = session.create_realtime_stream_sink()
-        query_df = session.stream_sql(monitor["compiled_rules"][0]["sql"].replace("input_table", view_name))
-        query = query_df.write_stream_queue_sink(sink, trigger_interval_ms=50)
-        stop_event = threading.Event()
+        created_runner_ids: list[str] = []
+        for compiled_rule in monitor["compiled_rules"] or []:
+            session = velaria.Session()
+            source = session.create_realtime_stream_source(columns)
+            stream_df = session.read_realtime_stream_source(source)
+            runner_id = f"{monitor_id}:{compiled_rule['rule_id']}"
+            view_name = f"input_table_{monitor_id}_{compiled_rule['rule_id']}"
+            session.create_temp_view(view_name, stream_df)
+            sink = session.create_realtime_stream_sink()
+            query_df = session.stream_sql(str(compiled_rule["sql"]).replace("input_table", view_name))
+            query = query_df.write_stream_queue_sink(sink, trigger_interval_ms=50)
+            stop_event = threading.Event()
+            runner = {
+                "runner_id": runner_id,
+                "monitor_id": monitor_id,
+                "rule_id": compiled_rule["rule_id"],
+                "compiled_rule": dict(compiled_rule),
+                "source_id": source_id,
+                "columns": columns,
+                "session": session,
+                "source": source,
+                "sink": sink,
+                "query": query,
+                "stop_event": stop_event,
+            }
 
-        def _query_worker() -> None:
-            try:
-                query.start()
-                with AgenticStore() as inner_store:
-                    inner_store.upsert_monitor_state(
-                        monitor_id,
-                        {
-                            "status": "running",
-                            "stream_query_id": query.progress()["query_id"],
-                            "last_error": None,
-                        },
-                    )
-                query.await_termination()
-            except Exception as exc:
-                with AgenticStore() as inner_store:
-                    inner_store.upsert_monitor_state(monitor_id, {"status": "error", "last_error": str(exc)})
-
-        def _sink_worker() -> None:
-            while not stop_event.is_set():
-                batch = sink.poll_arrow()
-                if batch is None:
-                    time.sleep(0.05)
-                    continue
+            def _query_worker(local_runner: dict[str, Any] = runner) -> None:
                 try:
-                    self._process_realtime_sink_batch(runner, batch)
+                    local_runner["query"].start()
+                    with AgenticStore() as inner_store:
+                        inner_store.upsert_monitor_state(
+                            monitor_id,
+                            {
+                                "status": "running",
+                                "stream_query_id": local_runner["query"].progress()["query_id"],
+                                "last_error": None,
+                            },
+                        )
+                    local_runner["query"].await_termination()
                 except Exception as exc:
                     with AgenticStore() as inner_store:
                         inner_store.upsert_monitor_state(monitor_id, {"status": "error", "last_error": str(exc)})
-                    break
 
-        runner = {
-            "monitor_id": monitor_id,
-            "source_id": source_id,
-            "columns": columns,
-            "session": session,
-            "source": source,
-            "sink": sink,
-            "query": query,
-            "stop_event": stop_event,
-        }
-        query_thread = threading.Thread(target=_query_worker, daemon=True)
-        sink_thread = threading.Thread(target=_sink_worker, daemon=True)
-        runner["query_thread"] = query_thread
-        runner["sink_thread"] = sink_thread
-        with self._realtime_runners_lock:
-            self._realtime_runners[monitor_id] = runner
-        query_thread.start()
-        sink_thread.start()
+            def _sink_worker(local_runner: dict[str, Any] = runner) -> None:
+                while not local_runner["stop_event"].is_set():
+                    batch = local_runner["sink"].poll_arrow()
+                    if batch is None:
+                        time.sleep(0.05)
+                        continue
+                    try:
+                        self._process_realtime_sink_batch(local_runner, batch)
+                    except Exception as exc:
+                        with AgenticStore() as inner_store:
+                            inner_store.upsert_monitor_state(monitor_id, {"status": "error", "last_error": str(exc)})
+                        break
+
+            query_thread = threading.Thread(target=_query_worker, daemon=True)
+            sink_thread = threading.Thread(target=_sink_worker, daemon=True)
+            runner["query_thread"] = query_thread
+            runner["sink_thread"] = sink_thread
+            with self._realtime_runners_lock:
+                self._realtime_runners[runner_id] = runner
+            with AgenticStore() as inner_store:
+                inner_store.upsert_monitor_state(
+                    monitor_id,
+                    {
+                        "status": "running",
+                        "last_error": None,
+                    },
+                )
+            created_runner_ids.append(runner_id)
+            query_thread.start()
+            sink_thread.start()
 
     def _stop_realtime_runner(self, monitor_id: str) -> None:
         with self._realtime_runners_lock:
-            runner = self._realtime_runners.pop(monitor_id, None)
-        if runner is None:
+            runner_ids = [runner_id for runner_id, runner in self._realtime_runners.items() if runner["monitor_id"] == monitor_id]
+            runners = [self._realtime_runners.pop(runner_id) for runner_id in runner_ids]
+        if not runners:
             return
-        runner["stop_event"].set()
-        try:
-            runner["source"].close()
-        except Exception:
-            pass
-        try:
-            runner["query"].stop()
-        except Exception:
-            pass
-        for key in ("query_thread", "sink_thread"):
-            thread = runner.get(key)
-            if thread is not None:
-                thread.join(timeout=2)
+        for runner in runners:
+            runner["stop_event"].set()
+            try:
+                runner["source"].close()
+            except Exception:
+                pass
+            try:
+                runner["query"].stop()
+            except Exception:
+                pass
+            for key in ("query_thread", "sink_thread"):
+                thread = runner.get(key)
+                if thread is not None:
+                    thread.join(timeout=2)
         with AgenticStore() as store:
             store.upsert_monitor_state(monitor_id, {"status": "idle"})
 
@@ -2383,12 +2400,26 @@ class VelariaService:
                                 monitor["cooldown_sec"] = int(payload["cooldown_sec"])
                             if "tags" in payload:
                                 monitor["tags"] = list(payload["tags"] or [])
+                            requested_enabled = None
                             if "enabled" in payload:
-                                monitor["enabled"] = bool(payload["enabled"])
+                                requested_enabled = bool(payload["enabled"])
                             if "dsl" in payload or "template_id" in payload:
                                 normalized = _normalize_monitor_create_payload({**monitor, **payload, "source": payload.get("source") or monitor["source"]})
                                 monitor.update(normalized)
+                            if requested_enabled is not None:
+                                if requested_enabled:
+                                    validation = _validate_monitor_payload(store, monitor)
+                                    monitor["validation"] = validation
+                                    if validation["status"] != "valid":
+                                        store.upsert_monitor(monitor)
+                                        raise ValueError("monitor validation failed")
+                                monitor["enabled"] = requested_enabled
                             updated = store.upsert_monitor(monitor)
+                        if requested_enabled is True:
+                            service._start_realtime_runner(parts[1])
+                        elif requested_enabled is False:
+                            service._stop_realtime_runner(parts[1])
+                        with AgenticStore() as store:
                             self._send_json(HTTPStatus.OK, {"ok": True, "monitor": _monitor_payload_for_response(store, updated)})
                             return
                     raise ApiRouteNotFoundError(f"unknown endpoint: {path}")

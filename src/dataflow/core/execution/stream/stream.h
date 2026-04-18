@@ -355,7 +355,7 @@ class QueueStreamSource : public StreamSource {
  private:
   Schema schema_;
   mutable std::mutex mu_;
-  std::deque<Table> queue_;
+  std::deque<std::pair<std::size_t, Table>> queue_;
   std::size_t next_offset_ = 0;
   std::size_t consumed_offset_ = 0;
   bool closed_ = false;

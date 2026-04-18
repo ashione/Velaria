@@ -11,6 +11,9 @@ from unittest import mock
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
+from velaria.agentic_store import AgenticStore
+from velaria.agentic_runtime import execute_monitor_once
+
 try:
     velaria_service = importlib.import_module("velaria_service")
 except ModuleNotFoundError:
@@ -181,6 +184,49 @@ class AgenticServiceTest(unittest.TestCase):
                     thread.join(timeout=5)
                     server.server_close()
 
+    def test_patch_monitor_enabled_starts_and_stops_realtime_runner(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-agentic-service-patch-enable-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                server, thread, base_url = self._start_server()
+                try:
+                    self._request_json(
+                        "POST",
+                        f"{base_url}/api/v1/external-events/sources",
+                        {
+                            "source_id": "ticks",
+                            "name": "ticks",
+                            "schema_binding": {
+                                "time_field": "ts",
+                                "type_field": "kind",
+                                "key_field": "symbol",
+                                "field_mappings": {"price": "price"},
+                            },
+                        },
+                    )
+                    status, payload = self._request_json(
+                        "POST",
+                        f"{base_url}/api/v1/monitors/from-intent",
+                        {
+                            "intent_text": "count events in a window",
+                            "source": {"kind": "external_event", "source_id": "ticks"},
+                            "template_params": {"group_by": ["source_key", "event_type"], "count_threshold": 2},
+                            "execution_mode": "stream",
+                        },
+                    )
+                    self.assertEqual(status, 201)
+                    monitor_id = payload["monitor"]["monitor_id"]
+                    status, payload = self._request_json("PATCH", f"{base_url}/api/v1/monitors/{monitor_id}", {"enabled": True})
+                    self.assertEqual(status, 200)
+                    self.assertTrue(payload["monitor"]["enabled"])
+                    self.assertEqual(payload["monitor"]["state"]["status"], "running")
+                    status, payload = self._request_json("PATCH", f"{base_url}/api/v1/monitors/{monitor_id}", {"enabled": False})
+                    self.assertEqual(status, 200)
+                    self.assertFalse(payload["monitor"]["enabled"])
+                finally:
+                    server.shutdown()
+                    thread.join(timeout=5)
+                    server.server_close()
+
     def test_realtime_stream_monitor_pipeline_without_manual_run(self):
         with tempfile.TemporaryDirectory(prefix="velaria-agentic-service-realtime-") as tmp:
             with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
@@ -256,3 +302,55 @@ class AgenticServiceTest(unittest.TestCase):
                     server.shutdown()
                     thread.join(timeout=5)
                     server.server_close()
+
+    def test_execute_monitor_once_runs_all_compiled_rules(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-agentic-multi-rule-") as tmp:
+            csv_path = pathlib.Path(tmp) / "input.csv"
+            csv_path.write_text("id,value\n1,5\n2,15\n3,25\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                with AgenticStore() as store:
+                    monitor = store.upsert_monitor(
+                        {
+                            "name": "multi-rule",
+                            "source": {"kind": "local_file", "path": str(csv_path), "input_type": "csv"},
+                            "execution_mode": "batch",
+                            "interval_sec": 60,
+                            "cooldown_sec": 300,
+                            "rule_spec": {"version": "v1", "name": "multi-rule"},
+                            "compiled_rules": [
+                                {
+                                    "rule_id": "rule_low",
+                                    "sql": "SELECT id, value FROM current_snapshot WHERE value >= 10",
+                                    "title_template": "low",
+                                    "summary_template": "value={value}",
+                                    "severity": "warning",
+                                    "output_mapping": {"key_fields": ["id", "value"], "sample_row_limit": 5},
+                                    "validation_status": "valid",
+                                },
+                                {
+                                    "rule_id": "rule_high",
+                                    "sql": "SELECT id, value FROM current_snapshot WHERE value >= 20",
+                                    "title_template": "high",
+                                    "summary_template": "value={value}",
+                                    "severity": "critical",
+                                    "output_mapping": {"key_fields": ["id", "value"], "sample_row_limit": 5},
+                                    "validation_status": "valid",
+                                },
+                            ],
+                            "validation": {
+                                "status": "valid",
+                                "promotion_rule": {"condition_tree": {"min_rows": 1}},
+                                "event_extraction": {
+                                    "event_title_mapping": "{value}",
+                                    "event_summary_mapping": "{value}",
+                                    "key_field_mapping": ["id", "value"],
+                                    "sample_row_limit": 5,
+                                    "severity": {"default": "warning", "rules": []},
+                                },
+                                "suppression_rule": {"cooldown": "300s", "dedupe_by": ["id"]},
+                            },
+                        }
+                    )
+                    result = execute_monitor_once(store, monitor["monitor_id"])
+                    self.assertEqual(len(result["signals"]), 2)
+                    self.assertEqual(len(store.list_signals(limit=10)), 2)

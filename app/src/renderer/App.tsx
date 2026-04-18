@@ -218,6 +218,8 @@ type FocusEventRecord = {
   summary: string;
   status: string;
   key_fields: Record<string, unknown>;
+  run_id?: string | null;
+  artifact_ids?: string[];
 };
 
 type SourceFormState = {
@@ -238,57 +240,6 @@ type MonitorFormState = {
   groupBy: string;
 };
 
-type ExternalSourceRecord = {
-  source_id: string;
-  kind: string;
-  name: string;
-  schema_binding?: {
-    time_field?: string;
-    type_field?: string;
-    key_field?: string;
-    field_mappings?: Record<string, string>;
-  };
-};
-
-type MonitorRecord = {
-  monitor_id: string;
-  name: string;
-  enabled: boolean;
-  intent_text?: string;
-  execution_mode: string;
-  source: Record<string, unknown>;
-  validation?: { status?: string; errors?: string[] };
-  state?: { status?: string; last_error?: string | null; stream_query_id?: string | null };
-};
-
-type FocusEventRecord = {
-  event_id: string;
-  monitor_id: string;
-  triggered_at: string;
-  severity: string;
-  title: string;
-  summary: string;
-  status: string;
-  key_fields: Record<string, unknown>;
-};
-
-type SourceFormState = {
-  sourceId: string;
-  name: string;
-  timeField: string;
-  typeField: string;
-  keyField: string;
-  priceField: string;
-};
-
-type MonitorFormState = {
-  name: string;
-  intentText: string;
-  sourceId: string;
-  executionMode: 'batch' | 'stream';
-  countThreshold: string;
-  groupBy: string;
-};
 
 const defaultImportOptions: ImportOptions = {
   delimiter: ',',
@@ -1121,7 +1072,7 @@ export function App() {
       }));
       const health = await fetch(`${info.baseUrl}/health`).then((r) => r.json());
       setServiceStatus(t('status_ready_on', { port: health.port }));
-      setServiceMeta(t('status_packaged', { packaged: info.packaged, version: health.version }));
+      setServiceMeta(t('status_packaged', { packaged: String(info.packaged), version: health.version }));
       const runsPayload = await fetch(`${info.baseUrl}/api/v1/runs?limit=100`).then((r) => r.json());
       setRuns(runsPayload.runs || []);
       const [sourcesPayload, monitorsPayload, eventsPayload] = await Promise.all([
@@ -1584,7 +1535,7 @@ export function App() {
     const embeddingConfig = embeddingFormToConfig(importForm);
     const keywordConfig = keywordFormToConfig(importForm);
     let handedOffBitableImport = false;
-    const importOptions = {
+    const importOptions: ImportOptions = {
       delimiter: importForm.delimiter,
       columns: importForm.inputType === 'json' ? importForm.columns.trim() : '',
       mappings: importForm.inputType === 'line' ? importForm.columns.trim() : '',
@@ -2065,10 +2016,10 @@ export function App() {
     const record = createDatasetRecord({
       name: `result-${selectedRunDetail.run.run_id.slice(0, 12)}`,
       sourceType:
-        selectedRunDetail.artifact.format === 'arrow'
+        (selectedRunDetail.artifact?.format || '') === 'arrow'
           ? 'arrow'
-          : selectedRunDetail.artifact.format,
-      sourcePath: decodeFileUri(selectedRunDetail.artifact.uri),
+          : selectedRunDetail.artifact?.format || 'parquet',
+      sourcePath: decodeFileUri(selectedRunDetail.artifact?.uri || ''),
       preview: selectedRunDetail.preview,
       kind: 'result',
       description: `Saved from run ${selectedRunDetail.run.run_id}`,
@@ -3630,6 +3581,17 @@ export function App() {
                         {JSON.stringify(focusEvent.key_fields || {}, null, 2)}
                       </div>
                       <div className="actions" style={{ marginTop: 10 }}>
+                        {focusEvent.run_id && (
+                          <button
+                            className="ghost"
+                            onClick={() => {
+                              setSelectedRunId(focusEvent.run_id || null);
+                              setView('runs');
+                            }}
+                          >
+                            {t('open_run_detail')}
+                          </button>
+                        )}
                         <button className="ghost" onClick={() => void focusEventAction(focusEvent.event_id, 'consume')}>
                           {t('focus_event_consume')}
                         </button>

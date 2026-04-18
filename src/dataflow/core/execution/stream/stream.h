@@ -7,9 +7,11 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <condition_variable>
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <deque>
 
 #include "src/dataflow/core/logical/planner/plan.h"
 #include "src/dataflow/core/execution/table.h"
@@ -334,6 +336,31 @@ class DirectoryCsvStreamSource : public StreamSource {
   std::string last_processed_;
 };
 
+class QueueStreamSource : public StreamSource {
+ public:
+  explicit QueueStreamSource(Schema schema);
+
+  void open(const StreamSourceContext& context) override;
+  bool nextBatch(const StreamPullContext& context, Table& batch) override;
+  bool bounded() const override;
+  std::string currentOffsetToken() const override;
+  bool restoreOffsetToken(const std::string& token) override;
+  void close() override;
+  std::string describe() const override { return "queue"; }
+
+  void push(Table batch);
+  void closeInput();
+  Schema schema() const { return schema_; }
+
+ private:
+  Schema schema_;
+  mutable std::mutex mu_;
+  std::deque<Table> queue_;
+  std::size_t next_offset_ = 0;
+  std::size_t consumed_offset_ = 0;
+  bool closed_ = false;
+};
+
 class StreamSink {
  public:
   virtual ~StreamSink() = default;
@@ -383,6 +410,21 @@ class MemoryStreamSink : public StreamSink {
   Table last_table_;
   size_t batches_written_ = 0;
   size_t rows_written_ = 0;
+};
+
+class QueueStreamSink : public StreamSink {
+ public:
+  void write(const Table& table) override;
+  void close() override;
+  std::string name() const override { return "queue"; }
+
+  bool pop(Table* table);
+  bool closed() const;
+
+ private:
+  mutable std::mutex mu_;
+  std::deque<Table> queue_;
+  bool closed_ = false;
 };
 
 enum class StreamTransformMode { PartitionLocal, GlobalBarrier };
@@ -483,7 +525,8 @@ class StreamingDataFrame {
                              const std::vector<bool>& ascending = {}) const;
   StreamingDataFrame limit(size_t n) const;
   StreamingDataFrame window(const std::string& timeColumn, uint64_t windowMs,
-                            const std::string& outputColumn = "window_start") const;
+                            const std::string& outputColumn = "window_start",
+                            uint64_t slideMs = 0) const;
 
   StreamingDataFrame withStateStore(std::shared_ptr<StateStore> state) const;
   GroupedStreamingDataFrame groupBy(const std::vector<std::string>& keys) const;

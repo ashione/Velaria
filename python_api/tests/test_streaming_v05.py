@@ -251,6 +251,55 @@ class StreamingV05Test(unittest.TestCase):
             self.assertEqual(float(keyed[("beta", 1)]["value_sum"]), 14.0)
             self.assertAlmostEqual(float(keyed[("beta", 1)]["avg_value"]), 7.0, places=5)
 
+    def test_start_stream_sql_supports_sliding_window_outputs(self):
+        session = velaria.Session()
+        table = pa.table(
+            {
+                "ts": [
+                    "2026-03-29T10:00:00",
+                    "2026-03-29T10:00:10",
+                    "2026-03-29T10:00:35",
+                ],
+                "key": ["u1", "u1", "u1"],
+                "value": [1, 1, 1],
+            }
+        )
+        stream_df = session.create_stream_from_arrow(table)
+        session.create_temp_view("events_stream_sliding", stream_df)
+
+        with tempfile.TemporaryDirectory(prefix="velaria-py-stream-sliding-") as tmp:
+            sink_path = str(pathlib.Path(tmp) / "sink.csv")
+            session.sql(
+                "CREATE SINK TABLE sink_sliding "
+                "(window_start STRING, key STRING, event_count INT) "
+                f"USING csv OPTIONS(path: '{sink_path}', delimiter: ',')"
+            )
+            query = session.start_stream_sql(
+                "INSERT INTO sink_sliding "
+                "SELECT window_start, key, COUNT(*) AS event_count "
+                "FROM events_stream_sliding "
+                "WINDOW BY ts EVERY 60000 SLIDE 30000 AS window_start "
+                "GROUP BY window_start, key",
+                trigger_interval_ms=0,
+            )
+            query.start()
+            processed = query.await_termination()
+
+            self.assertEqual(processed, 1)
+
+            with open(sink_path, newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+
+            got = {(row["window_start"], row["key"], int(float(row["event_count"]))) for row in rows}
+            self.assertEqual(
+                got,
+                {
+                    ("2026-03-29T09:59:30", "u1", 2),
+                    ("2026-03-29T10:00:00", "u1", 3),
+                    ("2026-03-29T10:00:30", "u1", 1),
+                },
+            )
+
     def test_start_stream_sql_zero_worker_settings_fall_back_to_inproc_local_workers(self):
         session = velaria.Session()
         table = pa.table(

@@ -117,6 +117,7 @@ struct StreamPlanNode {
   bool stateful = false;
   std::size_t limit = 0;
   uint64_t window_ms = 0;
+  uint64_t slide_ms = 0;
 };
 
 struct StreamLogicalPlan {

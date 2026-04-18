@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import threading
+import time
 import traceback
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -45,6 +47,11 @@ from velaria.workspace import (
     write_explain,
     write_inputs,
 )
+from velaria.agentic_store import AgenticStore
+from velaria.agentic_dsl import compile_rule_spec, compile_template_rule, parse_rule_spec
+from velaria.agentic_search import search_datasets, search_events, search_fields, search_templates
+from velaria.agentic_runtime import execute_monitor_once
+from velaria.agentic_runtime import coerce_result_rows, process_signal_rows
 
 
 _EXCEL_SUFFIXES = {".xlsx", ".xlsm", ".xls"}
@@ -1200,12 +1207,208 @@ def _error_response(exc: Exception) -> tuple[HTTPStatus, dict[str, Any]]:
     return HTTPStatus.INTERNAL_SERVER_ERROR, cli_impl._error_payload_from_exception(exc)
 
 
+def _normalize_monitor_create_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    source = dict(payload.get("source") or {})
+    if not source:
+        raise ValueError("source is required")
+    if "source_id" not in source and payload.get("source_id"):
+        source["source_id"] = payload["source_id"]
+    if "kind" not in source and payload.get("source_kind"):
+        source["kind"] = payload["source_kind"]
+    if "path" not in source and payload.get("input_path"):
+        source["path"] = str(_normalize_path(str(payload["input_path"])))
+    if "input_type" not in source and payload.get("input_type"):
+        source["input_type"] = payload["input_type"]
+    if "kind" not in source:
+        raise ValueError("source.kind is required")
+    if "source_id" in source and "binding" not in source:
+        source["binding"] = source["source_id"]
+    if payload.get("dsl"):
+        compiled = compile_rule_spec(dict(payload["dsl"]))
+        name = str(payload.get("name") or compiled["rule_spec"]["name"])
+    else:
+        template_id = str(payload.get("template_id") or "")
+        if not template_id:
+            raise ValueError("template_id or dsl is required")
+        template_params = dict(payload.get("template_params") or {})
+        name = str(payload.get("name") or template_id)
+        compiled = compile_rule_spec(
+            compile_template_rule(
+                template_id=template_id,
+                template_params=template_params,
+                source={"kind": source["kind"], "binding": source.get("binding") or source.get("path") or source.get("source_id")},
+                execution_mode=str(payload.get("execution_mode") or "batch"),
+                name=name,
+            )
+        )
+    return {
+        "name": name,
+        "intent_text": payload.get("intent_text"),
+        "source": source,
+        "template_id": payload.get("template_id"),
+        "template_params": dict(payload.get("template_params") or {}),
+        "compiled_rules": compiled["compiled_rules"],
+        "execution_mode": compiled["execution_mode"],
+        "interval_sec": int(payload.get("interval_sec", 60)),
+        "cooldown_sec": int(payload.get("cooldown_sec", 300)),
+        "tags": payload.get("tags") or [],
+        "rule_spec": compiled["rule_spec"],
+        "validation": {
+            "status": "pending",
+            "execution_spec": compiled["execution_spec"],
+            "promotion_rule": compiled["promotion_rule"],
+            "event_extraction": compiled["event_extraction"],
+            "suppression_rule": compiled["suppression_rule"],
+        },
+        "enabled": bool(payload.get("enabled", False)),
+    }
+
+
+def _validate_monitor_payload(store: AgenticStore, monitor: dict[str, Any]) -> dict[str, Any]:
+    validation = dict(monitor.get("validation") or {})
+    errors: list[str] = []
+    source = monitor.get("source") or {}
+    if source.get("kind") == "external_event":
+        source_id = source.get("source_id") or source.get("binding")
+        if not source_id or store.get_source(str(source_id)) is None:
+            errors.append("external_event source not found")
+    elif source.get("kind") in {"saved_dataset", "local_file", "bitable"}:
+        path = source.get("path")
+        if not path:
+            errors.append("source.path is required")
+        elif not Path(str(path)).exists():
+            errors.append(f"source path not found: {path}")
+    try:
+        parse_rule_spec(dict(monitor["rule_spec"]))
+    except Exception as exc:
+        errors.append(str(exc))
+    compiled_rules = monitor.get("compiled_rules") or []
+    if not compiled_rules:
+        errors.append("compiled_rules must not be empty")
+    if monitor.get("execution_mode") == "stream":
+        window = (((validation.get("execution_spec") or {}).get("window")) or {})
+        if not window:
+            errors.append("stream execution requires window config")
+    validation["status"] = "valid" if not errors else "invalid"
+    validation["errors"] = errors
+    return validation
+
+
+def _monitor_payload_for_response(store: AgenticStore, monitor: dict[str, Any]) -> dict[str, Any]:
+    response = dict(monitor)
+    response["state"] = store.get_monitor_state(monitor["monitor_id"]) or {
+        "monitor_id": monitor["monitor_id"],
+        "status": "idle",
+    }
+    return response
+
+
+def _monitor_from_intent_payload(store: AgenticStore, payload: dict[str, Any]) -> dict[str, Any]:
+    query_text = str(payload.get("intent_text") or payload.get("query_text") or "").strip()
+    if not query_text:
+        raise ValueError("intent_text is required")
+    top_k = int(payload.get("top_k", 5))
+    grounding_payload = {
+        "template_hits": search_templates(query_text, top_k=top_k),
+        "event_hits": search_events(query_text, _event_docs_from_store(store), top_k=top_k),
+        "dataset_hits": search_datasets(query_text, _dataset_docs_from_store(store), top_k=top_k),
+        "field_hits": search_fields(query_text, _field_docs_from_store(store), top_k=top_k),
+    }
+    bundle = store.save_grounding_bundle(query_text, grounding_payload)
+    template_hits = grounding_payload["template_hits"]
+    if not template_hits:
+        raise ValueError("no template candidates found for intent")
+    template_id = str(payload.get("template_id") or template_hits[0]["target_id"])
+    template_params = dict(payload.get("template_params") or {})
+    normalized = _normalize_monitor_create_payload(
+        {
+            "name": payload.get("name") or query_text,
+            "intent_text": query_text,
+            "template_id": template_id,
+            "template_params": template_params,
+            "source": payload.get("source"),
+            "execution_mode": payload.get("execution_mode", "batch"),
+            "interval_sec": payload.get("interval_sec", 60),
+            "cooldown_sec": payload.get("cooldown_sec", 300),
+            "tags": payload.get("tags") or [],
+        }
+    )
+    normalized["grounding_bundle_id"] = bundle["bundle_id"]
+    normalized["validation"]["grounding_bundle_id"] = bundle["bundle_id"]
+    return {"monitor": normalized, "grounding_bundle": bundle, "grounding_payload": grounding_payload}
+
+
+def _event_docs_from_store(store: AgenticStore) -> list[dict[str, Any]]:
+    docs: list[dict[str, Any]] = []
+    for event in store.list_focus_events(limit=200):
+        docs.append(
+            {
+                "doc_id": event["event_id"],
+                "target_kind": "event",
+                "title": event["title"],
+                "summary": event["summary"],
+                "body": json.dumps(event.get("key_fields") or {}, ensure_ascii=False),
+                "tags": [event["severity"]],
+                "metadata": {"event_id": event["event_id"], "monitor_id": event["monitor_id"]},
+            }
+        )
+    return docs
+
+
+def _dataset_docs_from_store(store: AgenticStore) -> list[dict[str, Any]]:
+    docs: list[dict[str, Any]] = []
+    for source in store.list_sources():
+        if source["kind"] not in {"saved_dataset", "local_file", "bitable"}:
+            continue
+        path = source["spec"].get("path") or source["spec"].get("input_path") or source.get("event_log_path")
+        docs.append(
+            {
+                "doc_id": source["source_id"],
+                "target_kind": "dataset",
+                "title": source["name"],
+                "summary": str(path or source["kind"]),
+                "body": json.dumps(source.get("metadata") or {}, ensure_ascii=False),
+                "tags": [source["kind"]],
+                "metadata": {"source_id": source["source_id"], "kind": source["kind"]},
+            }
+        )
+    return docs
+
+
+def _field_docs_from_store(store: AgenticStore) -> list[dict[str, Any]]:
+    docs: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for source in store.list_sources():
+        schema_binding = source.get("schema_binding") or {}
+        for name in (schema_binding.get("field_mappings") or {}).keys():
+            key = (source["source_id"], name)
+            if key in seen:
+                continue
+            seen.add(key)
+            docs.append(
+                {
+                    "doc_id": f"{source['source_id']}:{name}",
+                    "target_kind": "field",
+                    "title": name,
+                    "summary": f"field from {source['name']}",
+                    "body": source["kind"],
+                    "tags": [source["kind"]],
+                    "metadata": {"source_id": source["source_id"], "field": name},
+                }
+            )
+    return docs
+
+
 @dataclass
 class VelariaService:
     host: str
     port: int
     _embedding_provider_cache: dict[tuple[str, str | None], tuple[Any, str]] = field(default_factory=dict)
     _embedding_provider_lock: threading.Lock = field(default_factory=threading.Lock)
+    _scheduler_stop: threading.Event = field(default_factory=threading.Event)
+    _scheduler_thread: threading.Thread | None = None
+    _realtime_runners: dict[str, Any] = field(default_factory=dict)
+    _realtime_runners_lock: threading.Lock = field(default_factory=threading.Lock)
 
     def get_embedding_provider(self, provider_name: str, model_name: str | None):
         cache_key = (provider_name.strip().lower(), model_name or None)
@@ -1216,6 +1419,202 @@ class VelariaService:
             created = cli_impl._make_embedding_provider(provider_name, model_name)
             self._embedding_provider_cache[cache_key] = created
             return created
+
+    def _run_scheduler(self) -> None:
+        while not self._scheduler_stop.is_set():
+            try:
+                with AgenticStore() as store:
+                    now_dt = datetime.now(timezone.utc)
+                    for monitor in store.list_monitors():
+                        if not monitor.get("enabled"):
+                            continue
+                        source = monitor.get("source") or {}
+                        if monitor.get("execution_mode") == "stream" and source.get("kind") == "external_event":
+                            continue
+                        state = store.get_monitor_state(monitor["monitor_id"]) or {}
+                        last_run = _parse_time(state.get("last_run_at"))
+                        if last_run is not None:
+                            interval = max(1, int(monitor.get("interval_sec", 60)))
+                            if now_dt - last_run < timedelta(seconds=interval):
+                                continue
+                        try:
+                            execute_monitor_once(store, monitor["monitor_id"])
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+            self._scheduler_stop.wait(1.0)
+
+    def _push_realtime_observation(self, source_id: str, observation: dict[str, Any]) -> None:
+        with self._realtime_runners_lock:
+            runners = [runner for runner in self._realtime_runners.values() if runner["source_id"] == source_id]
+        if not runners:
+            return
+        row = {}
+        for key in runners[0]["columns"]:
+            value = observation.get(key)
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value, ensure_ascii=False, sort_keys=True)
+            row[key] = value
+        table = pa.table({key: [value] for key, value in row.items()})
+        for runner in runners:
+            runner["source"].push_arrow(table)
+
+    def _process_realtime_sink_batch(self, runner: dict[str, Any], batch: pa.Table) -> None:
+        with AgenticStore() as store:
+            monitor = store.get_monitor(runner["monitor_id"])
+            if monitor is None:
+                return
+            compiled_rule = dict((monitor["compiled_rules"] or [])[0])
+            result_rows = coerce_result_rows(batch.to_pylist())
+            if not result_rows:
+                return
+            run_id, run_dir = create_run(
+                "focus-event-realtime-batch",
+                {"monitor_id": runner["monitor_id"], "execution_mode": "stream"},
+                __version__,
+                run_name=f"{monitor['name']}-realtime",
+                description=f"Realtime focus-event batch for {monitor['name']}",
+                tags=monitor.get("tags") or [],
+            )
+            write_inputs(run_id, {"monitor": monitor, "mode": "realtime-stream"})
+            index = ArtifactIndex()
+            try:
+                index.upsert_run(read_run(run_id))
+                path = Path(run_dir) / "artifacts" / "result.parquet"
+                pq.write_table(batch, path)
+                artifact = cli_impl._table_artifact(path, batch, ["result", "focus-event-realtime"])
+                artifact["artifact_id"] = cli_impl._new_artifact_id()
+                artifact["run_id"] = run_id
+                artifact["created_at"] = cli_impl._utc_now()
+                index.insert_artifact(artifact)
+                emitted = process_signal_rows(
+                    store,
+                    monitor=monitor,
+                    compiled_rule=compiled_rule,
+                    result_rows=result_rows,
+                    run_id=run_id,
+                    artifact_ids=[artifact["artifact_id"]],
+                )
+                finalized = finalize_run(
+                    run_id,
+                    "succeeded",
+                    details={
+                        "focus_event_count": len(emitted["focus_events"]),
+                        "signal_id": emitted["signal"]["signal_id"],
+                    },
+                )
+                index.upsert_run(finalized)
+            except Exception as exc:
+                append_stderr(run_id, traceback.format_exc())
+                finalized = finalize_run(run_id, "failed", error=str(exc), details={"monitor_id": runner["monitor_id"]})
+                index.upsert_run(finalized)
+            finally:
+                index.close()
+
+    def _start_realtime_runner(self, monitor_id: str) -> None:
+        with AgenticStore() as store:
+            monitor = store.get_monitor(monitor_id)
+            if monitor is None:
+                raise FileNotFoundError(f"monitor not found: {monitor_id}")
+            source_binding = monitor.get("source") or {}
+            if monitor.get("execution_mode") != "stream" or source_binding.get("kind") != "external_event":
+                return
+            source_id = str(source_binding.get("source_id") or source_binding.get("binding"))
+            source_meta = store.get_source(source_id)
+            if source_meta is None:
+                raise FileNotFoundError(f"source not found: {source_id}")
+            if monitor.get("monitor_id") in self._realtime_runners:
+                return
+            columns = [
+                "event_time",
+                "event_type",
+                "source_key",
+                "payload_json",
+                "ingested_at",
+                "source_id",
+                *list((source_meta.get("schema_binding") or {}).get("field_mappings", {}).keys()),
+            ]
+        import velaria
+        session = velaria.Session()
+        source = session.create_realtime_stream_source(columns)
+        stream_df = session.read_realtime_stream_source(source)
+        view_name = f"input_table_{monitor_id}"
+        session.create_temp_view(view_name, stream_df)
+        sink = session.create_realtime_stream_sink()
+        query_df = session.stream_sql(monitor["compiled_rules"][0]["sql"].replace("input_table", view_name))
+        query = query_df.write_stream_queue_sink(sink, trigger_interval_ms=50)
+        stop_event = threading.Event()
+
+        def _query_worker() -> None:
+            try:
+                query.start()
+                with AgenticStore() as inner_store:
+                    inner_store.upsert_monitor_state(
+                        monitor_id,
+                        {
+                            "status": "running",
+                            "stream_query_id": query.progress()["query_id"],
+                            "last_error": None,
+                        },
+                    )
+                query.await_termination()
+            except Exception as exc:
+                with AgenticStore() as inner_store:
+                    inner_store.upsert_monitor_state(monitor_id, {"status": "error", "last_error": str(exc)})
+
+        def _sink_worker() -> None:
+            while not stop_event.is_set():
+                batch = sink.poll_arrow()
+                if batch is None:
+                    time.sleep(0.05)
+                    continue
+                try:
+                    self._process_realtime_sink_batch(runner, batch)
+                except Exception as exc:
+                    with AgenticStore() as inner_store:
+                        inner_store.upsert_monitor_state(monitor_id, {"status": "error", "last_error": str(exc)})
+                    break
+
+        runner = {
+            "monitor_id": monitor_id,
+            "source_id": source_id,
+            "columns": columns,
+            "session": session,
+            "source": source,
+            "sink": sink,
+            "query": query,
+            "stop_event": stop_event,
+        }
+        query_thread = threading.Thread(target=_query_worker, daemon=True)
+        sink_thread = threading.Thread(target=_sink_worker, daemon=True)
+        runner["query_thread"] = query_thread
+        runner["sink_thread"] = sink_thread
+        with self._realtime_runners_lock:
+            self._realtime_runners[monitor_id] = runner
+        query_thread.start()
+        sink_thread.start()
+
+    def _stop_realtime_runner(self, monitor_id: str) -> None:
+        with self._realtime_runners_lock:
+            runner = self._realtime_runners.pop(monitor_id, None)
+        if runner is None:
+            return
+        runner["stop_event"].set()
+        try:
+            runner["source"].close()
+        except Exception:
+            pass
+        try:
+            runner["query"].stop()
+        except Exception:
+            pass
+        for key in ("query_thread", "sink_thread"):
+            thread = runner.get(key)
+            if thread is not None:
+                thread.join(timeout=2)
+        with AgenticStore() as store:
+            store.upsert_monitor_state(monitor_id, {"status": "idle"})
 
     def build_handler(self):
         service = self
@@ -1230,7 +1629,7 @@ class VelariaService:
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.send_header("Access-Control-Allow-Headers", "Content-Type")
-                self.send_header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
+                self.send_header("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS")
                 self.end_headers()
                 self.wfile.write(body)
 
@@ -1245,7 +1644,7 @@ class VelariaService:
                 self.send_response(HTTPStatus.NO_CONTENT)
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.send_header("Access-Control-Allow-Headers", "Content-Type")
-                self.send_header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
+                self.send_header("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS")
                 self.end_headers()
 
             def do_GET(self) -> None:  # noqa: N802
@@ -1266,6 +1665,48 @@ class VelariaService:
                     parts = _api_parts(path)
                     if parts is None:
                         raise ApiRouteNotFoundError(f"unknown endpoint: {path}")
+                    if parts == ("external-events", "sources"):
+                        with AgenticStore() as store:
+                            self._send_json(HTTPStatus.OK, {"ok": True, "sources": store.list_sources()})
+                            return
+                    if parts == ("monitors",):
+                        with AgenticStore() as store:
+                            monitors = [_monitor_payload_for_response(store, monitor) for monitor in store.list_monitors()]
+                            self._send_json(HTTPStatus.OK, {"ok": True, "monitors": monitors})
+                            return
+                    if len(parts) == 2 and parts[0] == "monitors":
+                        with AgenticStore() as store:
+                            monitor = store.get_monitor(parts[1])
+                            if monitor is None:
+                                raise FileNotFoundError(f"monitor not found: {parts[1]}")
+                            self._send_json(HTTPStatus.OK, {"ok": True, "monitor": _monitor_payload_for_response(store, monitor)})
+                            return
+                    if parts == ("focus-events",):
+                        query = parse_qs(parsed.query)
+                        limit = int(query.get("limit", ["50"])[0])
+                        with AgenticStore() as store:
+                            self._send_json(HTTPStatus.OK, {"ok": True, "focus_events": store.list_focus_events(limit=limit)})
+                            return
+                    if len(parts) == 2 and parts[0] == "focus-events":
+                        with AgenticStore() as store:
+                            event = store.get_focus_event(parts[1])
+                            if event is None:
+                                raise FileNotFoundError(f"focus event not found: {parts[1]}")
+                            self._send_json(HTTPStatus.OK, {"ok": True, "focus_event": event})
+                            return
+                    if parts == ("signals",):
+                        query = parse_qs(parsed.query)
+                        limit = int(query.get("limit", ["50"])[0])
+                        with AgenticStore() as store:
+                            self._send_json(HTTPStatus.OK, {"ok": True, "signals": store.list_signals(limit=limit)})
+                            return
+                    if len(parts) == 2 and parts[0] == "signals":
+                        with AgenticStore() as store:
+                            signal = store.get_signal(parts[1])
+                            if signal is None:
+                                raise FileNotFoundError(f"signal not found: {parts[1]}")
+                            self._send_json(HTTPStatus.OK, {"ok": True, "signal": signal})
+                            return
                     if parts == ("runs",):
                         query = parse_qs(parsed.query)
                         limit = int(query.get("limit", ["20"])[0])
@@ -1363,6 +1804,131 @@ class VelariaService:
                     parts = _api_parts(path)
                     if parts is None:
                         raise ApiRouteNotFoundError(f"unknown endpoint: {path}")
+                    if parts == ("external-events", "sources"):
+                        with AgenticStore() as store:
+                            source = store.upsert_source(
+                                {
+                                    "source_id": payload.get("source_id"),
+                                    "kind": "external_event",
+                                    "name": payload.get("name") or payload.get("source_id") or "external-event-source",
+                                    "spec": dict(payload.get("spec") or {}),
+                                    "schema_binding": dict(payload.get("schema_binding") or {}),
+                                    "auth": dict(payload.get("auth") or {}),
+                                    "metadata": dict(payload.get("metadata") or {}),
+                                }
+                            )
+                            self._send_json(HTTPStatus.CREATED, {"ok": True, "source": source})
+                            return
+                    if len(parts) == 4 and parts[:2] == ("external-events", "sources") and parts[3] == "ingest":
+                        source_id = parts[2]
+                        with AgenticStore() as store:
+                            event = store.append_external_event(source_id, payload)
+                        service._push_realtime_observation(source_id, event)
+                        self._send_json(HTTPStatus.ACCEPTED, {"ok": True, "observation": event})
+                        return
+                    if parts == ("search", "templates"):
+                        with AgenticStore() as store:
+                            hits = search_templates(str(payload.get("query_text") or ""), top_k=int(payload.get("top_k", 10)))
+                            self._send_json(HTTPStatus.OK, {"ok": True, "hits": hits, "query_text": payload.get("query_text"), "retrieval_mode": "hybrid"})
+                            return
+                    if parts == ("search", "events"):
+                        with AgenticStore() as store:
+                            hits = search_events(str(payload.get("query_text") or ""), _event_docs_from_store(store), top_k=int(payload.get("top_k", 10)))
+                            self._send_json(HTTPStatus.OK, {"ok": True, "hits": hits, "query_text": payload.get("query_text"), "retrieval_mode": "hybrid"})
+                            return
+                    if parts == ("search", "datasets"):
+                        with AgenticStore() as store:
+                            hits = search_datasets(str(payload.get("query_text") or ""), _dataset_docs_from_store(store), top_k=int(payload.get("top_k", 10)))
+                            self._send_json(HTTPStatus.OK, {"ok": True, "hits": hits, "query_text": payload.get("query_text"), "retrieval_mode": "hybrid"})
+                            return
+                    if parts == ("search", "fields"):
+                        with AgenticStore() as store:
+                            hits = search_fields(str(payload.get("query_text") or ""), _field_docs_from_store(store), top_k=int(payload.get("top_k", 10)))
+                            self._send_json(HTTPStatus.OK, {"ok": True, "hits": hits, "query_text": payload.get("query_text"), "retrieval_mode": "hybrid"})
+                            return
+                    if parts == ("grounding",):
+                        query_text = str(payload.get("query_text") or "")
+                        top_k = int(payload.get("top_k", 5))
+                        with AgenticStore() as store:
+                            bundle_payload = {
+                                "template_hits": search_templates(query_text, top_k=top_k),
+                                "event_hits": search_events(query_text, _event_docs_from_store(store), top_k=top_k),
+                                "dataset_hits": search_datasets(query_text, _dataset_docs_from_store(store), top_k=top_k),
+                                "field_hits": search_fields(query_text, _field_docs_from_store(store), top_k=top_k),
+                            }
+                            bundle = store.save_grounding_bundle(query_text, bundle_payload)
+                            self._send_json(HTTPStatus.OK, {"ok": True, **bundle, "payload": bundle_payload})
+                            return
+                    if parts == ("monitors", "from-intent"):
+                        with AgenticStore() as store:
+                            generated = _monitor_from_intent_payload(store, payload)
+                            monitor = store.upsert_monitor(generated["monitor"])
+                            self._send_json(
+                                HTTPStatus.CREATED,
+                                {
+                                    "ok": True,
+                                    "monitor": _monitor_payload_for_response(store, monitor),
+                                    "grounding_bundle": generated["grounding_bundle"],
+                                    "grounding_payload": generated["grounding_payload"],
+                                },
+                            )
+                            return
+                    if parts == ("monitors",):
+                        with AgenticStore() as store:
+                            monitor_payload = _normalize_monitor_create_payload(payload)
+                            monitor = store.upsert_monitor(monitor_payload)
+                            self._send_json(HTTPStatus.CREATED, {"ok": True, "monitor": _monitor_payload_for_response(store, monitor)})
+                            return
+                    if len(parts) == 3 and parts[0] == "monitors" and parts[2] == "validate":
+                        with AgenticStore() as store:
+                            monitor = store.get_monitor(parts[1])
+                            if monitor is None:
+                                raise FileNotFoundError(f"monitor not found: {parts[1]}")
+                            validation = _validate_monitor_payload(store, monitor)
+                            monitor["validation"] = validation
+                            monitor = store.upsert_monitor(monitor)
+                            self._send_json(HTTPStatus.OK, {"ok": True, "monitor": _monitor_payload_for_response(store, monitor)})
+                            return
+                    if len(parts) == 3 and parts[0] == "monitors" and parts[2] == "enable":
+                        with AgenticStore() as store:
+                            monitor = store.get_monitor(parts[1])
+                            if monitor is None:
+                                raise FileNotFoundError(f"monitor not found: {parts[1]}")
+                            validation = _validate_monitor_payload(store, monitor)
+                            if validation["status"] != "valid":
+                                monitor["validation"] = validation
+                                monitor = store.upsert_monitor(monitor)
+                                raise ValueError("monitor validation failed")
+                            monitor["validation"] = validation
+                            store.upsert_monitor(monitor)
+                            enabled = store.set_monitor_enabled(parts[1], True)
+                        service._start_realtime_runner(parts[1])
+                        with AgenticStore() as store:
+                            self._send_json(HTTPStatus.OK, {"ok": True, "monitor": _monitor_payload_for_response(store, enabled)})
+                            return
+                    if len(parts) == 3 and parts[0] == "monitors" and parts[2] == "disable":
+                        service._stop_realtime_runner(parts[1])
+                        with AgenticStore() as store:
+                            monitor = store.set_monitor_enabled(parts[1], False)
+                            self._send_json(HTTPStatus.OK, {"ok": True, "monitor": _monitor_payload_for_response(store, monitor)})
+                            return
+                    if len(parts) == 3 and parts[0] == "monitors" and parts[2] == "run":
+                        with AgenticStore() as store:
+                            result = execute_monitor_once(store, parts[1])
+                            self._send_json(HTTPStatus.OK, {"ok": True, **result})
+                            return
+                    if parts == ("focus-events", "poll"):
+                        consumer_id = str(payload.get("consumer_id") or "default")
+                        with AgenticStore() as store:
+                            result = store.poll_focus_events(consumer_id=consumer_id, limit=int(payload.get("limit", 20)), after_event_id=payload.get("after_event_id"))
+                            self._send_json(HTTPStatus.OK, {"ok": True, **result})
+                            return
+                    if len(parts) == 3 and parts[0] == "focus-events" and parts[2] in {"consume", "archive"}:
+                        with AgenticStore() as store:
+                            status_name = "consumed" if parts[2] == "consume" else "archived"
+                            event = store.update_focus_event_status(parts[1], status_name)
+                            self._send_json(HTTPStatus.OK, {"ok": True, "focus_event": event})
+                            return
                     if parts == ("import", "preview"):
                         if str(payload.get("input_type") or "auto").lower() == "bitable":
                             preview_payload = _preview_bitable_import(payload)
@@ -1794,6 +2360,42 @@ class VelariaService:
                     status, payload = _error_response(exc)
                     self._send_json(status, payload)
 
+            def do_PATCH(self) -> None:  # noqa: N802
+                parsed = urlparse(self.path)
+                path = parsed.path
+                try:
+                    payload = self._read_json()
+                    parts = _api_parts(path)
+                    if parts is None:
+                        raise ApiRouteNotFoundError(f"unknown endpoint: {path}")
+                    if len(parts) == 2 and parts[0] == "monitors":
+                        with AgenticStore() as store:
+                            monitor = store.get_monitor(parts[1])
+                            if monitor is None:
+                                raise FileNotFoundError(f"monitor not found: {parts[1]}")
+                            if "name" in payload:
+                                monitor["name"] = payload["name"]
+                            if "intent_text" in payload:
+                                monitor["intent_text"] = payload["intent_text"]
+                            if "interval_sec" in payload:
+                                monitor["interval_sec"] = int(payload["interval_sec"])
+                            if "cooldown_sec" in payload:
+                                monitor["cooldown_sec"] = int(payload["cooldown_sec"])
+                            if "tags" in payload:
+                                monitor["tags"] = list(payload["tags"] or [])
+                            if "enabled" in payload:
+                                monitor["enabled"] = bool(payload["enabled"])
+                            if "dsl" in payload or "template_id" in payload:
+                                normalized = _normalize_monitor_create_payload({**monitor, **payload, "source": payload.get("source") or monitor["source"]})
+                                monitor.update(normalized)
+                            updated = store.upsert_monitor(monitor)
+                            self._send_json(HTTPStatus.OK, {"ok": True, "monitor": _monitor_payload_for_response(store, updated)})
+                            return
+                    raise ApiRouteNotFoundError(f"unknown endpoint: {path}")
+                except Exception as exc:
+                    status, payload = _error_response(exc)
+                    self._send_json(status, payload)
+
             def do_DELETE(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)
                 path = parsed.path
@@ -1801,6 +2403,14 @@ class VelariaService:
                     parts = _api_parts(path)
                     if parts is None:
                         raise ApiRouteNotFoundError(f"unknown endpoint: {path}")
+                    if len(parts) == 2 and parts[0] == "monitors":
+                        service._stop_realtime_runner(parts[1])
+                        with AgenticStore() as store:
+                            deleted = store.delete_monitor(parts[1])
+                            if not deleted:
+                                raise FileNotFoundError(f"monitor not found: {parts[1]}")
+                            self._send_json(HTTPStatus.OK, {"ok": True, "monitor_id": parts[1], "deleted": True})
+                            return
                     if len(parts) == 2 and parts[0] == "runs":
                         run_id = parts[1]
                         index = ArtifactIndex()
@@ -1828,6 +2438,17 @@ class VelariaService:
 
     def serve_forever(self) -> None:
         server = ThreadingHTTPServer((self.host, self.port), self.build_handler())
+        self._scheduler_stop.clear()
+        self._scheduler_thread = threading.Thread(target=self._run_scheduler, daemon=True)
+        self._scheduler_thread.start()
+        try:
+            with AgenticStore() as store:
+                for monitor in store.list_monitors():
+                    source = monitor.get("source") or {}
+                    if monitor.get("enabled") and monitor.get("execution_mode") == "stream" and source.get("kind") == "external_event":
+                        self._start_realtime_runner(monitor["monitor_id"])
+        except Exception:
+            pass
         print(
             json.dumps(
                 {
@@ -1843,6 +2464,13 @@ class VelariaService:
         try:
             server.serve_forever()
         finally:
+            self._scheduler_stop.set()
+            if self._scheduler_thread is not None:
+                self._scheduler_thread.join(timeout=2)
+            with self._realtime_runners_lock:
+                runner_ids = list(self._realtime_runners.keys())
+            for monitor_id in runner_ids:
+                self._stop_realtime_runner(monitor_id)
             server.server_close()
 
 

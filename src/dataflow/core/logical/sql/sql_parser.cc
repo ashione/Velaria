@@ -741,6 +741,19 @@ SqlQuery parseSelectQueryBody(ParseState& state, bool alreadyConsumedSelect) {
     } catch (...) {
       throw SQLSyntaxError("invalid WINDOW EVERY value: " + window_ms.text);
     }
+    if (state.consumeWord("SLIDE")) {
+      Token slide_ms = state.expectToken();
+      if (!slide_ms.is_number) {
+        throw SQLSyntaxError("WINDOW SLIDE must be numeric");
+      }
+      try {
+        window.slide_ms = static_cast<uint64_t>(std::stoull(slide_ms.text));
+      } catch (...) {
+        throw SQLSyntaxError("invalid WINDOW SLIDE value: " + slide_ms.text);
+      }
+    } else {
+      window.slide_ms = window.every_ms;
+    }
     state.expectWord("AS");
     window.output_column = state.expectToken().text;
     out.window = std::move(window);

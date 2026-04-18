@@ -1522,6 +1522,63 @@ std::string DirectoryCsvStreamSource::describe() const {
   return "directory_csv:" + directory_;
 }
 
+QueueStreamSource::QueueStreamSource(Schema schema) : schema_(std::move(schema)) {}
+
+void QueueStreamSource::open(const StreamSourceContext&) {
+  std::lock_guard<std::mutex> lock(mu_);
+  consumed_offset_ = 0;
+  closed_ = false;
+}
+
+bool QueueStreamSource::nextBatch(const StreamPullContext&, Table& batch) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (queue_.empty()) {
+    return false;
+  }
+  batch = std::move(queue_.front());
+  queue_.pop_front();
+  consumed_offset_ += 1;
+  return true;
+}
+
+bool QueueStreamSource::bounded() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return closed_;
+}
+
+std::string QueueStreamSource::currentOffsetToken() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return std::to_string(consumed_offset_);
+}
+
+bool QueueStreamSource::restoreOffsetToken(const std::string& token) {
+  if (token.empty()) {
+    return false;
+  }
+  const auto next = static_cast<std::size_t>(std::stoull(token));
+  std::lock_guard<std::mutex> lock(mu_);
+  consumed_offset_ = next;
+  return true;
+}
+
+void QueueStreamSource::close() {
+  closeInput();
+}
+
+void QueueStreamSource::push(Table batch) {
+  if (!schema_.fields.empty() && batch.schema.fields != schema_.fields) {
+    throw std::runtime_error("queue stream source schema mismatch");
+  }
+  std::lock_guard<std::mutex> lock(mu_);
+  queue_.push_back(std::move(batch));
+  next_offset_ += 1;
+}
+
+void QueueStreamSource::closeInput() {
+  std::lock_guard<std::mutex> lock(mu_);
+  closed_ = true;
+}
+
 void ConsoleStreamSink::write(const Table& table) {
   Table materialized = table;
   materializeRows(&materialized);
@@ -1585,6 +1642,34 @@ void MemoryStreamSink::write(const Table& table) {
   materializeRows(&last_table_);
   ++batches_written_;
   rows_written_ += table.rowCount();
+}
+
+void QueueStreamSink::write(const Table& table) {
+  std::lock_guard<std::mutex> lock(mu_);
+  queue_.push_back(table);
+}
+
+void QueueStreamSink::close() {
+  std::lock_guard<std::mutex> lock(mu_);
+  closed_ = true;
+}
+
+bool QueueStreamSink::pop(Table* table) {
+  if (table == nullptr) {
+    throw std::invalid_argument("queue sink output table is null");
+  }
+  std::lock_guard<std::mutex> lock(mu_);
+  if (queue_.empty()) {
+    return false;
+  }
+  *table = std::move(queue_.front());
+  queue_.pop_front();
+  return true;
+}
+
+bool QueueStreamSink::closed() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return closed_;
 }
 
 // ---------- Transform ----------
@@ -1816,27 +1901,35 @@ StreamingDataFrame StreamingDataFrame::limit(size_t n) const {
 }
 
 StreamingDataFrame StreamingDataFrame::window(const std::string& timeColumn, uint64_t windowMs,
-                                              const std::string& outputColumn) const {
+                                              const std::string& outputColumn,
+                                              uint64_t slideMs) const {
   if (windowMs == 0) {
     throw std::invalid_argument("window size must be positive");
   }
+  if (slideMs == 0) {
+    slideMs = windowMs;
+  }
+  if (slideMs > windowMs) {
+    throw std::invalid_argument("window slide must be <= window size");
+  }
   auto t = transforms_;
   t.emplace_back(
-      [timeColumn, windowMs, outputColumn](const Table& input, const StreamingQueryOptions&) {
+      [timeColumn, windowMs, outputColumn, slideMs](const Table& input, const StreamingQueryOptions&) {
         Table out = input;
         if (!out.schema.has(timeColumn)) {
           throw std::runtime_error("window column not found: " + timeColumn);
         }
         const auto idx = out.schema.indexOf(timeColumn);
-        if (!out.schema.has(outputColumn)) {
+        if (slideMs == windowMs && !out.schema.has(outputColumn)) {
           const auto ts_column = viewValueColumn(out, idx);
           auto bucket_values = vectorizedWindowStart(ts_column, windowMs);
           for (auto& value : bucket_values) {
             value = Value(formatTimestampMillis(static_cast<uint64_t>(value.asInt64())));
           }
           appendNamedColumn(&out, outputColumn, std::move(bucket_values), false);
+          return out;
         }
-        return out;
+        return assignSlidingWindow(input, idx, windowMs, slideMs, outputColumn, false);
       },
       StreamTransformMode::PartitionLocal, false, "window");
   return StreamingDataFrame(source_, std::move(t), state_);

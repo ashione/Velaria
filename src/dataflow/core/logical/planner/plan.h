@@ -311,12 +311,14 @@ struct WindowAssignPlan : PlanNode {
   PlanNodePtr child;
   size_t time_column_index;
   uint64_t window_ms;
+  uint64_t slide_ms;
   std::string output_column;
-  WindowAssignPlan(PlanNodePtr p, size_t cidx, uint64_t w, std::string output)
+  WindowAssignPlan(PlanNodePtr p, size_t cidx, uint64_t w, uint64_t s, std::string output)
       : PlanNode(PlanKind::WindowAssign),
         child(std::move(p)),
         time_column_index(cidx),
         window_ms(w),
+        slide_ms(s == 0 ? w : s),
         output_column(std::move(output)) {}
 };
 

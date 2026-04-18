@@ -423,6 +423,58 @@ void testAggregateVariants() {
          "avg aggregate should keep userB running avg");
 }
 
+void testSlidingWindowCount() {
+  dataflow::DataflowSession& session = dataflow::DataflowSession::builder();
+  auto sink = std::make_shared<CollectSink>();
+  auto state = dataflow::makeMemoryStateStore();
+
+  std::vector<dataflow::Table> batches = {
+      makeWindowBatch({{"2026-03-28T09:00:00", "userA", 1},
+                       {"2026-03-28T09:00:10", "userA", 1},
+                       {"2026-03-28T09:00:35", "userA", 1}}),
+  };
+
+  auto query = session.readStream(std::make_shared<dataflow::MemoryStreamSource>(batches))
+                   .withStateStore(state)
+                   .window("ts", 60000, "window_start", 30000)
+                   .groupBy({"window_start", "key"})
+                   .count(true, "event_count")
+                   .writeStream(sink, dataflow::StreamingQueryOptions{});
+  query.start();
+  const size_t processed = query.awaitTermination();
+  const auto collected = sink->batches();
+
+  expect(processed == 1, "sliding window count should process one batch");
+  expect(collected.size() == 1, "sliding window count should emit one batch");
+  auto table = collected.back();
+  dataflow::materializeRows(&table);
+  expect(table.rows.size() == 3, "sliding window count should emit three grouped rows");
+
+  const auto window_idx = table.schema.indexOf("window_start");
+  const auto key_idx = table.schema.indexOf("key");
+  const auto count_idx = table.schema.indexOf("event_count");
+  bool has_prev = false;
+  bool has_curr = false;
+  bool has_next = false;
+  for (const auto& row : table.rows) {
+    if (row[key_idx].toString() != "userA") {
+      continue;
+    }
+    if (row[window_idx].toString() == "2026-03-28T08:59:30" && row[count_idx].asInt64() == 2) {
+      has_prev = true;
+    }
+    if (row[window_idx].toString() == "2026-03-28T09:00:00" && row[count_idx].asInt64() == 3) {
+      has_curr = true;
+    }
+    if (row[window_idx].toString() == "2026-03-28T09:00:30" && row[count_idx].asInt64() == 1) {
+      has_next = true;
+    }
+  }
+  expect(has_prev, "sliding window should include previous overlapping bucket");
+  expect(has_curr, "sliding window should include current bucket");
+  expect(has_next, "sliding window should include next overlapping bucket");
+}
+
 void testCheckpointRestoreAggregateVariants() {
   namespace fs = std::filesystem;
   dataflow::DataflowSession& session = dataflow::DataflowSession::builder();
@@ -804,6 +856,7 @@ int main() {
     testBackpressure();
     testStatefulWindowCount();
     testAggregateVariants();
+    testSlidingWindowCount();
     testCheckpointRestoreAggregateVariants();
     testCheckpointRestoreAtLeastOnceDefault();
     testCheckpointRestoreBestEffort();

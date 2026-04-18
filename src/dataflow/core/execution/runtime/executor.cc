@@ -1927,11 +1927,8 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
     case PlanKind::WindowAssign: {
       const auto* node = static_cast<const WindowAssignPlan*>(plan.get());
       const auto table_input = borrowOrExecute(executor, node->child, requirements);
-      Table out = *table_input.table;
-      const auto input = viewValueColumn(out, node->time_column_index);
-      appendNamedColumn(&out, node->output_column,
-                        vectorizedWindowStart(input, node->window_ms), false);
-      return out;
+      return assignSlidingWindow(*table_input.table, node->time_column_index, node->window_ms,
+                                 node->slide_ms, node->output_column, false);
     }
     case PlanKind::Aggregate: {
       const SourcePlan* pushed_source = nullptr;

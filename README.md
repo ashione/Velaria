@@ -46,6 +46,7 @@ Owns:
 - CLI, packaging, and `uv` workflow
 - local app-side service and Electron prototype support
 - offline embedding generation helpers and versioned embedding asset management
+- offline keyword-index generation helpers and reusable BM25 keyword search assets
 - Excel / Bitable / custom stream adapters
 - local workspace and run tracking
 
@@ -106,7 +107,8 @@ Available today:
   - `CREATE TABLE`, `CREATE SOURCE TABLE`, `CREATE SINK TABLE`
   - `INSERT INTO ... VALUES`
   - `INSERT INTO ... SELECT`
-  - `SELECT` with projection/alias, `WHERE` (including `AND` / `OR`), `GROUP BY`, `ORDER BY`, `LIMIT`, current minimal `JOIN`
+  - `SELECT` with projection/alias, `WHERE` (including `AND` / `OR`), `GROUP BY`, `ORDER BY`, `LIMIT`, current minimal `JOIN`, `UNION` / `UNION ALL`
+  - batch `KEYWORD SEARCH(...) QUERY '...' TOP_K ...` and current keyword-assisted `HYBRID SEARCH ...`
 - current batch builtins:
   - string: `LOWER`, `UPPER`, `TRIM`, `LTRIM`, `RTRIM`, `LENGTH`, `LEN`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, `REVERSE`, `CONCAT`, `CONCAT_WS`, `LEFT`, `RIGHT`, `SUBSTR` / `SUBSTRING`, `POSITION`, `REPLACE`
   - numeric/date: `ABS`, `CEIL`, `FLOOR`, `ROUND`, `YEAR`, `MONTH`, `DAY`
@@ -123,7 +125,9 @@ Available today:
   - unbounded-source `ORDER BY` is rejected explicitly
 - local exact vector search on fixed-dimension `float32`
 - Python Arrow ingress/output and workspace-backed run tracking
+- reusable keyword-index assets for Arrow / Parquet datasets, including async build from the local desktop flow
 - local desktop app prototype under `app/`, backed by `velaria-service`
+- desktop import flow can asynchronously build reusable embedding datasets and keyword indexes from the same saved dataset
 - macOS desktop packaging prototype producing `.dmg`
 - AI / agent / skill integration through the supported Python ecosystem layer, with workspace and artifact management for result reuse and local data management
 - same-host actor/rpc/jobmaster smoke path
@@ -132,7 +136,7 @@ Current constraints:
 
 - `CREATE SOURCE TABLE` is read-only and rejects `INSERT`
 - `CREATE SINK TABLE` accepts writes but cannot be used as query input
-- SQL v1 does not expand to `CTE`, subquery, `UNION`, or richer join semantics
+- SQL v1 does not expand to `CTE`, subquery, richer join semantics, or aggregate `KEYWORD SEARCH` / `HYBRID SEARCH`
 - Python callbacks / Python UDFs are not part of the hot path
 - the Electron desktop app is still a local prototype, not a stable product surface
 - the repository does not claim a completed distributed runtime

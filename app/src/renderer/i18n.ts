@@ -122,6 +122,7 @@ export const I18N: Record<Locale, Record<string, string>> = {
     kind_result: 'Result',
     field_source: 'source',
     field_embedding_dataset: 'embedding dataset',
+    field_keyword_index: 'keyword index',
     field_schema: 'schema',
     field_embedding: 'embedding',
     field_kind: 'kind',
@@ -152,8 +153,11 @@ export const I18N: Record<Locale, Record<string, string>> = {
     label_artifacts: 'artifacts',
     dataset_saving: 'Saving dataset…',
     dataset_saved_message: 'Dataset saved locally and ready for analysis.',
+    dataset_building_background: 'Saving dataset and starting background builds…',
     dataset_saved_with_embedding_message:
       'Dataset saved locally. Embedding build started in the background and hybrid search will unlock when it finishes.',
+    dataset_saved_with_keyword_message:
+      'Dataset saved locally. Keyword index build started in the background and keyword search will unlock when it finishes.',
     dataset_saved_from_run: 'Result artifact saved as a local dataset.',
     dataset_save_failed: 'Failed to save dataset: {error}',
     dataset_removed_message: 'Removed local dataset record for {name}. Source files were not touched.',
@@ -194,7 +198,47 @@ export const I18N: Record<Locale, Record<string, string>> = {
     embedding_dataset_failed: 'Build failed',
     embedding_disabled: 'Embedding disabled for this dataset.',
     embedding_disabled_short: 'No embedding',
+    import_keyword_title: 'Keyword Index Config',
+    import_keyword_hint:
+      'Choose keyword-search columns during import so the dataset can build a reusable BM25 index in the background.',
+    keyword_enable: 'Enable for this dataset',
+    keyword_text_columns: 'Keyword Text Columns',
+    keyword_analyzer: 'Analyzer',
+    keyword_columns_placeholder: 'title,body,summary',
+    keyword_analyzer_placeholder: 'jieba',
+    keyword_ready: 'Keyword index built',
+    keyword_configured_only: 'Keyword index configured',
+    keyword_building_short: 'Keyword indexing',
+    keyword_build_needed_hint:
+      'Keyword index is configured for this dataset, but the reusable search index has not been built yet.',
+    keyword_building_hint:
+      'Keyword index build is running in the background. Keyword search will unlock automatically when it finishes.',
+    keyword_build_action: 'Build Keyword Index',
+    keyword_build_retry: 'Retry Build',
+    keyword_build_started: 'Started building keyword index for {name}.',
+    keyword_build_succeeded: 'Keyword index is ready for {name}.',
+    keyword_build_failed: 'Keyword index build failed: {error}',
+    keyword_build_failed_short: 'Keyword index failed',
+    keyword_disabled: 'Keyword index disabled for this dataset.',
+    keyword_disabled_short: 'No keyword index',
     hybrid_search_title: 'Hybrid Search',
+    keyword_results: 'Keyword Result',
+    keyword_search_inline_hint:
+      'Run BM25 keyword retrieval against the current dataset using the saved keyword-index configuration.',
+    keyword_locked_config_hint:
+      'Keyword config is locked to the built index: columns={columns} | analyzer={analyzer}',
+    keyword_query: 'Keyword Query',
+    keyword_query_placeholder: 'Search with keywords',
+    keyword_top_k: 'Top K',
+    run_keyword_search: 'Run Keyword Search',
+    keyword_loading: 'Running keyword search…',
+    keyword_failed: 'Keyword search failed: {error}',
+    keyword_no_result: 'No keyword search rows returned.',
+    keyword_query_required: 'Enter query text before running keyword search.',
+    keyword_requires_enabled:
+      'Keyword Search is unavailable because this dataset does not have keyword index enabled.',
+    keyword_requires_index:
+      'Keyword Search requires a prebuilt keyword index. Build the keyword index first, then run the query again.',
     hybrid_search_hint:
       'Run fuzzy vector-backed search against the current dataset using the saved import options and embedding defaults.',
     hybrid_search_inline_hint:
@@ -341,6 +385,7 @@ export const I18N: Record<Locale, Record<string, string>> = {
     kind_result: '分析结果',
     field_source: '来源',
     field_embedding_dataset: 'embedding 数据集',
+    field_keyword_index: '关键词索引',
     field_schema: 'Schema',
     field_embedding: 'Embedding',
     field_kind: '类型',
@@ -370,8 +415,11 @@ export const I18N: Record<Locale, Record<string, string>> = {
     label_artifacts: '个产物',
     dataset_saving: '正在保存数据集…',
     dataset_saved_message: '数据集已保存到本地，可直接继续分析。',
+    dataset_building_background: '正在保存数据集并启动后台构建…',
     dataset_saved_with_embedding_message:
       '数据集已保存到本地。embedding 数据集正在后台构建，完成后即可直接做 Hybrid Search。',
+    dataset_saved_with_keyword_message:
+      '数据集已保存到本地。关键词索引正在后台构建，完成后即可直接做关键词搜索。',
     dataset_saved_from_run: '运行结果已另存为本地数据集。',
     dataset_save_failed: '保存数据集失败：{error}',
     dataset_removed_message: '已移除本地数据集记录 {name}，源文件没有被删除。',
@@ -411,7 +459,46 @@ export const I18N: Record<Locale, Record<string, string>> = {
     embedding_dataset_failed: '构建失败',
     embedding_disabled: '这个数据集当前没有启用 embedding。',
     embedding_disabled_short: '未配置 embedding',
+    import_keyword_title: '关键词索引配置',
+    import_keyword_hint:
+      '在导入时选择关键词搜索列，这样数据集可以在后台异步构建可复用的 BM25 索引。',
+    keyword_enable: '为这个数据集启用',
+    keyword_text_columns: '关键词列',
+    keyword_analyzer: '分析器',
+    keyword_columns_placeholder: 'title,body,summary',
+    keyword_analyzer_placeholder: 'jieba',
+    keyword_ready: '关键词索引已构建',
+    keyword_configured_only: '关键词索引已配置',
+    keyword_building_short: '关键词索引构建中',
+    keyword_build_needed_hint: '这个数据集已经配置了关键词索引，但可复用的搜索索引还没有真正构建出来。',
+    keyword_building_hint:
+      '关键词索引正在后台构建。构建完成后，关键词搜索会自动恢复可用。',
+    keyword_build_action: '构建关键词索引',
+    keyword_build_retry: '重试构建',
+    keyword_build_started: '已开始为 {name} 构建关键词索引。',
+    keyword_build_succeeded: '{name} 的关键词索引已构建完成。',
+    keyword_build_failed: '关键词索引构建失败：{error}',
+    keyword_build_failed_short: '关键词索引构建失败',
+    keyword_disabled: '这个数据集当前没有启用关键词索引。',
+    keyword_disabled_short: '未配置关键词索引',
     hybrid_search_title: 'Hybrid Search',
+    keyword_results: '关键词搜索结果',
+    keyword_search_inline_hint:
+      '基于当前数据集已经构建的关键词索引配置，执行一次 BM25 关键词检索。',
+    keyword_locked_config_hint:
+      '关键词配置已锁定为当前已构建索引：列={columns} | analyzer={analyzer}',
+    keyword_query: '关键词查询',
+    keyword_query_placeholder: '输入关键词检索',
+    keyword_top_k: 'Top K',
+    run_keyword_search: '执行关键词搜索',
+    keyword_loading: '正在执行关键词搜索…',
+    keyword_failed: '关键词搜索失败：{error}',
+    keyword_no_result: '关键词搜索没有返回结果。',
+    keyword_query_required: '执行关键词搜索前请先输入查询文本。',
+    keyword_requires_enabled:
+      '当前数据集没有启用关键词索引，因此无法执行关键词搜索。',
+    keyword_requires_index:
+      '关键词搜索需要先构建关键词索引。请先构建索引，再重新执行查询。',
     hybrid_search_hint:
       '基于当前数据集的导入参数和 embedding 默认值，执行一次向量模糊检索。',
     hybrid_search_inline_hint:

@@ -12,6 +12,7 @@
 #include <string_view>
 #include <utility>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "src/dataflow/core/execution/columnar_batch.h"
@@ -27,6 +28,7 @@ namespace dataflow {
 namespace {
 
 constexpr char kGroupDelim = '\x1f';
+constexpr char kValueMetaDelim = '\x1e';
 
 enum class FilterCompareOp : uint8_t { Eq, Ne, Lt, Gt, Le, Ge };
 
@@ -160,6 +162,55 @@ std::string_view singleStringKeyAt(const ValueColumnBuffer& column, std::size_t 
     return view;
   }
   return std::string_view();
+}
+
+void appendLengthPrefixedUnionValue(std::string* key, const Value& value) {
+  const auto encoded = value.toString();
+  key->append(std::to_string(static_cast<int>(value.type())));
+  key->push_back(kValueMetaDelim);
+  key->append(std::to_string(encoded.size()));
+  key->push_back(kValueMetaDelim);
+  key->append(encoded);
+  key->push_back(kGroupDelim);
+}
+
+std::string serializeUnionRow(const Row& row) {
+  std::string key;
+  for (const auto& value : row) {
+    appendLengthPrefixedUnionValue(&key, value);
+  }
+  return key;
+}
+
+Table executeUnionTable(Table left, Table right, bool distinct) {
+  if (left.schema.fields.size() != right.schema.fields.size()) {
+    throw std::runtime_error("UNION requires the same number of columns on both sides");
+  }
+  materializeRows(&left);
+  materializeRows(&right);
+
+  Table out;
+  out.schema = left.schema;
+  out.rows.reserve(left.rows.size() + right.rows.size());
+  if (!distinct) {
+    out.rows.insert(out.rows.end(), left.rows.begin(), left.rows.end());
+    out.rows.insert(out.rows.end(), right.rows.begin(), right.rows.end());
+    return out;
+  }
+
+  std::unordered_set<std::string> seen;
+  seen.reserve(left.rows.size() + right.rows.size());
+  auto append_unique = [&](const std::vector<Row>& rows) {
+    for (const auto& row : rows) {
+      auto key = serializeUnionRow(row);
+      if (seen.insert(std::move(key)).second) {
+        out.rows.push_back(row);
+      }
+    }
+  };
+  append_unique(left.rows);
+  append_unique(right.rows);
+  return out;
 }
 
 struct AggregateAccumulator {
@@ -670,6 +721,8 @@ std::size_t planOutputWidth(const PlanNodePtr& plan) {
       return static_cast<const SelectPlan*>(plan.get())->indices.size();
     case PlanKind::Filter:
       return planOutputWidth(static_cast<const FilterPlan*>(plan.get())->child);
+    case PlanKind::Union:
+      return planOutputWidth(static_cast<const UnionPlan*>(plan.get())->left);
     case PlanKind::WithColumn:
       return planOutputWidth(static_cast<const WithColumnPlan*>(plan.get())->child) + 1;
     case PlanKind::Drop:
@@ -726,6 +779,12 @@ void collectSourceRequirements(const PlanNodePtr& plan, const std::vector<std::s
       collectPredicateColumns(node->predicate, &child_required);
       collectSourceRequirements(node->child, normalizeRequiredColumns(std::move(child_required)),
                                 requirements);
+      return;
+    }
+    case PlanKind::Union: {
+      const auto* node = static_cast<const UnionPlan*>(plan.get());
+      collectSourceRequirements(node->left, required_output, requirements);
+      collectSourceRequirements(node->right, required_output, requirements);
       return;
     }
     case PlanKind::WithColumn: {
@@ -1800,6 +1859,12 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
                                  : evaluatePlanPredicateExpr(*child_input.table,
                                                              filter_pattern.predicate);
       return filterTable(*child_input.table, selection, false);
+    }
+    case PlanKind::Union: {
+      const auto* node = static_cast<const UnionPlan*>(plan.get());
+      const auto left_input = borrowOrExecute(executor, node->left, requirements);
+      const auto right_input = borrowOrExecute(executor, node->right, requirements);
+      return executeUnionTable(*left_input.table, *right_input.table, node->distinct);
     }
     case PlanKind::WithColumn: {
       const auto* node = static_cast<const WithColumnPlan*>(plan.get());

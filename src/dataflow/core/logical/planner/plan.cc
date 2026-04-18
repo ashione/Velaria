@@ -12,7 +12,7 @@
 namespace dataflow {
 
 namespace {
-constexpr int kPlanFormatVersion = 1002;
+constexpr int kPlanFormatVersion = 1003;
 
 void appendToken(std::string* out, const std::string& value) {
   out->append(std::to_string(value.size()));
@@ -285,6 +285,13 @@ void serializeNode(const PlanNodePtr& plan, std::string* out) {
       serializePredicateExpr(node->predicate, out);
       return;
     }
+    case PlanKind::Union: {
+      const auto* node = static_cast<const UnionPlan*>(plan.get());
+      serializeNode(node->left, out);
+      serializeNode(node->right, out);
+      appendInt(out, node->distinct ? 1 : 0);
+      return;
+    }
     case PlanKind::WithColumn: {
       const auto* node = static_cast<const WithColumnPlan*>(plan.get());
       serializeNode(node->child, out);
@@ -419,6 +426,12 @@ PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset, int
       auto child = deserializeNode(payload, offset, format_version);
       auto predicate = deserializePredicateExpr(payload, offset);
       return std::make_shared<FilterPlan>(std::move(child), std::move(predicate));
+    }
+    case PlanKind::Union: {
+      auto left = deserializeNode(payload, offset, format_version);
+      auto right = deserializeNode(payload, offset, format_version);
+      const bool distinct = readInt(payload, offset) != 0;
+      return std::make_shared<UnionPlan>(std::move(left), std::move(right), distinct);
     }
     case PlanKind::WithColumn: {
       auto child = deserializeNode(payload, offset, format_version);

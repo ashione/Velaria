@@ -1,13 +1,22 @@
 #include "src/dataflow/core/contract/api/dataframe.h"
 
 #include <algorithm>
-#include <stdexcept>
+#include <cctype>
+#include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <limits>
+#include <memory>
+#include <mutex>
+#include <numeric>
 #include <sstream>
+#include <stdexcept>
+#include <unordered_map>
 
 #include "src/dataflow/ai/plugin_runtime.h"
+#include "cppjieba/Jieba.hpp"
 #include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/runtime/simd_dispatch.h"
 #include "src/dataflow/core/execution/runtime/vector_index.h"
@@ -80,6 +89,8 @@ bool subtreeSupportsSourceFilterPushdown(const PlanNodePtr& plan) {
       return subtreeSupportsSourceFilterPushdown(static_cast<const FilterPlan*>(plan.get())->child);
     case PlanKind::Limit:
       return subtreeSupportsSourceFilterPushdown(static_cast<const LimitPlan*>(plan.get())->child);
+    case PlanKind::Union:
+      return false;
     default:
       return false;
   }
@@ -103,6 +114,10 @@ void analyzeHybridQueryPlanRecursive(const PlanNodePtr& plan, HybridQueryPlanAna
       analyzeHybridQueryPlanRecursive(static_cast<const FilterPlan*>(plan.get())->child, analysis);
       return;
     }
+    case PlanKind::Union:
+      analysis->valid = false;
+      analysis->error = "only supports single-source DataFrame plans without UNION";
+      return;
     case PlanKind::WithColumn:
       analyzeHybridQueryPlanRecursive(static_cast<const WithColumnPlan*>(plan.get())->child,
                                       analysis);
@@ -202,6 +217,203 @@ Table gatherHybridSearchRows(const Table& input, const std::vector<VectorSearchR
   return out;
 }
 
+std::vector<std::string> tokenizeKeywordText(const std::string& text) {
+  auto fallbackTokenize = [&](const std::string& input) {
+    auto decodeUtf8 = [](const std::string& input, std::size_t* offset, std::string* token,
+                         uint32_t* codepoint) -> bool {
+      if (offset == nullptr || token == nullptr || codepoint == nullptr || *offset >= input.size()) {
+        return false;
+      }
+      const auto first = static_cast<unsigned char>(input[*offset]);
+      if (first < 0x80) {
+        token->assign(1, static_cast<char>(first));
+        *codepoint = first;
+        *offset += 1;
+        return true;
+      }
+      std::size_t width = 0;
+      uint32_t value = 0;
+      if ((first & 0xE0) == 0xC0) {
+        width = 2;
+        value = first & 0x1F;
+      } else if ((first & 0xF0) == 0xE0) {
+        width = 3;
+        value = first & 0x0F;
+      } else if ((first & 0xF8) == 0xF0) {
+        width = 4;
+        value = first & 0x07;
+      } else {
+        token->assign(1, static_cast<char>(first));
+        *codepoint = first;
+        *offset += 1;
+        return true;
+      }
+      if (*offset + width > input.size()) {
+        token->assign(1, static_cast<char>(first));
+        *codepoint = first;
+        *offset += 1;
+        return true;
+      }
+      for (std::size_t index = 1; index < width; ++index) {
+        const auto cont = static_cast<unsigned char>(input[*offset + index]);
+        if ((cont & 0xC0) != 0x80) {
+          token->assign(1, static_cast<char>(first));
+          *codepoint = first;
+          *offset += 1;
+          return true;
+        }
+        value = (value << 6) | (cont & 0x3F);
+      }
+      token->assign(input, *offset, width);
+      *codepoint = value;
+      *offset += width;
+      return true;
+    };
+    auto isCjkCodePoint = [](uint32_t codepoint) {
+      return (codepoint >= 0x3400 && codepoint <= 0x4DBF) ||
+             (codepoint >= 0x4E00 && codepoint <= 0x9FFF) ||
+             (codepoint >= 0xF900 && codepoint <= 0xFAFF) ||
+             (codepoint >= 0x3040 && codepoint <= 0x30FF) ||
+             (codepoint >= 0xAC00 && codepoint <= 0xD7AF);
+    };
+    auto appendCjkTokens = [](const std::vector<std::string>& cjk_chars,
+                              std::vector<std::string>* out) {
+      if (out == nullptr || cjk_chars.empty()) {
+        return;
+      }
+      const std::size_t max_window = std::min<std::size_t>(3, cjk_chars.size());
+      for (std::size_t window = 1; window <= max_window; ++window) {
+        for (std::size_t index = 0; index + window <= cjk_chars.size(); ++index) {
+          std::string token;
+          for (std::size_t cursor = 0; cursor < window; ++cursor) {
+            token += cjk_chars[index + cursor];
+          }
+          out->push_back(std::move(token));
+        }
+      }
+      if (cjk_chars.size() >= 2 && cjk_chars.size() <= 8) {
+        std::string full_run;
+        for (const auto& token : cjk_chars) {
+          full_run += token;
+        }
+        out->push_back(std::move(full_run));
+      }
+    };
+
+    std::vector<std::string> out;
+    std::string ascii_current;
+    std::vector<std::string> cjk_chars;
+    auto flush_ascii = [&]() {
+      if (!ascii_current.empty()) {
+        out.push_back(std::move(ascii_current));
+        ascii_current.clear();
+      }
+    };
+    auto flush_cjk = [&]() {
+      appendCjkTokens(cjk_chars, &out);
+      cjk_chars.clear();
+    };
+
+    std::size_t offset = 0;
+    while (offset < input.size()) {
+      std::string token;
+      uint32_t codepoint = 0;
+      decodeUtf8(input, &offset, &token, &codepoint);
+      if (token.size() == 1 && static_cast<unsigned char>(token[0]) < 0x80 &&
+          std::isalnum(static_cast<unsigned char>(token[0]))) {
+        flush_cjk();
+        ascii_current.push_back(
+            static_cast<char>(std::tolower(static_cast<unsigned char>(token[0]))));
+        continue;
+      }
+      if (isCjkCodePoint(codepoint)) {
+        flush_ascii();
+        cjk_chars.push_back(std::move(token));
+        continue;
+      }
+      flush_ascii();
+      flush_cjk();
+    }
+    flush_ascii();
+    flush_cjk();
+    return out;
+  };
+  auto normalizeJiebaToken = [](std::string token) -> std::string {
+    bool has_alnum = false;
+    for (char& ch : token) {
+      const auto byte = static_cast<unsigned char>(ch);
+      if (byte < 0x80 && std::isalnum(byte)) {
+        ch = static_cast<char>(std::tolower(byte));
+        has_alnum = true;
+      }
+    }
+    if (has_alnum) {
+      return token;
+    }
+    for (unsigned char byte : token) {
+      if (byte >= 0x80) {
+        return token;
+      }
+    }
+    return "";
+  };
+  auto loadJieba = []() -> cppjieba::Jieba* {
+    static std::unique_ptr<cppjieba::Jieba> jieba;
+    static std::once_flag once;
+    std::call_once(once, []() {
+      try {
+        const char* dict_dir = std::getenv("VELARIA_JIEBA_DICT_DIR");
+        if (dict_dir != nullptr && dict_dir[0] != '\0') {
+          std::filesystem::path base(dict_dir);
+          if (base.extension() == ".utf8") {
+            base = base.parent_path();
+          }
+          jieba = std::make_unique<cppjieba::Jieba>(
+              (base / "jieba.dict.utf8").string(),
+              (base / "hmm_model.utf8").string(),
+              (base / "user.dict.utf8").string(),
+              (base / "idf.utf8").string(),
+              (base / "stop_words.utf8").string());
+        } else {
+          jieba = std::make_unique<cppjieba::Jieba>();
+        }
+      } catch (...) {
+        jieba.reset();
+      }
+    });
+    return jieba.get();
+  };
+
+  if (auto* jieba = loadJieba()) {
+    std::vector<std::string> tokens;
+    jieba->CutForSearch(text, tokens, true);
+    std::vector<std::string> normalized;
+    normalized.reserve(tokens.size());
+    for (auto& token : tokens) {
+      auto normalized_token = normalizeJiebaToken(std::move(token));
+      if (!normalized_token.empty()) {
+        normalized.push_back(std::move(normalized_token));
+      }
+    }
+    if (!normalized.empty()) {
+      return normalized;
+    }
+  }
+
+  return fallbackTokenize(text);
+}
+
+Table gatherKeywordSearchRows(const Table& input,
+                              const std::vector<std::size_t>& row_indices,
+                              std::vector<Value> scores) {
+  if (input.schema.index.count("keyword_score") != 0) {
+    throw std::invalid_argument("keywordSearch output column already exists: keyword_score");
+  }
+  Table out = filterTable(input, makeRowSelection(input.rowCount(), row_indices), false);
+  appendNamedColumn(&out, "keyword_score", std::move(scores), false);
+  return out;
+}
+
 std::string formatHybridSearchExplain(const HybridSearchOptions& options,
                                       const HybridQueryPlanAnalysis& analysis,
                                       const CachedVectorColumn& cache, std::size_t input_rows,
@@ -233,6 +445,8 @@ std::string planKindName(PlanKind kind) {
       return "Select";
     case PlanKind::Filter:
       return "Filter";
+    case PlanKind::Union:
+      return "Union";
     case PlanKind::WithColumn:
       return "WithColumn";
     case PlanKind::Drop:
@@ -312,6 +526,14 @@ void explainPlan(const PlanNodePtr& node, std::ostringstream& out, int depth = 0
   if (node->kind == PlanKind::Filter) {
     const auto* n = static_cast<FilterPlan*>(node.get());
     explainPlan(n->child, out, depth + 1);
+    return;
+  }
+  if (node->kind == PlanKind::Union) {
+    const auto* n = static_cast<UnionPlan*>(node.get());
+    out << std::string((depth + 1) * 2, ' ') << "distinct=" << (n->distinct ? "true" : "false")
+        << "\n";
+    explainPlan(n->left, out, depth + 1);
+    explainPlan(n->right, out, depth + 1);
     return;
   }
   if (node->kind == PlanKind::WithColumn) {
@@ -680,6 +902,126 @@ DataFrame DataFrame::vectorQuery(const std::string& vectorColumn,
   return DataFrame(std::move(out));
 }
 
+DataFrame DataFrame::keywordSearch(const std::vector<std::string>& textColumns,
+                                   const std::string& queryText,
+                                   size_t top_k) const {
+  if (textColumns.empty()) {
+    throw std::invalid_argument("keywordSearch requires at least one text column");
+  }
+  if (top_k == 0) {
+    throw std::invalid_argument("keywordSearch top_k must be positive");
+  }
+  if (queryText.empty()) {
+    throw std::invalid_argument("keywordSearch query text cannot be empty");
+  }
+  const auto& input = materialize();
+  Table materialized_input = input;
+  const auto query_terms = tokenizeKeywordText(queryText);
+  if (query_terms.empty()) {
+    throw std::invalid_argument("keywordSearch query must contain at least one token");
+  }
+
+  std::vector<std::size_t> column_indices;
+  column_indices.reserve(textColumns.size());
+  for (const auto& column : textColumns) {
+    column_indices.push_back(input.schema.indexOf(column));
+  }
+
+  std::unordered_map<std::string, std::size_t> query_term_index;
+  std::vector<std::string> unique_terms;
+  unique_terms.reserve(query_terms.size());
+  for (const auto& term : query_terms) {
+    if (query_term_index.count(term) != 0) {
+      continue;
+    }
+    query_term_index[term] = unique_terms.size();
+    unique_terms.push_back(term);
+  }
+
+  std::vector<std::unordered_map<std::string, std::size_t>> row_term_freqs;
+  row_term_freqs.reserve(materialized_input.rowCount());
+  std::vector<std::size_t> row_lengths;
+  row_lengths.reserve(materialized_input.rowCount());
+  std::vector<std::size_t> document_frequency(unique_terms.size(), 0);
+
+  materializeRows(&materialized_input);
+  for (const auto& row : materialized_input.rows) {
+    std::unordered_map<std::string, std::size_t> term_freq;
+    std::size_t doc_length = 0;
+    for (const auto column_index : column_indices) {
+      if (column_index >= row.size() || row[column_index].isNull()) {
+        continue;
+      }
+      const auto tokens = tokenizeKeywordText(row[column_index].toString());
+      doc_length += tokens.size();
+      for (const auto& token : tokens) {
+        if (query_term_index.count(token) == 0) {
+          continue;
+        }
+        term_freq[token] += 1;
+      }
+    }
+    for (const auto& entry : term_freq) {
+      document_frequency[query_term_index.at(entry.first)] += 1;
+    }
+    row_lengths.push_back(doc_length);
+    row_term_freqs.push_back(std::move(term_freq));
+  }
+
+  const double row_count = static_cast<double>(materialized_input.rowCount());
+  const double total_length = std::accumulate(row_lengths.begin(), row_lengths.end(), 0.0);
+  const double avg_doc_length = row_count > 0.0 ? total_length / row_count : 0.0;
+  constexpr double k1 = 1.2;
+  constexpr double b = 0.75;
+
+  struct KeywordHit {
+    std::size_t row_index = 0;
+    double score = 0.0;
+  };
+  std::vector<KeywordHit> hits;
+  hits.reserve(materialized_input.rowCount());
+  for (std::size_t row_index = 0; row_index < row_term_freqs.size(); ++row_index) {
+    const auto& term_freq = row_term_freqs[row_index];
+    if (term_freq.empty()) {
+      continue;
+    }
+    double score = 0.0;
+    for (std::size_t term_index = 0; term_index < unique_terms.size(); ++term_index) {
+      const auto tf_it = term_freq.find(unique_terms[term_index]);
+      if (tf_it == term_freq.end()) {
+        continue;
+      }
+      const double tf = static_cast<double>(tf_it->second);
+      const double df = static_cast<double>(document_frequency[term_index]);
+      const double idf = std::log(1.0 + ((row_count - df + 0.5) / (df + 0.5)));
+      const double length_norm =
+          avg_doc_length > 0.0 ? (1.0 - b + b * (static_cast<double>(row_lengths[row_index]) / avg_doc_length))
+                               : 1.0;
+      score += idf * ((tf * (k1 + 1.0)) / (tf + k1 * length_norm));
+    }
+    if (score > 0.0) {
+      hits.push_back(KeywordHit{row_index, score});
+    }
+  }
+
+  std::sort(hits.begin(), hits.end(), [](const KeywordHit& left, const KeywordHit& right) {
+    if (left.score == right.score) {
+      return left.row_index < right.row_index;
+    }
+    return left.score > right.score;
+  });
+  const auto take = std::min<std::size_t>(top_k, hits.size());
+  std::vector<std::size_t> row_indices;
+  std::vector<Value> scores;
+  row_indices.reserve(take);
+  scores.reserve(take);
+  for (std::size_t index = 0; index < take; ++index) {
+    row_indices.push_back(hits[index].row_index);
+    scores.emplace_back(hits[index].score);
+  }
+  return DataFrame(gatherKeywordSearchRows(materialized_input, row_indices, std::move(scores)));
+}
+
 DataFrame DataFrame::hybridSearch(const std::string& vectorColumn,
                                   const std::vector<float>& queryVector,
                                   const HybridSearchOptions& options) const {
@@ -746,6 +1088,16 @@ GroupedDataFrame DataFrame::groupBy(const std::vector<std::string>& keys) const 
   idxs.reserve(keys.size());
   for (const auto& k : keys) idxs.push_back(source.indexOf(k));
   return GroupedDataFrame(plan_, idxs, executor_, schema_hint_);
+}
+
+DataFrame DataFrame::unionWith(const DataFrame& right, bool distinct) const {
+  const auto& leftSchema = schema();
+  const auto& rightSchema = right.schema();
+  if (leftSchema.fields.size() != rightSchema.fields.size()) {
+    throw std::invalid_argument("UNION requires the same number of columns on both sides");
+  }
+  auto node = std::make_shared<UnionPlan>(plan_, right.plan_, distinct);
+  return DataFrame(node, executor_, makeSchemaHint(leftSchema));
 }
 
 DataFrame DataFrame::join(const DataFrame& right, const std::string& leftOn, const std::string& rightOn,

@@ -29,6 +29,7 @@ from velaria import (
     load_embedding_dataframe,
     materialize_embeddings,
     materialize_mixed_text_embeddings,
+    materialize_mixed_text_embeddings_stream,
     query_file_embeddings,
     read_embedding_table,
     render_text_template,
@@ -36,6 +37,7 @@ from velaria import (
     run_mixed_text_hybrid_search,
     run_file_mixed_text_hybrid_search,
     select_embedding_updates,
+    stream_mixed_text_embeddings_to_parquet,
 )
 
 
@@ -61,6 +63,24 @@ class RaisingEmbeddingProvider(EmbeddingProvider):
     def embed(self, texts, *, model, batch_size=None):
         del texts, model, batch_size
         raise RuntimeError("embedding provider failed")
+
+
+class RecordingEmbeddingProvider(EmbeddingProvider):
+    provider_name = "recording"
+
+    def __init__(self, mapping):
+        self._mapping = mapping
+        self.calls = []
+
+    def embed(self, texts, *, model, batch_size=None):
+        self.calls.append(
+            {
+                "texts": list(texts),
+                "model": model,
+                "batch_size": batch_size,
+            }
+        )
+        return [list(self._mapping[text]) for text in texts]
 
 
 class EmbeddingPipelineTest(unittest.TestCase):
@@ -611,6 +631,89 @@ class EmbeddingPipelineTest(unittest.TestCase):
             ).to_rows()
             doc_id_index = result["schema"].index("doc_id")
             self.assertEqual(result["rows"][0][doc_id_index], "doc-1")
+
+    def test_materialize_mixed_text_embeddings_stream_batches_provider_calls(self):
+        provider = RecordingEmbeddingProvider(
+            {
+                "title: Alpha\nsummary: Payment page timeout": [1.0, 0.0, 0.0],
+                "title: Beta\nsummary: Refund delay in worker queue": [0.0, 1.0, 0.0],
+                "title: Gamma\nsummary: Checkout retry storm": [0.8, 0.2, 0.0],
+            }
+        )
+        records = [
+            {"doc_id": "doc-1", "title": "Alpha", "summary": "Payment page timeout", "source_updated_at": 1},
+            {"doc_id": "doc-2", "title": "Beta", "summary": "Refund delay in worker queue", "source_updated_at": 2},
+            {"doc_id": "doc-3", "title": "Gamma", "summary": "Checkout retry storm", "source_updated_at": 3},
+        ]
+        with tempfile.TemporaryDirectory(prefix="velaria-stream-embed-") as tmp:
+            output_path = pathlib.Path(tmp) / "bitable_embeddings.parquet"
+            table = materialize_mixed_text_embeddings_stream(
+                records,
+                provider=provider,
+                model="static-demo",
+                template_version="text-v1",
+                text_fields=("title", "summary"),
+                batch_size=2,
+                output_path=output_path,
+            )
+            self.assertTrue(output_path.exists())
+
+        self.assertEqual(table.column("doc_id").to_pylist(), ["doc-1", "doc-2", "doc-3"])
+        self.assertEqual([len(call["texts"]) for call in provider.calls], [2, 1])
+
+    def test_materialize_mixed_text_embeddings_stream_accepts_arrow_table(self):
+        provider = RecordingEmbeddingProvider(
+            {
+                "title: Alpha\nsummary: Payment page timeout": [1.0, 0.0, 0.0],
+                "title: Beta\nsummary: Refund delay in worker queue": [0.0, 1.0, 0.0],
+                "title: Gamma\nsummary: Checkout retry storm": [0.8, 0.2, 0.0],
+            }
+        )
+        source = pa.table(
+            {
+                "doc_id": ["doc-1", "doc-2", "doc-3"],
+                "title": ["Alpha", "Beta", "Gamma"],
+                "summary": [
+                    "Payment page timeout",
+                    "Refund delay in worker queue",
+                    "Checkout retry storm",
+                ],
+                "source_updated_at": [1, 2, 3],
+            }
+        )
+        table = materialize_mixed_text_embeddings_stream(
+            source,
+            provider=provider,
+            model="static-demo",
+            template_version="text-v1",
+            text_fields=("title", "summary"),
+            batch_size=2,
+        )
+        self.assertEqual(table.column("doc_id").to_pylist(), ["doc-1", "doc-2", "doc-3"])
+        self.assertEqual([len(call["texts"]) for call in provider.calls], [2, 1])
+
+    def test_stream_mixed_text_embeddings_to_parquet_requires_parquet_suffix(self):
+        provider = StaticEmbeddingProvider(
+            {
+                "title: Alpha\nsummary: Payment page timeout": [1.0, 0.0, 0.0],
+            }
+        )
+        records = [
+            {"doc_id": "doc-1", "title": "Alpha", "summary": "Payment page timeout", "source_updated_at": 1},
+        ]
+        with tempfile.TemporaryDirectory(prefix="velaria-stream-embed-suffix-") as tmp:
+            output_path = pathlib.Path(tmp) / "bitable_embeddings.arrow"
+            with self.assertRaisesRegex(
+                ValueError, "stream_mixed_text_embeddings_to_parquet requires a \\.parquet output path"
+            ):
+                stream_mixed_text_embeddings_to_parquet(
+                    records,
+                    provider=provider,
+                    model="static-demo",
+                    template_version="text-v1",
+                    text_fields=("title", "summary"),
+                    output_path=output_path,
+                )
 
     def test_build_file_embeddings_reads_csv_and_materializes_embedding_table(self):
         provider = StaticEmbeddingProvider(

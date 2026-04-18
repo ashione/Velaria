@@ -264,6 +264,38 @@ void runParserRegression() {
       });
 
   expectNoThrow(
+      "parser_union_all_projection",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT user_id FROM users UNION ALL SELECT user_id FROM archived_users");
+        expect(st.query.union_terms.size() == 1, "parser_union_all_term_size");
+        expect(st.query.union_terms[0].all, "parser_union_all_flag");
+      });
+
+  expectNoThrow(
+      "parser_union_distinct_projection",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT region FROM users UNION SELECT region FROM archived_users");
+        expect(st.query.union_terms.size() == 1, "parser_union_distinct_term_size");
+        expect(!st.query.union_terms[0].all, "parser_union_distinct_flag");
+      });
+
+  expectNoThrow(
+      "parser_keyword_search_clause_parsed",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT id, title, keyword_score FROM docs "
+            "WHERE bucket = 1 "
+            "KEYWORD SEARCH(title, body) QUERY 'payment timeout' TOP_K 20");
+        expect(st.query.keyword_search.has_value(), "parser_keyword_search_present");
+        expect(st.query.keyword_search->columns.size() == 2, "parser_keyword_search_column_count");
+        expect(st.query.keyword_search->query_text == "payment timeout",
+               "parser_keyword_search_query_text");
+        expect(st.query.keyword_search->top_k == 20, "parser_keyword_search_top_k");
+      });
+
+  expectNoThrow(
       "parser_join_with_parenthesized_on",
       []() {
         const auto st = dataflow::sql::SqlParser::parse(
@@ -441,6 +473,14 @@ void runSemanticRegression() {
       },
       "HYBRID SEARCH does not support aggregate");
 
+  expectThrows(
+      "planner_keyword_search_aggregate_rejected",
+      [&]() {
+        s.submit("SELECT region, SUM(score) AS total_score FROM t_users_v1 "
+                 "KEYWORD SEARCH(region) QUERY 'apac' TOP_K 2 GROUP BY region");
+      },
+      "KEYWORD SEARCH does not support aggregate");
+
   Table and_rows = s.submit(
       "SELECT user_id FROM t_users_v1 WHERE region = 'apac' AND score > 20 ORDER BY user_id LIMIT 5");
   expect(and_rows.rows.size() == 1, "planner_where_and_rows");
@@ -451,6 +491,61 @@ void runSemanticRegression() {
   expect(or_rows.rows.size() == 2, "planner_where_or_rows");
   expect(or_rows.rows[0][0].asInt64() == 1, "planner_where_or_first_user");
   expect(or_rows.rows[1][0].asInt64() == 2, "planner_where_or_second_user");
+
+  s.submit("CREATE TABLE t_users_archive_v1 (user_id INT, region STRING, score INT)");
+  s.submit("INSERT INTO t_users_archive_v1 VALUES (2, 'emea', 18), (4, 'latam', 21)");
+
+  Table union_all_rows = s.submit(
+      "SELECT user_id FROM t_users_v1 UNION ALL SELECT user_id FROM t_users_archive_v1");
+  expect(union_all_rows.rows.size() == 5, "planner_union_all_rows");
+
+  Table union_rows = s.submit(
+      "SELECT user_id FROM t_users_v1 UNION SELECT user_id FROM t_users_archive_v1");
+  expect(union_rows.rows.size() == 4, "planner_union_distinct_rows");
+
+  Table delimiter_left;
+  delimiter_left.schema = Schema({"left_text", "right_text"});
+  delimiter_left.rows = {
+      {Value(std::string("alpha") + std::string(1, '\x1f') + "beta"), Value("gamma")},
+  };
+  Table delimiter_right;
+  delimiter_right.schema = Schema({"left_text", "right_text"});
+  delimiter_right.rows = {
+      {Value("alpha"), Value(std::string("beta") + std::string(1, '\x1f') + "gamma")},
+  };
+  s.createTempView("t_union_delim_left_v1", s.createDataFrame(delimiter_left));
+  s.createTempView("t_union_delim_right_v1", s.createDataFrame(delimiter_right));
+  Table delimiter_union_rows = s.submit(
+      "SELECT left_text, right_text FROM t_union_delim_left_v1 "
+      "UNION SELECT left_text, right_text FROM t_union_delim_right_v1");
+  expect(delimiter_union_rows.rows.size() == 2, "planner_union_distinct_embedded_delimiter_rows");
+
+  expectThrows(
+      "planner_union_column_count_mismatch_rejected",
+      [&]() {
+        s.submit(
+            "SELECT user_id, region FROM t_users_v1 UNION SELECT user_id FROM t_users_archive_v1");
+      },
+      "same number of projected columns");
+
+  expectThrowsType<dataflow::SQLUnsupportedError>(
+      "planner_union_order_by_rejected",
+      [&]() {
+        s.submit(
+            "SELECT user_id FROM t_users_v1 UNION SELECT user_id FROM t_users_archive_v1 ORDER BY user_id");
+      },
+      "UNION does not support ORDER BY");
+
+  expectThrowsType<dataflow::SQLUnsupportedError>(
+      "stream_sql_union_rejected",
+      [&]() {
+        const auto parsed =
+            dataflow::sql::SqlParser::parse(
+                "SELECT user_id FROM stream_left_v1 UNION SELECT user_id FROM stream_right_v1");
+        dataflow::sql::SqlPlanner planner;
+        planner.buildStreamLogicalPlan(parsed.query);
+      },
+      "stream SQL does not support UNION");
 
   expectNoThrow(
       "unicode_quoted_identifier_select_regression",
@@ -532,6 +627,62 @@ void runSemanticRegression() {
       "HYBRID SEARCH embedding QUERY '[1 0 0]' METRIC cosine TOP_K 2");
   expect(hybrid_explain.find("HybridSearch column=embedding top_k=2") != std::string::npos,
          "sql_hybrid_search_explain_logical");
+
+  Table keyword_users;
+  keyword_users.schema = Schema({"id", "bucket", "status", "title", "body", "embedding"});
+  keyword_users.rows = {
+      {Value(int64_t(10)), Value(int64_t(1)), Value("open"), Value("Payment timeout"),
+       Value("checkout payment timeout issue"), Value(std::vector<float>{0.8f, 0.2f, 0.0f})},
+      {Value(int64_t(20)), Value(int64_t(1)), Value("open"), Value("Payment retry"),
+       Value("payment timeout recovered after retry"), Value(std::vector<float>{1.0f, 0.0f, 0.0f})},
+      {Value(int64_t(30)), Value(int64_t(1)), Value("closed"), Value("Refund delay"),
+       Value("refund queue backlog"), Value(std::vector<float>{0.0f, 1.0f, 0.0f})},
+  };
+  s.createTempView("t_keyword_sql_v1", s.createDataFrame(keyword_users));
+
+  Table keyword_result = s.submit(
+      "SELECT id, title, keyword_score FROM t_keyword_sql_v1 "
+      "WHERE bucket = 1 AND status = 'open' "
+      "KEYWORD SEARCH(title, body) QUERY 'payment timeout' TOP_K 2");
+  expect(keyword_result.rows.size() == 2, "sql_keyword_search_row_count");
+  expect(keyword_result.schema.fields[2] == "keyword_score", "sql_keyword_search_score_column");
+  expect(keyword_result.rows[0][0].asInt64() == 10, "sql_keyword_search_first_id");
+
+  Table keyword_hybrid_result = s.submit(
+      "SELECT id, keyword_score, vector_score FROM t_keyword_sql_v1 "
+      "WHERE bucket = 1 AND status = 'open' "
+      "KEYWORD SEARCH(title, body) QUERY 'payment timeout' TOP_K 2 "
+      "HYBRID SEARCH embedding QUERY '[1 0 0]' METRIC cosine TOP_K 1");
+  expect(keyword_hybrid_result.rows.size() == 1, "sql_keyword_hybrid_row_count");
+  expect(keyword_hybrid_result.schema.fields[1] == "keyword_score",
+         "sql_keyword_hybrid_keyword_score_column");
+  expect(keyword_hybrid_result.schema.fields[2] == "vector_score",
+         "sql_keyword_hybrid_vector_score_column");
+  expect(keyword_hybrid_result.rows[0][0].asInt64() == 20, "sql_keyword_hybrid_first_id");
+
+  const std::string keyword_explain = s.explainSql(
+      "SELECT id, title, keyword_score FROM t_keyword_sql_v1 "
+      "WHERE bucket = 1 AND status = 'open' "
+      "KEYWORD SEARCH(title, body) QUERY 'payment timeout' TOP_K 2");
+  expect(keyword_explain.find("KeywordSearch columns=2 top_k=2") != std::string::npos,
+         "sql_keyword_search_explain_logical");
+
+  Table keyword_cn_users;
+  keyword_cn_users.schema = Schema({"id", "title", "body"});
+  keyword_cn_users.rows = {
+      {Value(int64_t(1)), Value("支付超时"), Value("订单支付超时，需要尽快处理")},
+      {Value(int64_t(2)), Value("退款延迟"), Value("退款流程排队较慢")},
+      {Value(int64_t(3)), Value("支付重试"), Value("支付超时后重试成功")},
+      {Value(int64_t(4)), Value("支付成功"), Value("支付处理超时告警")},
+  };
+  s.createTempView("t_keyword_cn_v1", s.createDataFrame(keyword_cn_users));
+  Table keyword_cn_result = s.submit(
+      "SELECT id, title, keyword_score FROM t_keyword_cn_v1 "
+      "KEYWORD SEARCH(title, body) QUERY '支付超时' TOP_K 2");
+  expect(keyword_cn_result.rows.size() == 2, "sql_keyword_search_cn_row_count");
+  expect(keyword_cn_result.rows[0][0].asInt64() == 1, "sql_keyword_search_cn_first_id");
+  const auto second_cn_id = keyword_cn_result.rows[1][0].asInt64();
+  expect(second_cn_id == 3 || second_cn_id == 4, "sql_keyword_search_cn_second_id");
 
   s.submit("CREATE TABLE t_insert_select_positional_v1 (region STRING, total_score INT)");
   expectNoThrow(

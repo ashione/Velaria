@@ -18,6 +18,7 @@ enum class PlanKind {
   Source,
   Select,
   Filter,
+  Union,
   WithColumn,
   Drop,
   Limit,
@@ -247,6 +248,17 @@ struct FilterPlan : PlanNode {
       : PlanNode(PlanKind::Filter),
         child(std::move(p)),
         predicate(std::move(predicate_expr)) {}
+};
+
+struct UnionPlan : PlanNode {
+  PlanNodePtr left;
+  PlanNodePtr right;
+  bool distinct = false;
+  UnionPlan(PlanNodePtr l, PlanNodePtr r, bool deduplicate)
+      : PlanNode(PlanKind::Union),
+        left(std::move(l)),
+        right(std::move(r)),
+        distinct(deduplicate) {}
 };
 
 struct WithColumnPlan : PlanNode {

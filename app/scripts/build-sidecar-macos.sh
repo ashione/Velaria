@@ -12,9 +12,15 @@ echo "[sidecar] building native extension and native wheel"
 bazel build //:velaria_pyext //python_api:velaria_native_whl
 
 BAZEL_BIN="$(bazel info bazel-bin)"
+OUTPUT_BASE="$(bazel info output_base)"
 NATIVE_WHL="$(find "${BAZEL_BIN}/python_api" -maxdepth 1 -name 'velaria-*-native.whl' | head -n1)"
 if [[ -z "${NATIVE_WHL}" || ! -f "${NATIVE_WHL}" ]]; then
   echo "[sidecar] native wheel not found under ${BAZEL_BIN}/python_api" >&2
+  exit 1
+fi
+CPPJIEBA_DICT_DIR="${OUTPUT_BASE}/external/+http_archive+cppjieba_src/dict"
+if [[ ! -d "${CPPJIEBA_DICT_DIR}" ]]; then
+  echo "[sidecar] cppjieba dict directory not found under ${CPPJIEBA_DICT_DIR}" >&2
   exit 1
 fi
 
@@ -29,6 +35,15 @@ uv venv "${STAGE_DIR}/venv"
 PYTHON_BIN="${STAGE_DIR}/venv/bin/python"
 NORMALIZED_WHL="$(python3 "${ROOT_DIR}/scripts/normalize_wheel_filename.py" "${NATIVE_WHL}")"
 uv pip install --python "${PYTHON_BIN}" "${NORMALIZED_WHL}" pyinstaller
+
+JIEBA_DIR="${STAGE_DIR}/jieba_dict"
+mkdir -p "${JIEBA_DIR}"
+echo "[sidecar] copying jieba dictionaries from Bazel external repo"
+cp "${CPPJIEBA_DICT_DIR}/jieba.dict.utf8" "${JIEBA_DIR}/jieba.dict.utf8"
+cp "${CPPJIEBA_DICT_DIR}/hmm_model.utf8" "${JIEBA_DIR}/hmm_model.utf8"
+cp "${CPPJIEBA_DICT_DIR}/user.dict.utf8" "${JIEBA_DIR}/user.dict.utf8"
+cp "${CPPJIEBA_DICT_DIR}/idf.utf8" "${JIEBA_DIR}/idf.utf8"
+cp "${CPPJIEBA_DICT_DIR}/stop_words.utf8" "${JIEBA_DIR}/stop_words.utf8"
 
 VELARIA_PKG_DIR="$("${PYTHON_BIN}" - <<'PY'
 import pathlib
@@ -53,6 +68,7 @@ echo "[sidecar] packaging velaria_service.py with PyInstaller"
   --specpath "${BUILD_DIR}/spec" \
   --hidden-import velaria._velaria \
   --add-binary "${NATIVE_EXT}:velaria" \
+  --add-data "${JIEBA_DIR}:velaria/jieba_dict" \
   --collect-submodules velaria \
   --collect-binaries velaria \
   --collect-data velaria \

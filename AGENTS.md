@@ -19,6 +19,7 @@
 - 现阶段不做 JVM/Python 宿主栈移植，核心计算逻辑保持纯 C++ 实现。
 - 单节点示例命令保持可用，不要为了多进程实验破坏 `sql_demo / df_demo / stream_demo`。
 - 所有 Python 相关命令统一显式使用 `uv` 执行，包括测试、脚本、依赖安装；不要直接调用 `python` / `pip`。
+- 涉及 `python_api`、多维表格导入、embedding pipeline、desktop sidecar 的开发与验证时，默认可继续使用 `python_api/.venv`；如需隔离环境，使用 `UV_PROJECT_ENVIRONMENT=<env-name> uv ... --project python_api` 显式指定，不要在文档或规则里写死某个特定环境名。
 - `README.md` 保持英文，`README-zh.md` 保持中文；后续修改 README 内容时必须同步更新这两份文档。
 - `skills/*.md` 面向最终用户使用说明，不写仓库内部编译、Bazel 构建、源码同步或其他实现侧操作；只保留用户可直接执行的使用方式、参数说明与输入输出约束。
 - 仓库文档若展示 Python CLI 命令，必须使用仓库内真实可见入口：源码脚本 `uv run --project python_api python python_api/velaria_cli.py ...`，或已打包产物 `./dist/velaria-cli ...`；不要默认写成全局可执行的 `velaria-cli ...`，除非文档已明确提供安装该命令的步骤。
@@ -30,6 +31,8 @@
 - `skills/*.md` 的示例命令必须直接可执行，优先写源码入口或打包产物入口；不要假设存在额外安装步骤、shell alias 或全局命令。
 - Python 生态层的新能力如果面向 agent/skill 调用，默认要求 stdout 维持机器可读 JSON，日志落文件，失败路径也不能退化成 traceback 噪音。
 - 类似 workspace/run tracking 这类 Python 侧能力，要明确保持 kernel contract 不变：`explain` 继续对齐 `logical/physical/strategy`，`progress` 继续直接使用原生 `snapshotJson()`，不要在生态层发明第二套语义。
+- 本轮多维表格批量导入优化默认落在 Python 生态层时，要求优先采用 stream/batch 方式驱动 embedding provider，避免先整表 `to_pylist()` 后再做一次大批量物化；如确需回退到整表物化，必须先说明原因与边界。
+- 本轮 Python 侧验证默认仍可直接使用项目默认环境；若某次任务需要隔离依赖或避免污染现有环境，再显式设置 `UV_PROJECT_ENVIRONMENT=<env-name>` 后运行 `uv sync` / `uv run`。
 
 ## 命名与术语约束
 
@@ -105,6 +108,8 @@ bazel build //:sql_demo //:df_demo //:stream_demo \
 ### Python 测试
 
 ```bash
+uv sync --project python_api
+uv run --project python_api python -m unittest
 bazel build //:velaria_pyext
 bazel test //python_api:custom_stream_source_test
 bazel test //python_api:streaming_v05_test
@@ -167,6 +172,7 @@ bazel run //:stream_demo
 - `--listen` / `--connect` 参数必须是 `host:port`。
 - 多进程验收顺序必须是 `scheduler -> worker -> client`。
 - Python 测试、脚本、依赖安装统一使用 `uv run ...` / `uv pip ...`，不要直接使用 `python3` / `pip3`。
+- Python 生态层若需要隔离依赖或避免污染默认环境，使用 `UV_PROJECT_ENVIRONMENT=<env-name>` 显式创建和复用隔离环境，并在当前任务说明中写清环境用途；不要把具体环境名硬编码进仓库规则。
 - 若出现 `no-worker-available`，优先确认是否启动了 `--no-auto-worker`，然后再检查 worker 是否已连上 scheduler。
 - 若出现 `cannot connect`，先查 scheduler 是否已监听、端口是否一致。
 - `Value` 当前允许 `Int64/Double` 跨类型比较；若改成严格类型模式，需同步更新 Planner 与示例。

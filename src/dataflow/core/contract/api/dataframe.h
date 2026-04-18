@@ -78,6 +78,9 @@ class DataFrame {
                         const std::vector<float>& queryVector,
                         size_t top_k,
                         VectorDistanceMetric metric = VectorDistanceMetric::Cosine) const;
+  DataFrame keywordSearch(const std::vector<std::string>& textColumns,
+                         const std::string& queryText,
+                         size_t top_k) const;
   DataFrame hybridSearch(const std::string& vectorColumn,
                          const std::vector<float>& queryVector,
                          const HybridSearchOptions& options = {}) const;
@@ -90,6 +93,7 @@ class DataFrame {
                                   const HybridSearchOptions& options = {}) const;
 
   GroupedDataFrame groupBy(const std::vector<std::string>& keys) const;
+  DataFrame unionWith(const DataFrame& right, bool distinct = false) const;
   DataFrame join(const DataFrame& right, const std::string& leftOn, const std::string& rightOn,
                 JoinKind kind = JoinKind::Inner) const;
 

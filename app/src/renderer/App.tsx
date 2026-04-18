@@ -33,6 +33,12 @@ type EmbeddingConfig = {
   vectorColumn: string;
 };
 
+type KeywordIndexConfig = {
+  enabled: boolean;
+  textColumns: string[];
+  analyzer: string;
+};
+
 type EmbeddingDatasetRecord = {
   datasetPath: string;
   artifactUri: string;
@@ -41,6 +47,17 @@ type EmbeddingDatasetRecord = {
   builtAt: string;
   schema: string[];
   rowCount?: number;
+};
+
+type KeywordIndexRecord = {
+  indexPath: string;
+  artifactUri: string;
+  artifactId: string;
+  runId: string;
+  builtAt: string;
+  schema: string[];
+  docCount?: number;
+  termCount?: number;
 };
 
 type DatasetRecord = {
@@ -57,6 +74,8 @@ type DatasetRecord = {
   importOptions: ImportOptions;
   embeddingConfig: EmbeddingConfig;
   embeddingDataset: EmbeddingDatasetRecord | null;
+  keywordConfig: KeywordIndexConfig;
+  keywordIndex: KeywordIndexRecord | null;
 };
 
 type EmbeddingBuildState = {
@@ -141,6 +160,9 @@ type ImportFormState = {
   embeddingModel: string;
   embeddingTemplateVersion: string;
   embeddingVectorColumn: string;
+  keywordEnabled: boolean;
+  keywordTextColumns: string;
+  keywordAnalyzer: string;
 };
 
 type HybridSearchState = {
@@ -153,8 +175,13 @@ type HybridSearchState = {
   vectorColumn: string;
 };
 
+type KeywordSearchState = {
+  queryText: string;
+  topK: string;
+};
+
 type LastResultState = {
-  kind: 'sql' | 'hybrid';
+  kind: 'sql' | 'hybrid' | 'keyword';
   title: string;
   html: string;
 };
@@ -177,6 +204,12 @@ const defaultEmbeddingConfig: EmbeddingConfig = {
   vectorColumn: 'embedding',
 };
 
+const defaultKeywordConfig: KeywordIndexConfig = {
+  enabled: false,
+  textColumns: [],
+  analyzer: 'jieba',
+};
+
 const defaultImportForm: ImportFormState = {
   inputPath: '',
   inputType: 'auto',
@@ -193,6 +226,9 @@ const defaultImportForm: ImportFormState = {
   embeddingModel: DEFAULT_CHINESE_EMBEDDING_MODEL,
   embeddingTemplateVersion: 'text-v1',
   embeddingVectorColumn: 'embedding',
+  keywordEnabled: false,
+  keywordTextColumns: '',
+  keywordAnalyzer: 'jieba',
 };
 
 const defaultAnalyzeState: AnalyzeState = {
@@ -212,6 +248,11 @@ const defaultHybridSearchState: HybridSearchState = {
   templateVersion: 'text-v1',
   topK: '10',
   vectorColumn: 'embedding',
+};
+
+const defaultKeywordSearchState: KeywordSearchState = {
+  queryText: '',
+  topK: '10',
 };
 
 const viewMeta = {
@@ -312,6 +353,18 @@ function normalizeEmbeddingConfig(value: unknown): EmbeddingConfig {
   };
 }
 
+function normalizeKeywordConfig(value: unknown): KeywordIndexConfig {
+  const record = asRecord(value);
+  const textColumns = Array.isArray(record?.textColumns)
+    ? record.textColumns.filter((item): item is string => typeof item === 'string')
+    : [];
+  return {
+    enabled: Boolean(record?.enabled),
+    textColumns,
+    analyzer: typeof record?.analyzer === 'string' && record.analyzer ? record.analyzer : 'jieba',
+  };
+}
+
 function normalizeEmbeddingDatasetRecord(value: unknown): EmbeddingDatasetRecord | null {
   const record = asRecord(value);
   if (!record) return null;
@@ -329,6 +382,24 @@ function normalizeEmbeddingDatasetRecord(value: unknown): EmbeddingDatasetRecord
   };
 }
 
+function normalizeKeywordIndexRecord(value: unknown): KeywordIndexRecord | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  if (typeof record.indexPath !== 'string' || !record.indexPath) return null;
+  return {
+    indexPath: record.indexPath,
+    artifactUri: typeof record.artifactUri === 'string' ? record.artifactUri : '',
+    artifactId: typeof record.artifactId === 'string' ? record.artifactId : '',
+    runId: typeof record.runId === 'string' ? record.runId : '',
+    builtAt: typeof record.builtAt === 'string' ? record.builtAt : new Date().toISOString(),
+    schema: Array.isArray(record.schema)
+      ? record.schema.filter((item): item is string => typeof item === 'string')
+      : [],
+    docCount: typeof record.docCount === 'number' ? record.docCount : undefined,
+    termCount: typeof record.termCount === 'number' ? record.termCount : undefined,
+  };
+}
+
 function createDatasetRecord(payload: {
   name: string;
   sourceType: string;
@@ -340,9 +411,12 @@ function createDatasetRecord(payload: {
   importOptions?: Partial<ImportOptions>;
   embeddingConfig?: Partial<EmbeddingConfig>;
   embeddingDataset?: EmbeddingDatasetRecord | null;
+  keywordConfig?: Partial<KeywordIndexConfig>;
+  keywordIndex?: KeywordIndexRecord | null;
 }): DatasetRecord {
   const importOptions = { ...defaultImportOptions, ...(payload.importOptions || {}) };
   const embeddingConfig = { ...defaultEmbeddingConfig, ...(payload.embeddingConfig || {}) };
+  const keywordConfig = { ...defaultKeywordConfig, ...(payload.keywordConfig || {}) };
   return {
     datasetId: `dataset_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
     name: payload.name,
@@ -357,6 +431,8 @@ function createDatasetRecord(payload: {
     importOptions,
     embeddingConfig,
     embeddingDataset: payload.embeddingDataset || null,
+    keywordConfig,
+    keywordIndex: payload.keywordIndex || null,
   };
 }
 
@@ -384,6 +460,8 @@ function normalizeDatasetRecord(value: unknown): DatasetRecord | null {
     importOptions: normalizeImportOptions(record.importOptions),
     embeddingConfig: normalizeEmbeddingConfig(record.embeddingConfig),
     embeddingDataset: normalizeEmbeddingDatasetRecord(record.embeddingDataset),
+    keywordConfig: normalizeKeywordConfig(record.keywordConfig),
+    keywordIndex: normalizeKeywordIndexRecord(record.keywordIndex),
   };
 }
 
@@ -610,6 +688,48 @@ function extractEmbeddingDatasetRecord(payload: unknown): EmbeddingDatasetRecord
   };
 }
 
+function extractEmbeddingDatasetFromRunPayload(payload: unknown): EmbeddingDatasetRecord | null {
+  const record = asRecord(payload);
+  const run = asRecord(record?.run);
+  const details = asRecord(run?.details);
+  return normalizeEmbeddingDatasetRecord(details?.embedding_dataset ?? null);
+}
+
+function extractKeywordIndexRecord(payload: unknown): KeywordIndexRecord {
+  const record = asRecord(payload);
+  const result = asRecord(record?.result);
+  const run = asRecord(record?.run);
+  const artifact = asRecord(record?.artifact);
+  const indexPath = typeof result?.index_path === 'string' ? result.index_path : '';
+  if (!indexPath) {
+    throw new Error('keyword index build response missing index_path');
+  }
+  return {
+    indexPath,
+    artifactUri: typeof artifact?.uri === 'string' ? artifact.uri : '',
+    artifactId: typeof artifact?.artifact_id === 'string' ? artifact.artifact_id : '',
+    runId:
+      typeof record?.run_id === 'string'
+        ? record.run_id
+        : typeof run?.run_id === 'string'
+          ? run.run_id
+          : '',
+    builtAt: new Date().toISOString(),
+    schema: Array.isArray(result?.schema)
+      ? result.schema.filter((item): item is string => typeof item === 'string')
+      : [],
+    docCount: typeof result?.doc_count === 'number' ? result.doc_count : undefined,
+    termCount: typeof result?.term_count === 'number' ? result.term_count : undefined,
+  };
+}
+
+function extractKeywordIndexFromRunPayload(payload: unknown): KeywordIndexRecord | null {
+  const record = asRecord(payload);
+  const run = asRecord(record?.run);
+  const details = asRecord(run?.details);
+  return normalizeKeywordIndexRecord(details?.keyword_index ?? null);
+}
+
 function embeddingFormToConfig(form: ImportFormState): EmbeddingConfig {
   return {
     enabled: form.embeddingEnabled,
@@ -618,6 +738,14 @@ function embeddingFormToConfig(form: ImportFormState): EmbeddingConfig {
     model: form.embeddingModel.trim(),
     templateVersion: form.embeddingTemplateVersion.trim(),
     vectorColumn: form.embeddingVectorColumn.trim() || 'embedding',
+  };
+}
+
+function keywordFormToConfig(form: ImportFormState): KeywordIndexConfig {
+  return {
+    enabled: form.keywordEnabled,
+    textColumns: csvToList(form.keywordTextColumns),
+    analyzer: form.keywordAnalyzer.trim() || 'jieba',
   };
 }
 
@@ -639,6 +767,28 @@ function createEmbeddingBuildPayload(dataset: DatasetRecord): Record<string, unk
   if (dataset.importOptions.columns) payload.columns = dataset.importOptions.columns;
   if (dataset.importOptions.mappings) payload.mappings = dataset.importOptions.mappings;
   if (dataset.importOptions.regexPattern) payload.regex_pattern = dataset.importOptions.regexPattern;
+  return payload;
+}
+
+function createKeywordIndexBuildPayload(dataset: DatasetRecord): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    text_columns: dataset.keywordConfig.textColumns,
+    analyzer: dataset.keywordConfig.analyzer || 'jieba',
+    run_name: `keyword-index-${dataset.name}`,
+    description: `Keyword index build for dataset ${dataset.name}`,
+  };
+  if (['parquet', 'arrow', 'bitable'].includes(dataset.sourceType)) {
+    payload.dataset_path = dataset.sourcePath;
+  } else {
+    payload.input_path = dataset.sourcePath;
+    payload.input_type = dataset.sourceType;
+    payload.delimiter = dataset.importOptions.delimiter;
+    payload.json_format = dataset.importOptions.jsonFormat;
+    payload.line_mode = dataset.importOptions.lineMode;
+    if (dataset.importOptions.columns) payload.columns = dataset.importOptions.columns;
+    if (dataset.importOptions.mappings) payload.mappings = dataset.importOptions.mappings;
+    if (dataset.importOptions.regexPattern) payload.regex_pattern = dataset.importOptions.regexPattern;
+  }
   return payload;
 }
 
@@ -727,8 +877,10 @@ export function App() {
   });
   const [analysisResultHtml, setAnalysisResultHtml] = useState('<div class="empty">No run yet.</div>');
   const [hybridSearch, setHybridSearch] = useState<HybridSearchState>(defaultHybridSearchState);
+  const [keywordSearch, setKeywordSearch] = useState<KeywordSearchState>(defaultKeywordSearchState);
   const [hybridResultHtml, setHybridResultHtml] = useState('<div class="empty">No hybrid search yet.</div>');
   const [hybridMessage, setHybridMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
+  const [keywordMessage, setKeywordMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
   const [lastResult, setLastResult] = useState<LastResultState>({
     kind: 'sql',
     title: 'SQL',
@@ -994,6 +1146,9 @@ export function App() {
       if (importForm.embeddingEnabled) {
         payload.embedding_config = embeddingFormToConfig(importForm);
       }
+      if (importForm.keywordEnabled) {
+        payload.keyword_index_config = keywordFormToConfig(importForm);
+      }
       const result = (await api('/api/v1/import/preview', {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -1017,6 +1172,16 @@ export function App() {
     return 'disabled';
   }
 
+  function getKeywordUiStatus(dataset: DatasetRecord | null): 'disabled' | 'configured' | 'building' | 'failed' | 'ready' {
+    if (!dataset) return 'disabled';
+    const transient = embeddingBuilds[`${dataset.datasetId}::keyword`];
+    if (dataset.keywordIndex?.indexPath) return 'ready';
+    if (transient?.status === 'building') return 'building';
+    if (transient?.status === 'failed') return 'failed';
+    if (dataset.keywordConfig.enabled) return 'configured';
+    return 'disabled';
+  }
+
   function getEmbeddingStatusLabel(dataset: DatasetRecord | null) {
     const status = getEmbeddingUiStatus(dataset);
     if (status === 'ready') return t('embedding_ready');
@@ -1024,6 +1189,70 @@ export function App() {
     if (status === 'failed') return t('embedding_build_failed_short');
     if (status === 'configured') return t('embedding_configured_only');
     return t('embedding_disabled_short');
+  }
+
+  async function buildKeywordIndexDataset(datasetId: string, datasetSnapshot?: DatasetRecord) {
+    const target = datasetSnapshot || datasets.find((dataset) => dataset.datasetId === datasetId);
+    const stateKey = `${datasetId}::keyword`;
+    if (
+      !target ||
+      !target.keywordConfig.enabled ||
+      target.keywordIndex?.indexPath ||
+      embeddingBuilds[stateKey]?.status === 'building'
+    ) {
+      return;
+    }
+
+    setEmbeddingBuilds((current) => ({
+      ...current,
+      [stateKey]: { status: 'building' },
+    }));
+    setDatasetMessage({
+      kind: 'info',
+      text: t('keyword_build_started', { name: target.name }),
+    });
+
+    try {
+      const buildResult = await api('/api/v1/runs/keyword-index-build', {
+        method: 'POST',
+        body: JSON.stringify(createKeywordIndexBuildPayload(target)),
+      });
+      const keywordIndex = extractKeywordIndexRecord(buildResult);
+      const result = asRecord(buildResult.result);
+      setDatasets((current) =>
+        current.map((dataset) => {
+          if (dataset.datasetId !== datasetId) return dataset;
+          return {
+            ...dataset,
+            keywordIndex,
+            keywordConfig: {
+              ...dataset.keywordConfig,
+              analyzer:
+                typeof result?.analyzer === 'string' ? result.analyzer : dataset.keywordConfig.analyzer,
+            },
+          };
+        })
+      );
+      setEmbeddingBuilds((current) => {
+        const next = { ...current };
+        delete next[stateKey];
+        return next;
+      });
+      setDatasetMessage({
+        kind: 'info',
+        text: t('keyword_build_succeeded', { name: target.name }),
+      });
+    } catch (error) {
+      const message = String(error);
+      setEmbeddingBuilds((current) => ({
+        ...current,
+        [stateKey]: { status: 'failed', error: message },
+      }));
+      setDatasetMessage({
+        kind: 'error',
+        text: t('keyword_build_failed', { error: message }),
+      });
+    }
   }
 
   async function buildEmbeddingDataset(datasetId: string, datasetSnapshot?: DatasetRecord) {
@@ -1108,6 +1337,7 @@ export function App() {
   async function saveImportDataset() {
     if (!pendingImport) return;
     const embeddingConfig = embeddingFormToConfig(importForm);
+    const keywordConfig = keywordFormToConfig(importForm);
     let handedOffBitableImport = false;
     const importOptions = {
       delimiter: importForm.delimiter,
@@ -1122,7 +1352,7 @@ export function App() {
     setDatasetMessage(null);
     setImportMessage({
       kind: 'info',
-      text: embeddingConfig.enabled ? t('embedding_building') : t('dataset_saving'),
+      text: embeddingConfig.enabled || keywordConfig.enabled ? t('dataset_building_background') : t('dataset_saving'),
     });
     try {
       if (pendingImport.dataset.source_type === 'bitable') {
@@ -1136,6 +1366,23 @@ export function App() {
           run_name: `bitable-import-${new Date().toISOString()}`,
           description: 'Desktop workbench bitable import',
         };
+        if (embeddingConfig.enabled) {
+          payload.embedding_config = {
+            enabled: true,
+            text_columns: embeddingConfig.textColumns,
+            provider: embeddingConfig.provider || undefined,
+            model: embeddingConfig.model || undefined,
+            template_version: embeddingConfig.templateVersion || undefined,
+            vector_column: embeddingConfig.vectorColumn || 'embedding',
+          };
+        }
+        if (keywordConfig.enabled) {
+          payload.keyword_index_config = {
+            enabled: true,
+            text_columns: keywordConfig.textColumns,
+            analyzer: keywordConfig.analyzer || 'jieba',
+          };
+        }
         const started = await api('/api/v1/runs/bitable-import', {
           method: 'POST',
           body: JSON.stringify(payload),
@@ -1151,7 +1398,10 @@ export function App() {
         handedOffBitableImport = true;
         void (async () => {
           try {
-            const completed = importPreviewFromRunPayload(await waitForRunCompletion(runId));
+            const runResult = await waitForRunCompletion(runId);
+            const completed = importPreviewFromRunPayload(runResult);
+            const embeddingDataset = extractEmbeddingDatasetFromRunPayload(runResult);
+            const keywordIndex = extractKeywordIndexFromRunPayload(runResult);
             const record = createDatasetRecord({
               name: completed.dataset.name,
               sourceType: completed.dataset.source_type,
@@ -1161,7 +1411,9 @@ export function App() {
               kind: 'imported',
               importOptions,
               embeddingConfig,
-              embeddingDataset: null,
+              embeddingDataset,
+              keywordConfig,
+              keywordIndex,
             });
             setDatasets((current) => [record, ...current]);
             setSelectedDatasetId(record.datasetId);
@@ -1169,11 +1421,16 @@ export function App() {
               kind: 'info',
               text: embeddingConfig.enabled
                 ? t('dataset_saved_with_embedding_message')
+                : keywordConfig.enabled
+                  ? t('dataset_saved_with_keyword_message')
                 : t('dataset_saved_message'),
             });
             setView('analyze');
-            if (embeddingConfig.enabled) {
+            if (embeddingConfig.enabled && !embeddingDataset?.datasetPath) {
               void buildEmbeddingDataset(record.datasetId, record);
+            }
+            if (keywordConfig.enabled && !keywordIndex?.indexPath) {
+              void buildKeywordIndexDataset(record.datasetId, record);
             }
             await refreshRuns(runId);
           } catch (error) {
@@ -1195,6 +1452,8 @@ export function App() {
         importOptions,
         embeddingConfig,
         embeddingDataset: null,
+        keywordConfig,
+        keywordIndex: null,
       });
       setDatasets((current) => [record, ...current]);
       setSelectedDatasetId(record.datasetId);
@@ -1204,11 +1463,16 @@ export function App() {
         kind: 'info',
         text: embeddingConfig.enabled
           ? t('dataset_saved_with_embedding_message')
+          : keywordConfig.enabled
+            ? t('dataset_saved_with_keyword_message')
           : t('dataset_saved_message'),
       });
       setView('analyze');
       if (embeddingConfig.enabled) {
         void buildEmbeddingDataset(record.datasetId, record);
+      }
+      if (keywordConfig.enabled) {
+        void buildKeywordIndexDataset(record.datasetId, record);
       }
     } catch (error) {
       setImportMessage({
@@ -1365,6 +1629,7 @@ export function App() {
       const whereSql = sqlStructure.where?.trim() || '';
       const payload = {
         dataset_path: datasetPath,
+        index_path: currentDataset?.keywordIndex?.indexPath || undefined,
         query_text: queryText,
         provider: hybridSearch.provider.trim() || undefined,
         model: hybridSearch.model.trim() || undefined,
@@ -1409,6 +1674,53 @@ export function App() {
         html,
       });
       setHybridMessage({ kind: 'error', text: t('hybrid_failed', { error: String(error) }) });
+    }
+  }
+
+  async function runKeywordSearch() {
+    if (!currentDataset) {
+      const html = `<div class="empty">${escapeHtml(t('no_dataset_for_analyze'))}</div>`;
+      setLastResult({ kind: 'keyword', title: t('keyword_results'), html });
+      setKeywordMessage({ kind: 'error', text: t('no_dataset_for_analyze') });
+      return;
+    }
+    const indexPath = currentDataset.keywordIndex?.indexPath || '';
+    if (!indexPath) {
+      const message = t('keyword_requires_index');
+      const html = `<div class="empty">${escapeHtml(message)}</div>`;
+      setLastResult({ kind: 'keyword', title: t('keyword_results'), html });
+      setKeywordMessage({ kind: 'error', text: message });
+      return;
+    }
+    const queryText = keywordSearch.queryText.trim();
+    if (!queryText) {
+      const message = t('keyword_query_required');
+      const html = `<div class="empty">${escapeHtml(message)}</div>`;
+      setLastResult({ kind: 'keyword', title: t('keyword_results'), html });
+      setKeywordMessage({ kind: 'error', text: message });
+      return;
+    }
+    setKeywordMessage({ kind: 'info', text: t('keyword_loading') });
+    try {
+      const whereSql = sqlStructure.where?.trim() || '';
+      const result = await api('/api/v1/runs/keyword-search', {
+        method: 'POST',
+        body: JSON.stringify({
+          index_path: indexPath,
+          query_text: queryText,
+          top_k: Number(keywordSearch.topK) || 10,
+          where_sql: whereSql || undefined,
+        }),
+      });
+      const preview = normalizePreview(asRecord(result)?.preview);
+      const html = renderPreviewTable(preview, t('keyword_no_result'));
+      setLastResult({ kind: 'keyword', title: t('keyword_results'), html });
+      setKeywordMessage(null);
+    } catch (error) {
+      const message = t('keyword_failed', { error: String(error) });
+      const html = `<div class="empty">${escapeHtml(message)}</div>`;
+      setLastResult({ kind: 'keyword', title: t('keyword_results'), html });
+      setKeywordMessage({ kind: 'error', text: message });
     }
   }
 
@@ -1525,6 +1837,7 @@ export function App() {
 
   const datasetCards = visibleDatasets.map((dataset) => {
     const embeddingStatus = getEmbeddingStatusLabel(dataset);
+    const keywordStatus = getKeywordUiStatus(dataset);
     return (
       <div
         key={dataset.datasetId}
@@ -1548,6 +1861,7 @@ export function App() {
           <span>{dataset.sourceType}</span>
           <span>{t('rows_count', { count: dataset.preview?.row_count ?? '—' })}</span>
           <span>{embeddingStatus}</span>
+          <span>{keywordStatus === 'ready' ? t('keyword_ready') : keywordStatus === 'configured' ? t('keyword_configured_only') : keywordStatus === 'building' ? t('keyword_building_short') : keywordStatus === 'failed' ? t('keyword_build_failed_short') : t('keyword_disabled_short')}</span>
         </div>
       </div>
     );
@@ -1564,6 +1878,8 @@ export function App() {
 
   const currentEmbeddingStatus = getEmbeddingUiStatus(currentDataset);
   const currentEmbeddingBuild = currentDataset ? embeddingBuilds[currentDataset.datasetId] : null;
+  const currentKeywordStatus = getKeywordUiStatus(currentDataset);
+  const currentKeywordBuild = currentDataset ? embeddingBuilds[`${currentDataset.datasetId}::keyword`] : null;
   const datasetKindLabel = currentDataset
     ? t(currentDataset.kind === 'result' ? 'kind_result' : 'kind_imported')
     : '—';
@@ -1576,6 +1892,15 @@ export function App() {
         : currentDataset?.embeddingConfig.enabled
       ? `${t('embedding_configured_only')} · ${currentDataset.embeddingConfig.textColumns.join(', ') || '—'}`
       : t('embedding_disabled');
+  const currentKeywordSummary = currentDataset?.keywordIndex?.indexPath
+    ? `${currentDataset.keywordConfig.textColumns.join(', ') || '—'} · ${currentDataset.keywordConfig.analyzer || 'builtin'}`
+    : currentKeywordStatus === 'building'
+      ? `${t('keyword_building_short')} · ${currentDataset?.keywordConfig.textColumns.join(', ') || '—'}`
+      : currentKeywordStatus === 'failed'
+        ? `${t('keyword_build_failed_short')} · ${currentDataset?.keywordConfig.textColumns.join(', ') || '—'}`
+        : currentDataset?.keywordConfig.enabled
+          ? `${t('keyword_configured_only')} · ${currentDataset.keywordConfig.textColumns.join(', ') || '—'}`
+          : t('keyword_disabled');
   const currentEmbeddingDatasetValue = currentDataset?.embeddingDataset?.datasetPath || '';
   const currentEmbeddingDatasetPath =
     currentEmbeddingStatus === 'ready'
@@ -1594,6 +1919,10 @@ export function App() {
     currentDataset != null &&
     (currentEmbeddingStatus === 'configured' || currentEmbeddingStatus === 'failed');
   const isBuildingEmbedding = currentEmbeddingStatus === 'building';
+  const showBuildKeywordAction =
+    currentDataset != null &&
+    (currentKeywordStatus === 'configured' || currentKeywordStatus === 'failed');
+  const isBuildingKeyword = currentKeywordStatus === 'building';
 
   return (
     <div className="shell">
@@ -1955,6 +2284,58 @@ export function App() {
                         />
                       </label>
                     </div>
+
+                    <div className="subsection-card">
+                      <div className="subsection-head">
+                        <div>
+                          <h3>{t('import_keyword_title')}</h3>
+                          <div className="helper">{t('import_keyword_hint')}</div>
+                        </div>
+                        <label className="toggle-row">
+                          <input
+                            type="checkbox"
+                            checked={importForm.keywordEnabled}
+                            onChange={(event) =>
+                              setImportForm((current) => ({
+                                ...current,
+                                keywordEnabled: event.target.checked,
+                              }))
+                            }
+                          />
+                          <span>{t('keyword_enable')}</span>
+                        </label>
+                      </div>
+                      <div className="field-grid">
+                        <label>
+                          <span>{t('keyword_text_columns')}</span>
+                          <input
+                            value={importForm.keywordTextColumns}
+                            onChange={(event) =>
+                              setImportForm((current) => ({
+                                ...current,
+                                keywordTextColumns: event.target.value,
+                              }))
+                            }
+                            placeholder={t('keyword_columns_placeholder')}
+                            disabled={!importForm.keywordEnabled}
+                          />
+                        </label>
+                        <label>
+                          <span>{t('keyword_analyzer')}</span>
+                          <input
+                            value={importForm.keywordAnalyzer}
+                            onChange={(event) =>
+                              setImportForm((current) => ({
+                                ...current,
+                                keywordAnalyzer: event.target.value,
+                              }))
+                            }
+                            placeholder={t('keyword_analyzer_placeholder')}
+                            disabled={!importForm.keywordEnabled}
+                          />
+                        </label>
+                      </div>
+                    </div>
                   </form>
                   <div className="notice">{t('import_hint')}</div>
                   <div className="notice subtle">{t('dataset_delete_hint')}</div>
@@ -2077,6 +2458,10 @@ export function App() {
                           <div>{currentEmbeddingSummary}</div>
                         </div>
                         <div className="compact-card">
+                          <strong>{t('field_keyword_index')}</strong>
+                          <div>{currentKeywordSummary}</div>
+                        </div>
+                        <div className="compact-card">
                           <strong>{t('field_kind')}</strong>
                           <div>{datasetKindLabel}</div>
                         </div>
@@ -2107,6 +2492,34 @@ export function App() {
                       {currentEmbeddingStatus === 'failed' && currentEmbeddingBuild?.error && (
                         <div className="notice error">
                           {t('embedding_build_failed', { error: currentEmbeddingBuild.error })}
+                        </div>
+                      )}
+                      {showBuildKeywordAction && (
+                        <div className="notice">
+                          <div>{t('keyword_build_needed_hint')}</div>
+                          <div className="actions notice-actions">
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => {
+                                void buildKeywordIndexDataset(currentDataset.datasetId);
+                              }}
+                            >
+                              {t(
+                                currentKeywordStatus === 'failed'
+                                  ? 'keyword_build_retry'
+                                  : 'keyword_build_action'
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                      {isBuildingKeyword && (
+                        <div className="notice">{t('keyword_building_hint')}</div>
+                      )}
+                      {currentKeywordStatus === 'failed' && currentKeywordBuild?.error && (
+                        <div className="notice error">
+                          {t('keyword_build_failed', { error: currentKeywordBuild.error })}
                         </div>
                       )}
                       <div
@@ -2443,6 +2856,81 @@ export function App() {
                       </div>
                     </div>
                   </div>
+                  <div className="hybrid-inline-block">
+                    <div className="helper">{t('keyword_search_inline_hint')}</div>
+                    {keywordMessage && (
+                      <div className={`notice ${keywordMessage.kind === 'error' ? 'error' : ''}`}>
+                        {keywordMessage.text}
+                      </div>
+                    )}
+                    {!currentDataset?.keywordConfig.enabled && currentDataset && (
+                      <div className="notice error">{t('keyword_requires_enabled')}</div>
+                    )}
+                    {currentDataset && currentKeywordStatus === 'configured' && (
+                      <div className="notice">
+                        <div>{t('keyword_requires_index')}</div>
+                        <div className="actions notice-actions">
+                          <button
+                            type="button"
+                            className="ghost"
+                            onClick={() => {
+                              void buildKeywordIndexDataset(currentDataset.datasetId);
+                            }}
+                          >
+                            {t('keyword_build_action')}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {currentDataset && currentKeywordStatus === 'building' && (
+                      <div className="notice">{t('keyword_building_hint')}</div>
+                    )}
+                    {currentDataset && currentKeywordStatus === 'failed' && (
+                      <div className="notice error">
+                        <div>{t('keyword_requires_index')}</div>
+                        <div className="actions notice-actions">
+                          <button
+                            type="button"
+                            className="ghost"
+                            onClick={() => {
+                              void buildKeywordIndexDataset(currentDataset.datasetId);
+                            }}
+                          >
+                            {t('keyword_build_retry')}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    <div className="hybrid-inline-form">
+                      <label>
+                        <span>{t('keyword_query')}</span>
+                        <input
+                          value={keywordSearch.queryText}
+                          onChange={(event) =>
+                            setKeywordSearch((current) => ({ ...current, queryText: event.target.value }))
+                          }
+                          placeholder={t('keyword_query_placeholder')}
+                          disabled={!currentDataset}
+                        />
+                      </label>
+                      <div className="helper">{t('keyword_locked_config_hint', {
+                        columns: currentDataset?.keywordConfig.textColumns.join(', ') || '—',
+                        analyzer: currentDataset?.keywordConfig.analyzer || '—',
+                      })}</div>
+                      <div className="field-grid">
+                        <label>
+                          <span>{t('keyword_top_k')}</span>
+                          <input
+                            value={keywordSearch.topK}
+                            onChange={(event) =>
+                              setKeywordSearch((current) => ({ ...current, topK: event.target.value }))
+                            }
+                            disabled={!currentDataset}
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  </div>
                     <label>
                       <span>{t('sql_query')}</span>
                       <div className="editor-shell">
@@ -2462,6 +2950,9 @@ export function App() {
                     </label>
                     <div className="actions primary-actions">
                       <button type="button" onClick={() => void runAnalysis()}>{t('run_analysis')}</button>
+                      <button type="button" onClick={() => void runKeywordSearch()} disabled={!currentDataset || !currentDataset.keywordIndex?.indexPath}>
+                        {t('run_keyword_search')}
+                      </button>
                       <button type="button" onClick={() => void runHybridSearch()} disabled={!currentDataset || !hybridSearchReady}>
                         {t('run_hybrid_search')}
                       </button>
@@ -2530,8 +3021,6 @@ export function App() {
                         {expanded && selectedRunDetail && selectedRunDetail.run.run_id === run.run_id && (
                           <div className="result-box" style={{ marginTop: 14 }}>
                             <div className="meta">
-                              <span>{String(selectedRunDetail.run.status)}</span>
-                              <span>{String(selectedRunDetail.run.action)}</span>
                               <span>{t('rows_count', { count: selectedRunDetail.preview.row_count ?? '—' })}</span>
                             </div>
                             {!isTerminalRunStatus(String(selectedRunDetail.run.status)) && (

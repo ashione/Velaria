@@ -22,7 +22,14 @@ from velaria import (
     Session,
     __version__,
     DEFAULT_LOCAL_CHINESE_EMBEDDING_MODEL,
+    annotate_source_arrow_table,
+    build_keyword_index,
     build_file_embeddings,
+    load_keyword_index,
+    read_embedding_table,
+    search_keyword_index,
+    stream_mixed_text_embeddings_to_parquet,
+    materialize_mixed_text_embeddings_stream,
     query_file_embeddings,
     read_excel,
 )
@@ -221,6 +228,47 @@ def _load_arrow_table(input_path: Path):
     raise ValueError(f"unsupported arrow-like file: {input_path}")
 
 
+def _parse_path_list(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        value = raw.strip()
+        return [value] if value else []
+    if isinstance(raw, (list, tuple)):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    raise ValueError(f"invalid path list payload: {raw}")
+
+
+def _load_arrow_tables(paths: list[str]) -> list[pa.Table]:
+    if not paths:
+        raise ValueError("dataset_path or dataset_paths is required")
+    tables: list[pa.Table] = []
+    for raw_path in paths:
+        normalized = _normalize_path(raw_path)
+        tables.append(_load_arrow_table(normalized))
+    return tables
+
+
+def _directory_artifact(
+    path: Path,
+    *,
+    format_name: str,
+    row_count: int | None,
+    schema: list[str] | None,
+    preview: dict[str, Any] | None,
+    tags: list[str],
+) -> dict[str, Any]:
+    return {
+        "type": "directory",
+        "uri": cli_impl._uri_from_path(path),
+        "format": format_name,
+        "row_count": row_count,
+        "schema_json": schema,
+        "preview_json": preview,
+        "tags_json": tags,
+    }
+
+
 def _run_duration_ms(run: dict[str, Any]) -> int | None:
     created_at = run.get("created_at")
     finished_at = run.get("finished_at")
@@ -326,6 +374,7 @@ def _execute_embedding_build(payload: dict[str, Any], run_dir: Path, *, provider
         raise ValueError("text_columns must not be empty")
 
     input_type = str(payload.get("input_type") or "auto").lower()
+    effective_input_type = "parquet" if input_type == "bitable" else input_type
     template_version = str(payload.get("template_version") or "text-v1")
     vector_column = str(payload.get("vector_column") or "embedding")
     if vector_column != "embedding":
@@ -379,6 +428,103 @@ def _execute_embedding_build(payload: dict[str, Any], run_dir: Path, *, provider
     }
 
 
+def _execute_keyword_index_build(payload: dict[str, Any], run_dir: Path, *, run_id: str | None = None) -> dict[str, Any]:
+    dataset_paths = _parse_path_list(payload.get("dataset_paths"))
+    if payload.get("dataset_path"):
+        dataset_paths = [str(payload["dataset_path"]), *dataset_paths]
+
+    text_columns = _parse_string_list(payload.get("text_columns"))
+    if not text_columns:
+        raise ValueError("text_columns must not be empty")
+
+    source_paths = [str(_normalize_path(path)) for path in dataset_paths]
+    source_labels: list[str]
+    doc_id_field = str(payload.get("doc_id_field") or "doc_id")
+    if source_paths:
+        tables = _load_arrow_tables(source_paths)
+        source_labels = [Path(path).stem for path in source_paths]
+    else:
+        input_path = payload.get("input_path")
+        if not input_path:
+            raise ValueError("dataset_path, dataset_paths, or input_path is required")
+        session = Session()
+        source_df = _load_dataframe(
+            session,
+            {
+                "input_path": str(_normalize_path(str(input_path))),
+                "input_type": payload.get("input_type", "auto"),
+                "delimiter": payload.get("delimiter", ","),
+                "line_mode": payload.get("line_mode", "split"),
+                "regex_pattern": payload.get("regex_pattern"),
+                "mappings": payload.get("mappings"),
+                "columns": payload.get("columns"),
+                "json_format": payload.get("json_format", "json_lines"),
+            },
+        )
+        tables = [source_df.to_arrow()]
+        source_paths = [str(_normalize_path(str(input_path)))]
+        source_labels = [Path(source_paths[0]).stem]
+    output_dir = (
+        _normalize_path(payload["output_path"])
+        if payload.get("output_path")
+        else run_dir / "artifacts" / "keyword_index"
+    )
+    analyzer = str(payload.get("analyzer") or "jieba")
+    if run_id:
+        _update_run_progress(
+            run_id,
+            progress_phase="building_keyword_index",
+            keyword_dataset_count=len(tables),
+            keyword_text_columns=text_columns,
+            keyword_analyzer=analyzer,
+        )
+    manifest = build_keyword_index(
+        tables,
+        output_dir=output_dir,
+        text_columns=text_columns,
+        source_labels=source_labels,
+        analyzer=analyzer,
+        doc_id_field=doc_id_field,
+    )
+    docs_table = pq.read_table(output_dir / manifest["docs_path"])
+    preview_limit = int(payload.get("preview_limit", 50))
+    preview = cli_impl._preview_payload_from_table(docs_table, limit=preview_limit)
+    preview["schema"] = docs_table.schema.names
+    preview["row_count"] = docs_table.num_rows
+    artifact = _directory_artifact(
+        output_dir,
+        format_name="keyword-index",
+        row_count=manifest["doc_count"],
+        schema=docs_table.schema.names,
+        preview=preview,
+        tags=["dataset", "keyword-index-build", "result"],
+    )
+    result_payload = {
+        "index_path": str(output_dir),
+        "dataset_paths": source_paths,
+        "dataset_count": len(source_paths),
+        "text_columns": text_columns,
+        "analyzer": analyzer,
+        "doc_id_field": doc_id_field,
+        "doc_count": manifest["doc_count"],
+        "term_count": manifest["term_count"],
+        "posting_count": manifest["posting_count"],
+        "schema": docs_table.schema.names,
+    }
+    if run_id:
+        _update_run_progress(
+            run_id,
+            progress_phase="keyword_index_ready",
+            keyword_doc_count=manifest["doc_count"],
+            keyword_term_count=manifest["term_count"],
+        )
+    return {
+        "payload": result_payload,
+        "preview": preview,
+        "artifacts": [artifact],
+    }
+
+
 def _execute_hybrid_search(payload: dict[str, Any], run_dir: Path, *, provider: Any, resolved_model: str) -> dict[str, Any]:
     session = Session()
     provider_name = str(payload.get("provider") or _default_embedding_provider())
@@ -394,25 +540,81 @@ def _execute_hybrid_search(payload: dict[str, Any], run_dir: Path, *, provider: 
     template_version = str(payload.get("template_version") or "text-v1")
     metric = str(payload.get("metric") or "cosine")
     where_sql = payload.get("where_sql")
+    index_path = payload.get("index_path")
     dataset_path = payload.get("dataset_path")
     if not dataset_path:
         raise ValueError(
             "dataset_path is required for hybrid search. Build embeddings first via /api/v1/runs/embedding-build."
         )
     normalized_dataset_path = str(_normalize_path(str(dataset_path)))
-    result_df = query_file_embeddings(
-        session,
-        normalized_dataset_path,
-        provider=provider,
-        model=resolved_model,
-        query_text=query_text,
-        vector_column=vector_column,
-        top_k=top_k,
-        metric=metric,
-        where_sql=str(where_sql) if where_sql else None,
-    )
+    keyword_scores: dict[str, float] = {}
+    if index_path:
+        normalized_index_path = str(_normalize_path(str(index_path)))
+        loaded_index = load_keyword_index(normalized_index_path)
+        allowed_doc_ids: set[int] | None = None
+        if where_sql:
+            docs_df = session.create_dataframe_from_arrow(loaded_index["docs"])
+            session.create_temp_view("keyword_hybrid_candidates", docs_df)
+            filtered = session.sql(
+                f"SELECT __doc_id FROM keyword_hybrid_candidates WHERE {str(where_sql)}"
+            ).to_arrow()
+            allowed_doc_ids = {int(value) for value in filtered.column("__doc_id").to_pylist()}
+        keyword_candidates = search_keyword_index(
+            normalized_index_path,
+            query_text=query_text,
+            top_k=int(payload.get("keyword_top_k", max(top_k * 5, top_k))),
+            allowed_doc_ids=allowed_doc_ids,
+        )
+        if keyword_candidates.num_rows == 0:
+            result_table = pa.Table.from_pylist([])
+        else:
+            keyword_scores = {
+                str(row.get("__doc_join_key") or row.get("doc_id")): float(row["keyword_score"])
+                for row in keyword_candidates.to_pylist()
+                if row.get("__doc_join_key") is not None or row.get("doc_id") is not None
+            }
+            embedding_table = read_embedding_table(normalized_dataset_path)
+            join_column = "__doc_join_key" if "__doc_join_key" in embedding_table.column_names else "doc_id"
+            if join_column not in embedding_table.column_names:
+                raise ValueError("embedding dataset must contain __doc_join_key or doc_id for keyword+hybrid fusion")
+            doc_ids = set(keyword_scores.keys())
+            mask = pa.array(
+                [str(doc_id) in doc_ids if doc_id is not None else False for doc_id in embedding_table.column(join_column).to_pylist()],
+                type=pa.bool_(),
+            )
+            filtered_table = embedding_table.filter(mask)
+            result_df = query_file_embeddings(
+                session,
+                filtered_table,
+                provider=provider,
+                model=resolved_model,
+                query_text=query_text,
+                vector_column=vector_column,
+                top_k=top_k,
+                metric=metric,
+            )
+            result_table = result_df.to_arrow()
+    else:
+        result_df = query_file_embeddings(
+            session,
+            normalized_dataset_path,
+            provider=provider,
+            model=resolved_model,
+            query_text=query_text,
+            vector_column=vector_column,
+            top_k=top_k,
+            metric=metric,
+            where_sql=str(where_sql) if where_sql else None,
+        )
+        result_table = result_df.to_arrow()
 
-    result_table = result_df.to_arrow()
+    join_column = "__doc_join_key" if "__doc_join_key" in result_table.column_names else "doc_id"
+    if keyword_scores and result_table.num_rows > 0 and join_column in result_table.column_names and "keyword_score" not in result_table.column_names:
+        appended_scores = [
+            keyword_scores.get(str(doc_id), 0.0)
+            for doc_id in result_table.column(join_column).to_pylist()
+        ]
+        result_table = result_table.append_column("keyword_score", pa.array(appended_scores, type=pa.float64()))
     preview_limit = int(payload.get("preview_limit", 50))
     preview = cli_impl._preview_payload_from_table(result_table, limit=preview_limit)
     preview["schema"] = result_table.schema.names
@@ -434,9 +636,65 @@ def _execute_hybrid_search(payload: dict[str, Any], run_dir: Path, *, provider: 
             "top_k": top_k,
             "metric": metric,
             "where_sql": str(where_sql) if where_sql else None,
+            "index_path": str(_normalize_path(str(index_path))) if index_path else None,
             "vector_column": vector_column,
             "score_semantics": score_order,
             "score_kind": score_kind,
+            "schema": result_table.schema.names,
+            "row_count": result_table.num_rows,
+        },
+        "preview": preview,
+        "artifacts": artifacts,
+    }
+
+
+def _execute_keyword_search(payload: dict[str, Any], run_dir: Path) -> dict[str, Any]:
+    session = Session()
+    query_text = str(payload.get("query_text") or "").strip()
+    if not query_text:
+        raise ValueError("query_text must not be empty")
+
+    top_k = int(payload.get("top_k", 10))
+    if top_k <= 0:
+        raise ValueError("top_k must be positive")
+
+    index_path = payload.get("index_path")
+    if not index_path:
+        raise ValueError("index_path is required for keyword search. Build keyword index first.")
+    normalized_index_path = str(_normalize_path(str(index_path)))
+    where_sql = payload.get("where_sql")
+
+    allowed_doc_ids: set[int] | None = None
+    loaded_index = load_keyword_index(normalized_index_path)
+    docs_table = loaded_index["docs"]
+    if where_sql:
+        docs_df = session.create_dataframe_from_arrow(docs_table)
+        session.create_temp_view("keyword_docs_input", docs_df)
+        filtered = session.sql(f"SELECT __doc_id FROM keyword_docs_input WHERE {str(where_sql)}").to_arrow()
+        allowed_doc_ids = {int(value) for value in filtered.column("__doc_id").to_pylist()}
+
+    result_table = search_keyword_index(
+        normalized_index_path,
+        query_text=query_text,
+        top_k=top_k,
+        allowed_doc_ids=allowed_doc_ids,
+    )
+    preview_limit = int(payload.get("preview_limit", 50))
+    preview = cli_impl._preview_payload_from_table(result_table, limit=preview_limit)
+    preview["schema"] = result_table.schema.names
+    preview["row_count"] = result_table.num_rows
+    output_path = (
+        _normalize_path(payload["output_path"])
+        if payload.get("output_path")
+        else run_dir / "artifacts" / "keyword_search_result.parquet"
+    )
+    artifacts = [cli_impl._table_artifact(output_path, result_table, ["result", "keyword-search"])]
+    return {
+        "payload": {
+            "index_path": normalized_index_path,
+            "query_text": query_text,
+            "top_k": top_k,
+            "where_sql": str(where_sql) if where_sql else None,
             "schema": result_table.schema.names,
             "row_count": result_table.num_rows,
         },
@@ -471,39 +729,234 @@ def _execute_bitable_import(payload: dict[str, Any], run_dir: Path, *, run_id: s
                 last_page_rows=page_rows,
             )
 
-    rows = client.list_records_from_url(
-        bitable_url,
-        page_size=int(payload.get("page_size", _BITABLE_PAGE_SIZE)),
-        on_page=_on_page,
-    )
-    normalized_rows = _normalize_bitable_rows(rows)
-    table = pa.Table.from_pylist(normalized_rows)
     output_path = (
         _normalize_path(payload["output_path"])
         if payload.get("output_path")
         else run_dir / "artifacts" / "bitable_dataset.parquet"
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(table, str(output_path))
-
     preview_limit = int(payload.get("preview_limit", 50))
-    preview = cli_impl._preview_payload_from_table(table, limit=preview_limit)
-    preview["schema"] = table.schema.names
-    preview["row_count"] = table.num_rows
+    preview_rows: list[dict[str, Any]] = []
+    schema: pa.Schema | None = None
+    writer: pq.ParquetWriter | None = None
+    total_rows = 0
+    try:
+        try:
+            page_iter = client.iter_record_pages_from_url(
+                bitable_url,
+                page_size=int(payload.get("page_size", _BITABLE_PAGE_SIZE)),
+                on_page=_on_page,
+            )
+            iterator = iter(page_iter)
+        except TypeError:
+            rows = client.list_records_from_url(
+                bitable_url,
+                page_size=int(payload.get("page_size", _BITABLE_PAGE_SIZE)),
+                on_page=_on_page,
+            )
+            iterator = iter([rows])
+
+        for page_rows in iterator:
+            normalized_rows = _normalize_bitable_rows(page_rows)
+            page_table = pa.Table.from_pylist(normalized_rows)
+            if writer is None:
+                writer = pq.ParquetWriter(str(output_path), page_table.schema)
+                schema = page_table.schema
+            writer.write_table(page_table)
+            total_rows += page_table.num_rows
+            if len(preview_rows) < preview_limit:
+                remaining = preview_limit - len(preview_rows)
+                preview_rows.extend(normalized_rows[:remaining])
+    finally:
+        if writer is not None:
+            writer.close()
+
+    if schema is None:
+        raise ValueError("bitable import returned no rows")
+
+    preview_table = pa.Table.from_pylist(preview_rows, schema=schema) if preview_rows else pa.Table.from_arrays([], schema=schema)
+
+    preview = cli_impl._preview_payload_from_table(preview_table, limit=preview_limit)
+    preview["schema"] = schema.names
+    preview["row_count"] = total_rows
     dataset_name = str(payload.get("dataset_name") or "").strip() or _default_bitable_dataset_name(bitable_url)
-    artifacts = [_register_artifacts_preview_table(output_path, table)]
+    artifacts = [{
+        "type": "file",
+        "uri": cli_impl._uri_from_path(output_path),
+        "format": "parquet",
+        "row_count": total_rows,
+        "schema_json": schema.names,
+        "preview_json": preview,
+        "tags_json": ["dataset", "bitable-import", "result"],
+    }]
+    result_payload: dict[str, Any] = {
+        "dataset_name": dataset_name,
+        "source_type": "bitable",
+        "source_path": str(output_path),
+        "source_label": bitable_url,
+        "row_count": total_rows,
+        "schema": schema.names,
+        "imported_at": _timestamp_suffix(),
+        "fetched_rows": total_rows,
+        "pages_fetched": fetched_pages,
+    }
+
+    raw_keyword_index_config = payload.get("keyword_index_config")
+    keyword_index_config = raw_keyword_index_config if isinstance(raw_keyword_index_config, dict) else {}
+
+    worker_errors: list[BaseException] = []
+    worker_lock = threading.Lock()
+    embedding_result: dict[str, Any] | None = None
+    keyword_result: dict[str, Any] | None = None
+
+    raw_embedding_config = payload.get("embedding_config")
+    embedding_config = raw_embedding_config if isinstance(raw_embedding_config, dict) else {}
+
+    def record_worker_error(exc: BaseException) -> None:
+        with worker_lock:
+            worker_errors.append(exc)
+
+    def run_embedding() -> None:
+        nonlocal embedding_result
+        try:
+            text_columns = _parse_string_list(embedding_config.get("text_columns"))
+            if not text_columns:
+                raise ValueError("embedding_config.text_columns must not be empty")
+
+            provider_name = str(embedding_config.get("provider") or _default_embedding_provider())
+            resolved_model = _default_embedding_model(provider_name, embedding_config.get("model"))
+            provider, resolved_model = cli_impl._make_embedding_provider(provider_name, resolved_model)
+            template_version = str(embedding_config.get("template_version") or "text-v1")
+            vector_column = str(embedding_config.get("vector_column") or "embedding")
+            if vector_column != "embedding":
+                raise ValueError("bitable import currently materializes vectors into the 'embedding' column only")
+            embedding_batch_size = int(embedding_config.get("batch_size", 128))
+            embedding_output_path = (
+                _normalize_path(embedding_config["output_path"])
+                if embedding_config.get("output_path")
+                else run_dir / "artifacts" / "bitable_embedding_dataset.parquet"
+            )
+            if run_id:
+                _update_run_progress(
+                    run_id,
+                    progress_phase="building_embedding",
+                    embedding_provider=provider_name,
+                    embedding_model=resolved_model,
+                    embedding_batch_size=embedding_batch_size,
+                )
+
+            def _on_batch(total_rows: int, batch_rows: int) -> None:
+                if run_id:
+                    _update_run_progress(
+                        run_id,
+                        progress_phase="building_embedding",
+                        embedding_rows=total_rows,
+                        embedding_last_batch_rows=batch_rows,
+                    )
+
+            embedding_source_table = annotate_source_arrow_table(pq.read_table(str(output_path)), source_label=output_path.stem)
+            embedding_meta = stream_mixed_text_embeddings_to_parquet(
+                embedding_source_table,
+                provider=provider,
+                model=resolved_model,
+                template_version=template_version,
+                output_path=embedding_output_path,
+                text_fields=text_columns,
+                batch_size=embedding_batch_size,
+                preview_limit=int(payload.get("preview_limit", 50)),
+                on_batch=_on_batch,
+            )
+            embedding_result = {
+                "artifact": {
+                    "type": "file",
+                    "uri": cli_impl._uri_from_path(Path(embedding_meta["output_path"])),
+                    "format": "parquet",
+                    "row_count": embedding_meta["row_count"],
+                    "schema_json": embedding_meta["schema"],
+                    "preview_json": cli_impl._preview_payload_from_table(
+                        embedding_meta["preview_table"],
+                        limit=int(payload.get("preview_limit", 50)),
+                    ),
+                    "tags_json": ["dataset", "bitable-import", "embedding-build"],
+                },
+                "payload": {
+                    "dataset_path": embedding_meta["output_path"],
+                    "schema": embedding_meta["schema"],
+                    "row_count": embedding_meta["row_count"],
+                    "provider": provider_name,
+                    "model": resolved_model,
+                    "template_version": template_version,
+                    "vector_column": vector_column,
+                    "text_columns": text_columns,
+                },
+            }
+            if run_id:
+                _update_run_progress(
+                    run_id,
+                    progress_phase="embedding_ready",
+                    embedding_rows=embedding_meta["row_count"],
+                )
+        except BaseException as exc:  # noqa: BLE001
+            record_worker_error(exc)
+
+    def run_keyword_index() -> None:
+        nonlocal keyword_result
+        try:
+            text_columns = _parse_string_list(keyword_index_config.get("text_columns"))
+            if not text_columns:
+                raise ValueError("keyword_index_config.text_columns must not be empty")
+            analyzer = str(keyword_index_config.get("analyzer") or "jieba")
+            keyword_output_dir = (
+                _normalize_path(keyword_index_config["output_path"])
+                if keyword_index_config.get("output_path")
+                else run_dir / "artifacts" / "bitable_keyword_index"
+            )
+            keyword_result = _execute_keyword_index_build(
+                {
+                    "dataset_paths": [str(output_path)],
+                    "text_columns": text_columns,
+                    "output_path": str(keyword_output_dir),
+                    "analyzer": analyzer,
+                    "preview_limit": int(keyword_index_config.get("preview_limit", payload.get("preview_limit", 50))),
+                },
+                run_dir,
+                run_id=run_id,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            record_worker_error(exc)
+
+    workers: list[threading.Thread] = []
+    if embedding_config.get("enabled"):
+        workers.append(threading.Thread(target=run_embedding, daemon=True))
+    if keyword_index_config.get("enabled"):
+        workers.append(threading.Thread(target=run_keyword_index, daemon=True))
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    if worker_errors:
+        raise worker_errors[0]
+
+    if embedding_result is not None:
+        artifacts.append(embedding_result["artifact"])
+        result_payload["embedding_dataset"] = embedding_result["payload"]
+
+    if keyword_result is not None:
+        artifacts.extend(keyword_result.get("artifacts", []))
+        result_payload["keyword_index"] = {
+            "index_path": keyword_result["payload"]["index_path"],
+            "dataset_count": keyword_result["payload"]["dataset_count"],
+            "text_columns": keyword_result["payload"]["text_columns"],
+            "analyzer": keyword_result["payload"]["analyzer"],
+            "doc_count": keyword_result["payload"]["doc_count"],
+            "term_count": keyword_result["payload"]["term_count"],
+            "posting_count": keyword_result["payload"]["posting_count"],
+            "schema": keyword_result["payload"]["schema"],
+        }
+
     return {
-        "payload": {
-            "dataset_name": dataset_name,
-            "source_type": "bitable",
-            "source_path": str(output_path),
-            "source_label": bitable_url,
-            "row_count": table.num_rows,
-            "schema": table.schema.names,
-            "imported_at": _timestamp_suffix(),
-            "fetched_rows": table.num_rows,
-            "pages_fetched": fetched_pages,
-        },
+        "payload": result_payload,
         "preview": preview,
         "artifacts": artifacts,
     }
@@ -641,6 +1094,32 @@ def _finalize_bitable_import_run(
                 "artifact_uri": created_artifacts[0].get("uri", ""),
                 "artifact_id": created_artifacts[0].get("artifact_id", ""),
             }
+            embedding_dataset = result_payload.get("embedding_dataset")
+            if isinstance(embedding_dataset, dict):
+                for artifact in created_artifacts:
+                    tags = artifact.get("tags_json") or []
+                    if "embedding-build" not in tags:
+                        continue
+                    result_payload["embedding_dataset"] = {
+                        **embedding_dataset,
+                        "artifact_uri": artifact.get("uri", ""),
+                        "artifact_id": artifact.get("artifact_id", ""),
+                        "run_id": run_id,
+                    }
+                    break
+            keyword_index = result_payload.get("keyword_index")
+            if isinstance(keyword_index, dict):
+                for artifact in created_artifacts:
+                    tags = artifact.get("tags_json") or []
+                    if "keyword-index-build" not in tags:
+                        continue
+                    result_payload["keyword_index"] = {
+                        **keyword_index,
+                        "artifact_uri": artifact.get("uri", ""),
+                        "artifact_id": artifact.get("artifact_id", ""),
+                        "run_id": run_id,
+                    }
+                    break
         finalized = finalize_run(run_id, "succeeded", details=result_payload)
         index.upsert_run(finalized)
     except Exception as exc:
@@ -918,6 +1397,8 @@ class VelariaService:
                         if isinstance(tags, str):
                             tags = _parse_csv_list(tags)
                         request_app_secret = payload.get("app_secret") or payload.get("bitable_app_secret")
+                        embedding_config = payload.get("embedding_config")
+                        keyword_index_config = payload.get("keyword_index_config")
                         action_args = {
                             "bitable_url": payload.get("bitable_url") or payload.get("input_path"),
                             "app_id": payload.get("app_id") or payload.get("bitable_app_id"),
@@ -926,6 +1407,8 @@ class VelariaService:
                             "preview_limit": int(payload.get("preview_limit", 50)),
                             "timeout_seconds": int(payload.get("timeout_seconds", _BITABLE_TIMEOUT_SECONDS)),
                             "page_size": int(payload.get("page_size", _BITABLE_PAGE_SIZE)),
+                            "embedding_config": embedding_config,
+                            "keyword_index_config": keyword_index_config,
                         }
                         worker_args = {
                             **action_args,
@@ -1084,6 +1567,138 @@ class VelariaService:
                                 resolved_model_name,
                             )
                             result = _execute_embedding_build(action_args, run_dir, provider=provider, resolved_model=resolved_model)
+                            created_artifacts = _register_artifacts(index, run_id, result.get("artifacts", []))
+                            finalized = finalize_run(run_id, "succeeded")
+                            index.upsert_run(finalized)
+                            self._send_json(
+                                HTTPStatus.OK,
+                                _build_run_response(
+                                    index,
+                                    finalized,
+                                    run_dir=run_dir,
+                                    result=result,
+                                    artifacts=created_artifacts,
+                                ),
+                            )
+                            return
+                        except Exception as exc:
+                            append_stderr(run_id, traceback.format_exc())
+                            finalized = finalize_run(
+                                run_id,
+                                "failed",
+                                error=str(exc),
+                                details=cli_impl._error_payload_from_exception(exc),
+                            )
+                            index.upsert_run(finalized)
+                            raise
+                        finally:
+                            index.close()
+                    if parts == ("runs", "keyword-index-build"):
+                        tags = payload.get("tags") or []
+                        if isinstance(tags, str):
+                            tags = _parse_csv_list(tags)
+                        dataset_paths = _parse_path_list(payload.get("dataset_paths"))
+                        if payload.get("dataset_path"):
+                            dataset_paths = [payload["dataset_path"], *dataset_paths]
+                        action_args = {
+                            "dataset_paths": [str(_normalize_path(path)) for path in dataset_paths],
+                            "input_path": str(_normalize_path(payload["input_path"])) if payload.get("input_path") else None,
+                            "input_type": payload.get("input_type", "auto"),
+                            "delimiter": payload.get("delimiter", ","),
+                            "line_mode": payload.get("line_mode", "split"),
+                            "regex_pattern": payload.get("regex_pattern"),
+                            "mappings": payload.get("mappings"),
+                            "columns": payload.get("columns"),
+                            "json_format": payload.get("json_format", "json_lines"),
+                            "text_columns": payload.get("text_columns"),
+                            "analyzer": payload.get("analyzer", "jieba"),
+                            "output_path": payload.get("output_path"),
+                            "preview_limit": int(payload.get("preview_limit", 50)),
+                        }
+                        run_id, run_dir = create_run(
+                            "keyword-index-build",
+                            action_args,
+                            __version__,
+                            run_name=payload.get("run_name"),
+                            description=payload.get("description"),
+                            tags=tags,
+                        )
+                        write_inputs(
+                            run_id,
+                            {
+                                "action": "keyword-index-build",
+                                "action_args": action_args,
+                                "run_name": payload.get("run_name"),
+                                "description": payload.get("description"),
+                                "tags": tags,
+                            },
+                        )
+                        index = ArtifactIndex()
+                        try:
+                            index.upsert_run(read_run(run_id))
+                            result = _execute_keyword_index_build(action_args, run_dir, run_id=run_id)
+                            created_artifacts = _register_artifacts(index, run_id, result.get("artifacts", []))
+                            finalized = finalize_run(run_id, "succeeded", details=result.get("payload"))
+                            index.upsert_run(finalized)
+                            self._send_json(
+                                HTTPStatus.OK,
+                                _build_run_response(
+                                    index,
+                                    finalized,
+                                    run_dir=run_dir,
+                                    result=result,
+                                    artifacts=created_artifacts,
+                                ),
+                            )
+                            return
+                        except Exception as exc:
+                            append_stderr(run_id, traceback.format_exc())
+                            finalized = finalize_run(
+                                run_id,
+                                "failed",
+                                error=str(exc),
+                                details=cli_impl._error_payload_from_exception(exc),
+                            )
+                            index.upsert_run(finalized)
+                            raise
+                        finally:
+                            index.close()
+                    if parts == ("runs", "keyword-search"):
+                        tags = payload.get("tags") or []
+                        if isinstance(tags, str):
+                            tags = _parse_csv_list(tags)
+                        action_args = {
+                            "index_path": str(_normalize_path(str(payload["index_path"])))
+                            if payload.get("index_path")
+                            else None,
+                            "query_text": payload.get("query_text"),
+                            "top_k": int(payload.get("top_k", 10)),
+                            "where_sql": payload.get("where_sql"),
+                            "output_path": payload.get("output_path"),
+                            "preview_limit": int(payload.get("preview_limit", 50)),
+                        }
+                        run_id, run_dir = create_run(
+                            "keyword-search",
+                            action_args,
+                            __version__,
+                            run_name=payload.get("run_name"),
+                            description=payload.get("description"),
+                            tags=tags,
+                        )
+                        write_inputs(
+                            run_id,
+                            {
+                                "action": "keyword-search",
+                                "action_args": action_args,
+                                "run_name": payload.get("run_name"),
+                                "description": payload.get("description"),
+                                "tags": tags,
+                            },
+                        )
+                        index = ArtifactIndex()
+                        try:
+                            index.upsert_run(read_run(run_id))
+                            result = _execute_keyword_search(action_args, run_dir)
                             created_artifacts = _register_artifacts(index, run_id, result.get("artifacts", []))
                             finalized = finalize_run(run_id, "succeeded")
                             index.upsert_run(finalized)

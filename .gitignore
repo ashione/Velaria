@@ -16,6 +16,8 @@ src/dataflow/runner/dashboard/*.js.map
 
 # Python local artifacts
 .venv/
+.venv-*/
+python_api/.venv-*/
 __pycache__/
 *.pyc
 *.pyo

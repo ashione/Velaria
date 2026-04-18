@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
 
@@ -30,6 +31,14 @@ function sidecarExecutablePath() {
     return path.join(process.resourcesPath, 'bin', 'velaria-service', 'velaria-service');
   }
   return null;
+}
+
+function jiebaDictDir() {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'bin', 'velaria-service', '_internal', 'velaria', 'jieba_dict');
+  }
+  const devPath = path.join(repoRoot(), 'python_api', 'velaria', 'jieba_dict');
+  return existsSync(devPath) ? devPath : '';
 }
 
 function configDir() {
@@ -90,6 +99,10 @@ function startSidecar() {
       throw new Error('missing packaged sidecar path');
     }
     processRef = spawn(execPath, ['--port', String(DEFAULT_PORT)], {
+      env: {
+        ...process.env,
+        ...(jiebaDictDir() ? { VELARIA_JIEBA_DICT_DIR: jiebaDictDir() } : {}),
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
   } else {
@@ -110,6 +123,7 @@ function startSidecar() {
         env: {
           ...process.env,
           PYTHONUNBUFFERED: '1',
+          ...(jiebaDictDir() ? { VELARIA_JIEBA_DICT_DIR: jiebaDictDir() } : {}),
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       }

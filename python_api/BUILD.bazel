@@ -31,6 +31,7 @@ py_library(
         "velaria/custom_stream.py",
         "velaria/bitable.py",
         "velaria/embedding.py",
+        "velaria/keyword_index.py",
         "velaria/workspace/__init__.py",
         "velaria/workspace/artifact_index.py",
         "velaria/workspace/paths.py",
@@ -40,6 +41,7 @@ py_library(
     data = [":velaria_native_py_pkg"],
     imports = ["."],
     deps = [
+        requirement("jieba"),
         requirement("openpyxl"),
         requirement("pandas"),
         requirement("pyarrow"),

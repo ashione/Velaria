@@ -43,8 +43,9 @@ bool isClauseKeyword(const std::string& value) {
          u == "SELECT" || u == "CREATE" || u == "TABLE" || u == "INSERT" || u == "INTO" ||
          u == "VALUES" || u == "USING" || u == "OPTIONS" || u == "SOURCE" || u == "SINK" ||
          u == "WINDOW" || u == "EVERY" || u == "HYBRID" || u == "SEARCH" ||
+         u == "KEYWORD" ||
          u == "QUERY" || u == "METRIC" || u == "TOP_K" || u == "SCORE_THRESHOLD" ||
-         u == "AND" || u == "OR";
+         u == "AND" || u == "OR" || u == "UNION" || u == "ALL";
 }
 
 bool isJoinKeyword(const std::string& value) {
@@ -650,7 +651,40 @@ HybridSearchSpec parseHybridSearch(ParseState& state) {
   return out;
 }
 
-SqlQuery parseSelectQuery(ParseState& state, bool alreadyConsumedSelect) {
+KeywordSearchSpec parseKeywordSearch(ParseState& state) {
+  KeywordSearchSpec out;
+  state.expectWord("SEARCH");
+  state.expectSymbol("(");
+  out.columns.push_back(parseColumn(state));
+  while (state.consumeSymbol(",")) {
+    out.columns.push_back(parseColumn(state));
+  }
+  state.expectSymbol(")");
+  state.expectWord("QUERY");
+  const Token query_token = state.expectToken();
+  if (!query_token.is_string) {
+    throw SQLSyntaxError("KEYWORD SEARCH QUERY must be a quoted string literal");
+  }
+  out.query_text = query_token.text;
+  while (!state.isEnd()) {
+    if (state.consumeWord("TOP_K")) {
+      const Token top_k = state.expectToken();
+      if (!top_k.is_number) {
+        throw SQLSyntaxError("KEYWORD SEARCH TOP_K must be numeric");
+      }
+      try {
+        out.top_k = static_cast<std::size_t>(std::stoull(top_k.text));
+      } catch (...) {
+        throw SQLSyntaxError("invalid KEYWORD SEARCH TOP_K: " + top_k.text);
+      }
+      continue;
+    }
+    break;
+  }
+  return out;
+}
+
+SqlQuery parseSelectQueryBody(ParseState& state, bool alreadyConsumedSelect) {
   SqlQuery out;
   if (!alreadyConsumedSelect) {
     state.expectWord("SELECT");
@@ -683,6 +717,10 @@ SqlQuery parseSelectQuery(ParseState& state, bool alreadyConsumedSelect) {
 
   if (state.consumeWord("WHERE")) {
     out.where = parsePredicate(state);
+  }
+
+  if (state.consumeWord("KEYWORD")) {
+    out.keyword_search = parseKeywordSearch(state);
   }
 
   if (state.consumeWord("HYBRID")) {
@@ -738,6 +776,18 @@ SqlQuery parseSelectQuery(ParseState& state, bool alreadyConsumedSelect) {
     }
   }
 
+  return out;
+}
+
+SqlQuery parseSelectQuery(ParseState& state, bool alreadyConsumedSelect) {
+  SqlQuery out = parseSelectQueryBody(state, alreadyConsumedSelect);
+  while (state.consumeWord("UNION")) {
+    SqlUnionTerm term;
+    term.all = state.consumeWord("ALL");
+    state.expectWord("SELECT");
+    term.query = std::make_shared<SqlQuery>(parseSelectQueryBody(state, true));
+    out.union_terms.push_back(std::move(term));
+  }
   return out;
 }
 

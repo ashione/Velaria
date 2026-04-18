@@ -128,6 +128,7 @@ Available today:
 - local exact vector search on fixed-dimension `float32`
 - Python Arrow ingress/output and workspace-backed run tracking
 - Python realtime queue-backed stream source/sink for direct Arrow ingestion into long-running local stream queries
+- local agentic event service for `external_event` source ingest, monitor lifecycle, search/grounding, and `FocusEvent` polling
 - reusable keyword-index assets for Arrow / Parquet datasets, including async build from the local desktop flow
 - local desktop app prototype under `app/`, backed by `velaria-service`
 - desktop import flow can asynchronously build reusable embedding datasets and keyword indexes from the same saved dataset
@@ -158,6 +159,7 @@ For more detail, use:
 
 - boundaries and ownership: [docs/core-boundary.md](./docs/core-boundary.md)
 - runtime contract: [docs/runtime-contract.md](./docs/runtime-contract.md)
+- local agentic service / protocol: [docs/agentic-service-api.md](./docs/agentic-service-api.md)
 - streaming runtime shape: [docs/streaming_runtime_design.md](./docs/streaming_runtime_design.md)
 - Python ecosystem details: [python_api/README.md](./python_api/README.md)
 - current maintained plan: [plans/core-runtime-columnar-plan.md](./plans/core-runtime-columnar-plan.md)

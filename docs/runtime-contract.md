@@ -17,6 +17,7 @@ It is the source of truth for:
 This document complements:
 
 - [core-boundary.md](./core-boundary.md)
+- [agentic-service-api.md](./agentic-service-api.md)
 - [streaming_runtime_design.md](./streaming_runtime_design.md)
 - [local_vector_search_v01.md](./local_vector_search_v01.md)
 
@@ -57,6 +58,10 @@ Python ecosystem projections:
 - `read_excel(...)`
 
 Python-facing APIs may keep Pythonic naming, but their behavior must project the same semantics as the C++ kernel.
+
+The local agentic service and monitor/focus-event API are documented separately in
+`docs/agentic-service-api.md`; they build on this runtime contract but are not
+themselves kernel contract surfaces.
 
 ## Batch File Input Contract
 

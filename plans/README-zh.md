@@ -13,6 +13,7 @@
 - 稳定边界与 contract：
   - [../docs/core-boundary.md](../docs/core-boundary.md)
   - [../docs/runtime-contract.md](../docs/runtime-contract.md)
+  - [../docs/agentic-service-api.md](../docs/agentic-service-api.md)
   - [../docs/streaming_runtime_design.md](../docs/streaming_runtime_design.md)
 - 当前维护中的工作计划：
   - [core-runtime-columnar-plan.md](./core-runtime-columnar-plan.md)
@@ -23,6 +24,18 @@
   - 当前 core runtime columnar 路线的状态板
   - 维护已实现项、明确不做项和下一阶段
   - 当前活跃的 core-runtime 路线应优先更新这份文档
+- [agentic-event-data-platform-v1.md](./agentic-event-data-platform-v1.md)
+  - agentic / event 方向的总设计入口
+- [agentic-user-journeys-v1.md](./agentic-user-journeys-v1.md)
+  - 外部 agent、skill、配置者、分析者的主使用路径
+- [agentic-event-model-v1.md](./agentic-event-model-v1.md)
+  - observation、signal、focus event、monitor 等领域模型真源
+- [agentic-search-grounding-v1.md](./agentic-search-grounding-v1.md)
+  - 模糊查询、混合检索、skill grounding 与 monitor 创建的设计真源
+- [agentic-monitor-execution-v1.md](./agentic-monitor-execution-v1.md)
+  - batch monitor、stream monitor 与 external event source 的执行语义真源
+- [agentic-rule-dsl-v1.md](./agentic-rule-dsl-v1.md)
+  - 事件规则 DSL 的语法、校验、编译目标与 runtime 关系
 - [analytical-storage-format-v1.md](./analytical-storage-format-v1.md)
   - 内部分析型保存表格式的 v1 设计
 - [visual-data-app-v1.md](./visual-data-app-v1.md)
@@ -33,6 +46,9 @@
   - 导入 / 展示 / 分析三条核心工作流
 - [electron-dmg-packaging-v1.md](./electron-dmg-packaging-v1.md)
   - Electron 桌面打包与 `.dmg` 交付方案
+
+上面这组 agentic / event 文档是当前这条产品线的设计真源。
+它们当前仍属于 `plans/` 设计文档，尚未上升为稳定 `docs/` contract。
 
 ## 仍有参考价值的历史设计说明
 

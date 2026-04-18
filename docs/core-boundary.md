@@ -68,6 +68,7 @@ Python ecosystem owns:
 - Excel and Bitable adapters
 - custom source / custom sink adapters
 - realtime queue-backed stream source / sink projections for local agentic service use
+- local agentic service APIs for external event ingest, monitor lifecycle, search/grounding, and focus-event consumption
 - Python-facing demos in `python_api/examples`
 - Python-facing benchmarks in `python_api/benchmarks`
 
@@ -93,6 +94,8 @@ Repository view:
   - `//python_api:velaria_python_supported_regression`
 - shell entrypoint:
   - `./scripts/run_python_ecosystem_regression.sh`
+- local service/API reference:
+  - `docs/agentic-service-api.md`
 
 ### Experimental Runtime
 

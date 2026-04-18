@@ -128,6 +128,7 @@ Arrow / CSV / Python ingress
 - fixed-dimension `float32` 的本地 exact vector search
 - Python Arrow 输入/输出与 workspace-backed run tracking
 - Python 侧支持 realtime queue-backed stream source/sink，可把 Arrow batch 直接写入长运行本地流查询
+- 本地 agentic event service，支持 `external_event` Source 接入、Monitor 生命周期、search / grounding 与 `FocusEvent` 轮询
 - 面向 Arrow / Parquet 数据集的可复用 keyword index 资产，以及桌面导入流里的异步索引构建
 - `app/` 下的本地桌面原型，由 `velaria-service` 提供本地服务
 - 桌面端导入流可以在保存同一份数据集后，异步构建可复用的 embedding 数据集与 keyword index
@@ -158,6 +159,7 @@ Arrow / CSV / Python ingress
 
 - 边界与职责：[docs/core-boundary.md](./docs/core-boundary.md)
 - runtime contract：[docs/runtime-contract.md](./docs/runtime-contract.md)
+- 本地 agentic service / 协议：[docs/agentic-service-api.md](./docs/agentic-service-api.md)
 - streaming runtime 形态：[docs/streaming_runtime_design.md](./docs/streaming_runtime_design.md)
 - Python 生态细节：[python_api/README.md](./python_api/README.md)
 - 当前维护中的主 plan：[plans/core-runtime-columnar-plan.md](./plans/core-runtime-columnar-plan.md)

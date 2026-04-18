@@ -57,6 +57,19 @@ def _jsonl_to_table(rows: list[dict[str, Any]]) -> pa.Table:
     return pa.Table.from_pylist(normalized)
 
 
+def _empty_external_event_table(source_meta: dict[str, Any]) -> pa.Table:
+    field_names = [
+        "event_time",
+        "event_type",
+        "source_key",
+        "payload_json",
+        "ingested_at",
+        "source_id",
+        *list((source_meta.get("schema_binding") or {}).get("field_mappings", {}).keys()),
+    ]
+    return pa.table({name: pa.array([], type=pa.string()) for name in dict.fromkeys(field_names)})
+
+
 def _coerce_scalar(value: Any) -> Any:
     if not isinstance(value, str):
         return value
@@ -319,7 +332,7 @@ def execute_monitor_once(store: AgenticStore, monitor_id: str) -> dict[str, Any]
                     end_time=current_end.isoformat().replace("+00:00", "Z"),
                     time_field="ingested_at",
                 )
-            current_table = _jsonl_to_table(current_rows)
+            current_table = _jsonl_to_table(current_rows) if current_rows else _empty_external_event_table(source)
         else:
             payload = {"input_path": source_binding["path"], "input_type": source_binding.get("input_type", "auto")}
             current_df = __import__("velaria_service")._load_dataframe(session, payload)  # type: ignore[attr-defined]
@@ -327,6 +340,35 @@ def execute_monitor_once(store: AgenticStore, monitor_id: str) -> dict[str, Any]
         current_artifact_id = _materialize_snapshot_artifact(index, run_id, run_dir, current_table, "current_snapshot")
         if current_artifact_id:
             artifacts.append(current_artifact_id)
+        if monitor["execution_mode"] != "batch" and current_table.num_rows == 0:
+            explain = {
+                "monitor_id": monitor_id,
+                "execution_mode": monitor["execution_mode"],
+                "signal_rows": 0,
+                "focus_events": 0,
+                "empty_window": True,
+            }
+            write_explain(run_id, explain)
+            finalized = finalize_run(
+                run_id,
+                "succeeded",
+                details={
+                    "focus_event_count": 0,
+                    "signal_ids": [],
+                    "empty_window": True,
+                },
+            )
+            index.upsert_run(finalized)
+            state_updates = {"status": "idle", "last_success_at": now, "last_snapshot_id": current_artifact_id, "last_error": None}
+            if current_end is not None:
+                state_updates["last_emitted_window_end"] = current_end.isoformat().replace("+00:00", "Z")
+            store.upsert_monitor_state(monitor_id, state_updates)
+            return {
+                "run_id": run_id,
+                "signals": [],
+                "focus_events": [],
+                "artifacts": [index.get_artifact(artifact_id) for artifact_id in artifacts if index.get_artifact(artifact_id) is not None],
+            }
         if monitor["execution_mode"] == "batch":
             previous_artifact = None
             state = store.get_monitor_state(monitor_id)

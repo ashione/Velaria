@@ -303,6 +303,47 @@ class AgenticServiceTest(unittest.TestCase):
                     thread.join(timeout=5)
                     server.server_close()
 
+    def test_manual_run_stream_monitor_with_empty_window_keeps_schema(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-agentic-service-empty-window-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                server, thread, base_url = self._start_server()
+                try:
+                    status, _ = self._request_json(
+                        "POST",
+                        f"{base_url}/api/v1/external-events/sources",
+                        {
+                            "source_id": "ticks",
+                            "name": "ticks",
+                            "schema_binding": {
+                                "time_field": "ts",
+                                "type_field": "kind",
+                                "key_field": "symbol",
+                                "field_mappings": {"price": "price"},
+                            },
+                        },
+                    )
+                    self.assertEqual(status, 201)
+                    status, payload = self._request_json(
+                        "POST",
+                        f"{base_url}/api/v1/monitors/from-intent",
+                        {
+                            "intent_text": "count events in a window",
+                            "source": {"kind": "external_event", "source_id": "ticks"},
+                            "template_params": {"group_by": ["source_key", "event_type"], "count_threshold": 2},
+                            "execution_mode": "stream",
+                        },
+                    )
+                    self.assertEqual(status, 201)
+                    monitor_id = payload["monitor"]["monitor_id"]
+                    status, payload = self._request_json("POST", f"{base_url}/api/v1/monitors/{monitor_id}/run", {})
+                    self.assertEqual(status, 200)
+                    self.assertEqual(payload["focus_events"], [])
+                    self.assertEqual(payload["signals"], [])
+                finally:
+                    server.shutdown()
+                    thread.join(timeout=5)
+                    server.server_close()
+
     def test_execute_monitor_once_runs_all_compiled_rules(self):
         with tempfile.TemporaryDirectory(prefix="velaria-agentic-multi-rule-") as tmp:
             csv_path = pathlib.Path(tmp) / "input.csv"

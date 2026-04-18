@@ -198,6 +198,12 @@ type ExternalSourceRecord = {
   };
 };
 
+function externalEventColumns(source: ExternalSourceRecord | null | undefined): string[] {
+  if (!source) return ['event_time', 'event_type', 'source_key'];
+  const mapped = Object.keys(source.schema_binding?.field_mappings || {}).filter(Boolean);
+  return ['event_time', 'event_type', 'source_key', ...mapped];
+}
+
 type MonitorRecord = {
   monitor_id: string;
   name: string;
@@ -1174,6 +1180,16 @@ export function App() {
     setMonitors(monitorsPayload.monitors || []);
     setFocusEvents(eventsPayload.focus_events || []);
   }
+
+  const selectedMonitorSource = useMemo(
+    () => sources.find((source) => source.source_id === monitorForm.sourceId) || null,
+    [sources, monitorForm.sourceId]
+  );
+
+  const selectedMonitorColumns = useMemo(
+    () => externalEventColumns(selectedMonitorSource),
+    [selectedMonitorSource]
+  );
 
   async function createExternalSource(event: React.FormEvent) {
     event.preventDefault();
@@ -3456,7 +3472,11 @@ export function App() {
                         <select
                           value={monitorForm.sourceId}
                           onChange={(event) =>
-                            setMonitorForm((current) => ({ ...current, sourceId: event.target.value }))
+                            setMonitorForm((current) => ({
+                              ...current,
+                              sourceId: event.target.value,
+                              groupBy: 'source_key,event_type',
+                            }))
                           }
                           required
                         >
@@ -3502,6 +3522,9 @@ export function App() {
                             setMonitorForm((current) => ({ ...current, groupBy: event.target.value }))
                           }
                         />
+                        <small className="brand-sub">
+                          {t('monitor_available_columns', { columns: selectedMonitorColumns.join(', ') })}
+                        </small>
                       </label>
                     </div>
                     <div className="actions">

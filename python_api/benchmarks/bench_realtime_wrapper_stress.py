@@ -66,15 +66,23 @@ def run_once(iteration: int, *, mode: str) -> None:
                     }
                 )
             )
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                batch = sink.poll_arrow()
+                if batch is not None:
+                    _ = batch.to_pylist()
+                    break
+                time.sleep(0.01)
         else:
             source.push_rows(rows)
-        deadline = time.time() + 5.0
-        while time.time() < deadline:
-            batch = sink.poll_arrow()
-            if batch is not None:
-                _ = batch.to_pylist()
-                break
-            time.sleep(0.01)
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                progress = query.progress()
+                if int(progress.get("batches_processed", 0)) >= 1:
+                    break
+                time.sleep(0.01)
+            else:
+                raise RuntimeError("rows mode did not process a batch in time")
     finally:
         source.close()
         query.stop()

@@ -4,9 +4,11 @@ import argparse
 import csv
 import json
 import os
+import re
 import threading
 import time
 import traceback
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
@@ -244,6 +246,15 @@ def _parse_path_list(raw: Any) -> list[str]:
     if isinstance(raw, (list, tuple)):
         return [str(item).strip() for item in raw if str(item).strip()]
     raise ValueError(f"invalid path list payload: {raw}")
+
+
+def _safe_sql_identifier(raw: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_]", "_", str(raw).strip())
+    if not cleaned:
+        return "input_table"
+    if cleaned[0].isdigit():
+        cleaned = f"t_{cleaned}"
+    return cleaned
 
 
 def _load_arrow_tables(paths: list[str]) -> list[pa.Table]:
@@ -1207,7 +1218,7 @@ def _error_response(exc: Exception) -> tuple[HTTPStatus, dict[str, Any]]:
     return HTTPStatus.INTERNAL_SERVER_ERROR, cli_impl._error_payload_from_exception(exc)
 
 
-def _normalize_monitor_create_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def _normalize_monitor_create_payload(payload: dict[str, Any], store: AgenticStore | None = None) -> dict[str, Any]:
     source = dict(payload.get("source") or {})
     if not source:
         raise ValueError("source is required")
@@ -1246,7 +1257,7 @@ def _normalize_monitor_create_payload(payload: dict[str, Any]) -> dict[str, Any]
         "intent_text": payload.get("intent_text"),
         "source": source,
         "template_id": payload.get("template_id"),
-        "template_params": dict(payload.get("template_params") or {}),
+        "template_params": template_params if not payload.get("dsl") else dict(payload.get("template_params") or {}),
         "compiled_rules": compiled["compiled_rules"],
         "execution_mode": compiled["execution_mode"],
         "interval_sec": int(payload.get("interval_sec", 60)),
@@ -1270,8 +1281,26 @@ def _validate_monitor_payload(store: AgenticStore, monitor: dict[str, Any]) -> d
     source = monitor.get("source") or {}
     if source.get("kind") == "external_event":
         source_id = source.get("source_id") or source.get("binding")
-        if not source_id or store.get_source(str(source_id)) is None:
+        source_meta = store.get_source(str(source_id)) if source_id else None
+        if not source_id or source_meta is None:
             errors.append("external_event source not found")
+        else:
+            available_columns = {
+                "event_time",
+                "event_type",
+                "source_key",
+                "payload_json",
+                "ingested_at",
+                "source_id",
+                *list((source_meta.get("schema_binding") or {}).get("field_mappings", {}).keys()),
+            }
+            template_params = dict(monitor.get("template_params") or {})
+            for field_name in template_params.get("group_by") or []:
+                normalized = str(field_name).strip()
+                if normalized and normalized not in available_columns:
+                    errors.append(
+                        f"invalid group_by field: {normalized}; available columns: {', '.join(sorted(available_columns))}"
+                    )
     elif source.get("kind") in {"saved_dataset", "local_file", "bitable"}:
         path = source.get("path")
         if not path:
@@ -1331,7 +1360,8 @@ def _monitor_from_intent_payload(store: AgenticStore, payload: dict[str, Any]) -
             "interval_sec": payload.get("interval_sec", 60),
             "cooldown_sec": payload.get("cooldown_sec", 300),
             "tags": payload.get("tags") or [],
-        }
+        },
+        store,
     )
     normalized["grounding_bundle_id"] = bundle["bundle_id"]
     normalized["validation"]["grounding_bundle_id"] = bundle["bundle_id"]
@@ -1542,7 +1572,9 @@ class VelariaService:
             source = session.create_realtime_stream_source(columns)
             stream_df = session.read_realtime_stream_source(source)
             runner_id = f"{monitor_id}:{compiled_rule['rule_id']}"
-            view_name = f"input_table_{monitor_id}_{compiled_rule['rule_id']}"
+            view_name = _safe_sql_identifier(
+                f"input_table_{monitor_id}_{compiled_rule['rule_id']}_{uuid.uuid4().hex[:8]}"
+            )
             session.create_temp_view(view_name, stream_df)
             sink = session.create_realtime_stream_sink()
             query_df = session.stream_sql(str(compiled_rule["sql"]).replace("input_table", view_name))
@@ -1892,7 +1924,7 @@ class VelariaService:
                             return
                     if parts == ("monitors",):
                         with AgenticStore() as store:
-                            monitor_payload = _normalize_monitor_create_payload(payload)
+                            monitor_payload = _normalize_monitor_create_payload(payload, store)
                             monitor = store.upsert_monitor(monitor_payload)
                             self._send_json(HTTPStatus.CREATED, {"ok": True, "monitor": _monitor_payload_for_response(store, monitor)})
                             return
@@ -2404,7 +2436,7 @@ class VelariaService:
                             if "enabled" in payload:
                                 requested_enabled = bool(payload["enabled"])
                             if "dsl" in payload or "template_id" in payload:
-                                normalized = _normalize_monitor_create_payload({**monitor, **payload, "source": payload.get("source") or monitor["source"]})
+                                normalized = _normalize_monitor_create_payload({**monitor, **payload, "source": payload.get("source") or monitor["source"]}, store)
                                 monitor.update(normalized)
                             if requested_enabled is not None:
                                 if requested_enabled:

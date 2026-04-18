@@ -1,16 +1,30 @@
 from __future__ import annotations
 
 import gc
+import importlib.util
 import json
+import pathlib
 import sys
 import threading
 import time
 
-import velaria
+
+def _load_native_module():
+    ext_path = pathlib.Path(__file__).resolve().parents[1] / "velaria" / "_velaria.so"
+    spec = importlib.util.spec_from_file_location("_velaria", ext_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load velaria native extension from {ext_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_native = _load_native_module()
+Session = _native.Session
 
 
 def run_once(iteration: int, *, mode: str) -> None:
-    session = velaria.Session()
+    session = Session()
     source = session.create_realtime_stream_source(["event_time", "event_type", "source_key", "payload_json"])
     stream_df = session.read_realtime_stream_source(source)
     view_name = f"rt_input_{iteration}"

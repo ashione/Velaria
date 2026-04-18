@@ -502,7 +502,7 @@ PlanNodePtr pushLimitThroughPassthrough(const PlanNodePtr& node, size_t limit) {
     case PlanKind::WindowAssign: {
       const auto* n = static_cast<const WindowAssignPlan*>(node.get());
       return std::make_shared<WindowAssignPlan>(pushLimitThroughPassthrough(n->child, limit),
-                                                n->time_column_index, n->window_ms,
+                                                n->time_column_index, n->window_ms, n->slide_ms,
                                                 n->output_column);
     }
     default:
@@ -574,7 +574,8 @@ void explainPlan(const PlanNodePtr& node, std::ostringstream& out, int depth = 0
   if (node->kind == PlanKind::WindowAssign) {
     const auto* n = static_cast<WindowAssignPlan*>(node.get());
     out << std::string((depth + 1) * 2, ' ') << "idx=" << n->time_column_index
-        << ", window_ms=" << n->window_ms << ", output=" << n->output_column << "\n";
+        << ", window_ms=" << n->window_ms << ", slide_ms=" << n->slide_ms
+        << ", output=" << n->output_column << "\n";
     explainPlan(n->child, out, depth + 1);
     return;
   }

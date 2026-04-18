@@ -47,6 +47,10 @@ from .embedding import (
 from .excel import read_excel
 from .keyword_index import build_keyword_index, load_keyword_index, search_keyword_index, tokenize_keyword_text
 from .bitable import BitableClient, group_rows_by_field, group_rows_count_by_field
+from .agentic_store import AgenticStore
+from .agentic_dsl import compile_rule_spec, compile_template_rule, parse_rule_spec
+from .agentic_search import search_templates, search_events, search_datasets, search_fields
+from .agentic_runtime import execute_monitor_once
 from ._version import __version__
 
 
@@ -173,6 +177,8 @@ Session = _native.Session if _native is not None else _NativeUnavailable
 DataFrame = _native.DataFrame if _native is not None else _NativeUnavailable
 StreamingDataFrame = _native.StreamingDataFrame if _native is not None else _NativeUnavailable
 StreamingQuery = _native.StreamingQuery if _native is not None else _NativeUnavailable
+RealtimeStreamSource = _native.RealtimeStreamSource if _native is not None else _NativeUnavailable
+RealtimeStreamSink = _native.RealtimeStreamSink if _native is not None else _NativeUnavailable
 
 __all__ = [
     "__version__",
@@ -180,6 +186,8 @@ __all__ = [
     "DataFrame",
     "StreamingDataFrame",
     "StreamingQuery",
+    "RealtimeStreamSource",
+    "RealtimeStreamSink",
     "CustomArrowStreamSource",
     "CustomArrowStreamSink",
     "CustomStreamEmitOptions",
@@ -224,4 +232,13 @@ __all__ = [
     "BitableClient",
     "group_rows_by_field",
     "group_rows_count_by_field",
+    "AgenticStore",
+    "compile_rule_spec",
+    "compile_template_rule",
+    "parse_rule_spec",
+    "search_templates",
+    "search_events",
+    "search_datasets",
+    "search_fields",
+    "execute_monitor_once",
 ]

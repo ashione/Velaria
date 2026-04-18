@@ -72,10 +72,20 @@ typedef struct {
   PyObject_HEAD df::StreamingQuery* query_ptr;
 } PyVelariaStreamingQuery;
 
+typedef struct {
+  PyObject_HEAD std::shared_ptr<df::QueueStreamSource>* source_ptr;
+} PyVelariaRealtimeStreamSource;
+
+typedef struct {
+  PyObject_HEAD std::shared_ptr<df::QueueStreamSink>* sink_ptr;
+} PyVelariaRealtimeStreamSink;
+
 static PyTypeObject PyVelariaSessionType = {PyVarObject_HEAD_INIT(nullptr, 0)};
 static PyTypeObject PyVelariaDataFrameType = {PyVarObject_HEAD_INIT(nullptr, 0)};
 static PyTypeObject PyVelariaStreamingDataFrameType = {PyVarObject_HEAD_INIT(nullptr, 0)};
 static PyTypeObject PyVelariaStreamingQueryType = {PyVarObject_HEAD_INIT(nullptr, 0)};
+static PyTypeObject PyVelariaRealtimeStreamSourceType = {PyVarObject_HEAD_INIT(nullptr, 0)};
+static PyTypeObject PyVelariaRealtimeStreamSinkType = {PyVarObject_HEAD_INIT(nullptr, 0)};
 
 struct PyArrowInteropCache {
   PyObject* pyarrow = nullptr;
@@ -408,6 +418,56 @@ df::Value valueFromPy(PyObject* obj) {
     return df::Value(parseFloatVector(obj, "value"));
   }
   throw std::runtime_error("value must be None, int, float, bool, or string");
+}
+
+df::Table tableFromPyRows(PyObject* rows_obj, const df::Schema& schema) {
+  PyObject* seq = PySequence_Fast(rows_obj, "rows must be a sequence");
+  if (seq == nullptr) {
+    throw std::runtime_error("rows must be a sequence");
+  }
+  df::Table table;
+  table.schema = schema;
+  const Py_ssize_t count = PySequence_Fast_GET_SIZE(seq);
+  table.rows.reserve(static_cast<std::size_t>(count));
+  PyObject** items = PySequence_Fast_ITEMS(seq);
+  for (Py_ssize_t i = 0; i < count; ++i) {
+    PyObject* item = items[i];
+    df::Row row;
+    row.reserve(schema.fields.size());
+    if (PyDict_Check(item)) {
+      for (const auto& field : schema.fields) {
+        PyObject* value = PyDict_GetItemString(item, field.c_str());
+        if (value == nullptr) {
+          row.push_back(df::Value());
+        } else {
+          row.push_back(valueFromPy(value));
+        }
+      }
+    } else if (PyList_Check(item) || PyTuple_Check(item)) {
+      PyObject* row_seq = PySequence_Fast(item, "row must be a sequence");
+      if (row_seq == nullptr) {
+        Py_DECREF(seq);
+        throw std::runtime_error("row must be a sequence");
+      }
+      const Py_ssize_t width = PySequence_Fast_GET_SIZE(row_seq);
+      if (static_cast<std::size_t>(width) != schema.fields.size()) {
+        Py_DECREF(row_seq);
+        Py_DECREF(seq);
+        throw std::runtime_error("row width does not match realtime source schema");
+      }
+      PyObject** row_items = PySequence_Fast_ITEMS(row_seq);
+      for (Py_ssize_t c = 0; c < width; ++c) {
+        row.push_back(valueFromPy(row_items[c]));
+      }
+      Py_DECREF(row_seq);
+    } else {
+      Py_DECREF(seq);
+      throw std::runtime_error("rows must contain dicts or sequences");
+    }
+    table.rows.push_back(std::move(row));
+  }
+  Py_DECREF(seq);
+  return table;
 }
 
 PyObject* pyProbeFromNative(const df::FileSourceProbeResult& probe) {
@@ -1544,6 +1604,26 @@ PyObject* wrapStreamingQuery(df::StreamingQuery value) {
   return reinterpret_cast<PyObject*>(obj);
 }
 
+PyObject* wrapRealtimeStreamSource(std::shared_ptr<df::QueueStreamSource> source) {
+  auto* obj = reinterpret_cast<PyVelariaRealtimeStreamSource*>(
+      PyVelariaRealtimeStreamSourceType.tp_alloc(&PyVelariaRealtimeStreamSourceType, 0));
+  if (obj == nullptr) {
+    return nullptr;
+  }
+  obj->source_ptr = new std::shared_ptr<df::QueueStreamSource>(std::move(source));
+  return reinterpret_cast<PyObject*>(obj);
+}
+
+PyObject* wrapRealtimeStreamSink(std::shared_ptr<df::QueueStreamSink> sink) {
+  auto* obj = reinterpret_cast<PyVelariaRealtimeStreamSink*>(
+      PyVelariaRealtimeStreamSinkType.tp_alloc(&PyVelariaRealtimeStreamSinkType, 0));
+  if (obj == nullptr) {
+    return nullptr;
+  }
+  obj->sink_ptr = new std::shared_ptr<df::QueueStreamSink>(std::move(sink));
+  return reinterpret_cast<PyObject*>(obj);
+}
+
 void sessionDealloc(PyVelariaSession* self) { Py_TYPE(self)->tp_free(reinterpret_cast<PyObject*>(self)); }
 void dataFrameDealloc(PyVelariaDataFrame* self) {
   delete self->df_ptr;
@@ -1555,6 +1635,14 @@ void streamingDataFrameDealloc(PyVelariaStreamingDataFrame* self) {
 }
 void streamingQueryDealloc(PyVelariaStreamingQuery* self) {
   delete self->query_ptr;
+  Py_TYPE(self)->tp_free(reinterpret_cast<PyObject*>(self));
+}
+void realtimeStreamSourceDealloc(PyVelariaRealtimeStreamSource* self) {
+  delete self->source_ptr;
+  Py_TYPE(self)->tp_free(reinterpret_cast<PyObject*>(self));
+}
+void realtimeStreamSinkDealloc(PyVelariaRealtimeStreamSink* self) {
+  delete self->sink_ptr;
   Py_TYPE(self)->tp_free(reinterpret_cast<PyObject*>(self));
 }
 
@@ -1839,6 +1927,37 @@ PyObject* sessionCreateStreamFromArrow(PyVelariaSession* self, PyObject* args) {
     std::vector<df::Table> batches = tablesFromArrowObject(arrow_obj);
     return wrapStreamingDataFrame(
         self->session->readStream(std::make_shared<df::MemoryStreamSource>(std::move(batches))));
+  });
+}
+
+PyObject* sessionCreateRealtimeStreamSource(PyVelariaSession*, PyObject* args) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    PyObject* columns_obj = nullptr;
+    if (!PyArg_ParseTuple(args, "O", &columns_obj)) {
+      return nullptr;
+    }
+    const auto columns = parseStringList(columns_obj, "columns");
+    return wrapRealtimeStreamSource(std::make_shared<df::QueueStreamSource>(df::Schema(columns)));
+  });
+}
+
+PyObject* sessionReadRealtimeStreamSource(PyVelariaSession* self, PyObject* args) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    PyObject* source_obj = nullptr;
+    if (!PyArg_ParseTuple(args, "O", &source_obj)) {
+      return nullptr;
+    }
+    if (!PyObject_TypeCheck(source_obj, &PyVelariaRealtimeStreamSourceType)) {
+      throw std::runtime_error("read_realtime_stream_source expects a RealtimeStreamSource");
+    }
+    auto* source = reinterpret_cast<PyVelariaRealtimeStreamSource*>(source_obj);
+    return wrapStreamingDataFrame(self->session->readStream(*source->source_ptr));
+  });
+}
+
+PyObject* sessionCreateRealtimeStreamSink(PyVelariaSession*, PyObject*) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    return wrapRealtimeStreamSink(std::make_shared<df::QueueStreamSink>());
   });
 }
 
@@ -2143,6 +2262,31 @@ PyObject* dataFrameToArrow(PyVelariaDataFrame* self, PyObject*) {
   });
 }
 
+PyObject* pyArrowTableFromNative(const df::Table& native_table) {
+  if (!ensurePyArrowInteropCache()) {
+    PyErr_SetString(PyExc_ImportError, "pyarrow is required for Arrow table export");
+    return nullptr;
+  }
+  auto& cache = pyArrowInteropCache();
+  PyObject* capsules = exportArrowCapsules(native_table);
+  if (capsules == nullptr) {
+    return nullptr;
+  }
+  PyObject* batch =
+      PyObject_CallFunctionObjArgs(cache.record_batch_import_from_capsule,
+                                   PyTuple_GET_ITEM(capsules, 0),
+                                   PyTuple_GET_ITEM(capsules, 1), nullptr);
+  Py_DECREF(capsules);
+  if (batch == nullptr) {
+    return nullptr;
+  }
+  PyObject* batches = PyList_New(1);
+  PyList_SET_ITEM(batches, 0, batch);
+  PyObject* table = PyObject_CallFunctionObjArgs(cache.table_from_batches, batches, nullptr);
+  Py_DECREF(batches);
+  return table;
+}
+
 PyObject* streamSelect(PyVelariaStreamingDataFrame* self, PyObject* args) {
   return withExceptionTranslation([&]() -> PyObject* {
     PyObject* columns = nullptr;
@@ -2201,13 +2345,15 @@ PyObject* streamWindow(PyVelariaStreamingDataFrame* self, PyObject* args, PyObje
     const char* time_column = nullptr;
     unsigned long long window_ms = 0;
     const char* output_column = "window_start";
-    static const char* kwlist[] = {"time_column", "window_ms", "output_column", nullptr};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "sK|s", const_cast<char**>(kwlist),
-                                     &time_column, &window_ms, &output_column)) {
+    unsigned long long slide_ms = 0;
+    static const char* kwlist[] = {"time_column", "window_ms", "output_column", "slide_ms", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "sK|sK", const_cast<char**>(kwlist),
+                                     &time_column, &window_ms, &output_column, &slide_ms)) {
       return nullptr;
     }
     return wrapStreamingDataFrame(
-        self->sdf_ptr->window(time_column, static_cast<uint64_t>(window_ms), output_column));
+        self->sdf_ptr->window(time_column, static_cast<uint64_t>(window_ms), output_column,
+                              static_cast<uint64_t>(slide_ms)));
   });
 }
 
@@ -2278,6 +2424,37 @@ PyObject* streamWriteStreamConsole(PyVelariaStreamingDataFrame* self, PyObject* 
   });
 }
 
+PyObject* streamWriteStreamQueueSink(PyVelariaStreamingDataFrame* self, PyObject* args,
+                                     PyObject* kwargs) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    PyObject* sink_obj = nullptr;
+    unsigned long long trigger_interval_ms = 1000;
+    const char* checkpoint_path = "";
+    const char* checkpoint_delivery_mode = "at-least-once";
+    const char* execution_mode = "single-process";
+    unsigned long long local_workers = 1;
+    unsigned long long max_inflight_partitions = 0;
+    static const char* kwlist[] = {"sink", "trigger_interval_ms", "checkpoint_path",
+                                   "checkpoint_delivery_mode", "execution_mode",
+                                   "local_workers", "max_inflight_partitions", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|KsssKK", const_cast<char**>(kwlist),
+                                     &sink_obj, &trigger_interval_ms, &checkpoint_path,
+                                     &checkpoint_delivery_mode, &execution_mode, &local_workers,
+                                     &max_inflight_partitions)) {
+      return nullptr;
+    }
+    if (!PyObject_TypeCheck(sink_obj, &PyVelariaRealtimeStreamSinkType)) {
+      throw std::runtime_error("write_stream_queue_sink expects a RealtimeStreamSink");
+    }
+    auto* sink = reinterpret_cast<PyVelariaRealtimeStreamSink*>(sink_obj);
+    return wrapStreamingQuery(self->sdf_ptr->writeStream(
+        *sink->sink_ptr, parseQueryOptions(static_cast<uint64_t>(trigger_interval_ms),
+                                           checkpoint_path, checkpoint_delivery_mode,
+                                           execution_mode, local_workers,
+                                           max_inflight_partitions)));
+  });
+}
+
 PyObject* queryStart(PyVelariaStreamingQuery* self, PyObject*) {
   return withExceptionTranslation([&]() -> PyObject* {
     {
@@ -2333,6 +2510,59 @@ PyObject* querySnapshotJson(PyVelariaStreamingQuery* self, PyObject*) {
   });
 }
 
+PyObject* realtimeStreamSourcePushArrow(PyVelariaRealtimeStreamSource* self, PyObject* args) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    PyObject* arrow_obj = nullptr;
+    if (!PyArg_ParseTuple(args, "O", &arrow_obj)) {
+      return nullptr;
+    }
+    std::vector<df::Table> batches = tablesFromArrowObject(arrow_obj);
+    for (auto& batch : batches) {
+      self->source_ptr->get()->push(std::move(batch));
+    }
+    Py_RETURN_NONE;
+  });
+}
+
+PyObject* realtimeStreamSourcePushRows(PyVelariaRealtimeStreamSource* self, PyObject* args) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    PyObject* rows_obj = nullptr;
+    if (!PyArg_ParseTuple(args, "O", &rows_obj)) {
+      return nullptr;
+    }
+    const auto schema = self->source_ptr->get()->schema();
+    auto table = tableFromPyRows(rows_obj, schema);
+    self->source_ptr->get()->push(std::move(table));
+    Py_RETURN_NONE;
+  });
+}
+
+PyObject* realtimeStreamSourceClose(PyVelariaRealtimeStreamSource* self, PyObject*) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    self->source_ptr->get()->closeInput();
+    Py_RETURN_NONE;
+  });
+}
+
+PyObject* realtimeStreamSinkPollArrow(PyVelariaRealtimeStreamSink* self, PyObject*) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    df::Table table;
+    if (!self->sink_ptr->get()->pop(&table)) {
+      Py_RETURN_NONE;
+    }
+    return pyArrowTableFromNative(table);
+  });
+}
+
+PyObject* realtimeStreamSinkClosed(PyVelariaRealtimeStreamSink* self, PyObject*) {
+  return withExceptionTranslation([&]() -> PyObject* {
+    if (self->sink_ptr->get()->closed()) {
+      Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+  });
+}
+
 PyMethodDef sessionMethods[] = {
     {"probe", reinterpret_cast<PyCFunction>(sessionProbe), METH_VARARGS | METH_KEYWORDS,
      "Probe a file source and return inferred kind/options/schema."},
@@ -2351,6 +2581,15 @@ PyMethodDef sessionMethods[] = {
      METH_VARARGS, "Create a DataFrame from a pyarrow.Table-compatible object."},
     {"create_stream_from_arrow", reinterpret_cast<PyCFunction>(sessionCreateStreamFromArrow),
      METH_VARARGS, "Create a StreamingDataFrame from a pyarrow.Table-compatible object."},
+    {"create_realtime_stream_source",
+     reinterpret_cast<PyCFunction>(sessionCreateRealtimeStreamSource), METH_VARARGS,
+     "Create a realtime queue-backed stream source from a list of column names."},
+    {"read_realtime_stream_source",
+     reinterpret_cast<PyCFunction>(sessionReadRealtimeStreamSource), METH_VARARGS,
+     "Create a StreamingDataFrame from a realtime queue-backed stream source."},
+    {"create_realtime_stream_sink",
+     reinterpret_cast<PyCFunction>(sessionCreateRealtimeStreamSink), METH_NOARGS,
+     "Create a realtime queue-backed stream sink."},
     {"create_temp_view", reinterpret_cast<PyCFunction>(sessionCreateTempView), METH_VARARGS,
      "Register a DataFrame or StreamingDataFrame temp view."},
     {"read_stream_csv_dir", reinterpret_cast<PyCFunction>(sessionReadStreamCsvDir),
@@ -2399,13 +2638,15 @@ PyMethodDef streamingDataFrameMethods[] = {
     {"limit", reinterpret_cast<PyCFunction>(streamLimit), METH_VARARGS,
      "Apply a stream limit transform."},
     {"window", reinterpret_cast<PyCFunction>(streamWindow), METH_VARARGS | METH_KEYWORDS,
-     "Add a fixed tumbling window column."},
+     "Add a fixed tumbling or sliding window column."},
     {"group_sum", reinterpret_cast<PyCFunction>(streamGroupSum), METH_VARARGS | METH_KEYWORDS,
      "Group by keys and compute a streaming sum."},
     {"group_count", reinterpret_cast<PyCFunction>(streamGroupCount),
      METH_VARARGS | METH_KEYWORDS, "Group by keys and compute a streaming count."},
     {"write_stream_csv", reinterpret_cast<PyCFunction>(streamWriteStreamCsv),
      METH_VARARGS | METH_KEYWORDS, "Create a streaming query writing to a CSV sink."},
+    {"write_stream_queue_sink", reinterpret_cast<PyCFunction>(streamWriteStreamQueueSink),
+     METH_VARARGS | METH_KEYWORDS, "Create a streaming query writing to a realtime queue sink."},
     {"write_stream_console", reinterpret_cast<PyCFunction>(streamWriteStreamConsole),
      METH_VARARGS | METH_KEYWORDS, "Create a streaming query writing to the console."},
     {nullptr, nullptr, 0, nullptr},
@@ -2422,6 +2663,24 @@ PyMethodDef streamingQueryMethods[] = {
      "Return the current query progress snapshot."},
     {"snapshot_json", reinterpret_cast<PyCFunction>(querySnapshotJson), METH_NOARGS,
      "Return the current query snapshotJson() payload."},
+    {nullptr, nullptr, 0, nullptr},
+};
+
+PyMethodDef realtimeStreamSourceMethods[] = {
+    {"push_arrow", reinterpret_cast<PyCFunction>(realtimeStreamSourcePushArrow), METH_VARARGS,
+     "Push an Arrow batch or table into the realtime stream source."},
+    {"push_rows", reinterpret_cast<PyCFunction>(realtimeStreamSourcePushRows), METH_VARARGS,
+     "Push Python rows (dicts or sequences) into the realtime stream source."},
+    {"close", reinterpret_cast<PyCFunction>(realtimeStreamSourceClose), METH_NOARGS,
+     "Close the realtime stream source input."},
+    {nullptr, nullptr, 0, nullptr},
+};
+
+PyMethodDef realtimeStreamSinkMethods[] = {
+    {"poll_arrow", reinterpret_cast<PyCFunction>(realtimeStreamSinkPollArrow), METH_NOARGS,
+     "Poll one emitted Arrow table from the realtime stream sink, or None."},
+    {"closed", reinterpret_cast<PyCFunction>(realtimeStreamSinkClosed), METH_NOARGS,
+     "Return whether the realtime stream sink has been closed."},
     {nullptr, nullptr, 0, nullptr},
 };
 
@@ -2458,7 +2717,15 @@ PyMODINIT_FUNC PyInit__velaria(void) {
                    streamingDataFrameMethods) ||
       !prepareType(&PyVelariaStreamingQueryType, "velaria.StreamingQuery",
                    sizeof(PyVelariaStreamingQuery),
-                   reinterpret_cast<destructor>(streamingQueryDealloc), streamingQueryMethods)) {
+                   reinterpret_cast<destructor>(streamingQueryDealloc), streamingQueryMethods) ||
+      !prepareType(&PyVelariaRealtimeStreamSourceType, "velaria.RealtimeStreamSource",
+                   sizeof(PyVelariaRealtimeStreamSource),
+                   reinterpret_cast<destructor>(realtimeStreamSourceDealloc),
+                   realtimeStreamSourceMethods) ||
+      !prepareType(&PyVelariaRealtimeStreamSinkType, "velaria.RealtimeStreamSink",
+                   sizeof(PyVelariaRealtimeStreamSink),
+                   reinterpret_cast<destructor>(realtimeStreamSinkDealloc),
+                   realtimeStreamSinkMethods)) {
     return nullptr;
   }
 
@@ -2471,6 +2738,8 @@ PyMODINIT_FUNC PyInit__velaria(void) {
   Py_INCREF(&PyVelariaDataFrameType);
   Py_INCREF(&PyVelariaStreamingDataFrameType);
   Py_INCREF(&PyVelariaStreamingQueryType);
+  Py_INCREF(&PyVelariaRealtimeStreamSourceType);
+  Py_INCREF(&PyVelariaRealtimeStreamSinkType);
 
   if (PyModule_AddObject(module, "Session", reinterpret_cast<PyObject*>(&PyVelariaSessionType)) <
           0 ||
@@ -2479,7 +2748,11 @@ PyMODINIT_FUNC PyInit__velaria(void) {
       PyModule_AddObject(module, "StreamingDataFrame",
                          reinterpret_cast<PyObject*>(&PyVelariaStreamingDataFrameType)) < 0 ||
       PyModule_AddObject(module, "StreamingQuery",
-                         reinterpret_cast<PyObject*>(&PyVelariaStreamingQueryType)) < 0) {
+                         reinterpret_cast<PyObject*>(&PyVelariaStreamingQueryType)) < 0 ||
+      PyModule_AddObject(module, "RealtimeStreamSource",
+                         reinterpret_cast<PyObject*>(&PyVelariaRealtimeStreamSourceType)) < 0 ||
+      PyModule_AddObject(module, "RealtimeStreamSink",
+                         reinterpret_cast<PyObject*>(&PyVelariaRealtimeStreamSinkType)) < 0) {
     Py_DECREF(module);
     return nullptr;
   }

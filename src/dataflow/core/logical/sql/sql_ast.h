@@ -112,6 +112,7 @@ struct PredicateExpr {
 struct WindowSpec {
   ColumnRef time_column;
   uint64_t every_ms = 0;
+  uint64_t slide_ms = 0;
   std::string output_column = "window_start";
 };
 

@@ -62,6 +62,35 @@ jobs:
         run: |
           ./scripts/run_python_stage_benchmark.sh
 
+  python-wrapper-leak-smoke:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bazelisk
+        uses: bazelbuild/setup-bazelisk@v3
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Configure Python for Bazel
+        run: |
+          echo "VELARIA_PYTHON_BIN=$(which python)" >> "$GITHUB_ENV"
+
+      - name: Python Wrapper Leak Smoke
+        env:
+          VELARIA_WRAPPER_STRESS_ITERATIONS: "1"
+          VELARIA_WRAPPER_LEAK_ITERATIONS: "1"
+        run: |
+          chmod +x ./scripts/run_python_wrapper_leak_smoke.sh
+          ./scripts/run_python_wrapper_leak_smoke.sh
+
   wheel-manylinux:
     if: startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/release/')
     runs-on: ${{ matrix.runs-on }}

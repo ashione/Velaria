@@ -334,7 +334,20 @@ void runParserRegression() {
             "WINDOW BY ts EVERY 60000 AS window_start GROUP BY window_start, key");
         expect(st.query.window.has_value(), "parser_window_present");
         expect(st.query.window->every_ms == 60000, "parser_window_ms");
+        expect(st.query.window->slide_ms == 60000, "parser_window_default_slide_ms");
         expect(st.query.window->output_column == "window_start", "parser_window_output");
+      });
+
+  expectNoThrow(
+      "parser_stream_sliding_window_clause",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT window_start, key, COUNT(*) AS event_count FROM stream_events "
+            "WINDOW BY ts EVERY 60000 SLIDE 30000 AS window_start GROUP BY window_start, key");
+        expect(st.query.window.has_value(), "parser_sliding_window_present");
+        expect(st.query.window->every_ms == 60000, "parser_sliding_window_ms");
+        expect(st.query.window->slide_ms == 30000, "parser_sliding_slide_ms");
+        expect(st.query.window->output_column == "window_start", "parser_sliding_window_output");
       });
 
   expectNoThrow(
@@ -449,6 +462,25 @@ void runSemanticRegression() {
             "WINDOW BY score EVERY 60000 AS window_start GROUP BY region");
       },
       "not supported in SQL v1");
+  expectThrowsType<dataflow::SQLUnsupportedError>(
+      "planner_stream_window_slide_gt_window_rejected",
+      [&]() {
+        dataflow::Table stream_events;
+        stream_events.schema = dataflow::Schema({"ts", "region", "score"});
+        stream_events.rows = {
+            {dataflow::Value("2026-03-28T09:00:00"), dataflow::Value("apac"),
+             dataflow::Value(int64_t(1))},
+        };
+        s.createTempView(
+            "invalid_window_slide_events",
+            s.readStream(std::make_shared<dataflow::MemoryStreamSource>(
+                std::vector<dataflow::Table>{stream_events})));
+        s.explainStreamSql(
+            "SELECT window_start, region, COUNT(*) AS cnt "
+            "FROM invalid_window_slide_events "
+            "WINDOW BY ts EVERY 60000 SLIDE 70000 AS window_start GROUP BY window_start, region");
+      },
+      "WINDOW SLIDE");
 
   expectThrows(
       "planner_select_star_mixed_projection_rejected",
@@ -1536,6 +1568,60 @@ void runStreamSqlRegression() {
   }
   expect(has_count_user_a, "stream_sql_window_count_sink_has_user_a");
   expect(has_count_user_b, "stream_sql_window_count_sink_has_user_b");
+
+  const std::string sliding_sink_path = "/tmp/velaria-stream-sliding-sql-regression-output.csv";
+  fs::remove(sliding_sink_path);
+  s.sql(
+      "CREATE SINK TABLE stream_sliding_summary_v1 "
+      "(window_start STRING, key STRING, event_count INT) "
+      "USING csv OPTIONS(path: '" +
+      sliding_sink_path + "', delimiter: ',')");
+
+  auto sliding_query = s.startStreamSql(
+      "INSERT INTO stream_sliding_summary_v1 "
+      "SELECT window_start, key, COUNT(*) AS event_count "
+      "FROM stream_window_events_v1 "
+      "WINDOW BY ts EVERY 60000 SLIDE 30000 AS window_start "
+      "GROUP BY window_start, key",
+      window_options);
+  expect(sliding_query.awaitTermination() == 1, "stream_sql_sliding_processed_batches");
+
+  auto sliding_sink_table = s.read_csv(sliding_sink_path).toTable();
+  dataflow::materializeRows(&sliding_sink_table);
+  expect(sliding_sink_table.rows.size() == 4, "stream_sql_sliding_sink_rows");
+  bool has_user_a_prev = false;
+  bool has_user_a_curr = false;
+  bool has_user_b_prev = false;
+  bool has_user_b_curr = false;
+  const auto sliding_window_idx = sliding_sink_table.schema.indexOf("window_start");
+  const auto sliding_key_idx = sliding_sink_table.schema.indexOf("key");
+  const auto sliding_count_idx = sliding_sink_table.schema.indexOf("event_count");
+  for (const auto& row : sliding_sink_table.rows) {
+    if (row[sliding_window_idx].toString() == "2026-03-29T09:59:30" &&
+        row[sliding_key_idx].toString() == "userA" &&
+        row[sliding_count_idx].asInt64() == 2) {
+      has_user_a_prev = true;
+    }
+    if (row[sliding_window_idx].toString() == "2026-03-29T10:00:00" &&
+        row[sliding_key_idx].toString() == "userA" &&
+        row[sliding_count_idx].asInt64() == 2) {
+      has_user_a_curr = true;
+    }
+    if (row[sliding_window_idx].toString() == "2026-03-29T10:00:30" &&
+        row[sliding_key_idx].toString() == "userB" &&
+        row[sliding_count_idx].asInt64() == 1) {
+      has_user_b_prev = true;
+    }
+    if (row[sliding_window_idx].toString() == "2026-03-29T10:01:00" &&
+        row[sliding_key_idx].toString() == "userB" &&
+        row[sliding_count_idx].asInt64() == 1) {
+      has_user_b_curr = true;
+    }
+  }
+  expect(has_user_a_prev, "stream_sql_sliding_sink_has_user_a_prev");
+  expect(has_user_a_curr, "stream_sql_sliding_sink_has_user_a_curr");
+  expect(has_user_b_prev, "stream_sql_sliding_sink_has_user_b_prev");
+  expect(has_user_b_curr, "stream_sql_sliding_sink_has_user_b_curr");
 
   const std::string alias_sink_path = "/tmp/velaria-stream-window-alias-sql-regression-output.csv";
   fs::remove(alias_sink_path);

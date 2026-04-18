@@ -1567,10 +1567,14 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query,
   }
 
   if (query.window.has_value()) {
+    if (query.window->slide_ms == 0 || query.window->slide_ms > query.window->every_ms) {
+      throwUnsupportedSqlV1("stream SQL WINDOW SLIDE must be > 0 and <= EVERY");
+    }
     StreamPlanNode window;
     window.kind = StreamPlanNodeKind::WindowAssign;
     window.column = resolveStreamColumnName(query.window->time_column, query.from);
     window.window_ms = query.window->every_ms;
+    window.slide_ms = query.window->slide_ms == 0 ? query.window->every_ms : query.window->slide_ms;
     window.output_column = query.window->output_column;
     logical.nodes.push_back(window);
   }
@@ -1877,6 +1881,7 @@ std::string SqlPlanner::explainStreamLogicalPlan(const StreamLogicalPlan& logica
       out << " limit=" << node.limit;
     } else if (node.kind == StreamPlanNodeKind::WindowAssign) {
       out << " time_column=" << node.column << " window_ms=" << node.window_ms
+          << " slide_ms=" << (node.slide_ms == 0 ? node.window_ms : node.slide_ms)
           << " output=" << node.output_column;
     } else if (node.kind == StreamPlanNodeKind::Aggregate) {
       out << " keys=[" << joinStrings(node.group_keys, ", ") << "]"
@@ -1951,7 +1956,8 @@ StreamingDataFrame SqlPlanner::materializeStreamFromPhysical(
         current = current.limit(node.limit);
         break;
       case StreamPlanNodeKind::WindowAssign:
-        current = current.window(node.column, node.window_ms, node.output_column);
+        current = current.window(node.column, node.window_ms, node.output_column,
+                                 node.slide_ms == 0 ? node.window_ms : node.slide_ms);
         break;
       case StreamPlanNodeKind::Aggregate:
         current = current.groupBy(node.group_keys).aggregate(node.aggregates, node.stateful);

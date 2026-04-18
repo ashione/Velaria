@@ -17,6 +17,7 @@ It is the source of truth for:
 This document complements:
 
 - [core-boundary.md](./core-boundary.md)
+- [agentic-service-api.md](./agentic-service-api.md)
 - [streaming_runtime_design.md](./streaming_runtime_design.md)
 - [local_vector_search_v01.md](./local_vector_search_v01.md)
 
@@ -51,9 +52,16 @@ Python ecosystem projections:
 - `Session.explain_vector_search(...)`
 - `Session.create_dataframe_from_arrow(...)`
 - `Session.create_stream_from_arrow(...)`
+- `Session.create_realtime_stream_source(...)`
+- `Session.read_realtime_stream_source(...)`
+- `Session.create_realtime_stream_sink(...)`
 - `read_excel(...)`
 
 Python-facing APIs may keep Pythonic naming, but their behavior must project the same semantics as the C++ kernel.
+
+The local agentic service and monitor/focus-event API are documented separately in
+`docs/agentic-service-api.md`; they build on this runtime contract but are not
+themselves kernel contract surfaces.
 
 ## Batch File Input Contract
 
@@ -159,6 +167,24 @@ The `strategy` section must be the single explanation outlet for:
 - backpressure threshold snapshot
 
 If runtime behavior changes, `strategy` text and `StreamingQueryProgress` must change together.
+
+### Stream Window Contract
+
+Current stable stream window behavior is:
+
+- fixed tumbling windows through the native `window(..., window_ms, ...)` path
+- fixed sliding windows through `window(..., window_ms, ..., slide_ms)` when `slide_ms <= window_ms`
+- stream SQL supports `WINDOW BY <time_column> EVERY <window_ms> [SLIDE <slide_ms>] AS <output_column>`
+- `SLIDE` defaults to `EVERY` when omitted
+- unbounded global windows are not part of the stable contract
+- event-time / watermark semantics are not yet a stable contract family
+
+The planner and runtime must agree on:
+
+- window size
+- slide size
+- output column name
+- row-expansion behavior for overlapping sliding windows
 
 ### Vector Explain
 

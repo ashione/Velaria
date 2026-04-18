@@ -23,6 +23,19 @@ constexpr char kGroupDelim = '\x1f';
 enum class CompareOp { Eq, Ne, Lt, Gt, Le, Ge };
 
 int64_t parseEpochMillis(const std::string& raw);
+std::tm toUtcTm(std::time_t seconds);
+
+std::string formatTimestampMillis(int64_t millis) {
+  const auto seconds = static_cast<std::time_t>(millis / 1000);
+  const int64_t remainder = millis % 1000;
+  auto tm = toUtcTm(seconds);
+  std::ostringstream out;
+  out << std::put_time(&tm, "%Y-%m-%dT%H:%M:%S");
+  if (remainder != 0) {
+    out << "." << std::setfill('0') << std::setw(3) << std::llabs(remainder);
+  }
+  return out.str();
+}
 
 std::tm toUtcTm(std::time_t seconds) {
   std::tm tm = {};
@@ -1592,6 +1605,91 @@ std::vector<Value> vectorizedWindowStart(const ValueColumnBuffer& input, uint64_
 
 std::vector<Value> vectorizedWindowStart(const ValueColumnView& input, uint64_t window_ms) {
   return vectorizedWindowStart(*input.buffer, window_ms);
+}
+
+Table assignSlidingWindow(const Table& table, std::size_t time_column_index, uint64_t window_ms,
+                          uint64_t slide_ms, const std::string& output_column,
+                          bool materialize_rows, bool format_window_as_timestamp) {
+  if (window_ms == 0) {
+    throw std::runtime_error("window size cannot be zero");
+  }
+  if (slide_ms == 0) {
+    slide_ms = window_ms;
+  }
+  if (slide_ms > window_ms) {
+    throw std::runtime_error("window slide must be <= window size");
+  }
+  if (slide_ms == window_ms) {
+    Table out = table;
+    if (out.schema.has(output_column)) {
+      throw std::runtime_error("window output column already exists: " + output_column);
+    }
+    const auto input = viewValueColumn(out, time_column_index);
+    auto bucket_values = vectorizedWindowStart(input, window_ms);
+    if (format_window_as_timestamp) {
+      for (auto& value : bucket_values) {
+        if (!value.isNull()) {
+          value = Value(formatTimestampMillis(value.asInt64()));
+        }
+      }
+    }
+    appendNamedColumn(&out, output_column, std::move(bucket_values), false);
+    if (materialize_rows && out.rows.empty()) {
+      materializeRows(&out);
+    }
+    return out;
+  }
+
+  Table materialized = table;
+  materializeRows(&materialized);
+  Table out;
+  out.schema = materialized.schema;
+  if (out.schema.has(output_column)) {
+    throw std::runtime_error("window output column already exists: " + output_column);
+  }
+  out.schema.fields.push_back(output_column);
+  out.schema.index.emplace(output_column, out.schema.fields.size() - 1);
+
+  const auto windows_per_row = std::max<uint64_t>(1, (window_ms + slide_ms - 1) / slide_ms);
+  out.rows.reserve(materialized.rows.size() * static_cast<std::size_t>(windows_per_row));
+  for (const auto& row : materialized.rows) {
+    if (time_column_index >= row.size()) {
+      throw std::runtime_error("window column index out of range");
+    }
+    const auto& value = row[time_column_index];
+    if (value.isNull()) {
+      auto new_row = row;
+      new_row.push_back(Value());
+      out.rows.push_back(std::move(new_row));
+      continue;
+    }
+    const int64_t ts_ms = value.isNumber() ? value.asInt64() : parseEpochMillis(value.toString());
+    const int64_t slide = static_cast<int64_t>(slide_ms);
+    const int64_t window = static_cast<int64_t>(window_ms);
+    const int64_t last_start = (ts_ms / slide) * slide;
+    bool emitted = false;
+    for (uint64_t i = 0; i < windows_per_row; ++i) {
+      const int64_t start = last_start - static_cast<int64_t>(i) * slide;
+      if (ts_ms >= start && ts_ms < start + window) {
+        auto new_row = row;
+        new_row.push_back(format_window_as_timestamp ? Value(formatTimestampMillis(start))
+                                                    : Value(start));
+        out.rows.push_back(std::move(new_row));
+        emitted = true;
+      }
+    }
+    if (!emitted) {
+      auto new_row = row;
+      new_row.push_back(Value());
+      out.rows.push_back(std::move(new_row));
+    }
+  }
+
+  if (!materialize_rows) {
+    // Keep row representation only; callers that need columnar cache can build it lazily.
+    out.columnar_cache.reset();
+  }
+  return out;
 }
 
 std::vector<Value> vectorizedStringLength(const StringColumnBuffer& input) {

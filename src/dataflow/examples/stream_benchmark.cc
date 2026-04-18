@@ -32,7 +32,8 @@ std::vector<dataflow::Table> makeBatches(size_t batch_count, size_t rows_per_bat
 }
 
 void runCase(const std::string& name, dataflow::StreamingExecutionMode mode, size_t workers,
-             bool stateful, size_t batch_count, size_t rows_per_batch) {
+             bool stateful, size_t batch_count, size_t rows_per_batch,
+             uint64_t slide_ms = 0) {
   using namespace dataflow::observability;
   dataflow::DataflowSession& session = dataflow::DataflowSession::builder();
   auto source =
@@ -49,9 +50,10 @@ void runCase(const std::string& name, dataflow::StreamingExecutionMode mode, siz
 
   auto sink = std::make_shared<dataflow::MemoryStreamSink>();
   auto state = dataflow::makeMemoryStateStore();
+  const uint64_t effective_slide_ms = slide_ms == 0 ? 60000 : slide_ms;
   auto stream = session.readStream(source)
                     .withStateStore(state)
-                    .window("ts", 60000, "window_start")
+                    .window("ts", 60000, "window_start", effective_slide_ms)
                     .groupBy({"window_start", "key"});
 
   auto query = stateful ? stream.sum("value", true, "value_sum").writeStream(sink, options)
@@ -71,6 +73,7 @@ void runCase(const std::string& name, dataflow::StreamingExecutionMode mode, siz
 
   std::cout << "[bench] " << name << " processed=" << processed << " elapsed_s=" << seconds
             << " batches_per_s=" << batches_per_sec << " rows_per_s=" << rows_per_sec
+            << " slide_ms=" << effective_slide_ms
             << " mode=" << progress.execution_mode
             << " reason=" << progress.execution_reason
             << " blocked=" << progress.blocked_count
@@ -83,6 +86,7 @@ void runCase(const std::string& name, dataflow::StreamingExecutionMode mode, siz
                    field("elapsed_s", std::to_string(seconds), true),
                    field("batches_per_s", std::to_string(batches_per_sec), true),
                    field("rows_per_s", std::to_string(rows_per_sec), true),
+                   field("slide_ms", static_cast<std::size_t>(effective_slide_ms)),
                    field("mode", progress.execution_mode),
                    field("reason", progress.execution_reason),
                    field("transport_mode", progress.transport_mode),
@@ -102,10 +106,12 @@ int main(int argc, char** argv) {
   size_t batch_count = 32;
   size_t rows_per_batch = 8192;
   size_t worker_count = 4;
+  uint64_t slide_ms = 30000;
 
   if (argc > 1) batch_count = static_cast<size_t>(std::strtoull(argv[1], nullptr, 10));
   if (argc > 2) rows_per_batch = static_cast<size_t>(std::strtoull(argv[2], nullptr, 10));
   if (argc > 3) worker_count = static_cast<size_t>(std::strtoull(argv[3], nullptr, 10));
+  if (argc > 4) slide_ms = static_cast<uint64_t>(std::strtoull(argv[4], nullptr, 10));
 
   runCase("stateless-single", dataflow::StreamingExecutionMode::SingleProcess, 1, false, batch_count,
           rows_per_batch);
@@ -115,5 +121,9 @@ int main(int argc, char** argv) {
           rows_per_batch);
   runCase("stateful-local-workers", dataflow::StreamingExecutionMode::LocalWorkers, worker_count, true,
           batch_count, rows_per_batch);
+  runCase("stateful-single-sliding", dataflow::StreamingExecutionMode::SingleProcess, 1, true,
+          batch_count, rows_per_batch, slide_ms);
+  runCase("stateful-local-workers-sliding", dataflow::StreamingExecutionMode::LocalWorkers,
+          worker_count, true, batch_count, rows_per_batch, slide_ms);
   return 0;
 }

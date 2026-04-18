@@ -122,7 +122,7 @@ type AppConfig = {
   bitableAppSecret: string;
 };
 
-type ViewKey = 'home' | 'data' | 'analyze' | 'runs' | 'settings';
+type ViewKey = 'home' | 'data' | 'analyze' | 'runs' | 'monitors' | 'settings';
 
 type AnalyzeState = {
   inputPath: string;
@@ -185,6 +185,67 @@ type LastResultState = {
   title: string;
   html: string;
 };
+
+type ExternalSourceRecord = {
+  source_id: string;
+  kind: string;
+  name: string;
+  schema_binding?: {
+    time_field?: string;
+    type_field?: string;
+    key_field?: string;
+    field_mappings?: Record<string, string>;
+  };
+};
+
+function externalEventColumns(source: ExternalSourceRecord | null | undefined): string[] {
+  if (!source) return ['event_time', 'event_type', 'source_key'];
+  const mapped = Object.keys(source.schema_binding?.field_mappings || {}).filter(Boolean);
+  return ['event_time', 'event_type', 'source_key', ...mapped];
+}
+
+type MonitorRecord = {
+  monitor_id: string;
+  name: string;
+  enabled: boolean;
+  intent_text?: string;
+  execution_mode: string;
+  source: Record<string, unknown>;
+  validation?: { status?: string; errors?: string[] };
+  state?: { status?: string; last_error?: string | null; stream_query_id?: string | null };
+};
+
+type FocusEventRecord = {
+  event_id: string;
+  monitor_id: string;
+  triggered_at: string;
+  severity: string;
+  title: string;
+  summary: string;
+  status: string;
+  key_fields: Record<string, unknown>;
+  run_id?: string | null;
+  artifact_ids?: string[];
+};
+
+type SourceFormState = {
+  sourceId: string;
+  name: string;
+  timeField: string;
+  typeField: string;
+  keyField: string;
+  priceField: string;
+};
+
+type MonitorFormState = {
+  name: string;
+  intentText: string;
+  sourceId: string;
+  executionMode: 'batch' | 'stream';
+  countThreshold: string;
+  groupBy: string;
+};
+
 
 const defaultImportOptions: ImportOptions = {
   delimiter: ',',
@@ -255,11 +316,30 @@ const defaultKeywordSearchState: KeywordSearchState = {
   topK: '10',
 };
 
+const defaultSourceForm: SourceFormState = {
+  sourceId: '',
+  name: '',
+  timeField: 'ts',
+  typeField: 'kind',
+  keyField: 'symbol',
+  priceField: 'price',
+};
+
+const defaultMonitorForm: MonitorFormState = {
+  name: '',
+  intentText: 'count events in a window',
+  sourceId: '',
+  executionMode: 'stream',
+  countThreshold: '2',
+  groupBy: 'source_key,event_type',
+};
+
 const viewMeta = {
   home: { titleKey: 'view_home_title', subtitleKey: 'view_home_subtitle' },
   data: { titleKey: 'view_data_title', subtitleKey: 'view_data_subtitle' },
   analyze: { titleKey: 'view_analyze_title', subtitleKey: 'view_analyze_subtitle' },
   runs: { titleKey: 'view_runs_title', subtitleKey: 'view_runs_subtitle' },
+  monitors: { titleKey: 'view_monitors_title', subtitleKey: 'view_monitors_subtitle' },
   settings: { titleKey: 'view_settings_title', subtitleKey: 'view_settings_subtitle' },
 } as const;
 
@@ -869,6 +949,12 @@ export function App() {
   const [runMessage, setRunMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedRunDetail, setSelectedRunDetail] = useState<RunDetailPayload | null>(null);
+  const [sources, setSources] = useState<ExternalSourceRecord[]>([]);
+  const [monitors, setMonitors] = useState<MonitorRecord[]>([]);
+  const [focusEvents, setFocusEvents] = useState<FocusEventRecord[]>([]);
+  const [sourceForm, setSourceForm] = useState<SourceFormState>(defaultSourceForm);
+  const [monitorForm, setMonitorForm] = useState<MonitorFormState>(defaultMonitorForm);
+  const [monitorMessage, setMonitorMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
   const [analysisState, setAnalysisState] = useState<AnalyzeState>(defaultAnalyzeState);
   const [filterBuilder, setFilterBuilder] = useState<FilterBuilderState>({
     column: '',
@@ -992,9 +1078,17 @@ export function App() {
       }));
       const health = await fetch(`${info.baseUrl}/health`).then((r) => r.json());
       setServiceStatus(t('status_ready_on', { port: health.port }));
-      setServiceMeta(t('status_packaged', { packaged: info.packaged, version: health.version }));
+      setServiceMeta(t('status_packaged', { packaged: String(info.packaged), version: health.version }));
       const runsPayload = await fetch(`${info.baseUrl}/api/v1/runs?limit=100`).then((r) => r.json());
       setRuns(runsPayload.runs || []);
+      const [sourcesPayload, monitorsPayload, eventsPayload] = await Promise.all([
+        fetch(`${info.baseUrl}/api/v1/external-events/sources`).then((r) => r.json()),
+        fetch(`${info.baseUrl}/api/v1/monitors`).then((r) => r.json()),
+        fetch(`${info.baseUrl}/api/v1/focus-events?limit=50`).then((r) => r.json()),
+      ]);
+      setSources(sourcesPayload.sources || []);
+      setMonitors(monitorsPayload.monitors || []);
+      setFocusEvents(eventsPayload.focus_events || []);
       if (runsPayload.runs?.[0]) {
         setSelectedRunId(runsPayload.runs[0].run_id);
       }
@@ -1052,6 +1146,15 @@ export function App() {
     }));
   }, [currentDataset]);
 
+  useEffect(() => {
+    if (view !== 'monitors' || !serviceInfo) return;
+    void refreshMonitors();
+    const timer = window.setInterval(() => {
+      void refreshMonitors();
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [view, serviceInfo]);
+
   async function refreshRuns(nextSelectedRunId: string | null = selectedRunId) {
     const payload = await api('/api/v1/runs?limit=100');
     const nextRuns = payload.runs || [];
@@ -1064,6 +1167,115 @@ export function App() {
     setSelectedRunId(fallbackRunId);
     if (!fallbackRunId) {
       setSelectedRunDetail(null);
+    }
+  }
+
+  async function refreshMonitors() {
+    const [sourcesPayload, monitorsPayload, eventsPayload] = await Promise.all([
+      api('/api/v1/external-events/sources'),
+      api('/api/v1/monitors'),
+      api('/api/v1/focus-events?limit=50'),
+    ]);
+    setSources(sourcesPayload.sources || []);
+    setMonitors(monitorsPayload.monitors || []);
+    setFocusEvents(eventsPayload.focus_events || []);
+  }
+
+  const selectedMonitorSource = useMemo(
+    () => sources.find((source) => source.source_id === monitorForm.sourceId) || null,
+    [sources, monitorForm.sourceId]
+  );
+
+  const selectedMonitorColumns = useMemo(
+    () => externalEventColumns(selectedMonitorSource),
+    [selectedMonitorSource]
+  );
+
+  async function createExternalSource(event: React.FormEvent) {
+    event.preventDefault();
+    setMonitorMessage(null);
+    try {
+      await api('/api/v1/external-events/sources', {
+        method: 'POST',
+        body: JSON.stringify({
+          source_id: sourceForm.sourceId.trim() || undefined,
+          name: sourceForm.name.trim() || sourceForm.sourceId.trim() || 'external-source',
+          schema_binding: {
+            time_field: sourceForm.timeField.trim(),
+            type_field: sourceForm.typeField.trim(),
+            key_field: sourceForm.keyField.trim(),
+            field_mappings: {
+              price: sourceForm.priceField.trim(),
+            },
+          },
+        }),
+      });
+      setMonitorMessage({ kind: 'info', text: t('source_created') });
+      setSourceForm(defaultSourceForm);
+      await refreshMonitors();
+    } catch (error) {
+      setMonitorMessage({ kind: 'error', text: t('source_create_failed', { error: String(error) }) });
+    }
+  }
+
+  async function createMonitorFromIntent(event: React.FormEvent) {
+    event.preventDefault();
+    setMonitorMessage(null);
+    try {
+      await api('/api/v1/monitors/from-intent', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: monitorForm.name.trim() || undefined,
+          intent_text: monitorForm.intentText.trim(),
+          source: {
+            kind: 'external_event',
+            source_id: monitorForm.sourceId,
+          },
+          execution_mode: monitorForm.executionMode,
+          template_params: {
+            group_by: monitorForm.groupBy
+              .split(',')
+              .map((item) => item.trim())
+              .filter(Boolean),
+            count_threshold: Number(monitorForm.countThreshold || '2'),
+          },
+        }),
+      });
+      setMonitorMessage({ kind: 'info', text: t('monitor_created') });
+      setMonitorForm((current) => ({ ...defaultMonitorForm, sourceId: current.sourceId }));
+      await refreshMonitors();
+    } catch (error) {
+      setMonitorMessage({ kind: 'error', text: t('monitor_create_failed', { error: String(error) }) });
+    }
+  }
+
+  async function monitorAction(monitorId: string, action: 'validate' | 'enable' | 'disable' | 'run' | 'delete') {
+    setMonitorMessage(null);
+    try {
+      if (action === 'delete') {
+        await api(`/api/v1/monitors/${encodeURIComponent(monitorId)}`, { method: 'DELETE' });
+      } else {
+        await api(`/api/v1/monitors/${encodeURIComponent(monitorId)}/${action}`, {
+          method: 'POST',
+          body: JSON.stringify({}),
+        });
+      }
+      await refreshMonitors();
+    } catch (error) {
+      setMonitorMessage({ kind: 'error', text: String(error) });
+    }
+  }
+
+  async function focusEventAction(eventId: string, action: 'consume' | 'archive') {
+    setMonitorMessage(null);
+    try {
+      await api(`/api/v1/focus-events/${encodeURIComponent(eventId)}/${action}`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      await refreshMonitors();
+    } catch (error) {
+      setMonitorMessage({ kind: 'error', text: String(error) });
     }
   }
 
@@ -1339,7 +1551,7 @@ export function App() {
     const embeddingConfig = embeddingFormToConfig(importForm);
     const keywordConfig = keywordFormToConfig(importForm);
     let handedOffBitableImport = false;
-    const importOptions = {
+    const importOptions: ImportOptions = {
       delimiter: importForm.delimiter,
       columns: importForm.inputType === 'json' ? importForm.columns.trim() : '',
       mappings: importForm.inputType === 'line' ? importForm.columns.trim() : '',
@@ -1820,10 +2032,10 @@ export function App() {
     const record = createDatasetRecord({
       name: `result-${selectedRunDetail.run.run_id.slice(0, 12)}`,
       sourceType:
-        selectedRunDetail.artifact.format === 'arrow'
+        (selectedRunDetail.artifact?.format || '') === 'arrow'
           ? 'arrow'
-          : selectedRunDetail.artifact.format,
-      sourcePath: decodeFileUri(selectedRunDetail.artifact.uri),
+          : selectedRunDetail.artifact?.format || 'parquet',
+      sourcePath: decodeFileUri(selectedRunDetail.artifact?.uri || ''),
       preview: selectedRunDetail.preview,
       kind: 'result',
       description: `Saved from run ${selectedRunDetail.run.run_id}`,
@@ -1938,7 +2150,7 @@ export function App() {
           </button>
         </div>
         <nav className="nav">
-          {(['home', 'data', 'analyze', 'runs', 'settings'] as ViewKey[]).map((key) => (
+          {(['home', 'data', 'analyze', 'runs', 'monitors', 'settings'] as ViewKey[]).map((key) => (
             <button
               key={key}
               className={view === key ? 'active' : ''}
@@ -1990,6 +2202,14 @@ export function App() {
                 <div className="metric-label">{t('metric_last_status')}</div>
                 <div className="metric-value">{runs[0]?.status || '—'}</div>
               </div>
+              <div className="metric">
+                <div className="metric-label">{t('metric_monitors')}</div>
+                <div className="metric-value">{monitors.length}</div>
+              </div>
+              <div className="metric">
+                <div className="metric-label">{t('metric_focus_events')}</div>
+                <div className="metric-value">{focusEvents.length}</div>
+              </div>
             </div>
             <div className="grid">
               <section className="panel half">
@@ -2004,6 +2224,9 @@ export function App() {
                     </button>
                     <button className="ghost" onClick={() => setView('runs')}>
                       {t('quick_runs')}
+                    </button>
+                    <button className="ghost" onClick={() => setView('monitors')}>
+                      {t('quick_monitors')}
                     </button>
                   </div>
                   <div className="helper">{t('quick_helper')}</div>
@@ -3110,6 +3333,298 @@ export function App() {
                       {t('page_next')}
                     </button>
                   </div>
+                </div>
+              </div>
+            </section>
+          </section>
+        )}
+
+        {view === 'monitors' && (
+          <section className="section active">
+            <div className="grid">
+              <section className="panel half">
+                <div className="panel-head">
+                  <h2>{t('sources_title')}</h2>
+                  <div className="actions">
+                    <button className="ghost" onClick={() => void refreshMonitors()}>
+                      {t('refresh_monitors')}
+                    </button>
+                  </div>
+                </div>
+                <div className="panel-body stack">
+                  {monitorMessage && (
+                    <div className={`notice ${monitorMessage.kind === 'error' ? 'error' : ''}`}>
+                      {monitorMessage.text}
+                    </div>
+                  )}
+                  <form onSubmit={createExternalSource}>
+                    <div className="field-grid">
+                      <label>
+                        <span>{t('source_id')}</span>
+                        <input
+                          value={sourceForm.sourceId}
+                          onChange={(event) =>
+                            setSourceForm((current) => ({ ...current, sourceId: event.target.value }))
+                          }
+                          required
+                        />
+                      </label>
+                      <label>
+                        <span>{t('source_name')}</span>
+                        <input
+                          value={sourceForm.name}
+                          onChange={(event) =>
+                            setSourceForm((current) => ({ ...current, name: event.target.value }))
+                          }
+                        />
+                      </label>
+                    </div>
+                    <div className="field-grid">
+                      <label>
+                        <span>{t('time_field')}</span>
+                        <input
+                          value={sourceForm.timeField}
+                          onChange={(event) =>
+                            setSourceForm((current) => ({ ...current, timeField: event.target.value }))
+                          }
+                        />
+                      </label>
+                      <label>
+                        <span>{t('type_field')}</span>
+                        <input
+                          value={sourceForm.typeField}
+                          onChange={(event) =>
+                            setSourceForm((current) => ({ ...current, typeField: event.target.value }))
+                          }
+                        />
+                      </label>
+                    </div>
+                    <div className="field-grid">
+                      <label>
+                        <span>{t('key_field')}</span>
+                        <input
+                          value={sourceForm.keyField}
+                          onChange={(event) =>
+                            setSourceForm((current) => ({ ...current, keyField: event.target.value }))
+                          }
+                        />
+                      </label>
+                      <label>
+                        <span>{t('extra_field')}</span>
+                        <input
+                          value={sourceForm.priceField}
+                          onChange={(event) =>
+                            setSourceForm((current) => ({ ...current, priceField: event.target.value }))
+                          }
+                        />
+                      </label>
+                    </div>
+                    <div className="actions">
+                      <button type="submit">{t('create_source')}</button>
+                    </div>
+                  </form>
+                  <div className="list">
+                    {sources.map((source) => (
+                      <div key={source.source_id} className="list-item">
+                        <div className="item-head">
+                          <h4>{source.name}</h4>
+                          <span className="badge">{source.kind}</span>
+                        </div>
+                        <div className="meta">
+                          <span>{source.source_id}</span>
+                          <span>{source.schema_binding?.key_field || '—'}</span>
+                        </div>
+                      </div>
+                    ))}
+                    {!sources.length && <div className="empty">{t('no_sources_yet')}</div>}
+                  </div>
+                </div>
+              </section>
+
+              <section className="panel half">
+                <div className="panel-head">
+                  <h2>{t('monitors_title')}</h2>
+                </div>
+                <div className="panel-body stack">
+                  <form onSubmit={createMonitorFromIntent}>
+                    <label>
+                      <span>{t('monitor_name')}</span>
+                      <input
+                        value={monitorForm.name}
+                        onChange={(event) =>
+                          setMonitorForm((current) => ({ ...current, name: event.target.value }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      <span>{t('intent_text')}</span>
+                      <input
+                        value={monitorForm.intentText}
+                        onChange={(event) =>
+                          setMonitorForm((current) => ({ ...current, intentText: event.target.value }))
+                        }
+                        required
+                      />
+                    </label>
+                    <div className="field-grid">
+                      <label>
+                        <span>{t('source_id')}</span>
+                        <select
+                          value={monitorForm.sourceId}
+                          onChange={(event) =>
+                            setMonitorForm((current) => ({
+                              ...current,
+                              sourceId: event.target.value,
+                              groupBy: 'source_key,event_type',
+                            }))
+                          }
+                          required
+                        >
+                          <option value="">{t('no_sources_yet')}</option>
+                          {sources.map((source) => (
+                            <option key={source.source_id} value={source.source_id}>
+                              {source.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        <span>{t('execution_mode')}</span>
+                        <select
+                          value={monitorForm.executionMode}
+                          onChange={(event) =>
+                            setMonitorForm((current) => ({
+                              ...current,
+                              executionMode: event.target.value as MonitorFormState['executionMode'],
+                            }))
+                          }
+                        >
+                          <option value="stream">stream</option>
+                          <option value="batch">batch</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div className="field-grid">
+                      <label>
+                        <span>{t('count_threshold')}</span>
+                        <input
+                          value={monitorForm.countThreshold}
+                          onChange={(event) =>
+                            setMonitorForm((current) => ({ ...current, countThreshold: event.target.value }))
+                          }
+                        />
+                      </label>
+                      <label>
+                        <span>{t('group_by_fields')}</span>
+                        <input
+                          value={monitorForm.groupBy}
+                          onChange={(event) =>
+                            setMonitorForm((current) => ({ ...current, groupBy: event.target.value }))
+                          }
+                        />
+                        <small className="brand-sub">
+                          {t('monitor_available_columns', { columns: selectedMonitorColumns.join(', ') })}
+                        </small>
+                      </label>
+                    </div>
+                    <div className="actions">
+                      <button type="submit" disabled={!sources.length}>{t('create_monitor')}</button>
+                    </div>
+                  </form>
+                  <div className="list">
+                    {monitors.map((monitor) => (
+                      <div key={monitor.monitor_id} className="list-item">
+                        <div className="item-head">
+                          <h4>{monitor.name}</h4>
+                          <span className="badge">
+                            {monitor.state?.status || monitor.validation?.status || t('monitor_status')}
+                          </span>
+                        </div>
+                        <div className="meta">
+                          <span>{monitor.execution_mode}</span>
+                          <span>{monitor.enabled ? 'enabled' : 'disabled'}</span>
+                        </div>
+                        <div className="actions" style={{ marginTop: 10 }}>
+                          <button className="ghost" onClick={() => void monitorAction(monitor.monitor_id, 'validate')}>
+                            {t('monitor_validate')}
+                          </button>
+                          {monitor.enabled ? (
+                            <button className="ghost" onClick={() => void monitorAction(monitor.monitor_id, 'disable')}>
+                              {t('monitor_disable')}
+                            </button>
+                          ) : (
+                            <button className="ghost" onClick={() => void monitorAction(monitor.monitor_id, 'enable')}>
+                              {t('monitor_enable')}
+                            </button>
+                          )}
+                          <button className="ghost" onClick={() => void monitorAction(monitor.monitor_id, 'run')}>
+                            {t('monitor_run_now')}
+                          </button>
+                          <button className="ghost danger-button" onClick={() => void monitorAction(monitor.monitor_id, 'delete')}>
+                            {t('monitor_delete')}
+                          </button>
+                        </div>
+                        {monitor.state?.last_error && (
+                          <div className="notice error" style={{ marginTop: 10 }}>
+                            {monitor.state.last_error}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    {!monitors.length && <div className="empty">{t('no_monitors_yet')}</div>}
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            <section className="panel" style={{ marginTop: 24 }}>
+              <div className="panel-head">
+                <h2>{t('focus_events_title')}</h2>
+                <div className="actions">
+                  <button className="ghost" onClick={() => void refreshMonitors()}>
+                    {t('refresh_focus_events')}
+                  </button>
+                </div>
+              </div>
+              <div className="panel-body">
+                <div className="list">
+                  {focusEvents.map((focusEvent) => (
+                    <div key={focusEvent.event_id} className="list-item">
+                      <div className="item-head">
+                        <h4>{focusEvent.title}</h4>
+                        <span className="badge">{focusEvent.severity}</span>
+                      </div>
+                      <div className="meta">
+                        <span>{focusEvent.monitor_id}</span>
+                        <span>{focusEvent.status}</span>
+                        <span>{focusEvent.triggered_at}</span>
+                      </div>
+                      <div className="helper" style={{ marginTop: 10 }}>{focusEvent.summary}</div>
+                      <div className="mono" style={{ marginTop: 10 }}>
+                        {JSON.stringify(focusEvent.key_fields || {}, null, 2)}
+                      </div>
+                      <div className="actions" style={{ marginTop: 10 }}>
+                        {focusEvent.run_id && (
+                          <button
+                            className="ghost"
+                            onClick={() => {
+                              setSelectedRunId(focusEvent.run_id || null);
+                              setView('runs');
+                            }}
+                          >
+                            {t('open_run_detail')}
+                          </button>
+                        )}
+                        <button className="ghost" onClick={() => void focusEventAction(focusEvent.event_id, 'consume')}>
+                          {t('focus_event_consume')}
+                        </button>
+                        <button className="ghost" onClick={() => void focusEventAction(focusEvent.event_id, 'archive')}>
+                          {t('focus_event_archive')}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  {!focusEvents.length && <div className="empty">{t('no_focus_events_yet')}</div>}
                 </div>
               </div>
             </section>

@@ -37,6 +37,50 @@ class _FakeDataFrame:
 
 
 class PythonCliContractTest(unittest.TestCase):
+    def test_agentic_search_templates_cli_returns_hits(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = velaria_cli.main(["search", "templates", "--query-text", "count events", "--top-k", "2"])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertGreaterEqual(len(payload["hits"]), 1)
+
+    def test_agentic_source_create_and_list_cli(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-cli-agentic-source-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    exit_code = velaria_cli.main(
+                        [
+                            "source",
+                            "create",
+                            "--source-id",
+                            "ticks",
+                            "--kind",
+                            "external_event",
+                            "--name",
+                            "ticks",
+                            "--schema-binding",
+                            json.dumps({"time_field": "ts", "type_field": "kind", "key_field": "symbol"}),
+                        ]
+                    )
+                self.assertEqual(exit_code, 0)
+                self.assertEqual(stderr.getvalue(), "")
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(payload["source"]["source_id"], "ticks")
+
+                list_stdout = io.StringIO()
+                with redirect_stdout(list_stdout):
+                    list_exit = velaria_cli.main(["source", "list"])
+                self.assertEqual(list_exit, 0)
+                list_payload = json.loads(list_stdout.getvalue())
+                self.assertEqual(len(list_payload["sources"]), 1)
+                self.assertEqual(list_payload["sources"][0]["source_id"], "ticks")
+
     def test_interactive_mode_accepts_commands_and_exits_cleanly(self):
         with tempfile.TemporaryDirectory(prefix="velaria-cli-interactive-") as tmp:
             with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):

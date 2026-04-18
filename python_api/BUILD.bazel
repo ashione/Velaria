@@ -30,6 +30,11 @@ py_library(
         "velaria/excel.py",
         "velaria/custom_stream.py",
         "velaria/bitable.py",
+        "velaria/agentic_store.py",
+        "velaria/agentic_templates.py",
+        "velaria/agentic_dsl.py",
+        "velaria/agentic_search.py",
+        "velaria/agentic_runtime.py",
         "velaria/embedding.py",
         "velaria/keyword_index.py",
         "velaria/workspace/__init__.py",
@@ -109,6 +114,20 @@ py_binary(
     name = "bench_embedding_recall",
     srcs = ["benchmarks/bench_embedding_recall.py"],
     main = "benchmarks/bench_embedding_recall.py",
+    deps = [":velaria_py_pkg"],
+)
+
+py_binary(
+    name = "bench_realtime_stream",
+    srcs = ["benchmarks/bench_realtime_stream.py"],
+    main = "benchmarks/bench_realtime_stream.py",
+    deps = [":velaria_py_pkg"],
+)
+
+py_binary(
+    name = "bench_realtime_wrapper_stress",
+    srcs = ["benchmarks/bench_realtime_wrapper_stress.py"],
+    main = "benchmarks/bench_realtime_wrapper_stress.py",
     deps = [":velaria_py_pkg"],
 )
 

@@ -1,5 +1,7 @@
 import pathlib
 import tempfile
+import threading
+import time
 import unittest
 
 import pyarrow as pa
@@ -192,6 +194,96 @@ class ArrowStreamIngestionTest(unittest.TestCase):
             self.assertEqual(arrow_out.column("id").to_pylist(), [1, 2, 3])
             self.assertEqual(arrow_out.column("name").to_pylist(), ["alice", None, "carol,inc"])
             self.assertEqual(arrow_out.column("score").to_pylist(), [1.5, None, 3.25])
+
+    def test_realtime_stream_source_and_sink_support_direct_arrow_ingest(self):
+        session = velaria.Session()
+        source = session.create_realtime_stream_source(["ts", "key", "value"])
+        stream_df = session.read_realtime_stream_source(source)
+        session.create_temp_view("realtime_events", stream_df)
+        sink = session.create_realtime_stream_sink()
+        query_df = session.stream_sql(
+            "SELECT window_start, key, COUNT(*) AS event_count "
+            "FROM realtime_events "
+            "WINDOW BY ts EVERY 60000 SLIDE 30000 AS window_start "
+            "GROUP BY window_start, key"
+        )
+        query = query_df.write_stream_queue_sink(
+            sink,
+            trigger_interval_ms=0,
+            execution_mode="local-workers",
+            local_workers=2,
+            max_inflight_partitions=2,
+        )
+        query.start()
+        worker = threading.Thread(target=lambda: query.await_termination(), daemon=True)
+        worker.start()
+        try:
+            source.push_arrow(
+                pa.table(
+                    {
+                        "ts": ["2026-03-29T10:00:00", "2026-03-29T10:00:10", "2026-03-29T10:00:35"],
+                        "key": ["u1", "u1", "u1"],
+                        "value": [1, 1, 1],
+                    }
+                )
+            )
+            observed = None
+            for _ in range(50):
+                batch = sink.poll_arrow()
+                if batch is not None:
+                    observed = batch
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(observed)
+            rows = {(row["window_start"], row["key"], row["event_count"]) for row in observed.to_pylist()}
+            self.assertEqual(
+                rows,
+                {
+                    ("2026-03-29T09:59:30", "u1", 2),
+                    ("2026-03-29T10:00:00", "u1", 3),
+                    ("2026-03-29T10:00:30", "u1", 1),
+                },
+            )
+        finally:
+            source.close()
+            query.stop()
+            worker.join(timeout=5)
+
+    def test_realtime_stream_source_and_sink_support_python_row_ingest(self):
+        session = velaria.Session()
+        source = session.create_realtime_stream_source(["ts", "key", "value"])
+        stream_df = session.read_realtime_stream_source(source)
+        session.create_temp_view("realtime_events_rows", stream_df)
+        sink = session.create_realtime_stream_sink()
+        query_df = session.stream_sql(
+            "SELECT key, COUNT(*) AS event_count "
+            "FROM realtime_events_rows "
+            "GROUP BY key HAVING event_count >= 2"
+        )
+        query = query_df.write_stream_queue_sink(sink, trigger_interval_ms=0)
+        query.start()
+        worker = threading.Thread(target=lambda: query.await_termination(max_batches=2), daemon=True)
+        worker.start()
+        try:
+            source.push_rows(
+                [
+                    {"ts": "2026-03-29T10:00:00", "key": "u1", "value": 1},
+                    {"ts": "2026-03-29T10:00:10", "key": "u1", "value": 2},
+                ]
+            )
+            observed = None
+            for _ in range(50):
+                batch = sink.poll_arrow()
+                if batch is not None:
+                    observed = batch
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(observed)
+            self.assertEqual(observed.to_pylist(), [{"key": "u1", "event_count": 2}])
+        finally:
+            source.close()
+            query.stop()
+            worker.join(timeout=5)
 
 
 if __name__ == "__main__":

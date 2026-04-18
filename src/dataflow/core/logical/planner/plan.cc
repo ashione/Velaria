@@ -12,7 +12,7 @@
 namespace dataflow {
 
 namespace {
-constexpr int kPlanFormatVersion = 1003;
+constexpr int kPlanFormatVersion = 1004;
 
 void appendToken(std::string* out, const std::string& value) {
   out->append(std::to_string(value.size()));
@@ -334,6 +334,7 @@ void serializeNode(const PlanNodePtr& plan, std::string* out) {
       serializeNode(node->child, out);
       appendSize(out, node->time_column_index);
       appendSize(out, static_cast<std::size_t>(node->window_ms));
+      appendSize(out, static_cast<std::size_t>(node->slide_ms));
       appendToken(out, node->output_column);
       return;
     }
@@ -487,9 +488,11 @@ PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset, int
       auto child = deserializeNode(payload, offset, format_version);
       const auto time_column_index = readSize(payload, offset);
       const auto window_ms = static_cast<uint64_t>(readSize(payload, offset));
+      const auto slide_ms =
+          format_version >= 1004 ? static_cast<uint64_t>(readSize(payload, offset)) : window_ms;
       const auto output_column = readToken(payload, offset);
       return std::make_shared<WindowAssignPlan>(std::move(child), time_column_index, window_ms,
-                                                output_column);
+                                                slide_ms, output_column);
     }
     case PlanKind::Aggregate: {
       auto child = deserializeNode(payload, offset, format_version);

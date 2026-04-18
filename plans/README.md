@@ -13,6 +13,7 @@ Use this index to decide which plan document is authoritative for the question y
 - stable boundaries and contracts:
   - [../docs/core-boundary.md](../docs/core-boundary.md)
   - [../docs/runtime-contract.md](../docs/runtime-contract.md)
+  - [../docs/agentic-service-api.md](../docs/agentic-service-api.md)
   - [../docs/streaming_runtime_design.md](../docs/streaming_runtime_design.md)
 - current maintained working plan:
   - [core-runtime-columnar-plan.md](./core-runtime-columnar-plan.md)
@@ -23,6 +24,18 @@ Use this index to decide which plan document is authoritative for the question y
   - current status board for the core runtime columnar path
   - tracks implemented items, explicit non-goals, and next phases
   - this is the main plan document to update for the active core-runtime line
+- [agentic-event-data-platform-v1.md](./agentic-event-data-platform-v1.md)
+  - top-level design for the local agentic event data platform direction
+- [agentic-user-journeys-v1.md](./agentic-user-journeys-v1.md)
+  - primary user journeys for external agents, skills, configurators, and analysts
+- [agentic-event-model-v1.md](./agentic-event-model-v1.md)
+  - domain model source of truth for observation, signal, focus-event, and monitor objects
+- [agentic-search-grounding-v1.md](./agentic-search-grounding-v1.md)
+  - search and grounding design for monitor creation, skill usage, and event reuse
+- [agentic-monitor-execution-v1.md](./agentic-monitor-execution-v1.md)
+  - execution semantics for batch monitors, stream monitors, and external event sources
+- [agentic-rule-dsl-v1.md](./agentic-rule-dsl-v1.md)
+  - rule DSL syntax, validation, and compilation targets for event monitors
 - [analytical-storage-format-v1.md](./analytical-storage-format-v1.md)
   - v1 analytical storage format direction for internal saved tables
 - [visual-data-app-v1.md](./visual-data-app-v1.md)
@@ -33,6 +46,9 @@ Use this index to decide which plan document is authoritative for the question y
   - import / data detail / analyze workflow design
 - [electron-dmg-packaging-v1.md](./electron-dmg-packaging-v1.md)
   - Electron desktop packaging plan and `.dmg` delivery path
+
+The agentic/event documents above are the current design source of truth for this product line.
+They are still design documents in `plans/`, not yet stable `docs/` contracts.
 
 ## Historical Notes Still Useful As Background
 

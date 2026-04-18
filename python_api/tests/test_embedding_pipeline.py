@@ -37,6 +37,7 @@ from velaria import (
     run_mixed_text_hybrid_search,
     run_file_mixed_text_hybrid_search,
     select_embedding_updates,
+    stream_mixed_text_embeddings_to_parquet,
 )
 
 
@@ -690,6 +691,29 @@ class EmbeddingPipelineTest(unittest.TestCase):
         )
         self.assertEqual(table.column("doc_id").to_pylist(), ["doc-1", "doc-2", "doc-3"])
         self.assertEqual([len(call["texts"]) for call in provider.calls], [2, 1])
+
+    def test_stream_mixed_text_embeddings_to_parquet_requires_parquet_suffix(self):
+        provider = StaticEmbeddingProvider(
+            {
+                "title: Alpha\nsummary: Payment page timeout": [1.0, 0.0, 0.0],
+            }
+        )
+        records = [
+            {"doc_id": "doc-1", "title": "Alpha", "summary": "Payment page timeout", "source_updated_at": 1},
+        ]
+        with tempfile.TemporaryDirectory(prefix="velaria-stream-embed-suffix-") as tmp:
+            output_path = pathlib.Path(tmp) / "bitable_embeddings.arrow"
+            with self.assertRaisesRegex(
+                ValueError, "stream_mixed_text_embeddings_to_parquet requires a \\.parquet output path"
+            ):
+                stream_mixed_text_embeddings_to_parquet(
+                    records,
+                    provider=provider,
+                    model="static-demo",
+                    template_version="text-v1",
+                    text_fields=("title", "summary"),
+                    output_path=output_path,
+                )
 
     def test_build_file_embeddings_reads_csv_and_materializes_embedding_table(self):
         provider = StaticEmbeddingProvider(

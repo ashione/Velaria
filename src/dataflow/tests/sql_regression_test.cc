@@ -503,6 +503,23 @@ void runSemanticRegression() {
       "SELECT user_id FROM t_users_v1 UNION SELECT user_id FROM t_users_archive_v1");
   expect(union_rows.rows.size() == 4, "planner_union_distinct_rows");
 
+  Table delimiter_left;
+  delimiter_left.schema = Schema({"left_text", "right_text"});
+  delimiter_left.rows = {
+      {Value(std::string("alpha") + std::string(1, '\x1f') + "beta"), Value("gamma")},
+  };
+  Table delimiter_right;
+  delimiter_right.schema = Schema({"left_text", "right_text"});
+  delimiter_right.rows = {
+      {Value("alpha"), Value(std::string("beta") + std::string(1, '\x1f') + "gamma")},
+  };
+  s.createTempView("t_union_delim_left_v1", s.createDataFrame(delimiter_left));
+  s.createTempView("t_union_delim_right_v1", s.createDataFrame(delimiter_right));
+  Table delimiter_union_rows = s.submit(
+      "SELECT left_text, right_text FROM t_union_delim_left_v1 "
+      "UNION SELECT left_text, right_text FROM t_union_delim_right_v1");
+  expect(delimiter_union_rows.rows.size() == 2, "planner_union_distinct_embedded_delimiter_rows");
+
   expectThrows(
       "planner_union_column_count_mismatch_rejected",
       [&]() {

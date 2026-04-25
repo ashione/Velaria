@@ -49,7 +49,7 @@ Owns:
 - offline keyword-index generation helpers and reusable BM25 keyword search assets
 - Excel / Bitable / custom stream adapters
 - local workspace and run tracking
-- AI-assisted data analysis via Claude Agent SDK or Codex App Server runtime
+- Velaria Agent runtime wrapping Codex App Server or Claude Agent SDK
 
 Does not own:
 
@@ -111,8 +111,8 @@ Available today:
   - `SELECT` with projection/alias, `WHERE` (including `AND` / `OR` and column-to-column predicates), `GROUP BY` columns/scalar expressions, `ORDER BY`, `LIMIT`, current minimal `JOIN`, `UNION` / `UNION ALL`
   - batch `KEYWORD SEARCH(...) QUERY '...' TOP_K ...` and current keyword-assisted `HYBRID SEARCH ...`
 - current batch builtins:
-  - scalar: string functions such as `LOWER`, `UPPER`, `TRIM`, `LTRIM`, `RTRIM`, `LENGTH`, `LEN`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, `REVERSE`, `CONCAT`, `CONCAT_WS`, `LEFT`, `RIGHT`, `SUBSTR` / `SUBSTRING`, `POSITION`, `REPLACE`, `CAST`; numeric functions such as `ABS`, `CEIL`, `FLOOR`, `ROUND`; date/time functions such as `YEAR`, `MONTH`, `DAY`, `ISO_YEAR`, `ISO_WEEK`, `WEEK`, `YEARWEEK`, `NOW`, `TODAY`, `CURRENT_TIMESTAMP`, `currentTimestamp`, `UNIX_TIMESTAMP`; supported scalar functions can be nested in projections
-  - numeric/date: `ABS`, `CEIL`, `FLOOR`, `ROUND`, `YEAR`, `MONTH`, `DAY`, `ISO_YEAR`, `ISO_WEEK`, `WEEK`, `YEARWEEK`
+  - scalar string, numeric, and date/time functions; supported scalar functions can be nested in projections and used in supported `GROUP BY` expressions
+  - the Agent-facing SQL function reference is exposed on demand through `velaria_sql_capabilities`, `velaria_sql_function_search`, `velaria_sql_query_patterns`, and `velaria://sql/catalog`
 - stream path:
   - `readStream(...)`, `readStreamCsvDir(...)`
   - `single-process` and `local-workers`
@@ -134,10 +134,11 @@ Available today:
 - local desktop app prototype under `app/`, backed by `velaria-service`
 - desktop import flow can asynchronously build reusable embedding datasets and keyword indexes from the same saved dataset
 - macOS desktop packaging prototype producing `.dmg`
-- AI / agent / skill integration through the supported Python ecosystem layer, with workspace and artifact management for result reuse and local data management
-- AI-assisted SQL generation from natural language via configurable LLM runtime
-- CLI `ai` subcommand for SQL generation, session management, and agent analysis
-- desktop app AI SQL assistant with session controls in Analyze page
+- Velaria Agent integration through the supported Python ecosystem layer, with workspace and artifact management for result reuse and local data management
+- interactive `velaria_cli.py -i` agent mode for natural language data work, Velaria local functions, runs, artifacts, and terminal rendering
+- on-demand Velaria usage skill and SQL catalog exposure through MCP resources/tools instead of prompt-inlining
+- CLI `ai` subcommand retained for non-interactive SQL generation and historical compatibility commands
+- desktop app Agent SQL assistant with session controls in Analyze page
 - same-host actor/rpc/jobmaster smoke path
 
 Current constraints:
@@ -147,8 +148,8 @@ Current constraints:
 - SQL v1 does not expand to `CTE`, subquery, richer join semantics, or aggregate `KEYWORD SEARCH` / `HYBRID SEARCH`
 - Python callbacks / Python UDFs are not part of the hot path
 - the Electron desktop app is still a local prototype, not a stable product surface
-- AI runtime requires `claude-agent-sdk` or `codex-app-server-sdk` (optional dependencies)
-- Codex runtime defaults to `gpt-5.4-mini` with workspace-write network access unless `agentModel` / `agentCodexNetworkAccess` is set
+- Agent runtime uses Codex by default; Claude support requires the optional `claude-agent-sdk`
+- Codex runtime defaults to `gpt-5.4-mini`, reasoning effort `none`, and workspace-write network access unless `agentModel` / `agentReasoningEffort` / `agentCodexNetworkAccess` is set
 - Codex runtime inherits standard proxy environment variables such as `http_proxy`, `https_proxy`, and `all_proxy`
 - the repository does not claim a completed distributed runtime
 

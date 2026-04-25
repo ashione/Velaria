@@ -31,7 +31,7 @@ The supported Python ecosystem includes:
 - vector search and vector explain APIs
 - offline embedding pipeline helpers for versioned vector assets
 - offline keyword-index build helpers and reusable BM25 keyword-search assets
-- agent runtime wrapper for Claude Code / Claude Agent SDK and Codex App Server integration
+- agent runtime wrapper for Codex App Server and Claude Code / Claude Agent SDK integration
 - interactive agent CLI via `velaria_cli.py -i`
 
 ### Examples
@@ -421,8 +421,8 @@ The agent runtime provides:
 - On-demand SQL reference resource `velaria://sql/catalog` for SQL v1
   capabilities, scalar functions, and reusable query patterns
 - Natural language to SQL generation via `velaria_cli.py ai generate-sql`
-- Session-based compatibility commands via `velaria_cli.py ai session` and
-  `velaria_cli.py ai analyze`
+- Legacy compatibility commands under `velaria_cli.py ai ...`; new interactive
+  work should use `velaria_cli.py -i`
 
 Minimal Codex runtime config:
 
@@ -432,14 +432,15 @@ Minimal Codex runtime config:
   "agentAuthMode": "oauth",
   "agentProvider": "openai",
   "agentModel": "gpt-5.4-mini",
+  "agentReasoningEffort": "none",
   "agentRuntimeWorkspace": "~/.velaria/ai-runtime",
   "agentCodexNetworkAccess": true
 }
 ```
 
 Codex uses the local `codex app-server` command and defaults to `gpt-5.4-mini`
-when `agentModel` is omitted. `agentRuntimeWorkspace` is the runtime working directory
-used to save and resume agent threads. If omitted, Velaria creates a
+when `agentModel` is omitted. `agentReasoningEffort` defaults to `none`.
+`agentRuntimeWorkspace` is the runtime working directory used to save and resume agent threads. If omitted, Velaria creates a
 project-scoped directory under `~/.velaria/ai-runtime/`. `agentAuthMode: "oauth"`
 reuses the local Codex or Claude login. Use `agentAuthMode: "api_key"` together
 with `agentApiKey` and `agentBaseUrl` when the provider should be driven by
@@ -450,15 +451,22 @@ set `agentCodexNetworkAccess` to `false` only for offline runtime sessions.
 The runtime inherits standard proxy environment variables such as `http_proxy`,
 `https_proxy`, and `all_proxy`.
 
-AI CLI examples:
+Velaria Agent keeps the underlying runtime generic. Velaria-specific usage
+guidance and SQL function details are exposed on demand through MCP resources
+and local functions, not by embedding the full skill or SQL function catalog in
+the default prompt. Use `velaria_sql_capabilities`,
+`velaria_sql_function_search`, `velaria_sql_query_patterns`, or the
+`velaria://sql/catalog` MCP resource when an agent needs SQL details.
+
+Agent CLI examples:
 
 ```bash
 uv run --project python python python/velaria_cli.py -i
 
 # Inside interactive mode, plain text goes to the active agent thread.
-velaria> 读取 data/sales.csv，按 region 汇总 amount，并保存 run
-velaria> /status
-velaria> :run list --limit 5
+› 读取 data/sales.csv，按 region 汇总 amount，并保存 run
+› /status
+› :run list --limit 5
 
 uv run --project python python python/velaria_cli.py ai generate-sql \
   --prompt "top 5 by score" --schema "name,score,region"

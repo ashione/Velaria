@@ -86,50 +86,48 @@ xattr -dr com.apple.quarantine /Applications/Velaria.app
 client -> scheduler(jobmaster) -> worker -> in-proc operator chain -> result
 ```
 
-## AI Runtime
+## Agent Runtime
 
-安装 AI 依赖：
+Codex runtime 依赖随默认 Python 包安装。只有使用 Claude Code runtime 时才需要额外安装：
 
 ```bash
 uv sync --project python --extra ai-claude
-# 或
-uv sync --project python --extra ai-codex
 ```
 
-配置 AI provider：
+配置 Agent provider：
 
 ```bash
 mkdir -p ~/.velaria
 cat > ~/.velaria/config.json << 'EOF'
 {
-  "aiProvider": "claude",
-  "aiApiKey": "your-api-key",
-  "aiRuntime": "claude",
-  "aiModel": "claude-sonnet-4-20250514",
-  "aiRuntimePath": "/opt/velaria-runtime/bin/claude",
-  "aiRuntimeWorkspace": "~/.velaria/ai-runtime",
-  "aiReuseLocalConfig": true,
-  "aiCodexNetworkAccess": true,
-  "aiProxy": "http://127.0.0.1:7897",
-  "aiAllProxy": "socks5://127.0.0.1:7897"
+  "agentProvider": "openai",
+  "agentAuthMode": "oauth",
+  "agentRuntime": "codex",
+  "agentModel": "gpt-5.4-mini",
+  "agentReasoningEffort": "none",
+  "agentRuntimeWorkspace": "~/.velaria/ai-runtime",
+  "agentReuseLocalConfig": true,
+  "agentCodexNetworkAccess": true,
+  "agentProxy": "http://127.0.0.1:7897",
+  "agentAllProxy": "socks5://127.0.0.1:7897"
 }
 EOF
 ```
 
-`aiRuntimePath` 是可选项。Codex 可以省略它并使用本地 `codex app-server`
-命令；只有需要覆盖该可执行文件时才设置 `aiRuntimePath` /
-`aiCodexRuntimePath`。Claude Code runtime 可以使用 `aiClaudeRuntimePath` 或
-`aiRuntimePath`。`aiRuntimeWorkspace` 是 runtime 工作目录，用于保存 agent
+`agentRuntimePath` 是可选项。Codex 可以省略它并使用本地 `codex app-server`
+命令；只有需要覆盖该可执行文件时才设置 `agentRuntimePath` /
+`agentCodexRuntimePath`。Claude Code runtime 可以使用 `agentClaudeRuntimePath`。
+`agentRuntimeWorkspace` 是 runtime 工作目录，用于保存 agent
 thread、生成配置以及 MCP/function 日志；如果省略，Velaria 会使用
-`~/.velaria/ai-runtime/` 下的项目级目录。`aiReuseLocalConfig` 控制 runtime
+`~/.velaria/ai-runtime/` 下的项目级目录。`agentReuseLocalConfig` 控制 runtime
 进程是否复用当前用户配置；设为 `false` 时 runtime 会使用隔离 HOME。
 Codex workspace-write 网络访问默认开启；只有需要离线运行 agent runtime
-时才把 `aiCodexNetworkAccess` 设为 `false`。`aiProxy` 会同时设置 runtime
-进程的 `http_proxy` 和 `https_proxy`；需要分别配置时使用 `aiHttpProxy`、
-`aiHttpsProxy`、`aiAllProxy` 和 `aiNoProxy`。Shell 里的代理变量也会被继承，
+时才把 `agentCodexNetworkAccess` 设为 `false`。`agentProxy` 会同时设置 runtime
+进程的 `http_proxy` 和 `https_proxy`；需要分别配置时使用 `agentHttpProxy`、
+`agentHttpsProxy`、`agentAllProxy` 和 `agentNoProxy`。Shell 里的代理变量也会被继承，
 Velaria 会默认保留 localhost 绕过，以免影响本地 MCP/data URL。
 
-从 CLI 使用 AI：
+通过历史兼容命令做非交互 SQL 生成：
 
 ```bash
 uv run --project python python python/velaria_cli.py ai generate-sql \
@@ -140,13 +138,13 @@ uv run --project python python python/velaria_cli.py ai generate-sql \
 
 ```bash
 uv run --project python python python/velaria_cli.py -i
-velaria> 找出分数最高的5个人
-velaria> /status
-velaria> :run list --limit 5
+› 找出分数最高的5个人
+› /status
+› :run list --limit 5
 ```
 
-交互式 CLI 是 agent runtime wrapper：它会直接启动或恢复已配置的
-Codex/Claude runtime，注入 Velaria skill，并通过 runtime bridge / MCP server
+交互式 CLI 是 agent runtime wrapper：它会直接启动已配置的
+Codex/Claude runtime，通过 MCP resource/tool 按需暴露 Velaria usage skill 与 SQL catalog，并通过 runtime bridge / MCP server
 暴露 Velaria local functions。`velaria_service` 仍作为桌面 app 和其他 app
 client 使用的 HTTP sidecar，交互式 CLI 不需要先启动 service。
 

@@ -86,51 +86,50 @@ Same-host flow:
 client -> scheduler(jobmaster) -> worker -> in-proc operator chain -> result
 ```
 
-## AI Runtime
+## Agent Runtime
 
-Bootstrap AI dependencies:
+Codex runtime dependencies are part of the default Python package. Install
+Claude runtime support only when using Claude Code:
 
 ```bash
 uv sync --project python --extra ai-claude
-# or
-uv sync --project python --extra ai-codex
 ```
 
-Configure AI provider:
+Configure the Agent provider:
 
 ```bash
 mkdir -p ~/.velaria
 cat > ~/.velaria/config.json << 'EOF'
 {
-  "aiProvider": "claude",
-  "aiApiKey": "your-api-key",
-  "aiRuntime": "claude",
-  "aiModel": "claude-sonnet-4-20250514",
-  "aiRuntimePath": "/opt/velaria-runtime/bin/claude",
-  "aiRuntimeWorkspace": "~/.velaria/ai-runtime",
-  "aiReuseLocalConfig": true,
-  "aiCodexNetworkAccess": true,
-  "aiProxy": "http://127.0.0.1:7897",
-  "aiAllProxy": "socks5://127.0.0.1:7897"
+  "agentProvider": "openai",
+  "agentAuthMode": "oauth",
+  "agentRuntime": "codex",
+  "agentModel": "gpt-5.4-mini",
+  "agentReasoningEffort": "none",
+  "agentRuntimeWorkspace": "~/.velaria/ai-runtime",
+  "agentReuseLocalConfig": true,
+  "agentCodexNetworkAccess": true,
+  "agentProxy": "http://127.0.0.1:7897",
+  "agentAllProxy": "socks5://127.0.0.1:7897"
 }
 EOF
 ```
 
-`aiRuntimePath` is optional. Codex can omit it and use the local
-`codex app-server` command; set `aiRuntimePath` / `aiCodexRuntimePath` only when
-overriding that executable. Claude Code runtime can use `aiClaudeRuntimePath` or
-`aiRuntimePath`. `aiRuntimeWorkspace` is the runtime working directory used for
+`agentRuntimePath` is optional. Codex can omit it and use the local
+`codex app-server` command; set `agentRuntimePath` / `agentCodexRuntimePath` only when
+overriding that executable. Claude Code runtime can use `agentClaudeRuntimePath`.
+`agentRuntimeWorkspace` is the runtime working directory used for
 agent threads, generated config, and MCP/function logs. If omitted, Velaria uses
-a project-scoped directory under `~/.velaria/ai-runtime/`. `aiReuseLocalConfig`
+a project-scoped directory under `~/.velaria/ai-runtime/`. `agentReuseLocalConfig`
 controls whether the runtime process can reuse the current user config; set it
 to `false` when the runtime should use an isolated HOME. Codex workspace-write
-network access is enabled by default; set `aiCodexNetworkAccess` to `false` only
-when the agent runtime must be offline. `aiProxy` sets both `http_proxy` and
-`https_proxy` for the runtime process; use `aiHttpProxy`, `aiHttpsProxy`,
-`aiAllProxy`, and `aiNoProxy` for separate values. Shell proxy variables are
+network access is enabled by default; set `agentCodexNetworkAccess` to `false` only
+when the agent runtime must be offline. `agentProxy` sets both `http_proxy` and
+`https_proxy` for the runtime process; use `agentHttpProxy`, `agentHttpsProxy`,
+`agentAllProxy`, and `agentNoProxy` for separate values. Shell proxy variables are
 also inherited, and Velaria keeps localhost bypassed for local MCP/data URLs.
 
-Use AI from the CLI:
+Use non-interactive SQL generation from the legacy compatibility command:
 
 ```bash
 uv run --project python python python/velaria_cli.py ai generate-sql \
@@ -141,14 +140,15 @@ Interactive mode:
 
 ```bash
 uv run --project python python python/velaria_cli.py -i
-velaria> 找出分数最高的5个人
-velaria> /status
-velaria> :run list --limit 5
+› 找出分数最高的5个人
+› /status
+› :run list --limit 5
 ```
 
-The interactive CLI is an agent runtime wrapper. It starts or resumes the
-configured Codex/Claude runtime directly, injects the Velaria skill, and exposes
-Velaria local functions through the runtime bridge / MCP server. `velaria_service`
+The interactive CLI is an agent runtime wrapper. It starts a configured
+Codex/Claude runtime directly, exposes the Velaria usage skill and SQL catalog
+on demand through MCP resources/tools, and registers Velaria local functions
+through the runtime bridge / MCP server. `velaria_service`
 remains the HTTP sidecar for the desktop app and other app clients; it is not
 required for CLI interactive mode.
 

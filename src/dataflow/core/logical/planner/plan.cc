@@ -12,7 +12,7 @@
 namespace dataflow {
 
 namespace {
-constexpr int kPlanFormatVersion = 1004;
+constexpr int kPlanFormatVersion = 1005;
 
 void appendToken(std::string* out, const std::string& value) {
   out->append(std::to_string(value.size()));
@@ -212,6 +212,8 @@ void serializePredicateExpr(const std::shared_ptr<PlanPredicateExpr>& expr, std:
   if (expr->kind == PlanPredicateExprKind::Comparison) {
     appendSize(out, expr->comparison.column_index);
     appendToken(out, expr->comparison.op);
+    appendInt(out, expr->comparison.rhs_is_column ? 1 : 0);
+    appendSize(out, expr->comparison.rhs_column_index);
     appendToken(out, serializeValue(expr->comparison.value));
     return;
   }
@@ -230,12 +232,43 @@ std::shared_ptr<PlanPredicateExpr> deserializePredicateExpr(const std::string& p
   if (expr->kind == PlanPredicateExprKind::Comparison) {
     expr->comparison.column_index = readSize(payload, offset);
     expr->comparison.op = readToken(payload, offset);
+    expr->comparison.rhs_is_column = readInt(payload, offset) != 0;
+    expr->comparison.rhs_column_index = readSize(payload, offset);
     expr->comparison.value = deserializeValue(readToken(payload, offset));
     return expr;
   }
   expr->left = deserializePredicateExpr(payload, offset);
   expr->right = deserializePredicateExpr(payload, offset);
   return expr;
+}
+
+void serializeComputedArg(const ComputedColumnArg& arg, std::string* out) {
+  appendInt(out, arg.is_literal ? 1 : 0);
+  appendInt(out, arg.is_function ? 1 : 0);
+  appendSize(out, arg.source_column_index);
+  appendToken(out, serializeValue(arg.literal));
+  appendToken(out, arg.source_column_name);
+  appendInt(out, static_cast<int>(arg.function));
+  appendSize(out, arg.args.size());
+  for (const auto& nested : arg.args) {
+    serializeComputedArg(nested, out);
+  }
+}
+
+ComputedColumnArg deserializeComputedArg(const std::string& payload, std::size_t* offset) {
+  ComputedColumnArg arg;
+  arg.is_literal = (readInt(payload, offset) != 0);
+  arg.is_function = (readInt(payload, offset) != 0);
+  arg.source_column_index = readSize(payload, offset);
+  arg.literal = deserializeValue(readToken(payload, offset));
+  arg.source_column_name = readToken(payload, offset);
+  arg.function = static_cast<ComputedColumnKind>(readInt(payload, offset));
+  const auto arg_count = readSize(payload, offset);
+  arg.args.reserve(arg_count);
+  for (std::size_t i = 0; i < arg_count; ++i) {
+    arg.args.push_back(deserializeComputedArg(payload, offset));
+  }
+  return arg;
 }
 
 void serializeNode(const PlanNodePtr& plan, std::string* out) {
@@ -300,10 +333,7 @@ void serializeNode(const PlanNodePtr& plan, std::string* out) {
       appendInt(out, static_cast<int>(node->function));
       appendSize(out, node->args.size());
       for (const auto& arg : node->args) {
-        appendInt(out, arg.is_literal ? 1 : 0);
-        appendSize(out, arg.source_column_index);
-        appendToken(out, serializeValue(arg.literal));
-        appendToken(out, arg.source_column_name);
+        serializeComputedArg(arg, out);
       }
       return;
     }
@@ -443,12 +473,7 @@ PlanNodePtr deserializeNode(const std::string& payload, std::size_t* offset, int
       std::vector<ComputedColumnArg> args;
       args.reserve(arg_count);
       for (std::size_t i = 0; i < arg_count; ++i) {
-        ComputedColumnArg arg;
-        arg.is_literal = (readInt(payload, offset) != 0);
-        arg.source_column_index = readSize(payload, offset);
-        arg.literal = deserializeValue(readToken(payload, offset));
-        arg.source_column_name = readToken(payload, offset);
-        args.push_back(std::move(arg));
+        args.push_back(deserializeComputedArg(payload, offset));
       }
       if (function == ComputedColumnKind::Copy) {
         auto node = std::make_shared<WithColumnPlan>(std::move(child), added_column, source_column_index);

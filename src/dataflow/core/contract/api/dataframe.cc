@@ -31,6 +31,21 @@ std::shared_ptr<const Schema> makeSchemaHint(const Schema& schema) {
   return std::make_shared<Schema>(schema);
 }
 
+void validateComputedColumnArg(const ComputedColumnArg& arg) {
+  if (arg.is_literal) {
+    return;
+  }
+  if (arg.is_function) {
+    for (const auto& nested : arg.args) {
+      validateComputedColumnArg(nested);
+    }
+    return;
+  }
+  if (arg.source_column_index == static_cast<size_t>(-1)) {
+    throw std::invalid_argument("withColumn expression argument column index cannot be -1");
+  }
+}
+
 VectorSearchMetric toRuntimeMetric(VectorDistanceMetric metric) {
   return metric == VectorDistanceMetric::L2
              ? VectorSearchMetric::L2
@@ -776,9 +791,7 @@ DataFrame DataFrame::withColumn(const std::string& name, const std::string& sour
 DataFrame DataFrame::withColumn(const std::string& name, ComputedColumnKind function,
                                const std::vector<ComputedColumnArg>& args) const {
   for (const auto& arg : args) {
-    if (!arg.is_literal && arg.source_column_index == static_cast<size_t>(-1)) {
-      throw std::invalid_argument("withColumn expression argument column index cannot be -1");
-    }
+    validateComputedColumnArg(arg);
   }
   Schema output_schema = schema();
   output_schema.fields.push_back(name);

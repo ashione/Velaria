@@ -351,6 +351,31 @@ void runParserRegression() {
       });
 
   expectNoThrow(
+      "parser_group_by_scalar_expression",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT ISO_YEAR(ts) AS iso_year, WEEK(ts) AS iso_week, COUNT(*) AS n "
+            "FROM input_table GROUP BY ISO_YEAR(ts), WEEK(ts)");
+        expect(st.query.group_by.size() == 2, "parser_group_by_scalar_expression_size");
+        expect(st.query.group_by[0].is_string_function,
+               "parser_group_by_scalar_expression_first_function");
+        expect(st.query.group_by[1].is_string_function,
+               "parser_group_by_scalar_expression_second_function");
+      });
+
+  expectNoThrow(
+      "parser_nested_cast_string_function",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT SUBSTR(CAST(open AS STRING), 1, 4) AS open_prefix FROM input_table");
+        expect(st.query.select_items.size() == 1, "parser_nested_cast_projection_size");
+        expect(st.query.select_items[0].is_string_function,
+               "parser_nested_cast_projection_function");
+        expect(st.query.select_items[0].string_function.args[0].is_function,
+               "parser_nested_cast_argument_function");
+      });
+
+  expectNoThrow(
       "parser_insert_select_with_target_columns",
       []() {
         const auto st = dataflow::sql::SqlParser::parse(
@@ -523,6 +548,23 @@ void runSemanticRegression() {
   expect(or_rows.rows.size() == 2, "planner_where_or_rows");
   expect(or_rows.rows[0][0].asInt64() == 1, "planner_where_or_first_user");
   expect(or_rows.rows[1][0].asInt64() == 2, "planner_where_or_second_user");
+
+  s.submit("CREATE TABLE t_prices_v1 (trade_date STRING, open DOUBLE, close DOUBLE, open_text STRING)");
+  s.submit("INSERT INTO t_prices_v1 VALUES "
+           "('2026-01-01', 10.25, 9.75, '10.25'), "
+           "('2026-01-02', 8.50, 8.75, '8.50'), "
+           "('2026-01-03', 7.10, 6.05, '7.10')");
+  Table down_days = s.submit(
+      "SELECT COUNT(*) AS down_days FROM t_prices_v1 WHERE open > close");
+  expect(down_days.rows.size() == 1, "planner_column_compare_count_rows");
+  expect(down_days.rows[0][0].asInt64() == 2, "planner_column_compare_count_value");
+  Table cast_substr = s.submit(
+      "SELECT trade_date, SUBSTR(CAST(open AS STRING), 1, 4) AS open_prefix, "
+      "CAST(open_text AS DOUBLE) AS open_number "
+      "FROM t_prices_v1 ORDER BY trade_date LIMIT 1");
+  expect(cast_substr.rows.size() == 1, "planner_cast_substr_rows");
+  expect(cast_substr.rows[0][1].toString() == "10.2", "planner_cast_substr_prefix");
+  expect(cast_substr.rows[0][2].asDouble() == 10.25, "planner_cast_string_to_double");
 
   s.submit("CREATE TABLE t_users_archive_v1 (user_id INT, region STRING, score INT)");
   s.submit("INSERT INTO t_users_archive_v1 VALUES (2, 'emea', 18), (4, 'latam', 21)");
@@ -821,13 +863,20 @@ void runSemanticRegression() {
   expect(substring_alias_string_function_batch.rows.size() == 1, "substring_alias_batch_rows");
   expect(substring_alias_string_function_batch.rows[0][0].toString() == "pa", "substring_alias_substr_ok");
 
-  expectThrowsType<dataflow::SQLUnsupportedError>(
-      "planner_string_function_unsupported_in_aggregate",
+  expectThrows(
+      "planner_string_function_group_expression_required",
       [&]() {
         s.submit("SELECT LOWER(region) AS region_lower, SUM(score) AS total_score FROM t_users_v1 "
                  "GROUP BY region");
       },
-      "not supported in SQL v1");
+      "non-aggregate expression must appear in GROUP BY");
+
+  Table lower_grouped_batch = s.submit(
+      "SELECT LOWER(region) AS region_lower, SUM(score) AS total_score FROM t_users_v1 "
+      "GROUP BY LOWER(region) ORDER BY region_lower");
+  expect(lower_grouped_batch.rows.size() == 3, "planner_string_function_grouped_rows");
+  expect(lower_grouped_batch.rows[0][0].toString() == "apac",
+         "planner_string_function_grouped_first_key");
 
   expectThrows(
       "planner_concat_arity_zero_rejected",

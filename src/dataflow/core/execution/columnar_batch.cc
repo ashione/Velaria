@@ -1236,6 +1236,34 @@ RowSelection vectorizedFilterSelection(const ValueColumnView& input, const Value
   return vectorizedFilterSelection(*input.buffer, rhs, op, max_selected);
 }
 
+RowSelection vectorizedColumnCompareSelection(const ValueColumnView& lhs,
+                                             const ValueColumnView& rhs,
+                                             const std::string& op) {
+  const auto parsed_op = parseCompareOp(op);
+  const auto row_count = valueColumnViewRowCount(lhs);
+  if (valueColumnViewRowCount(rhs) != row_count) {
+    throw std::runtime_error("column comparison row count mismatch");
+  }
+  RowSelection out;
+  out.input_row_count = row_count;
+  out.selected.assign(row_count, 0);
+  out.indices.reserve(row_count);
+  for (std::size_t i = 0; i < row_count; ++i) {
+    if (valueColumnIsNullAt(*lhs.buffer, i) || valueColumnIsNullAt(*rhs.buffer, i)) {
+      continue;
+    }
+    const auto left_value = valueColumnValueAt(*lhs.buffer, i);
+    const auto right_value = valueColumnValueAt(*rhs.buffer, i);
+    if (!matchesTypedValueCompare(left_value, right_value, parsed_op)) {
+      continue;
+    }
+    out.selected[i] = 1;
+    out.indices.push_back(i);
+    ++out.selected_count;
+  }
+  return out;
+}
+
 Table projectTable(const Table& table, const std::vector<std::size_t>& indices,
                    const std::vector<std::string>& aliases, bool materialize_rows) {
   Table out;
@@ -1999,13 +2027,17 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
   }
   struct BoundComputedArg {
     bool is_literal = false;
+    bool is_function = false;
     size_t source_column_index = 0;
     bool literal_is_null = false;
     bool literal_is_numeric = false;
     int64_t literal_int64 = 0;
     double literal_double = 0.0;
     std::string literal_string;
+    Value literal;
     std::string source_column_name;
+    ComputedColumnKind function = ComputedColumnKind::Copy;
+    std::vector<ComputedColumnArg> args;
   };
 
   std::vector<BoundComputedArg> bound;
@@ -2013,9 +2045,13 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
   for (const auto& arg : args) {
     BoundComputedArg item;
     item.is_literal = arg.is_literal;
+    item.is_function = arg.is_function;
     item.source_column_index = arg.source_column_index;
     item.source_column_name = arg.source_column_name;
+    item.function = arg.function;
+    item.args = arg.args;
     if (arg.is_literal) {
+      item.literal = arg.literal;
       item.literal_is_null = arg.literal.isNull();
       if (!item.literal_is_null) {
         item.literal_string = arg.literal.type() == DataType::String ? arg.literal.asString()
@@ -2042,10 +2078,73 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
     return table->schema.indexOf(arg.source_column_name);
   };
 
+  auto materialize_value_arg = [&](const BoundComputedArg& arg) -> std::vector<Value> {
+    if (arg.is_function) {
+      return computeComputedColumnValues(table, arg.function, arg.args);
+    }
+    if (arg.is_literal) {
+      return std::vector<Value>(row_count, arg.literal);
+    }
+    const auto input = viewValueColumn(*table, resolve_source_index(arg));
+    std::vector<Value> values(row_count);
+    for (std::size_t i = 0; i < row_count; ++i) {
+      values[i] = valueColumnValueAt(*input.buffer, i);
+    }
+    return values;
+  };
+
+  auto string_buffer_from_values = [&](const std::vector<Value>& values) {
+    StringColumnBuffer out;
+    out.values.resize(values.size());
+    out.is_null.assign(values.size(), 0);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+      if (values[i].isNull()) {
+        out.is_null[i] = 1;
+        continue;
+      }
+      out.values[i] = values[i].toString();
+    }
+    return out;
+  };
+
+  auto int64_buffer_from_values = [&](const std::vector<Value>& values) {
+    Int64ColumnBuffer out;
+    out.values.resize(values.size());
+    out.is_null.assign(values.size(), 0);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+      if (values[i].isNull()) {
+        out.is_null[i] = 1;
+        continue;
+      }
+      out.values[i] = values[i].isNumber() ? values[i].asInt64()
+                                           : static_cast<int64_t>(std::stoll(values[i].toString()));
+    }
+    return out;
+  };
+
+  auto double_buffer_from_values = [&](const std::vector<Value>& values) {
+    DoubleColumnBuffer out;
+    out.values.resize(values.size());
+    out.is_null.assign(values.size(), 0);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+      if (values[i].isNull()) {
+        out.is_null[i] = 1;
+        continue;
+      }
+      out.values[i] = values[i].isNumber() ? values[i].asDouble()
+                                           : std::stod(values[i].toString());
+    }
+    return out;
+  };
+
   auto materialize_string_args = [&]() {
     std::vector<StringColumnBuffer> columns;
     columns.reserve(bound.size());
     for (const auto& arg : bound) {
+      if (arg.is_function) {
+        columns.push_back(string_buffer_from_values(materialize_value_arg(arg)));
+        continue;
+      }
       if (arg.is_literal) {
         if (arg.literal_is_null) {
           columns.push_back(makeNullStringColumn(row_count));
@@ -2060,6 +2159,9 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
   };
 
   auto materialize_int64_arg = [&](const BoundComputedArg& arg) -> Int64ColumnBuffer {
+    if (arg.is_function) {
+      return int64_buffer_from_values(materialize_value_arg(arg));
+    }
     if (arg.is_literal) {
       if (arg.literal_is_null) {
         return makeNullInt64Column(row_count);
@@ -2073,6 +2175,9 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
   };
 
   auto materialize_double_arg = [&](const BoundComputedArg& arg) -> DoubleColumnBuffer {
+    if (arg.is_function) {
+      return double_buffer_from_values(materialize_value_arg(arg));
+    }
     if (arg.is_literal) {
       if (arg.literal_is_null) {
         return makeNullDoubleColumn(row_count);
@@ -2092,11 +2197,9 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
     std::vector<Value> output(row_count);
     for (std::size_t i = 0; i < row_count; ++i) {
       Value value;
-      if (arg.is_literal) {
-        if (arg.literal_is_null) {
-          continue;
-        }
-        value = arg.literal_is_numeric ? Value(arg.literal_double) : Value(arg.literal_string);
+      if (arg.is_literal || arg.is_function) {
+        auto values = materialize_value_arg(arg);
+        value = values[i];
       } else {
         const auto input = viewValueColumn(*table, resolve_source_index(arg));
         if (i >= valueColumnViewRowCount(input)) {
@@ -2126,6 +2229,44 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
   switch (function) {
     case ComputedColumnKind::Copy:
       throw std::runtime_error("computed function must not be COPY");
+    case ComputedColumnKind::Cast: {
+      if (bound.size() != 2 || !bound[1].is_literal || bound[1].literal_is_null) {
+        throw std::runtime_error("CAST expects value and target type");
+      }
+      const auto values = materialize_value_arg(bound[0]);
+      const auto& target = bound[1].literal_string;
+      std::vector<Value> out(values.size());
+      for (std::size_t i = 0; i < values.size(); ++i) {
+        const auto& value = values[i];
+        if (value.isNull()) {
+          continue;
+        }
+        if (target == "STRING" || target == "TEXT") {
+          out[i] = Value(value.toString());
+        } else if (target == "INT" || target == "INTEGER" || target == "INT64" ||
+                   target == "BIGINT") {
+          out[i] = Value(value.isNumber() ? value.asInt64()
+                                          : static_cast<int64_t>(std::stoll(value.toString())));
+        } else if (target == "DOUBLE" || target == "FLOAT" || target == "REAL") {
+          out[i] = Value(value.isNumber() ? value.asDouble() : std::stod(value.toString()));
+        } else if (target == "BOOL" || target == "BOOLEAN") {
+          if (value.isBool()) {
+            out[i] = Value(value.asBool());
+          } else if (value.isNumber()) {
+            out[i] = Value(value.asDouble() != 0.0);
+          } else {
+            auto text = value.toString();
+            std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+              return static_cast<char>(std::tolower(ch));
+            });
+            out[i] = Value(text == "true" || text == "1");
+          }
+        } else {
+          throw std::runtime_error("unsupported CAST target type: " + target);
+        }
+      }
+      return out;
+    }
     case ComputedColumnKind::StringLength:
       if (bound.size() != 1) throw std::runtime_error("LENGTH expects 1 argument");
       return vectorizedStringLength(materialize_string_args()[0]);

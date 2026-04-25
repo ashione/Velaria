@@ -466,16 +466,17 @@ Current SQL mapping carried by Python:
   - `CREATE TABLE`, `CREATE SOURCE TABLE`, `CREATE SINK TABLE`
   - `INSERT INTO ... VALUES`
   - `INSERT INTO ... SELECT`
-  - `SELECT` with projection/alias, `WHERE`, `GROUP BY`, `ORDER BY`, `LIMIT`, `UNION` / `UNION ALL`, and the current minimal `JOIN`
-  - batch `WHERE` supports single predicates plus `AND` / `OR` expressions
+  - `SELECT` with projection/alias, `WHERE`, `GROUP BY` columns/scalar expressions, `ORDER BY`, `LIMIT`, `UNION` / `UNION ALL`, and the current minimal `JOIN`
+  - batch `WHERE` supports single predicates, column-to-column predicates, plus `AND` / `OR` expressions
   - batch `KEYWORD SEARCH(title, body) QUERY '...' TOP_K ...` on single-table non-aggregate queries
   - batch `HYBRID SEARCH ... QUERY ...` on single-table non-aggregate queries
   - current Python service can combine reusable keyword-index recall with vector rerank by passing both `index_path` and `dataset_path` to `hybrid-search`
 - batch builtins currently exposed through the same core path:
   - `LOWER`, `UPPER`, `TRIM`, `LTRIM`, `RTRIM`
   - `LENGTH`, `LEN`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, `REVERSE`
-  - `CONCAT`, `CONCAT_WS`, `LEFT`, `RIGHT`, `SUBSTR` / `SUBSTRING`, `POSITION`, `REPLACE`
-  - `ABS`, `CEIL`, `FLOOR`, `ROUND`, `YEAR`, `MONTH`, `DAY`
+  - `CONCAT`, `CONCAT_WS`, `LEFT`, `RIGHT`, `SUBSTR` / `SUBSTRING`, `POSITION`, `REPLACE`, `CAST`
+  - `ABS`, `CEIL`, `FLOOR`, `ROUND`, `YEAR`, `MONTH`, `DAY`, `ISO_YEAR`, `ISO_WEEK`, `WEEK`, `YEARWEEK`
+  - supported scalar functions can be nested in projection expressions
 - `Session.stream_sql(...)`, `Session.explain_stream_sql(...)`, and `Session.start_stream_sql(...)` share the same stream SQL front-door checks:
   - source must be a source table / stream source
   - sink target must be a sink table

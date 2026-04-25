@@ -108,11 +108,11 @@ Available today:
   - `CREATE TABLE`, `CREATE SOURCE TABLE`, `CREATE SINK TABLE`
   - `INSERT INTO ... VALUES`
   - `INSERT INTO ... SELECT`
-  - `SELECT` with projection/alias, `WHERE` (including `AND` / `OR`), `GROUP BY`, `ORDER BY`, `LIMIT`, current minimal `JOIN`, `UNION` / `UNION ALL`
+  - `SELECT` with projection/alias, `WHERE` (including `AND` / `OR`), `GROUP BY` columns/scalar expressions, `ORDER BY`, `LIMIT`, current minimal `JOIN`, `UNION` / `UNION ALL`
   - batch `KEYWORD SEARCH(...) QUERY '...' TOP_K ...` and current keyword-assisted `HYBRID SEARCH ...`
 - current batch builtins:
   - string: `LOWER`, `UPPER`, `TRIM`, `LTRIM`, `RTRIM`, `LENGTH`, `LEN`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, `REVERSE`, `CONCAT`, `CONCAT_WS`, `LEFT`, `RIGHT`, `SUBSTR` / `SUBSTRING`, `POSITION`, `REPLACE`
-  - numeric/date: `ABS`, `CEIL`, `FLOOR`, `ROUND`, `YEAR`, `MONTH`, `DAY`
+  - numeric/date: `ABS`, `CEIL`, `FLOOR`, `ROUND`, `YEAR`, `MONTH`, `DAY`, `ISO_YEAR`, `ISO_WEEK`, `WEEK`, `YEARWEEK`
 - stream path:
   - `readStream(...)`, `readStreamCsvDir(...)`
   - `single-process` and `local-workers`

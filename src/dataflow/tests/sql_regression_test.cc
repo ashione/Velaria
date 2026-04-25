@@ -351,6 +351,19 @@ void runParserRegression() {
       });
 
   expectNoThrow(
+      "parser_group_by_scalar_expression",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT ISO_YEAR(ts) AS iso_year, WEEK(ts) AS iso_week, COUNT(*) AS n "
+            "FROM input_table GROUP BY ISO_YEAR(ts), WEEK(ts)");
+        expect(st.query.group_by.size() == 2, "parser_group_by_scalar_expression_size");
+        expect(st.query.group_by[0].is_string_function,
+               "parser_group_by_scalar_expression_first_function");
+        expect(st.query.group_by[1].is_string_function,
+               "parser_group_by_scalar_expression_second_function");
+      });
+
+  expectNoThrow(
       "parser_insert_select_with_target_columns",
       []() {
         const auto st = dataflow::sql::SqlParser::parse(
@@ -821,13 +834,20 @@ void runSemanticRegression() {
   expect(substring_alias_string_function_batch.rows.size() == 1, "substring_alias_batch_rows");
   expect(substring_alias_string_function_batch.rows[0][0].toString() == "pa", "substring_alias_substr_ok");
 
-  expectThrowsType<dataflow::SQLUnsupportedError>(
-      "planner_string_function_unsupported_in_aggregate",
+  expectThrows(
+      "planner_string_function_group_expression_required",
       [&]() {
         s.submit("SELECT LOWER(region) AS region_lower, SUM(score) AS total_score FROM t_users_v1 "
                  "GROUP BY region");
       },
-      "not supported in SQL v1");
+      "non-aggregate expression must appear in GROUP BY");
+
+  Table lower_grouped_batch = s.submit(
+      "SELECT LOWER(region) AS region_lower, SUM(score) AS total_score FROM t_users_v1 "
+      "GROUP BY LOWER(region) ORDER BY region_lower");
+  expect(lower_grouped_batch.rows.size() == 3, "planner_string_function_grouped_rows");
+  expect(lower_grouped_batch.rows[0][0].toString() == "apac",
+         "planner_string_function_grouped_first_key");
 
   expectThrows(
       "planner_concat_arity_zero_rejected",

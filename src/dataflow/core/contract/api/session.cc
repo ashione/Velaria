@@ -843,7 +843,10 @@ StreamingDataFrame buildAggregateStream(const StreamingDataFrame& seed, const sq
   std::vector<std::string> group_keys;
   group_keys.reserve(query.group_by.size());
   for (const auto& key : query.group_by) {
-    group_keys.push_back(resolveColumnName(key, from));
+    if (key.is_string_function) {
+      throwUnsupportedSqlV1("stream SQL aggregate expression grouping is only available through the planner path");
+    }
+    group_keys.push_back(resolveColumnName(key.column, from));
   }
 
   std::optional<sql::SelectItem> aggregate_item;
@@ -859,9 +862,13 @@ StreamingDataFrame buildAggregateStream(const StreamingDataFrame& seed, const sq
       aggregate_item = item;
       continue;
     }
-    const auto column = resolveColumnName(item.column, from);
-    if (std::find(group_keys.begin(), group_keys.end(), column) == group_keys.end()) {
-      throw SQLSemanticError("non-aggregate field must appear in GROUP BY: " + column);
+    if (item.is_string_function) {
+      throwUnsupportedSqlV1("stream SQL aggregate expression projection is only available through the planner path");
+    } else {
+      const auto column = resolveColumnName(item.column, from);
+      if (std::find(group_keys.begin(), group_keys.end(), column) == group_keys.end()) {
+        throw SQLSemanticError("non-aggregate field must appear in GROUP BY: " + column);
+      }
     }
   }
 
@@ -891,6 +898,8 @@ StreamingDataFrame buildAggregateStream(const StreamingDataFrame& seed, const sq
   for (const auto& item : query.select_items) {
     if (item.is_aggregate) {
       final_columns.push_back(output_name);
+    } else if (item.is_string_function) {
+      throwUnsupportedSqlV1("stream SQL aggregate expression projection is only available through the planner path");
     } else {
       final_columns.push_back(resolveColumnName(item.column, from));
     }

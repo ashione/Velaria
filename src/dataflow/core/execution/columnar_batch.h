@@ -155,6 +155,9 @@ std::vector<Value> vectorizedRound(const DoubleColumnBuffer& input);
 std::vector<Value> vectorizedDateYear(const ValueColumnView& input);
 std::vector<Value> vectorizedDateMonth(const ValueColumnView& input);
 std::vector<Value> vectorizedDateDay(const ValueColumnView& input);
+std::vector<Value> vectorizedDateIsoYear(const ValueColumnView& input);
+std::vector<Value> vectorizedDateIsoWeek(const ValueColumnView& input);
+std::vector<Value> vectorizedDateYearWeek(const ValueColumnView& input);
 
 std::vector<Value> computeComputedColumnValues(
     Table* table,

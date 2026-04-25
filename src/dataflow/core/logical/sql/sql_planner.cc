@@ -104,6 +104,14 @@ ComputedColumnKind toComputedFunctionKind(sql::StringFunctionKind function) {
       return ComputedColumnKind::DateMonth;
     case sql::StringFunctionKind::Day:
       return ComputedColumnKind::DateDay;
+    case sql::StringFunctionKind::IsoYear:
+      return ComputedColumnKind::DateIsoYear;
+    case sql::StringFunctionKind::IsoWeek:
+      return ComputedColumnKind::DateIsoWeek;
+    case sql::StringFunctionKind::Week:
+      return ComputedColumnKind::DateWeek;
+    case sql::StringFunctionKind::YearWeek:
+      return ComputedColumnKind::DateYearWeek;
   }
   return ComputedColumnKind::StringConcat;
 }
@@ -153,6 +161,14 @@ std::string defaultStringAlias(const sql::StringFunctionExpr& expr, std::size_t 
         return std::string("month");
       case sql::StringFunctionKind::Day:
         return std::string("day");
+      case sql::StringFunctionKind::IsoYear:
+        return std::string("iso_year");
+      case sql::StringFunctionKind::IsoWeek:
+        return std::string("iso_week");
+      case sql::StringFunctionKind::Week:
+        return std::string("week");
+      case sql::StringFunctionKind::YearWeek:
+        return std::string("yearweek");
     }
     return std::string("string_func");
   }(expr.function);
@@ -474,8 +490,12 @@ void ensureStringFunctionSupported(const StringFunctionExpr& function) {
     case StringFunctionKind::Year:
     case StringFunctionKind::Month:
     case StringFunctionKind::Day:
+    case StringFunctionKind::IsoYear:
+    case StringFunctionKind::IsoWeek:
+    case StringFunctionKind::Week:
+    case StringFunctionKind::YearWeek:
       if (function.args.size() != 1) {
-        throw SQLSemanticError("YEAR/MONTH/DAY expects 1 argument");
+        throw SQLSemanticError("date scalar function expects 1 argument");
       }
       break;
   }
@@ -657,6 +677,43 @@ std::vector<ComputedColumnArg> resolveStringFunctionArgs(const StringFunctionExp
   return args;
 }
 
+std::string stringFunctionKindKey(StringFunctionKind function) {
+  return std::to_string(static_cast<int>(function));
+}
+
+std::string columnRefKey(const ColumnRef& column) {
+  return column.qualifier + "." + column.name;
+}
+
+std::string functionArgKey(const StringFunctionArg& arg) {
+  if (arg.is_column) {
+    return "c:" + columnRefKey(arg.column);
+  }
+  return "l:" + arg.literal.toString();
+}
+
+std::string stringFunctionExprKey(const StringFunctionExpr& function) {
+  std::ostringstream out;
+  out << "fn:" << stringFunctionKindKey(function.function) << "(";
+  for (std::size_t i = 0; i < function.args.size(); ++i) {
+    if (i > 0) out << ",";
+    out << functionArgKey(function.args[i]);
+  }
+  out << ")";
+  return out.str();
+}
+
+std::string hiddenGroupExprColumn(std::size_t position) {
+  return "__group_expr_" + std::to_string(position);
+}
+
+std::string groupExprKey(const GroupByExpr& expr, const RelationContext& ctx) {
+  if (expr.is_string_function) {
+    return stringFunctionExprKey(expr.string_function);
+  }
+  return "col:" + std::to_string(ctx.resolveColumn(expr.column, nullptr));
+}
+
 std::vector<std::string> resolveKeywordColumns(const KeywordSearchSpec& keyword,
                                                RelationContext& ctx,
                                                const Schema& schema) {
@@ -823,6 +880,14 @@ std::string computedFunctionName(ComputedColumnKind function) {
       return "month";
     case ComputedColumnKind::DateDay:
       return "day";
+    case ComputedColumnKind::DateIsoYear:
+      return "iso_year";
+    case ComputedColumnKind::DateIsoWeek:
+      return "iso_week";
+    case ComputedColumnKind::DateWeek:
+      return "week";
+    case ComputedColumnKind::DateYearWeek:
+      return "yearweek";
   }
   return "copy";
 }
@@ -1057,7 +1122,6 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
     }
   }
 
-  const auto whereFilteredSchema = current.schema();
   const bool hasAggregateQuery =
       !query.group_by.empty() ||
       std::any_of(query.select_items.begin(), query.select_items.end(),
@@ -1073,12 +1137,6 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
                   [](const SelectItem& item) { return item.is_literal; })) {
     throwUnsupportedSqlV1("literal projection with FROM is not supported");
   }
-  if (std::any_of(query.select_items.begin(), query.select_items.end(),
-                  [](const SelectItem& item) { return item.is_string_function; }) &&
-      hasAggregateQuery) {
-    throwUnsupportedSqlV1("string functions are not supported in aggregate queries");
-  }
-
   if (query.keyword_search.has_value()) {
     const auto& keyword = *query.keyword_search;
     LogicalPlanStep keyword_step;
@@ -1119,21 +1177,52 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
 
     std::vector<std::size_t> groupKeys;
     std::unordered_set<std::string> groupKeySet;
-    for (const auto& key : query.group_by) {
-      auto idx = ctx.resolveColumn(key, nullptr);
+    std::unordered_map<std::string, std::string> groupOutputByExpr;
+    for (std::size_t group_index = 0; group_index < query.group_by.size(); ++group_index) {
+      const auto& key = query.group_by[group_index];
+      if (key.is_string_function) {
+        const auto expression_key = groupExprKey(key, ctx);
+        auto existing = groupOutputByExpr.find(expression_key);
+        if (existing != groupOutputByExpr.end()) {
+          groupKeys.push_back(current.schema().indexOf(existing->second));
+          groupKeySet.insert(expression_key);
+          continue;
+        }
+        const auto outName = hiddenGroupExprColumn(group_index);
+        LogicalPlanStep withColumnStep;
+        withColumnStep.kind = LogicalStepKind::WithColumn;
+        withColumnStep.with_column_name = outName;
+        withColumnStep.with_function = toComputedFunctionKind(key.string_function.function);
+        withColumnStep.with_args = resolveStringFunctionArgs(key.string_function, ctx);
+        logical.steps.push_back(withColumnStep);
+        current = current.withColumn(outName, withColumnStep.with_function, withColumnStep.with_args);
+        const auto idx = current.schema().indexOf(outName);
+        groupKeys.push_back(idx);
+        groupKeySet.insert(expression_key);
+        groupOutputByExpr[expression_key] = outName;
+        continue;
+      }
+      auto idx = ctx.resolveColumn(key.column, nullptr);
       groupKeys.push_back(idx);
-      auto name = whereFilteredSchema.fields[idx];
-      groupKeySet.insert(name);
+      auto name = current.schema().fields[idx];
+      groupKeySet.insert("col:" + std::to_string(idx));
+      groupOutputByExpr["col:" + std::to_string(idx)] = name;
     }
 
     std::vector<AggregateSpec> specs;
     std::vector<std::string> aggOutputs;
     for (const auto& item : query.select_items) {
       if (!item.is_aggregate) {
-        if (!item.column.name.empty()) {
-          const auto name = whereFilteredSchema.fields[ctx.resolveColumn(item.column, nullptr)];
-          if (groupKeySet.find(name) == groupKeySet.end()) {
-            throw SQLSemanticError("non-aggregate field must appear in GROUP BY: " + name);
+        if (item.is_string_function) {
+          const auto key = stringFunctionExprKey(item.string_function);
+          if (groupKeySet.find(key) == groupKeySet.end()) {
+            throw SQLSemanticError("non-aggregate expression must appear in GROUP BY");
+          }
+        } else if (!item.column.name.empty()) {
+          const auto idx = ctx.resolveColumn(item.column, nullptr);
+          if (groupKeySet.find("col:" + std::to_string(idx)) == groupKeySet.end()) {
+            throw SQLSemanticError("non-aggregate field must appear in GROUP BY: " +
+                                   current.schema().fields[idx]);
           }
         }
         continue;
@@ -1240,7 +1329,21 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
         finalIndices.push_back(aggSchema.indexOf(outName));
         finalAliases.push_back(item.alias.empty() ? outName : item.alias);
       } else {
-        const auto idx = aggSchema.indexOf(item.column.name);
+        std::size_t idx = 0;
+        if (item.is_string_function) {
+          const auto expr_key = stringFunctionExprKey(item.string_function);
+          const auto mapped = groupOutputByExpr.find(expr_key);
+          if (mapped == groupOutputByExpr.end()) {
+            throw SQLSemanticError("non-aggregate expression must appear in GROUP BY");
+          }
+          idx = aggSchema.indexOf(mapped->second);
+          finalIndices.push_back(idx);
+          finalAliases.push_back(item.alias.empty() ? defaultStringAlias(item.string_function,
+                                                                         finalAliases.size())
+                                                    : item.alias);
+          continue;
+        }
+        idx = aggSchema.indexOf(item.column.name);
         finalIndices.push_back(idx);
         finalAliases.push_back(item.alias.empty() ? aggSchema.fields[idx] : item.alias);
       }
@@ -1585,16 +1688,39 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query,
     }
 
     std::vector<std::string> group_keys;
+    std::unordered_set<std::string> group_key_set;
+    std::unordered_map<std::string, std::string> group_output_by_expr;
     group_keys.reserve(query.group_by.size());
-    for (const auto& key : query.group_by) {
-      group_keys.push_back(resolveStreamColumnName(key, query.from));
+    for (std::size_t group_index = 0; group_index < query.group_by.size(); ++group_index) {
+      const auto& key = query.group_by[group_index];
+      if (key.is_string_function) {
+        const auto expression_key = stringFunctionExprKey(key.string_function);
+        auto existing = group_output_by_expr.find(expression_key);
+        if (existing != group_output_by_expr.end()) {
+          group_keys.push_back(existing->second);
+          group_key_set.insert(expression_key);
+          continue;
+        }
+        const auto out_name = hiddenGroupExprColumn(group_index);
+        StreamPlanNode with_column;
+        with_column.kind = StreamPlanNodeKind::WithColumn;
+        with_column.output_column = out_name;
+        with_column.with_function = toComputedFunctionKind(key.string_function.function);
+        with_column.with_args = resolveStreamStringFunctionArgs(key.string_function, query.from);
+        logical.nodes.push_back(with_column);
+        group_keys.push_back(out_name);
+        group_key_set.insert(expression_key);
+        group_output_by_expr[expression_key] = out_name;
+        continue;
+      }
+      const auto column = resolveStreamColumnName(key.column, query.from);
+      group_keys.push_back(column);
+      group_key_set.insert("col:" + column);
+      group_output_by_expr["col:" + column] = column;
     }
 
     std::vector<StreamAggregateSpec> aggregates;
     for (const auto& item : query.select_items) {
-      if (item.is_string_function) {
-        throwUnsupportedSqlV1("stream SQL does not support string functions in aggregate query");
-      }
       if (item.is_all || item.is_table_all) {
         throwUnsupportedSqlV1("stream SQL aggregate query does not support star projection");
       }
@@ -1609,9 +1735,16 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query,
         aggregates.push_back(aggregate);
         continue;
       }
-      const auto column = resolveStreamColumnName(item.column, query.from);
-      if (std::find(group_keys.begin(), group_keys.end(), column) == group_keys.end()) {
-        throw SQLSemanticError("non-aggregate field must appear in GROUP BY: " + column);
+      if (item.is_string_function) {
+        const auto key = stringFunctionExprKey(item.string_function);
+        if (group_key_set.find(key) == group_key_set.end()) {
+          throw SQLSemanticError("non-aggregate expression must appear in GROUP BY");
+        }
+      } else {
+        const auto column = resolveStreamColumnName(item.column, query.from);
+        if (group_key_set.find("col:" + column) == group_key_set.end()) {
+          throw SQLSemanticError("non-aggregate field must appear in GROUP BY: " + column);
+        }
       }
     }
     if (aggregates.empty()) {
@@ -1683,6 +1816,19 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query,
     for (const auto& item : query.select_items) {
       if (item.is_aggregate) {
         project.columns.push_back(aggregateOutputName(item));
+      } else if (item.is_string_function) {
+        const auto expr_key = stringFunctionExprKey(item.string_function);
+        const auto mapped = group_output_by_expr.find(expr_key);
+        if (mapped == group_output_by_expr.end()) {
+          throw SQLSemanticError("non-aggregate expression must appear in GROUP BY");
+        }
+        const auto output = item.alias.empty() ? defaultStringAlias(item.string_function,
+                                                                   project.columns.size())
+                                               : item.alias;
+        if (output != mapped->second) {
+          aliases.push_back({output, mapped->second});
+        }
+        project.columns.push_back(output);
       } else {
         const auto column = resolveStreamColumnName(item.column, query.from);
         if (!item.alias.empty() && item.alias != column) {

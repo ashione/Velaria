@@ -333,6 +333,10 @@ std::optional<StringFunctionKind> tryParseStringFunction(const std::string& valu
   if (u == "YEAR") return StringFunctionKind::Year;
   if (u == "MONTH") return StringFunctionKind::Month;
   if (u == "DAY") return StringFunctionKind::Day;
+  if (u == "ISO_YEAR") return StringFunctionKind::IsoYear;
+  if (u == "ISO_WEEK") return StringFunctionKind::IsoWeek;
+  if (u == "WEEK") return StringFunctionKind::Week;
+  if (u == "YEARWEEK") return StringFunctionKind::YearWeek;
   return std::nullopt;
 }
 
@@ -574,6 +578,26 @@ SelectItem parseSelectItem(ParseState& state) {
   return item;
 }
 
+GroupByExpr parseGroupByExpr(ParseState& state) {
+  Token first = state.expectToken();
+  if (first.is_number || first.is_string || first.text == "*") {
+    throw SQLSyntaxError("GROUP BY expects a column or scalar function");
+  }
+  if (state.consumeSymbol("(")) {
+    auto function = tryParseStringFunction(first.text);
+    if (!function.has_value()) {
+      throw SQLUnsupportedError("not supported in SQL v1: scalar function " + first.text);
+    }
+    GroupByExpr expr;
+    expr.is_string_function = true;
+    expr.string_function = parseStringFunctionExpr(state, *function);
+    return expr;
+  }
+  GroupByExpr expr;
+  expr.column = parseColumnWithFirst(state, first);
+  return expr;
+}
+
 JoinItem parseJoin(ParseState& state) {
   JoinItem out;
   if (state.consumeWord("LEFT")) {
@@ -761,9 +785,9 @@ SqlQuery parseSelectQueryBody(ParseState& state, bool alreadyConsumedSelect) {
 
   if (state.consumeWord("GROUP")) {
     state.expectWord("BY");
-    out.group_by.push_back(parseColumn(state));
+    out.group_by.push_back(parseGroupByExpr(state));
     while (state.consumeSymbol(",")) {
-      out.group_by.push_back(parseColumn(state));
+      out.group_by.push_back(parseGroupByExpr(state));
     }
   }
 

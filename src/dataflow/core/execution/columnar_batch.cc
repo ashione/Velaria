@@ -25,6 +25,44 @@ enum class CompareOp { Eq, Ne, Lt, Gt, Le, Ge };
 int64_t parseEpochMillis(const std::string& raw);
 std::tm toUtcTm(std::time_t seconds);
 
+struct IsoWeekFields {
+  int year = 1970;
+  int week = 1;
+};
+
+bool isLeapYear(int year) {
+  return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+}
+
+int dayOfWeek(int year, int month, int day) {
+  static constexpr int offsets[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+  if (month < 3) {
+    --year;
+  }
+  return (year + year / 4 - year / 100 + year / 400 + offsets[month - 1] + day) % 7;
+}
+
+int isoWeeksInYear(int year) {
+  const int jan1 = dayOfWeek(year, 1, 1);
+  return jan1 == 4 || (jan1 == 3 && isLeapYear(year)) ? 53 : 52;
+}
+
+IsoWeekFields isoWeekFields(const std::tm& tm_utc) {
+  const int year = tm_utc.tm_year + 1900;
+  const int ordinal_day = tm_utc.tm_yday + 1;
+  const int iso_weekday = tm_utc.tm_wday == 0 ? 7 : tm_utc.tm_wday;
+  int week = (ordinal_day - iso_weekday + 10) / 7;
+  if (week < 1) {
+    const int previous_year = year - 1;
+    return IsoWeekFields{previous_year, isoWeeksInYear(previous_year)};
+  }
+  const int weeks_this_year = isoWeeksInYear(year);
+  if (week > weeks_this_year) {
+    return IsoWeekFields{year + 1, 1};
+  }
+  return IsoWeekFields{year, week};
+}
+
 std::string formatTimestampMillis(int64_t millis) {
   const auto seconds = static_cast<std::time_t>(millis / 1000);
   const int64_t remainder = millis % 1000;
@@ -1992,6 +2030,52 @@ std::vector<Value> vectorizedDateDay(const ValueColumnView& input) {
   return out;
 }
 
+std::vector<Value> vectorizedDateIsoYear(const ValueColumnView& input) {
+  const auto row_count = valueColumnViewRowCount(input);
+  std::vector<Value> out(row_count);
+  for (std::size_t i = 0; i < row_count; ++i) {
+    if (valueColumnIsNullAt(*input.buffer, i)) {
+      continue;
+    }
+    const int64_t millis = valueColumnEpochMillisAt(*input.buffer, i);
+    std::time_t sec = static_cast<std::time_t>(millis / 1000);
+    const auto tm_utc = toUtcTm(sec);
+    out[i] = Value(static_cast<int64_t>(isoWeekFields(tm_utc).year));
+  }
+  return out;
+}
+
+std::vector<Value> vectorizedDateIsoWeek(const ValueColumnView& input) {
+  const auto row_count = valueColumnViewRowCount(input);
+  std::vector<Value> out(row_count);
+  for (std::size_t i = 0; i < row_count; ++i) {
+    if (valueColumnIsNullAt(*input.buffer, i)) {
+      continue;
+    }
+    const int64_t millis = valueColumnEpochMillisAt(*input.buffer, i);
+    std::time_t sec = static_cast<std::time_t>(millis / 1000);
+    const auto tm_utc = toUtcTm(sec);
+    out[i] = Value(static_cast<int64_t>(isoWeekFields(tm_utc).week));
+  }
+  return out;
+}
+
+std::vector<Value> vectorizedDateYearWeek(const ValueColumnView& input) {
+  const auto row_count = valueColumnViewRowCount(input);
+  std::vector<Value> out(row_count);
+  for (std::size_t i = 0; i < row_count; ++i) {
+    if (valueColumnIsNullAt(*input.buffer, i)) {
+      continue;
+    }
+    const int64_t millis = valueColumnEpochMillisAt(*input.buffer, i);
+    std::time_t sec = static_cast<std::time_t>(millis / 1000);
+    const auto tm_utc = toUtcTm(sec);
+    const auto iso = isoWeekFields(tm_utc);
+    out[i] = Value(static_cast<int64_t>(iso.year * 100 + iso.week));
+  }
+  return out;
+}
+
 std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind function,
                                               const std::vector<ComputedColumnArg>& args) {
   if (table == nullptr) {
@@ -2088,7 +2172,7 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
     return materializeDoubleColumn(*table, resolve_source_index(arg));
   };
 
-  auto materialize_date_field = [&](const BoundComputedArg& arg, int which) {
+  auto materialize_date_field = [&](const BoundComputedArg& arg, ComputedColumnKind date_function) {
     std::vector<Value> output(row_count);
     for (std::size_t i = 0; i < row_count; ++i) {
       Value value;
@@ -2111,12 +2195,22 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
       std::time_t sec = static_cast<std::time_t>(millis / 1000);
       const auto tm_utc = toUtcTm(sec);
       int64_t field = 0;
-      if (which == 0) {
+      if (date_function == ComputedColumnKind::DateYear) {
         field = static_cast<int64_t>(tm_utc.tm_year + 1900);
-      } else if (which == 1) {
+      } else if (date_function == ComputedColumnKind::DateMonth) {
         field = static_cast<int64_t>(tm_utc.tm_mon + 1);
-      } else {
+      } else if (date_function == ComputedColumnKind::DateDay) {
         field = static_cast<int64_t>(tm_utc.tm_mday);
+      } else {
+        const auto iso = isoWeekFields(tm_utc);
+        if (date_function == ComputedColumnKind::DateIsoYear) {
+          field = static_cast<int64_t>(iso.year);
+        } else if (date_function == ComputedColumnKind::DateIsoWeek ||
+                   date_function == ComputedColumnKind::DateWeek) {
+          field = static_cast<int64_t>(iso.week);
+        } else {
+          field = static_cast<int64_t>(iso.year * 100 + iso.week);
+        }
       }
       output[i] = Value(field);
     }
@@ -2197,19 +2291,38 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
       if (!bound[0].is_literal) {
         return vectorizedDateYear(viewValueColumn(*table, resolve_source_index(bound[0])));
       }
-      return materialize_date_field(bound[0], 0);
+      return materialize_date_field(bound[0], ComputedColumnKind::DateYear);
     case ComputedColumnKind::DateMonth:
       if (bound.size() != 1) throw std::runtime_error("MONTH expects 1 argument");
       if (!bound[0].is_literal) {
         return vectorizedDateMonth(viewValueColumn(*table, resolve_source_index(bound[0])));
       }
-      return materialize_date_field(bound[0], 1);
+      return materialize_date_field(bound[0], ComputedColumnKind::DateMonth);
     case ComputedColumnKind::DateDay:
       if (bound.size() != 1) throw std::runtime_error("DAY expects 1 argument");
       if (!bound[0].is_literal) {
         return vectorizedDateDay(viewValueColumn(*table, resolve_source_index(bound[0])));
       }
-      return materialize_date_field(bound[0], 2);
+      return materialize_date_field(bound[0], ComputedColumnKind::DateDay);
+    case ComputedColumnKind::DateIsoYear:
+      if (bound.size() != 1) throw std::runtime_error("ISO_YEAR expects 1 argument");
+      if (!bound[0].is_literal) {
+        return vectorizedDateIsoYear(viewValueColumn(*table, resolve_source_index(bound[0])));
+      }
+      return materialize_date_field(bound[0], ComputedColumnKind::DateIsoYear);
+    case ComputedColumnKind::DateIsoWeek:
+    case ComputedColumnKind::DateWeek:
+      if (bound.size() != 1) throw std::runtime_error("ISO_WEEK/WEEK expects 1 argument");
+      if (!bound[0].is_literal) {
+        return vectorizedDateIsoWeek(viewValueColumn(*table, resolve_source_index(bound[0])));
+      }
+      return materialize_date_field(bound[0], function);
+    case ComputedColumnKind::DateYearWeek:
+      if (bound.size() != 1) throw std::runtime_error("YEARWEEK expects 1 argument");
+      if (!bound[0].is_literal) {
+        return vectorizedDateYearWeek(viewValueColumn(*table, resolve_source_index(bound[0])));
+      }
+      return materialize_date_field(bound[0], ComputedColumnKind::DateYearWeek);
   }
   throw std::runtime_error("unsupported computed function");
 }

@@ -53,7 +53,11 @@ enum class ComputedColumnKind {
   NumericRound,
   DateYear,
   DateMonth,
-  DateDay
+  DateDay,
+  DateIsoYear,
+  DateIsoWeek,
+  DateWeek,
+  DateYearWeek
 };
 
 enum class AggImplKind {

@@ -35,7 +35,11 @@ enum class StringFunctionKind {
   Round,
   Year,
   Month,
-  Day
+  Day,
+  IsoYear,
+  IsoWeek,
+  Week,
+  YearWeek
 };
 
 struct ColumnRef {
@@ -73,6 +77,12 @@ struct SelectItem {
   bool is_string_function = false;
   StringFunctionExpr string_function;
   std::string alias;
+};
+
+struct GroupByExpr {
+  bool is_string_function = false;
+  ColumnRef column;
+  StringFunctionExpr string_function;
 };
 
 struct OrderByItem {
@@ -151,7 +161,7 @@ struct SqlQuery {
   std::optional<KeywordSearchSpec> keyword_search;
   std::optional<HybridSearchSpec> hybrid_search;
   std::optional<WindowSpec> window;
-  std::vector<ColumnRef> group_by;
+  std::vector<GroupByExpr> group_by;
   std::shared_ptr<PredicateExpr> having;
   std::vector<OrderByItem> order_by;
   std::optional<std::size_t> limit;

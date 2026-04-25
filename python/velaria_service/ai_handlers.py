@@ -1,0 +1,139 @@
+"""AI runtime HTTP handlers for Velaria service."""
+from __future__ import annotations
+
+import asyncio
+import json
+import threading
+from typing import Any
+
+from ._helpers import get_ai_config
+
+
+_runtime_instance = None
+_runtime_config_key = ""
+_runtime_lock = threading.Lock()
+
+
+def _get_runtime():
+    global _runtime_instance, _runtime_config_key
+    with _runtime_lock:
+        config = get_ai_config()
+        config_key = json.dumps(config, sort_keys=True, default=str)
+        if _runtime_instance is None or _runtime_config_key != config_key:
+            if _runtime_instance is not None and hasattr(_runtime_instance, "shutdown"):
+                _runtime_instance.shutdown()
+            from velaria.ai_runtime import create_runtime
+            _runtime_instance = create_runtime(config)
+            _runtime_config_key = config_key
+        return _runtime_instance
+
+
+def _safe_get_runtime() -> tuple[Any | None, dict[str, Any] | None]:
+    """Get runtime, returning (runtime, None) on success or (None, error_dict) on failure."""
+    try:
+        return _get_runtime(), None
+    except (RuntimeError, ImportError) as exc:
+        return None, {"ok": False, "error": str(exc), "error_type": "runtime_unavailable"}
+
+
+def handle_create_session(payload: dict[str, Any]) -> dict[str, Any]:
+    runtime, err = _safe_get_runtime()
+    if err:
+        return err
+    dataset_context = payload.get("dataset_context", {})
+    session_id = asyncio.run(runtime.create_session(dataset_context))
+    return {"ok": True, "session_id": session_id}
+
+
+def handle_resume_session(session_id: str) -> dict[str, Any]:
+    runtime, err = _safe_get_runtime()
+    if err:
+        return err
+    ok = asyncio.run(runtime.resume_session(session_id))
+    if not ok:
+        return {"ok": False, "error": f"session not found or closed: {session_id}"}
+    return {"ok": True, "session_id": session_id}
+
+
+def handle_generate_sql(payload: dict[str, Any], session_id: str | None = None) -> dict[str, Any]:
+    prompt = payload.get("prompt")
+    if not prompt:
+        return {"ok": False, "error": "prompt is required", "error_type": "validation_error"}
+    schema = payload.get("schema")
+    if not schema or not isinstance(schema, list):
+        return {"ok": False, "error": "schema (list of column names) is required", "error_type": "validation_error"}
+
+    runtime, err = _safe_get_runtime()
+    if err:
+        return err
+    table_name = str(payload.get("table_name") or "input_table")
+    sample_rows = payload.get("sample_rows")
+
+    # If no session_id, create a temporary one
+    if not session_id:
+        session_id = asyncio.run(
+            runtime.create_session(
+                {
+                    "schema": schema,
+                    "table_name": table_name,
+                }
+            )
+        )
+
+    result = asyncio.run(
+        runtime.generate_sql(
+            session_id,
+            str(prompt),
+            list(schema),
+            table_name,
+            sample_rows,
+        )
+    )
+    if result.get("error"):
+        return {"ok": False, **result}
+    return {"ok": True, "session_id": session_id, **result}
+
+
+def handle_analyze(payload: dict[str, Any], session_id: str) -> dict[str, Any]:
+    prompt = payload.get("prompt")
+    if not prompt:
+        return {"ok": False, "error": "prompt is required"}
+
+    runtime, err = _safe_get_runtime()
+    if err:
+        return err
+    results: list[dict[str, Any]] = []
+
+    async def _collect():
+        async for msg in runtime.analyze(session_id, str(prompt)):
+            results.append(msg)
+
+    asyncio.run(_collect())
+    return {"ok": True, "session_id": session_id, "messages": results}
+
+
+def handle_list_sessions() -> dict[str, Any]:
+    runtime, err = _safe_get_runtime()
+    if err:
+        return err
+    sessions = asyncio.run(runtime.list_sessions())
+    return {"ok": True, "sessions": sessions}
+
+
+def handle_get_session(session_id: str) -> dict[str, Any]:
+    runtime, err = _safe_get_runtime()
+    if err:
+        return err
+    sessions = asyncio.run(runtime.list_sessions())
+    for s in sessions:
+        if s["session_id"] == session_id:
+            return {"ok": True, "session": s}
+    return {"ok": False, "error": f"session not found: {session_id}"}
+
+
+def handle_close_session(session_id: str) -> dict[str, Any]:
+    runtime, err = _safe_get_runtime()
+    if err:
+        return err
+    asyncio.run(runtime.close_session(session_id))
+    return {"ok": True, "session_id": session_id, "closed": True}

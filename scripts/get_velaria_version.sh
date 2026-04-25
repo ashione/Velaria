@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION_FILE="${ROOT_DIR}/python_api/velaria/_version.py"
+VERSION_FILE="${ROOT_DIR}/python/velaria/_version.py"
 
 if [[ ! -f "${VERSION_FILE}" ]]; then
   echo "version file not found: ${VERSION_FILE}" >&2

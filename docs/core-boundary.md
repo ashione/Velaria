@@ -58,9 +58,9 @@ Python is a supported ecosystem layer, not a convenience sidecar.
 
 Python ecosystem owns:
 
-- native binding surface in `python_api`
-- supported library modules in `python_api/velaria`
-- supported CLI tooling in `python_api/velaria_cli.py`
+- native binding surface in `python`
+- supported library modules in `python/velaria`
+- supported CLI tooling in `python/velaria_cli.py`
 - Python projections of `Session.probe(...)`, `Session.read(...)`, and explicit file readers
 - Arrow ingestion/output
 - `uv`-based development and test workflow
@@ -69,8 +69,8 @@ Python ecosystem owns:
 - custom source / custom sink adapters
 - realtime queue-backed stream source / sink projections for local agentic service use
 - local agentic service APIs for external event ingest, monitor lifecycle, search/grounding, and focus-event consumption
-- Python-facing demos in `python_api/examples`
-- Python-facing benchmarks in `python_api/benchmarks`
+- Python-facing demos in `python/examples`
+- Python-facing benchmarks in `python/benchmarks`
 
 Python ecosystem must not:
 
@@ -85,13 +85,13 @@ Repository view:
 - Bazel source group:
   - `//:velaria_python_ecosystem_sources`
 - Python-layer source groups:
-  - `//python_api:velaria_python_supported_sources`
-  - `//python_api:velaria_python_example_sources`
-  - `//python_api:velaria_python_experimental_sources`
+  - `//python:velaria_python_supported_sources`
+  - `//python:velaria_python_example_sources`
+  - `//python:velaria_python_experimental_sources`
 - regression entrypoint:
   - `//:python_ecosystem_regression`
 - Python-layer regression entrypoint:
-  - `//python_api:velaria_python_supported_regression`
+  - `//python:velaria_python_supported_regression`
 - shell entrypoint:
   - `./scripts/run_python_ecosystem_regression.sh`
 - local service/API reference:

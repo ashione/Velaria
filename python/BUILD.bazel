@@ -3,7 +3,7 @@ load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
 load("@rules_python//python:py_test.bzl", "py_test")
 load("@pypi//:requirements.bzl", "requirement")
-load("//python_api:version.bzl", "VELARIA_PY_VERSION")
+load("//python:version.bzl", "VELARIA_PY_VERSION")
 
 py_binary(
     name = "sync_native_extension",
@@ -25,7 +25,16 @@ py_library(
     name = "velaria_py_pkg",
     srcs = [
         "velaria/__init__.py",
-        "velaria/cli.py",
+        "velaria/cli/__init__.py",
+        "velaria/cli/_common.py",
+        "velaria/cli/agentic.py",
+        "velaria/cli/ai_cmd.py",
+        "velaria/cli/artifacts.py",
+        "velaria/cli/embedding.py",
+        "velaria/cli/file_sql.py",
+        "velaria/cli/interactive.py",
+        "velaria/cli/run_cmd.py",
+        "velaria/cli/vector_search.py",
         "velaria/_version.py",
         "velaria/excel.py",
         "velaria/custom_stream.py",
@@ -37,6 +46,14 @@ py_library(
         "velaria/agentic_runtime.py",
         "velaria/embedding.py",
         "velaria/keyword_index.py",
+        "velaria/ai_runtime/__init__.py",
+        "velaria/ai_runtime/_tools.py",
+        "velaria/ai_runtime/agent.py",
+        "velaria/ai_runtime/claude_runtime.py",
+        "velaria/ai_runtime/codex_runtime.py",
+        "velaria/ai_runtime/functions.py",
+        "velaria/ai_runtime/mcp_server.py",
+        "velaria/ai_runtime/session_registry.py",
         "velaria/workspace/__init__.py",
         "velaria/workspace/artifact_index.py",
         "velaria/workspace/paths.py",
@@ -47,9 +64,14 @@ py_library(
     imports = ["."],
     deps = [
         requirement("jieba"),
+        requirement("codex_app_server_sdk"),
+        requirement("mcp"),
         requirement("openpyxl"),
         requirement("pandas"),
+        requirement("prompt_toolkit"),
         requirement("pyarrow"),
+        requirement("rich"),
+        requirement("xlrd"),
     ],
     visibility = ["//visibility:public"],
 )
@@ -199,6 +221,11 @@ py_wheel(
         "pyarrow",
         "pandas",
         "openpyxl",
+        "mcp",
+        "codex-app-server-sdk",
+        "prompt-toolkit",
+        "rich",
+        "xlrd",
     ],
 )
 
@@ -233,6 +260,7 @@ py_test(
     imports = ["."],
     deps = [
         ":velaria_py_pkg",
+        requirement("mcp"),
         requirement("pyarrow"),
     ],
 )
@@ -344,6 +372,17 @@ py_test(
 )
 
 py_test(
+    name = "ai_runtime_agent_test",
+    srcs = ["tests/test_ai_runtime_agent.py"],
+    main = "tests/test_ai_runtime_agent.py",
+    imports = ["."],
+    deps = [
+        ":velaria_py_pkg",
+        requirement("pyarrow"),
+    ],
+)
+
+py_test(
     name = "workspace_runs_test",
     srcs = ["tests/test_workspace_runs.py"],
     main = "tests/test_workspace_runs.py",
@@ -370,6 +409,7 @@ test_suite(
     tests = [
         ":arrow_stream_ingestion_test",
         ":artifact_index_test",
+        ":ai_runtime_agent_test",
         ":bitable_group_by_owner_integration_test",
         ":bitable_stream_source_test",
         ":custom_stream_source_test",

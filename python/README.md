@@ -31,6 +31,8 @@ The supported Python ecosystem includes:
 - vector search and vector explain APIs
 - offline embedding pipeline helpers for versioned vector assets
 - offline keyword-index build helpers and reusable BM25 keyword-search assets
+- agent runtime wrapper for Claude Code / Claude Agent SDK and Codex App Server integration
+- interactive agent CLI via `velaria_cli.py -i`
 
 ### Examples
 
@@ -274,7 +276,7 @@ result = run_mixed_text_hybrid_search(
 For a local semantic baseline with `all-MiniLM-L6-v2`, install the optional provider dependency first:
 
 ```bash
-uv sync --project python_api --extra embedding
+uv sync --project python --extra embedding
 ```
 
 Then swap the provider:
@@ -288,7 +290,7 @@ provider = SentenceTransformerEmbeddingProvider(
 If you want to avoid remote Hub resolution on every machine, put the model files in a local directory and point the provider at that directory. Supported lookup order for the default MiniLM model is:
 
 1. `VELARIA_EMBEDDING_MODEL_DIR`
-2. `python_api/models/all-MiniLM-L6-v2`
+2. `python/models/all-MiniLM-L6-v2`
 3. fallback to the Hugging Face model id
 
 Example:
@@ -326,17 +328,17 @@ Recommended startup flow:
 CLI examples:
 
 ```bash
-uv run --project python_api python python_api/velaria_cli.py file-sql \
+uv run --project python python python/velaria_cli.py file-sql \
   --csv /tmp/input.csv \
   --input-type csv \
   --query "SELECT * FROM input_table LIMIT 5"
 
-uv run --project python_api python python_api/velaria_cli.py file-sql \
+uv run --project python python python/velaria_cli.py file-sql \
   --input-path /tmp/input.jsonl \
   --input-type auto \
   --query "SELECT * FROM input_table LIMIT 5"
 
-uv run --project python_api python python_api/velaria_cli.py file-sql \
+uv run --project python python python/velaria_cli.py file-sql \
   --input-path /tmp/events.log \
   --input-type line \
   --line-mode regex \
@@ -348,14 +350,14 @@ uv run --project python_api python python_api/velaria_cli.py file-sql \
 Mixed-text embedding pipeline through the CLI:
 
 ```bash
-uv run --project python_api python python_api/velaria_cli.py embedding-build \
+uv run --project python python python/velaria_cli.py embedding-build \
   --input-path /tmp/docs.csv \
   --input-type csv \
   --text-columns title,summary,tags \
   --provider minilm \
   --output-path /tmp/docs_embeddings.parquet
 
-uv run --project python_api python python_api/velaria_cli.py embedding-query \
+uv run --project python python python/velaria_cli.py embedding-query \
   --dataset-path /tmp/docs_embeddings.parquet \
   --provider minilm \
   --query-text "payment page hangs during checkout" \
@@ -363,7 +365,7 @@ uv run --project python_api python python_api/velaria_cli.py embedding-query \
   --top-k 5
 
 # direct query from the raw file without a prebuilt embedding dataset
-uv run --project python_api python python_api/velaria_cli.py embedding-query \
+uv run --project python python python/velaria_cli.py embedding-query \
   --input-path /tmp/docs.csv \
   --input-type csv \
   --text-columns title,summary,tags \
@@ -393,6 +395,69 @@ curl -sS http://127.0.0.1:37491/api/v1/runs/keyword-search \
     "where_sql": "bucket = 1",
     "top_k": 10
   }'
+```
+
+### Agent Runtime (Optional)
+
+Codex runtime dependencies are installed with the default Python package. Install
+Claude runtime support only when using Claude Code:
+
+```bash
+uv sync --project python --extra ai-claude    # Claude Agent SDK
+```
+
+The agent runtime provides:
+
+- Codex/Claude-backed interactive agent runtime via `velaria_cli.py -i`
+- Thread persistence under `agentRuntimeWorkspace`
+- Automatic injection of `skills/velaria_python_local/SKILL.md`
+- Velaria local functions exposed through the runtime bridge / MCP server:
+  `velaria_read`, `velaria_schema`, `velaria_sql`, `velaria_explain`,
+  `velaria_dataset_download`, `velaria_dataset_import`,
+  `velaria_dataset_normalize`, `velaria_dataset_process`,
+  `velaria_cli_run`, `velaria_artifact_preview`
+- Natural language to SQL generation via `velaria_cli.py ai generate-sql`
+- Session-based compatibility commands via `velaria_cli.py ai session` and
+  `velaria_cli.py ai analyze`
+
+Minimal Codex runtime config:
+
+```json
+{
+  "agentRuntime": "codex",
+  "agentAuthMode": "oauth",
+  "agentProvider": "openai",
+  "agentModel": "gpt-5.4-mini",
+  "agentRuntimeWorkspace": "~/.velaria/ai-runtime",
+  "agentCodexNetworkAccess": true
+}
+```
+
+Codex uses the local `codex app-server` command and defaults to `gpt-5.4-mini`
+when `agentModel` is omitted. `agentRuntimeWorkspace` is the runtime working directory
+used to save and resume agent threads. If omitted, Velaria creates a
+project-scoped directory under `~/.velaria/ai-runtime/`. `agentAuthMode: "oauth"`
+reuses the local Codex or Claude login. Use `agentAuthMode: "api_key"` together
+with `agentApiKey` and `agentBaseUrl` when the provider should be driven by
+explicit API credentials. Use `agentRuntimePath` / `agentCodexRuntimePath` only
+when overriding the local Codex executable. Use `agentClaudeRuntimePath` for
+Claude Code runtime. Codex workspace-write network access is enabled by default;
+set `agentCodexNetworkAccess` to `false` only for offline runtime sessions.
+The runtime inherits standard proxy environment variables such as `http_proxy`,
+`https_proxy`, and `all_proxy`.
+
+AI CLI examples:
+
+```bash
+uv run --project python python python/velaria_cli.py -i
+
+# Inside interactive mode, plain text goes to the active agent thread.
+velaria> 读取 data/sales.csv，按 region 汇总 amount，并保存 run
+velaria> /status
+velaria> :run list --limit 5
+
+uv run --project python python python/velaria_cli.py ai generate-sql \
+  --prompt "top 5 by score" --schema "name,score,region"
 ```
 
 Current SQL mapping carried by Python:
@@ -433,17 +498,17 @@ Desktop / service import behavior:
 Stable Python layout in this repo:
 
 - supported library:
-  - `python_api/velaria/`
+  - `python/velaria/`
 - supported CLI tool:
-  - `python_api/velaria_cli.py`
+  - `python/velaria_cli.py`
 - examples:
-  - `python_api/examples/`
+  - `python/examples/`
 - benchmarks:
-  - `python_api/benchmarks/`
+  - `python/benchmarks/`
 - reserved experimental area:
-  - `python_api/experimental/`
+  - `python/experimental/`
 - regression tests:
-  - `python_api/tests/`
+  - `python/tests/`
 
 ## Toolchain and Environment
 
@@ -469,24 +534,24 @@ Bootstrap:
 
 ```bash
 bazel build //:velaria_pyext
-bazel run //python_api:sync_native_extension
-uv sync --project python_api --python python3.13
+bazel run //python:sync_native_extension
+uv sync --project python --python python3.13
 ```
 
-If you run `python_api/velaria_cli.py` or other source-checkout Python entrypoints directly,
-keep `python_api/velaria/_velaria.so` in sync with:
+If you run `python/velaria_cli.py` or other source-checkout Python entrypoints directly,
+keep `python/velaria/_velaria.so` in sync with:
 
 ```bash
-bazel run //python_api:sync_native_extension
+bazel run //python:sync_native_extension
 ```
 
 Run demos:
 
 ```bash
-uv run --project python_api python python_api/examples/demo_batch_sql_arrow.py
-uv run --project python_api python python_api/examples/demo_stream_sql.py
-uv run --project python_api python python_api/examples/demo_vector_search.py
-uv run --project python_api python python_api/examples/demo_embedding_pipeline.py
+uv run --project python python python/examples/demo_batch_sql_arrow.py
+uv run --project python python python/examples/demo_stream_sql.py
+uv run --project python python python/examples/demo_vector_search.py
+uv run --project python python python/examples/demo_embedding_pipeline.py
 ```
 
 Recommended regression entrypoint:
@@ -501,9 +566,9 @@ Repository benchmark fixture generation:
 - if you want a locally realistic benchmark input, generate an anonymized CSV from a private raw export with:
 
 ```bash
-uv run --project python_api python scripts/generate_stage_benchmark_fixture.py \
+uv run --project python python scripts/generate_stage_benchmark_fixture.py \
   --input /path/to/raw_rows_100k.csv \
-  --output python_api/benchmarks/data/stage_input_100k_anonymized.csv
+  --output python/benchmarks/data/stage_input_100k_anonymized.csv
 ```
 
 - keep that generated CSV local and untracked; it is ignored by `.gitignore`
@@ -525,14 +590,14 @@ Benchmark regression entrypoint:
 Embedding pipeline benchmark:
 
 ```bash
-uv run --project python_api python python_api/benchmarks/bench_embedding_pipeline.py
+uv run --project python python python/benchmarks/bench_embedding_pipeline.py
 ```
 
 For the local MiniLM provider:
 
 ```bash
-uv sync --project python_api --extra embedding
-uv run --project python_api python python_api/benchmarks/bench_embedding_pipeline.py \
+uv sync --project python --extra embedding
+uv run --project python python python/benchmarks/bench_embedding_pipeline.py \
   --provider minilm \
   --model sentence-transformers/all-MiniLM-L6-v2
 ```
@@ -590,7 +655,7 @@ Benchmark scenario controls:
 - set `VELARIA_STAGE_BENCH_SCENARIO=groupby_count_max` for the `caller_psm / count / max(latency)` path
 - set `VELARIA_STAGE_BENCH_SCENARIO=filter_lower_limit` for the `LOWER(method) + filter + LIMIT` path
 - set `VELARIA_STAGE_BENCH_QUERY="..."` only when you intentionally want a custom Velaria query
-- pass `--cache-in-memory` to `python_api/benchmarks/bench_stage_paths.py` when you want the
+- pass `--cache-in-memory` to `python/benchmarks/bench_stage_paths.py` when you want the
   reuse path to retain projected source columns in the current session
 - when `VELARIA_STAGE_BENCH_QUERY` does not match the selected scenario query, also set
   `VELARIA_STAGE_BENCH_SKIP_HARDCODE=1`; otherwise the benchmark rejects the run
@@ -606,7 +671,7 @@ Interpretation guardrails for the stage benchmark:
 - `DataFrame.to_arrow()` is the first materialization point in this harness, so its stage includes
   execution plus Arrow export
 - `to_pylist()` only measures the Python-side conversion from the already materialized Arrow table
-- the `hardcode` baseline in `python_api/benchmarks/bench_stage_paths.py` is a scenario-specific
+- the `hardcode` baseline in `python/benchmarks/bench_stage_paths.py` is a scenario-specific
   Python stdlib baseline built with `csv.DictReader` and manual logic; it is useful for relative
   comparison inside this harness, but it is not a native C/C++ kernel upper bound
 - packaged CLI startup is a separate measurement surface from the Python API stage benchmark
@@ -618,13 +683,13 @@ Build targets:
 - native extension:
   - `//:velaria_pyext`
 - sync built native extension into the source checkout:
-  - `//python_api:sync_native_extension`
+  - `//python:sync_native_extension`
 - pure-Python wheel wrapper:
-  - `//python_api:velaria_whl`
+  - `//python:velaria_whl`
 - native wheel:
-  - `//python_api:velaria_native_whl`
+  - `//python:velaria_native_whl`
 - Python CLI:
-  - `//python_api:velaria_cli`
+  - `//python:velaria_cli`
 
 Single-file CLI packaging:
 
@@ -643,7 +708,7 @@ The CLI is part of the ecosystem layer. For supported paths, it should delegate 
 Repo-visible CLI entrypoints are:
 
 - source checkout:
-  - `uv run --project python_api python python_api/velaria_cli.py ...`
+  - `uv run --project python python python/velaria_cli.py ...`
 - installed wheel or local package install:
   - `velaria-cli ...`
   - `velaria_cli ...`
@@ -673,7 +738,7 @@ export VELARIA_HOME=/tmp/velaria-home
 Tracked run commands:
 
 ```bash
-uv run --project python_api python python_api/velaria_cli.py run start -- file-sql \
+uv run --project python python python/velaria_cli.py run start -- file-sql \
   --run-name "cn_slow_query_24h_2026-04-03" \
   --description "score filter result for demo input" \
   --tag cn \
@@ -689,14 +754,14 @@ uv run --project python_api python python_api/velaria_cli.py run start -- file-s
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
 
-uv run --project python_api python python_api/velaria_cli.py run list --tag cn --query "slow query" --limit 20
-uv run --project python_api python python_api/velaria_cli.py run result --run-id <run_id>
-uv run --project python_api python python_api/velaria_cli.py run diff --run-id <run_id> --other-run-id <other_run_id>
-uv run --project python_api python python_api/velaria_cli.py run show --run-id <run_id>
-uv run --project python_api python python_api/velaria_cli.py run status --run-id <run_id>
-uv run --project python_api python python_api/velaria_cli.py artifacts list --run-id <run_id>
-uv run --project python_api python python_api/velaria_cli.py artifacts preview --artifact-id <artifact_id>
-uv run --project python_api python python_api/velaria_cli.py run cleanup --keep-last 10
+uv run --project python python python/velaria_cli.py run list --tag cn --query "slow query" --limit 20
+uv run --project python python python/velaria_cli.py run result --run-id <run_id>
+uv run --project python python python/velaria_cli.py run diff --run-id <run_id> --other-run-id <other_run_id>
+uv run --project python python python/velaria_cli.py run show --run-id <run_id>
+uv run --project python python python/velaria_cli.py run status --run-id <run_id>
+uv run --project python python python/velaria_cli.py artifacts list --run-id <run_id>
+uv run --project python python python/velaria_cli.py artifacts preview --artifact-id <artifact_id>
+uv run --project python python python/velaria_cli.py run cleanup --keep-last 10
 ```
 
 The tracked workspace contract is:
@@ -716,7 +781,7 @@ End-to-end examples:
 CSV SQL to parquet plus preview:
 
 ```bash
-uv run --project python_api python python_api/velaria_cli.py run start -- file-sql \
+uv run --project python python python/velaria_cli.py run start -- file-sql \
   --run-name "high_score_rows" \
   --description "high score rows for local inspection" \
   --tag local-demo \
@@ -724,22 +789,22 @@ uv run --project python_api python python_api/velaria_cli.py run start -- file-s
   --csv /path/to/input.csv \
   --query "SELECT name, score FROM input_table WHERE score > 10"
 
-uv run --project python_api python python_api/velaria_cli.py run list --tag scores --query "high score"
-uv run --project python_api python python_api/velaria_cli.py run result --run-id <run_id>
-uv run --project python_api python python_api/velaria_cli.py run diff --run-id <run_id> --other-run-id <other_run_id>
-uv run --project python_api python python_api/velaria_cli.py artifacts list --run-id <run_id>
-uv run --project python_api python python_api/velaria_cli.py artifacts preview --artifact-id <artifact_id>
+uv run --project python python python/velaria_cli.py run list --tag scores --query "high score"
+uv run --project python python python/velaria_cli.py run result --run-id <run_id>
+uv run --project python python python/velaria_cli.py run diff --run-id <run_id> --other-run-id <other_run_id>
+uv run --project python python python/velaria_cli.py artifacts list --run-id <run_id>
+uv run --project python python python/velaria_cli.py artifacts preview --artifact-id <artifact_id>
 ```
 
 Stream SQL once plus status:
 
 ```bash
-uv run --project python_api python python_api/velaria_cli.py run start -- stream-sql-once \
+uv run --project python python python/velaria_cli.py run start -- stream-sql-once \
   --source-csv-dir /path/to/source_dir \
   --sink-schema "key STRING, value_sum INT" \
   --query "INSERT INTO output_sink SELECT key, SUM(value) AS value_sum FROM input_stream GROUP BY key"
 
-uv run --project python_api python python_api/velaria_cli.py run status --run-id <run_id>
+uv run --project python python python/velaria_cli.py run status --run-id <run_id>
 ```
 
 For this action, the query still follows the core stream SQL boundary:
@@ -752,19 +817,19 @@ For this action, the query still follows the core stream SQL boundary:
 Vector search plus explain artifact:
 
 ```bash
-uv run --project python_api python python_api/velaria_cli.py run start -- vector-search \
+uv run --project python python python/velaria_cli.py run start -- vector-search \
   --csv /path/to/vectors.csv \
   --vector-column embedding \
   --query-vector "0.1,0.2,0.3" \
   --top-k 5
 
-uv run --project python_api python python_api/velaria_cli.py artifacts list --run-id <run_id>
+uv run --project python python python/velaria_cli.py artifacts list --run-id <run_id>
 ```
 
 Hybrid search through the CLI keeps the same command and adds optional filter / threshold controls:
 
 ```bash
-uv run --project python_api python python_api/velaria_cli.py vector-search \
+uv run --project python python python/velaria_cli.py vector-search \
   --csv /path/to/vectors.csv \
   --vector-column embedding \
   --query-vector "0.1,0.2,0.3" \
@@ -779,7 +844,7 @@ uv run --project python_api python python_api/velaria_cli.py vector-search \
 Batch SQL also supports a minimal hybrid search clause through `file-sql`:
 
 ```bash
-uv run --project python_api python python_api/velaria_cli.py file-sql \
+uv run --project python python python/velaria_cli.py file-sql \
   --csv /path/to/vectors.csv \
   --query "SELECT id, bucket, vector_score FROM input_table WHERE bucket = 1 HYBRID SEARCH embedding QUERY '[0.1 0.2 0.3]' METRIC cosine TOP_K 5 SCORE_THRESHOLD 0.02"
 ```
@@ -787,11 +852,11 @@ uv run --project python_api python python_api/velaria_cli.py file-sql \
 Python ecosystem source groups:
 
 - supported:
-  - `//python_api:velaria_python_supported_sources`
+  - `//python:velaria_python_supported_sources`
 - examples and benchmarks:
-  - `//python_api:velaria_python_example_sources`
+  - `//python:velaria_python_example_sources`
 - experimental placeholder:
-  - `//python_api:velaria_python_experimental_sources`
+  - `//python:velaria_python_experimental_sources`
 
 ## Arrow Contract
 
@@ -867,17 +932,17 @@ These are supported as ecosystem integrations, not as alternate execution cores.
 
 Python ecosystem regression targets:
 
-- `//python_api:streaming_v05_test`
-- `//python_api:arrow_stream_ingestion_test`
-- `//python_api:vector_search_test`
-- `//python_api:read_excel_test`
-- `//python_api:custom_stream_source_test`
-- `//python_api:bitable_stream_source_test`
-- `//python_api:bitable_group_by_owner_integration_test`
+- `//python:streaming_v05_test`
+- `//python:arrow_stream_ingestion_test`
+- `//python:vector_search_test`
+- `//python:read_excel_test`
+- `//python:custom_stream_source_test`
+- `//python:bitable_stream_source_test`
+- `//python:bitable_group_by_owner_integration_test`
 
 Python-layer grouped suite:
 
-- `//python_api:velaria_python_supported_regression`
+- `//python:velaria_python_supported_regression`
 
 Root-level grouped suite:
 

@@ -8,11 +8,32 @@ contextBridge.exposeInMainWorld('velariaShell', {
     ipcRenderer.invoke('shell:get-config') as Promise<{
       bitableAppId?: string;
       bitableAppSecret?: string;
+      agentRuntime?: string;
+      agentAuthMode?: string;
+      agentProvider?: string;
+      agentApiKey?: string;
+      agentBaseUrl?: string;
+      agentModel?: string;
     }>,
-  saveConfig: (payload: { bitableAppId?: string; bitableAppSecret?: string }) =>
+  saveConfig: (payload: {
+    bitableAppId?: string;
+    bitableAppSecret?: string;
+    agentRuntime?: string;
+    agentAuthMode?: string;
+    agentProvider?: string;
+    agentApiKey?: string;
+    agentBaseUrl?: string;
+    agentModel?: string;
+  }) =>
     ipcRenderer.invoke('shell:save-config', payload) as Promise<{
       bitableAppId?: string;
       bitableAppSecret?: string;
+      agentRuntime?: string;
+      agentAuthMode?: string;
+      agentProvider?: string;
+      agentApiKey?: string;
+      agentBaseUrl?: string;
+      agentModel?: string;
     }>,
   exportFile: (payload: { sourcePath: string; suggestedName?: string }) =>
     ipcRenderer.invoke('shell:export-file', payload) as Promise<{

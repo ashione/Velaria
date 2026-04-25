@@ -183,9 +183,9 @@ actor-stream payload 当前使用 typed binary batch：
 新增测试覆盖：
 
 - `source_sink_abi_test`：验证 runtime ABI 适配层上下文、checkpoint、ack、close 调用链。
-- `python_api/tests/test_streaming_v05.py`：验证 Python Arrow batch SQL 与 stream SQL progress 合同。
+- `python/tests/test_streaming_v05.py`：验证 Python Arrow batch SQL 与 stream SQL progress 合同。
 - `stream_strategy_explain_test`：验证 explain 输出、execution-mode consistency、auto fallback reason。
-- `python_api/tests/test_arrow_stream_ingestion.py`：验证 `RecordBatchReader`、`__arrow_c_stream__` 与 stream Arrow ingestion。
+- `python/tests/test_arrow_stream_ingestion.py`：验证 `RecordBatchReader`、`__arrow_c_stream__` 与 stream Arrow ingestion。
 
 配套 regression 脚本：
 

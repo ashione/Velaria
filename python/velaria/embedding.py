@@ -129,7 +129,7 @@ class SentenceTransformerEmbeddingProvider(EmbeddingProvider):
         except ImportError as exc:
             raise ImportError(
                 "sentence-transformers is required for local MiniLM embeddings. "
-                "Enable the embedding extra with `uv sync --project python_api --extra embedding`."
+                "Enable the embedding extra with `uv sync --project python --extra embedding`."
             ) from exc
 
         kwargs: dict[str, Any] = {}
@@ -219,7 +219,7 @@ def download_embedding_model(
     except ImportError as exc:
         raise ImportError(
             "huggingface_hub is required to download local embedding models. "
-            "Enable the embedding extra with `uv sync --project python_api --extra embedding`."
+            "Enable the embedding extra with `uv sync --project python --extra embedding`."
         ) from exc
     hub.snapshot_download(
         repo_id=str(model_name),

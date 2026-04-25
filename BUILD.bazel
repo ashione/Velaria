@@ -75,9 +75,9 @@ filegroup(
 filegroup(
     name = "velaria_python_ecosystem_sources",
     srcs = [
-        "//python_api:velaria_python_supported_sources",
-        "//python_api:velaria_python_example_sources",
-        "//python_api:velaria_python_experimental_sources",
+        "//python:velaria_python_supported_sources",
+        "//python:velaria_python_example_sources",
+        "//python:velaria_python_experimental_sources",
         "src/dataflow/interop/python/python_module.cc",
     ],
     visibility = ["//visibility:public"],
@@ -224,7 +224,7 @@ test_suite(
 test_suite(
     name = "python_ecosystem_regression",
     tests = [
-        "//python_api:velaria_python_supported_regression",
+        "//python:velaria_python_supported_regression",
     ],
 )
 

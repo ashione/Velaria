@@ -110,9 +110,9 @@ jobs:
           if [[ "${{ matrix.arch }}" == "x86_64" ]]; then
             BAZEL_SIMD_FLAGS+=(--per_file_copt=src/dataflow/core/execution/runtime/simd_backend_avx2\\.cc@-mavx2)
           fi
-          bazel build "${BAZEL_SIMD_FLAGS[@]}" //python_api:velaria_native_whl
+          bazel build "${BAZEL_SIMD_FLAGS[@]}" //python:velaria_native_whl
           mkdir -p dist/linux
-          cp bazel-bin/python_api/velaria-*-native.whl dist/linux/
+          cp bazel-bin/python/velaria-*-native.whl dist/linux/
           python3 ./scripts/normalize_wheel_filename.py dist/linux/velaria-*-native.whl
 
       - name: Repair wheel to manylinux
@@ -142,7 +142,7 @@ jobs:
 
       - name: Validate manylinux wheel contents
         run: |
-          python3 ./scripts/validate_native_wheel.py dist/linux/velaria-*.whl python_api/velaria
+          python3 ./scripts/validate_native_wheel.py dist/linux/velaria-*.whl python/velaria
 
       - name: Verify SIMD backend from repaired wheel
         run: |
@@ -195,16 +195,16 @@ jobs:
             --linkopt=arm64 \
             --linkopt=-arch \
             --linkopt=x86_64 \
-            //python_api:velaria_native_whl
+            //python:velaria_native_whl
           mkdir -p dist/macos
-          cp bazel-bin/python_api/velaria-*-native.whl dist/macos/
+          cp bazel-bin/python/velaria-*-native.whl dist/macos/
           python3 ./scripts/normalize_wheel_filename.py dist/macos/velaria-*-native.whl
 
       - name: Validate macOS wheel contents
         run: |
           python3 ./scripts/validate_native_wheel.py \
             dist/macos/velaria-*.whl \
-            python_api/velaria \
+            python/velaria \
             arm64,x86_64
 
       - name: Upload macOS artifact

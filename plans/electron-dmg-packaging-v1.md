@@ -46,12 +46,12 @@
   - `//:velaria_pyext`
   - 参考：[BUILD.bazel](../BUILD.bazel)
 - Python wheel：
-  - `//python_api:velaria_whl`
+  - `//python:velaria_whl`
 - Python native wheel：
-  - `//python_api:velaria_native_whl`
-  - 参考：[python_api/BUILD.bazel](../python_api/BUILD.bazel)
+  - `//python:velaria_native_whl`
+  - 参考：[python/BUILD.bazel](../python/BUILD.bazel)
 - Python 包已把 `_velaria.so` 视为 package data：
-  - 参考：[python_api/pyproject.toml](../python_api/pyproject.toml)
+  - 参考：[python/pyproject.toml](../python/pyproject.toml)
 - 已有单文件 CLI 打包脚本，可作为 sidecar 思路参考：
   - 参考：[scripts/build_py_cli_executable.sh](../scripts/build_py_cli_executable.sh)
 
@@ -120,7 +120,7 @@ v1 打包必须拆成四类产物：
 
 来源：
 
-- `bazel build //python_api:velaria_native_whl`
+- `bazel build //python:velaria_native_whl`
 
 ### 5.3 Python sidecar 产物
 
@@ -187,8 +187,8 @@ app/
   resources/
     icons/
 
-python_api/
-  velaria_service.py
+python/
+  velaria_service/
 ```
 
 发布构建中间目录建议固定为：
@@ -236,7 +236,7 @@ Velaria.app/
 
 新增文件：
 
-- `python_api/velaria_service.py`
+- `python/velaria_service/`
 
 职责：
 
@@ -261,7 +261,7 @@ v1 不要求完整 API 集，但至少要支持：
 职责：
 
 1. 构建 `//:velaria_pyext`
-2. 构建 `//python_api:velaria_native_whl`
+2. 构建 `//python:velaria_native_whl`
 3. 在临时目录创建 Python 虚拟环境
 4. 安装 native wheel
 5. 用 PyInstaller 打出 `velaria-service`
@@ -375,7 +375,7 @@ v1 固定顺序：
 执行项：
 
 1. 新建 `app/` 工程骨架。
-2. 新增 `python_api/velaria_service.py`。
+2. 新增 `python/velaria_service/`。
 3. 新增 `app/scripts/build-sidecar-macos.sh`。
 4. 用 PyInstaller 打出 sidecar。
 5. 新增 `electron-builder` 配置。
@@ -431,7 +431,7 @@ v1 固定顺序：
 
 1. 新建 `app/package.json`
 2. 新建 `app/electron-builder.yml`
-3. 新建 `python_api/velaria_service.py`
+3. 新建 `python/velaria_service/`
 4. 新建 `app/scripts/build-sidecar-macos.sh`
 5. 新建 `app/scripts/package-macos.sh`
 6. 在 `package.json` 中加入：

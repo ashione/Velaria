@@ -112,11 +112,11 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 """,
-    sha256 = "60f5e896affef9736cce83e79887ae6ad2a6c5cc4435740a7b845ec9dffeecfb",
-    strip_prefix = "limonp-master",
+    sha256 = "0d98bd9c87bd82bcfc234107908969e7416145d8b5e996e43c5d2513c419b2c0",
+    strip_prefix = "limonp-1.0.2",
     type = "tar.gz",
     urls = [
-        "https://codeload.github.com/yanyiwu/limonp/tar.gz/refs/heads/master",
+        "https://codeload.github.com/yanyiwu/limonp/tar.gz/refs/tags/v1.0.2",
     ],
 )
 
@@ -128,6 +128,6 @@ pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
 pip.parse(
     hub_name = "pypi",
     python_version = "3.12",
-    requirements_lock = "//python_api:requirements.lock",
+    requirements_lock = "//python:requirements.lock",
 )
 use_repo(pip, "pypi")

@@ -41,7 +41,7 @@ Owns:
 
 Owns:
 
-- native binding in `python_api`
+- native binding in `python`
 - Arrow ingress/output
 - CLI, packaging, and `uv` workflow
 - local app-side service and Electron prototype support
@@ -49,6 +49,7 @@ Owns:
 - offline keyword-index generation helpers and reusable BM25 keyword search assets
 - Excel / Bitable / custom stream adapters
 - local workspace and run tracking
+- AI-assisted data analysis via Claude Agent SDK or Codex App Server runtime
 
 Does not own:
 
@@ -134,6 +135,9 @@ Available today:
 - desktop import flow can asynchronously build reusable embedding datasets and keyword indexes from the same saved dataset
 - macOS desktop packaging prototype producing `.dmg`
 - AI / agent / skill integration through the supported Python ecosystem layer, with workspace and artifact management for result reuse and local data management
+- AI-assisted SQL generation from natural language via configurable LLM runtime
+- CLI `ai` subcommand for SQL generation, session management, and agent analysis
+- desktop app AI SQL assistant with session controls in Analyze page
 - same-host actor/rpc/jobmaster smoke path
 
 Current constraints:
@@ -143,6 +147,9 @@ Current constraints:
 - SQL v1 does not expand to `CTE`, subquery, richer join semantics, or aggregate `KEYWORD SEARCH` / `HYBRID SEARCH`
 - Python callbacks / Python UDFs are not part of the hot path
 - the Electron desktop app is still a local prototype, not a stable product surface
+- AI runtime requires `claude-agent-sdk` or `codex-app-server-sdk` (optional dependencies)
+- Codex runtime defaults to `gpt-5.4-mini` with workspace-write network access unless `agentModel` / `agentCodexNetworkAccess` is set
+- Codex runtime inherits standard proxy environment variables such as `http_proxy`, `https_proxy`, and `all_proxy`
 - the repository does not claim a completed distributed runtime
 
 Stable public surfaces:
@@ -161,7 +168,7 @@ For more detail, use:
 - runtime contract: [docs/runtime-contract.md](./docs/runtime-contract.md)
 - local agentic service / protocol: [docs/agentic-service-api.md](./docs/agentic-service-api.md)
 - streaming runtime shape: [docs/streaming_runtime_design.md](./docs/streaming_runtime_design.md)
-- Python ecosystem details: [python_api/README.md](./python_api/README.md)
+- Python ecosystem details: [python/README.md](./python/README.md)
 - current maintained plan: [plans/core-runtime-columnar-plan.md](./plans/core-runtime-columnar-plan.md)
 - plan directory guide: [plans/README.md](./plans/README.md)
 
@@ -211,17 +218,17 @@ regex_df = session.read_line_file(
 CLI examples:
 
 ```bash
-uv run --project python_api python python_api/velaria_cli.py file-sql \
+uv run --project python python python/velaria_cli.py file-sql \
   --csv /tmp/input.csv \
   --input-type csv \
   --query "SELECT * FROM input_table LIMIT 5"
 
-uv run --project python_api python python_api/velaria_cli.py file-sql \
+uv run --project python python python/velaria_cli.py file-sql \
   --input-path /tmp/input.jsonl \
   --input-type auto \
   --query "SELECT * FROM input_table LIMIT 5"
 
-uv run --project python_api python python_api/velaria_cli.py file-sql \
+uv run --project python python python/velaria_cli.py file-sql \
   --input-path /tmp/events.log \
   --input-type line \
   --line-mode regex \
@@ -238,7 +245,7 @@ bazel run //:df_demo
 bazel run //:stream_demo
 bazel run //:file_source_benchmark -- 200000 3
 # emits CSV / line / JSON file-source sub-cases as JSON lines
-uv run --project python_api python python_api/velaria_cli.py --help
+uv run --project python python python/velaria_cli.py --help
 ./dist/velaria-cli --help
 ```
 

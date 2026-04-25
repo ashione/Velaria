@@ -17,13 +17,13 @@ src/dataflow/runner/dashboard/*.js.map
 # Python local artifacts
 .venv/
 .venv-*/
-python_api/.venv-*/
+python/.venv-*/
 __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
-python_api/velaria/_velaria.so
-python_api/benchmarks/data/*.csv
+python/velaria/_velaria.so
+python/benchmarks/data/*.csv
 
 # Desktop app local artifacts
 app/node_modules/

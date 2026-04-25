@@ -9,36 +9,36 @@ Bootstrap:
 
 ```bash
 bazel build //:velaria_pyext
-bazel run //python_api:sync_native_extension
-uv sync --project python_api --python python3.13
+bazel run //python:sync_native_extension
+uv sync --project python --python python3.13
 ```
 
 Run examples:
 
 ```bash
-uv run --project python_api python python_api/examples/demo_batch_sql_arrow.py
-uv run --project python_api python python_api/examples/demo_stream_sql.py
-uv run --project python_api python python_api/examples/demo_vector_search.py
+uv run --project python python python/examples/demo_batch_sql_arrow.py
+uv run --project python python python/examples/demo_stream_sql.py
+uv run --project python python python/examples/demo_vector_search.py
 ```
 
 Tracked run examples:
 
 ```bash
-uv run --project python_api python python_api/velaria_cli.py -i
+uv run --project python python python/velaria_cli.py -i
 
-uv run --project python_api python python_api/velaria_cli.py run start -- file-sql \
+uv run --project python python python/velaria_cli.py run start -- file-sql \
   --run-name "score_demo" \
   --description "score filter result for demo input" \
   --tag demo \
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
 
-uv run --project python_api python python_api/velaria_cli.py run list --tag demo --query "score"
-uv run --project python_api python python_api/velaria_cli.py run result --run-id <run_id>
-uv run --project python_api python python_api/velaria_cli.py run diff --run-id <run_id> --other-run-id <other_run_id>
-uv run --project python_api python python_api/velaria_cli.py run show --run-id <run_id>
-uv run --project python_api python python_api/velaria_cli.py artifacts list --run-id <run_id>
-uv run --project python_api python python_api/velaria_cli.py artifacts preview --artifact-id <artifact_id>
+uv run --project python python python/velaria_cli.py run list --tag demo --query "score"
+uv run --project python python python/velaria_cli.py run result --run-id <run_id>
+uv run --project python python python/velaria_cli.py run diff --run-id <run_id> --other-run-id <other_run_id>
+uv run --project python python python/velaria_cli.py run show --run-id <run_id>
+uv run --project python python python/velaria_cli.py artifacts list --run-id <run_id>
+uv run --project python python python/velaria_cli.py artifacts preview --artifact-id <artifact_id>
 ```
 
 Desktop app prototype:
@@ -85,6 +85,72 @@ Same-host flow:
 ```text
 client -> scheduler(jobmaster) -> worker -> in-proc operator chain -> result
 ```
+
+## AI Runtime
+
+Bootstrap AI dependencies:
+
+```bash
+uv sync --project python --extra ai-claude
+# or
+uv sync --project python --extra ai-codex
+```
+
+Configure AI provider:
+
+```bash
+mkdir -p ~/.velaria
+cat > ~/.velaria/config.json << 'EOF'
+{
+  "aiProvider": "claude",
+  "aiApiKey": "your-api-key",
+  "aiRuntime": "claude",
+  "aiModel": "claude-sonnet-4-20250514",
+  "aiRuntimePath": "/opt/velaria-runtime/bin/claude",
+  "aiRuntimeWorkspace": "~/.velaria/ai-runtime",
+  "aiReuseLocalConfig": true,
+  "aiCodexNetworkAccess": true,
+  "aiProxy": "http://127.0.0.1:7897",
+  "aiAllProxy": "socks5://127.0.0.1:7897"
+}
+EOF
+```
+
+`aiRuntimePath` is optional. Codex can omit it and use the local
+`codex app-server` command; set `aiRuntimePath` / `aiCodexRuntimePath` only when
+overriding that executable. Claude Code runtime can use `aiClaudeRuntimePath` or
+`aiRuntimePath`. `aiRuntimeWorkspace` is the runtime working directory used for
+agent threads, generated config, and MCP/function logs. If omitted, Velaria uses
+a project-scoped directory under `~/.velaria/ai-runtime/`. `aiReuseLocalConfig`
+controls whether the runtime process can reuse the current user config; set it
+to `false` when the runtime should use an isolated HOME. Codex workspace-write
+network access is enabled by default; set `aiCodexNetworkAccess` to `false` only
+when the agent runtime must be offline. `aiProxy` sets both `http_proxy` and
+`https_proxy` for the runtime process; use `aiHttpProxy`, `aiHttpsProxy`,
+`aiAllProxy`, and `aiNoProxy` for separate values. Shell proxy variables are
+also inherited, and Velaria keeps localhost bypassed for local MCP/data URLs.
+
+Use AI from the CLI:
+
+```bash
+uv run --project python python python/velaria_cli.py ai generate-sql \
+  --prompt "top 5 by score" --schema "name,score,region"
+```
+
+Interactive mode:
+
+```bash
+uv run --project python python python/velaria_cli.py -i
+velaria> 找出分数最高的5个人
+velaria> /status
+velaria> :run list --limit 5
+```
+
+The interactive CLI is an agent runtime wrapper. It starts or resumes the
+configured Codex/Claude runtime directly, injects the Velaria skill, and exposes
+Velaria local functions through the runtime bridge / MCP server. `velaria_service`
+remains the HTTP sidecar for the desktop app and other app clients; it is not
+required for CLI interactive mode.
 
 Build:
 

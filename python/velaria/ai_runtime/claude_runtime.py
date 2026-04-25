@@ -49,6 +49,7 @@ class ClaudeAgentRuntime:
         sample_rows: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         from claude_agent_sdk import query as claude_query
+        from claude_agent_sdk.types import ClaudeAgentOptions
 
         user_msg = _build_sql_user_message(prompt, schema, table_name, sample_rows)
         sql_system = (
@@ -62,21 +63,29 @@ class ClaudeAgentRuntime:
         result_text = ""
         async for msg in claude_query(
             prompt=user_msg,
-            system_prompt=sql_system,
-            model=self.model,
-            api_key=self.api_key,
-            max_turns=1,
+            options=ClaudeAgentOptions(
+                system_prompt=sql_system,
+                model=self.model,
+                max_turns=1,
+                permission_mode="bypassPermissions",
+            ),
         ):
-            if hasattr(msg, "content") and isinstance(msg.content, str):
-                result_text += msg.content
-            elif hasattr(msg, "text"):
-                result_text += msg.text
+            # AssistantMessage.content is a list of TextBlock/ThinkingBlock
+            if hasattr(msg, "content") and isinstance(msg.content, list):
+                text_parts = [block.text for block in msg.content if hasattr(block, "text")]
+                if text_parts:
+                    # Take only this message's text (overwrite, not accumulate)
+                    result_text = "".join(text_parts)
+            # ResultMessage.result may contain the final text
+            elif hasattr(msg, "result") and isinstance(msg.result, str) and msg.result.strip():
+                result_text = msg.result
 
         self.registry.update_activity(session_id)
         return _parse_sql_json(result_text)
 
     async def analyze(self, session_id: str, prompt: str) -> AsyncIterator[dict[str, Any]]:
         from claude_agent_sdk import ClaudeSDKClient
+        from claude_agent_sdk.types import ClaudeAgentOptions
 
         session_data = self._sessions.get(session_id)
         if not session_data:
@@ -113,16 +122,26 @@ class ClaudeAgentRuntime:
             )
 
         client = ClaudeSDKClient(
-            model=self.model,
-            api_key=self.api_key,
+            options=ClaudeAgentOptions(
+                model=self.model,
+                system_prompt=VELARIA_SQL_SYSTEM_PROMPT,
+                permission_mode="bypassPermissions",
+            ),
             custom_tools=custom_tools,
-            system_prompt=VELARIA_SQL_SYSTEM_PROMPT,
         )
 
-        async for msg in client.query(prompt=prompt, session_id=session_id):
+        async for msg in client.query(prompt=prompt):
+            msg_type = type(msg).__name__
+            content = ""
+            if hasattr(msg, "content") and isinstance(msg.content, list):
+                for block in msg.content:
+                    if hasattr(block, "text"):
+                        content += block.text
+            elif hasattr(msg, "result") and isinstance(msg.result, str):
+                content = msg.result
             yield {
-                "type": getattr(msg, "type", "text"),
-                "content": getattr(msg, "content", "") or getattr(msg, "text", ""),
+                "type": msg_type,
+                "content": content,
                 "session_id": session_id,
             }
 

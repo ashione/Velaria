@@ -484,6 +484,13 @@ class AiRuntimeAgentTest(unittest.TestCase):
                 self.assertIn('model_reasoning_effort = "none"', isolated_config_text)
                 self.assertIn("[sandbox_workspace_write]", isolated_config_text)
                 self.assertIn("network_access = true", isolated_config_text)
+                self.assertIn('[mcp_servers."velaria"]', isolated_config_text)
+                self.assertIn('command = "', isolated_config_text)
+                self.assertIn('args = ["-m", "velaria.ai_runtime.mcp_server"]', isolated_config_text)
+                self.assertIn('enabled_tools = [', isolated_config_text)
+                self.assertIn('"velaria_dataset_import"', isolated_config_text)
+                self.assertIn('[mcp_servers."velaria".env]', isolated_config_text)
+                self.assertIn('"VELARIA_HOME"', isolated_config_text)
                 self.assertNotIn("plugins", isolated_config_text)
                 self.assertEqual(
                     json.loads((pathlib.Path(fake.connect_kwargs["env"]["CODEX_HOME"]) / "auth.json").read_text()),

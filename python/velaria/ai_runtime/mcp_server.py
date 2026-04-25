@@ -122,7 +122,9 @@ def _create_server():
         version="0.1.0",
         instructions=(
             "Velaria local function bridge. Use these tools for Velaria dataset "
-            "import, schema inspection, SQL processing, runs, and artifacts."
+            "download/localization, import, schema inspection, SQL processing, "
+            "runs, and artifacts. HTTP(S) dataset URLs should be handled through "
+            "Velaria tools before generic shell or Python download code."
         ),
     )
 

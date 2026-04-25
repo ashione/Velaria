@@ -120,6 +120,31 @@ class AiRuntimeAgentTest(unittest.TestCase):
                     source = store.get_source("remote_sales")
             self.assertEqual(source["spec"]["source_url"], "https://example.test/data/sales.csv")
 
+    def test_dataset_download_is_first_class_url_tool(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-agent-url-download-") as tmp:
+            source_csv = pathlib.Path(tmp) / "remote-sales.csv"
+            source_csv.write_text("region,amount\ncn,10\n", encoding="utf-8")
+            workspace = pathlib.Path(tmp) / "runtime"
+
+            def fake_urlretrieve(url, target):
+                pathlib.Path(target).write_text(source_csv.read_text(encoding="utf-8"), encoding="utf-8")
+                return str(target), None
+
+            with mock.patch.dict(os.environ, {"VELARIA_RUNTIME_WORKSPACE": str(workspace)}):
+                with mock.patch("urllib.request.urlretrieve", side_effect=fake_urlretrieve):
+                    downloaded = execute_local_function(
+                        "velaria_dataset_download",
+                        {"url": "https://example.test/data/sales.csv", "limit": 1},
+                    )
+
+            self.assertTrue(downloaded["ok"])
+            self.assertEqual(downloaded["function"], "velaria_dataset_download")
+            self.assertEqual(downloaded["source_url"], "https://example.test/data/sales.csv")
+            self.assertIn(str(workspace / "imports" / "downloads"), downloaded["source_path"])
+            self.assertEqual(downloaded["schema"], ["region", "amount"])
+            self.assertEqual(downloaded["row_count"], 1)
+            self.assertEqual(downloaded["rows"], [{"region": "cn", "amount": 10}])
+
     def test_dataset_process_saved_run_surfaces_run_metadata(self):
         def fake_main(argv):
             print(
@@ -182,10 +207,15 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertIn("velaria_read", names)
         self.assertIn("velaria_sql", names)
         self.assertIn("velaria_dataset_import", names)
+        self.assertIn("velaria_dataset_download", names)
         self.assertIn("velaria_dataset_process", names)
         import_tool = next(tool for tool in tools["result"]["tools"] if tool["name"] == "velaria_dataset_import")
         self.assertEqual(import_tool["annotations"]["destructiveHint"], False)
-        self.assertEqual(import_tool["annotations"]["openWorldHint"], False)
+        self.assertEqual(import_tool["annotations"]["openWorldHint"], True)
+        self.assertIn("HTTP(S)", import_tool["description"])
+        download_tool = next(tool for tool in tools["result"]["tools"] if tool["name"] == "velaria_dataset_download")
+        self.assertEqual(download_tool["annotations"]["openWorldHint"], True)
+        self.assertIn("url", download_tool["inputSchema"]["required"])
 
         resource = _handle_request(
             {
@@ -215,10 +245,11 @@ class AiRuntimeAgentTest(unittest.TestCase):
                     tools = await session.list_tools()
                     names = {tool.name for tool in tools.tools}
                     self.assertIn("velaria_schema", names)
+                    self.assertIn("velaria_dataset_download", names)
                     self.assertIn("velaria_dataset_process", names)
                     process_tool = next(tool for tool in tools.tools if tool.name == "velaria_dataset_process")
                     self.assertFalse(process_tool.annotations.destructiveHint)
-                    self.assertFalse(process_tool.annotations.openWorldHint)
+                    self.assertTrue(process_tool.annotations.openWorldHint)
 
                     result = await session.call_tool(
                         "velaria_schema",
@@ -239,6 +270,7 @@ class AiRuntimeAgentTest(unittest.TestCase):
         skill = load_velaria_skill_text()
         tool_names = {tool["name"] for tool in tool_definitions()}
         self.assertIn("velaria_dataset_import", tool_names)
+        self.assertIn("velaria_dataset_download", tool_names)
         self.assertIn("velaria_dataset_process", tool_names)
         self.assertIn("You are Velaria Agent", instructions)
         self.assertIn("product identity", instructions)
@@ -247,6 +279,9 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertIn("Default workflow policy for data tasks", instructions)
         self.assertIn("first get the data into a Velaria-processable local format", instructions)
         self.assertIn("then call the Velaria local functions", instructions)
+        self.assertIn("For HTTP(S) URLs", instructions)
+        self.assertIn("Do not write curl, wget, Python download code", instructions)
+        self.assertIn("velaria_dataset_download", instructions)
         self.assertIn("velaria_dataset_import", instructions)
         self.assertIn("velaria_dataset_process", instructions)
         self.assertIn("velaria_sql", instructions)
@@ -334,6 +369,7 @@ class AiRuntimeAgentTest(unittest.TestCase):
                 self.assertEqual(mcp["args"], ["-m", "velaria.ai_runtime.mcp_server"])
                 self.assertEqual(mcp["default_tools_approval_mode"], "approve")
                 self.assertIn("velaria_dataset_import", mcp["enabled_tools"])
+                self.assertIn("velaria_dataset_download", mcp["enabled_tools"])
                 self.assertEqual(mcp["env"]["VELARIA_WORKSPACE"], str(pathlib.Path(tmp)))
                 self.assertEqual(mcp["env"]["VELARIA_RUNTIME_WORKSPACE"], str(pathlib.Path(tmp)))
                 self.assertEqual(mcp["env"]["VELARIA_SKILL_DIR"], str(skill_dir.resolve()))

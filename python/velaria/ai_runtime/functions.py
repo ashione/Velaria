@@ -66,10 +66,12 @@ def _velaria_schema(args: JsonDict) -> JsonDict:
     path = str(args.get("path") or "")
     if not path:
         return {"schema": [], "table_name": str(args.get("table_name") or "input_table")}
+    preview = _velaria_read({"path": path, "limit": 0})
     return {
-        "schema": _velaria_read({"path": path, "limit": 0})["schema"],
+        "schema": preview["schema"],
         "table_name": str(args.get("table_name") or "input_table"),
-        "source_path": path,
+        "source_path": preview.get("source_path", path),
+        **({"source_url": preview["source_url"]} if preview.get("source_url") else {}),
     }
 
 
@@ -167,6 +169,30 @@ def _velaria_dataset_import(args: JsonDict) -> JsonDict:
         "row_count": preview["row_count"],
         "rows": preview["rows"],
     }
+
+
+def _velaria_dataset_download(args: JsonDict) -> JsonDict:
+    url = str(args["url"])
+    if not _is_url(url):
+        return {"ok": False, "error": "url must be an http(s) URL"}
+    target = _download_source_url(url)
+    limit = int(args.get("limit") or 20)
+    result: JsonDict = {
+        "source_url": url,
+        "source_path": str(target),
+        "file_name": target.name,
+        "size_bytes": target.stat().st_size if target.exists() else 0,
+    }
+    if bool(args.get("preview", True)):
+        preview = _velaria_read({"path": str(target), "limit": limit})
+        result.update(
+            {
+                "schema": preview.get("schema") or [],
+                "row_count": preview.get("row_count", 0),
+                "rows": preview.get("rows") or [],
+            }
+        )
+    return result
 
 
 def _velaria_dataset_process(args: JsonDict) -> JsonDict:
@@ -447,7 +473,8 @@ def velaria_agent_instructions() -> str:
         "ecosystem layer for local file ingress, SQL execution, workspace runs, "
         "artifacts, and agent-assisted analysis. Prefer the registered Velaria "
         "local functions/MCP tools for Velaria operations. Use "
-        "`velaria_dataset_import` for dataset registration/import and "
+        "`velaria_dataset_download` for HTTP(S) dataset localization, "
+        "`velaria_dataset_import` for dataset registration/import, and "
         "`velaria_dataset_process` for dataset SQL processing before falling "
         "back to raw shell or generic CLI commands.\n\n"
         "Default workflow policy for data tasks: when the user asks to inspect, "
@@ -457,10 +484,16 @@ def velaria_agent_instructions() -> str:
         "functions. Use `velaria_read`/`velaria_schema` to inspect local files, "
         "`velaria_dataset_import` to register datasets, `velaria_sql` for "
         "ad-hoc queries, `velaria_dataset_process` to save runs/artifacts, and "
-        "`velaria_artifact_preview` to inspect saved outputs. It is acceptable "
-        "to write small conversion or download code when needed to prepare data "
-        "for Velaria. If Velaria cannot handle the requested workflow, explain "
-        "that boundary and then use the best available fallback.\n\n"
+        "`velaria_artifact_preview` to inspect saved outputs. For HTTP(S) URLs, "
+        "call `velaria_dataset_download` or pass the URL directly to "
+        "`velaria_dataset_import`, `velaria_read`, `velaria_sql`, or "
+        "`velaria_dataset_process`; these functions localize the remote file "
+        "inside the Velaria runtime workspace. Do not write curl, wget, Python "
+        "download code, or generic shell download steps before trying the "
+        "Velaria function. If a source is an `.xls` or `.xlsx` URL, Velaria can "
+        "download it and convert it to CSV for SQL processing. If Velaria cannot "
+        "handle the requested workflow, explain that boundary and then use the "
+        "best available fallback.\n\n"
         "Velaria SQL v1 supports SELECT projection/aliases, WHERE, GROUP BY, "
         "ORDER BY, LIMIT, minimal JOIN, INSERT INTO ... VALUES, INSERT INTO ... "
         "SELECT, CREATE TABLE, CREATE SOURCE TABLE, and CREATE SINK TABLE. Do "
@@ -483,11 +516,14 @@ def local_function_registry() -> dict[str, LocalFunction]:
     return {
         "velaria_read": LocalFunction(
             "velaria_read",
-            "Read a local data file with Velaria and return schema plus preview rows.",
+            "Read a local data file or HTTP(S) dataset URL with Velaria and return schema plus preview rows. URL inputs are downloaded into the Velaria runtime workspace first.",
             _tool_schema(
                 {
-                    "path": {"type": "string"},
-                    "limit": {"type": "integer", "default": 20},
+                    "path": {
+                        "type": "string",
+                        "description": "Local file path or HTTP(S) URL to a CSV, JSON, Arrow, Parquet, or supported Excel dataset.",
+                    },
+                    "limit": {"type": "integer", "default": 20, "description": "Maximum preview rows to return."},
                 },
                 ["path"],
             ),
@@ -495,10 +531,13 @@ def local_function_registry() -> dict[str, LocalFunction]:
         ),
         "velaria_schema": LocalFunction(
             "velaria_schema",
-            "Inspect the schema for a local data file or the named working table.",
+            "Inspect the schema for a local data file, HTTP(S) dataset URL, or the named working table.",
             _tool_schema(
                 {
-                    "path": {"type": "string"},
+                    "path": {
+                        "type": "string",
+                        "description": "Optional local file path or HTTP(S) URL. If omitted, returns the named working table schema placeholder.",
+                    },
                     "table_name": {"type": "string", "default": "input_table"},
                 }
             ),
@@ -506,11 +545,14 @@ def local_function_registry() -> dict[str, LocalFunction]:
         ),
         "velaria_sql": LocalFunction(
             "velaria_sql",
-            "Execute Velaria SQL. Provide source_path to register a file as input_table first.",
+            "Execute Velaria SQL. Provide source_path as a local file path or HTTP(S) dataset URL to register it as input_table first.",
             _tool_schema(
                 {
                     "query": {"type": "string"},
-                    "source_path": {"type": "string"},
+                    "source_path": {
+                        "type": "string",
+                        "description": "Optional local file path or HTTP(S) URL to register as the query input table.",
+                    },
                     "table_name": {"type": "string", "default": "input_table"},
                     "limit": {"type": "integer", "default": 50},
                 },
@@ -524,7 +566,10 @@ def local_function_registry() -> dict[str, LocalFunction]:
             _tool_schema(
                 {
                     "query": {"type": "string"},
-                    "source_path": {"type": "string"},
+                    "source_path": {
+                        "type": "string",
+                        "description": "Optional local file path or HTTP(S) URL to register before explaining the query.",
+                    },
                     "table_name": {"type": "string", "default": "input_table"},
                 },
                 ["query"],
@@ -533,10 +578,13 @@ def local_function_registry() -> dict[str, LocalFunction]:
         ),
         "velaria_dataset_import": LocalFunction(
             "velaria_dataset_import",
-            "Import/register a local dataset as a Velaria source and return dataset schema plus preview metadata.",
+            "Import/register a local file or HTTP(S) dataset URL as a Velaria source and return dataset schema plus preview metadata. Prefer this for user-provided dataset URLs before writing custom download code.",
             _tool_schema(
                 {
-                    "path": {"type": "string"},
+                    "path": {
+                        "type": "string",
+                        "description": "Local file path or HTTP(S) URL to import. URL inputs are downloaded into the Velaria runtime workspace first.",
+                    },
                     "source_id": {"type": "string"},
                     "name": {"type": "string"},
                     "kind": {"type": "string", "default": "local_file"},
@@ -550,13 +598,39 @@ def local_function_registry() -> dict[str, LocalFunction]:
             ),
             _velaria_dataset_import,
         ),
-        "velaria_dataset_process": LocalFunction(
-            "velaria_dataset_process",
-            "Process a Velaria dataset with SQL, optionally saving a workspace run and result artifact.",
+        "velaria_dataset_download": LocalFunction(
+            "velaria_dataset_download",
+            "Download/localize an HTTP(S) dataset URL into the Velaria runtime workspace and optionally return schema plus preview rows. Use this first when the user asks to fetch or download a dataset.",
             _tool_schema(
                 {
-                    "source_path": {"type": "string"},
-                    "path": {"type": "string"},
+                    "url": {
+                        "type": "string",
+                        "description": "HTTP(S) URL for the dataset to download into the Velaria runtime workspace.",
+                    },
+                    "preview": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Whether to read the downloaded file with Velaria and return schema plus preview rows.",
+                    },
+                    "limit": {"type": "integer", "default": 20, "description": "Maximum preview rows to return."},
+                },
+                ["url"],
+            ),
+            _velaria_dataset_download,
+        ),
+        "velaria_dataset_process": LocalFunction(
+            "velaria_dataset_process",
+            "Process a Velaria local file or HTTP(S) dataset URL with SQL, optionally saving a workspace run and result artifact. URL inputs are downloaded into the Velaria runtime workspace first.",
+            _tool_schema(
+                {
+                    "source_path": {
+                        "type": "string",
+                        "description": "Local file path or HTTP(S) URL to process.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Alias for source_path; local file path or HTTP(S) URL to process.",
+                    },
                     "query": {"type": "string"},
                     "table_name": {"type": "string", "default": "input_table"},
                     "input_type": {"type": "string", "default": "auto"},
@@ -620,11 +694,20 @@ def _tool_annotations(name: str) -> JsonDict:
         "velaria_artifact_preview",
     }
     idempotent = name not in {"velaria_dataset_process", "velaria_cli_run"}
+    open_world = name in {
+        "velaria_read",
+        "velaria_schema",
+        "velaria_sql",
+        "velaria_explain",
+        "velaria_dataset_import",
+        "velaria_dataset_download",
+        "velaria_dataset_process",
+    }
     return {
         "readOnlyHint": read_only,
         "destructiveHint": False,
         "idempotentHint": idempotent,
-        "openWorldHint": False,
+        "openWorldHint": open_world,
     }
 
 

@@ -8,6 +8,12 @@ description: How to use a locally installed Velaria Python package for local ana
 这个 Skill 用于说明如何把 `velaria` 的 Python 包作为本地分析工具使用，不涉及仓库实现代码或编译/构建逻辑。  
 核心思路：**把数据先加载为临时视图，再用 `session.sql(...)` 写 SQL 处理。**
 
+在 Velaria Agent 中处理数据任务时，优先调用已注册的 Velaria local functions/MCP tools：
+
+- HTTP(S) 数据集 URL：先用 `velaria_dataset_download` 本地化，或直接把 URL 传给 `velaria_dataset_import` / `velaria_read` / `velaria_sql` / `velaria_dataset_process`。
+- 本地文件：用 `velaria_dataset_import` 注册、`velaria_read` / `velaria_schema` 检查、`velaria_sql` 查询、`velaria_dataset_process` 保存 run/artifact。
+- 不要在 Velaria 工具失败前先写 `curl`、`wget` 或自定义 Python 下载脚本；只有 Velaria 工具无法覆盖时再回退到通用方式。
+
 本 Skill 默认只使用 `uv` 执行。仓库内可直接使用的入口只有两类：
 
 - 源码入口：`uv run --project python python python/velaria_cli.py ...`

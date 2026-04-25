@@ -13,10 +13,12 @@ type SidecarProcess = ChildProcessByStdio<null, Readable, Readable>;
 type AppConfig = {
   bitableAppId?: string;
   bitableAppSecret?: string;
-  aiProvider?: string;
-  aiApiKey?: string;
-  aiBaseUrl?: string;
-  aiModel?: string;
+  agentRuntime?: string;
+  agentAuthMode?: string;
+  agentProvider?: string;
+  agentApiKey?: string;
+  agentBaseUrl?: string;
+  agentModel?: string;
 };
 
 let sidecarProcess: SidecarProcess | null = null;
@@ -69,21 +71,29 @@ async function readAppConfig(): Promise<AppConfig> {
         typeof parsed.bitableAppSecret === 'string' && parsed.bitableAppSecret.trim()
           ? parsed.bitableAppSecret.trim()
           : undefined,
-      aiProvider:
-        typeof parsed.aiProvider === 'string' && parsed.aiProvider.trim()
-          ? parsed.aiProvider.trim()
+      agentRuntime:
+        typeof parsed.agentRuntime === 'string' && parsed.agentRuntime.trim()
+          ? parsed.agentRuntime.trim()
           : undefined,
-      aiApiKey:
-        typeof parsed.aiApiKey === 'string' && parsed.aiApiKey.trim()
-          ? parsed.aiApiKey.trim()
+      agentAuthMode:
+        typeof parsed.agentAuthMode === 'string' && parsed.agentAuthMode.trim()
+          ? parsed.agentAuthMode.trim()
           : undefined,
-      aiBaseUrl:
-        typeof parsed.aiBaseUrl === 'string' && parsed.aiBaseUrl.trim()
-          ? parsed.aiBaseUrl.trim()
+      agentProvider:
+        typeof parsed.agentProvider === 'string' && parsed.agentProvider.trim()
+          ? parsed.agentProvider.trim()
           : undefined,
-      aiModel:
-        typeof parsed.aiModel === 'string' && parsed.aiModel.trim()
-          ? parsed.aiModel.trim()
+      agentApiKey:
+        typeof parsed.agentApiKey === 'string' && parsed.agentApiKey.trim()
+          ? parsed.agentApiKey.trim()
+          : undefined,
+      agentBaseUrl:
+        typeof parsed.agentBaseUrl === 'string' && parsed.agentBaseUrl.trim()
+          ? parsed.agentBaseUrl.trim()
+          : undefined,
+      agentModel:
+        typeof parsed.agentModel === 'string' && parsed.agentModel.trim()
+          ? parsed.agentModel.trim()
           : undefined,
     };
   } catch {
@@ -92,7 +102,17 @@ async function readAppConfig(): Promise<AppConfig> {
 }
 
 async function writeAppConfig(payload: AppConfig): Promise<AppConfig> {
-  const next: AppConfig = {
+  let existing: Record<string, unknown> = {};
+  try {
+    const raw = await fs.readFile(configPath(), 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      existing = parsed as Record<string, unknown>;
+    }
+  } catch {
+    existing = {};
+  }
+  const sanitized: AppConfig = {
     bitableAppId:
       typeof payload.bitableAppId === 'string' && payload.bitableAppId.trim()
         ? payload.bitableAppId.trim()
@@ -101,26 +121,40 @@ async function writeAppConfig(payload: AppConfig): Promise<AppConfig> {
       typeof payload.bitableAppSecret === 'string' && payload.bitableAppSecret.trim()
         ? payload.bitableAppSecret.trim()
         : undefined,
-    aiProvider:
-      typeof payload.aiProvider === 'string' && payload.aiProvider.trim()
-        ? payload.aiProvider.trim()
+    agentRuntime:
+      typeof payload.agentRuntime === 'string' && payload.agentRuntime.trim()
+        ? payload.agentRuntime.trim()
         : undefined,
-    aiApiKey:
-      typeof payload.aiApiKey === 'string' && payload.aiApiKey.trim()
-        ? payload.aiApiKey.trim()
+    agentAuthMode:
+      typeof payload.agentAuthMode === 'string' && payload.agentAuthMode.trim()
+        ? payload.agentAuthMode.trim()
         : undefined,
-    aiBaseUrl:
-      typeof payload.aiBaseUrl === 'string' && payload.aiBaseUrl.trim()
-        ? payload.aiBaseUrl.trim()
+    agentProvider:
+      typeof payload.agentProvider === 'string' && payload.agentProvider.trim()
+        ? payload.agentProvider.trim()
         : undefined,
-    aiModel:
-      typeof payload.aiModel === 'string' && payload.aiModel.trim()
-        ? payload.aiModel.trim()
+    agentApiKey:
+      payload.agentAuthMode === 'api_key' && typeof payload.agentApiKey === 'string' && payload.agentApiKey.trim()
+        ? payload.agentApiKey.trim()
+        : undefined,
+    agentBaseUrl:
+      typeof payload.agentBaseUrl === 'string' && payload.agentBaseUrl.trim()
+        ? payload.agentBaseUrl.trim()
+        : undefined,
+    agentModel:
+      typeof payload.agentModel === 'string' && payload.agentModel.trim()
+        ? payload.agentModel.trim()
         : undefined,
   };
+  const next: Record<string, unknown> = { ...existing, ...sanitized };
+  for (const [key, value] of Object.entries(next)) {
+    if (value === undefined) {
+      delete next[key];
+    }
+  }
   await fs.mkdir(configDir(), { recursive: true });
   await fs.writeFile(configPath(), `${JSON.stringify(next, null, 2)}\n`, 'utf-8');
-  return next;
+  return readAppConfig();
 }
 
 function startSidecar() {
@@ -149,6 +183,7 @@ function startSidecar() {
         'run',
         '--project',
         path.join(root, 'python'),
+        'python',
         '-m',
         'velaria_service',
         '--port',
@@ -158,6 +193,7 @@ function startSidecar() {
         cwd: root,
         env: {
           ...process.env,
+          PYTHONPATH: path.join(root, 'python'),
           PYTHONUNBUFFERED: '1',
           ...(jiebaDictDir() ? { VELARIA_JIEBA_DICT_DIR: jiebaDictDir() } : {}),
         },

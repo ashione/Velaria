@@ -8,25 +8,31 @@ declare global {
       getConfig: () => Promise<{
         bitableAppId?: string;
         bitableAppSecret?: string;
-        aiProvider?: string;
-        aiApiKey?: string;
-        aiBaseUrl?: string;
-        aiModel?: string;
+        agentRuntime?: string;
+        agentAuthMode?: string;
+        agentProvider?: string;
+        agentApiKey?: string;
+        agentBaseUrl?: string;
+        agentModel?: string;
       }>;
       saveConfig: (payload: {
         bitableAppId?: string;
         bitableAppSecret?: string;
-        aiProvider?: string;
-        aiApiKey?: string;
-        aiBaseUrl?: string;
-        aiModel?: string;
+        agentRuntime?: string;
+        agentAuthMode?: string;
+        agentProvider?: string;
+        agentApiKey?: string;
+        agentBaseUrl?: string;
+        agentModel?: string;
       }) => Promise<{
         bitableAppId?: string;
         bitableAppSecret?: string;
-        aiProvider?: string;
-        aiApiKey?: string;
-        aiBaseUrl?: string;
-        aiModel?: string;
+        agentRuntime?: string;
+        agentAuthMode?: string;
+        agentProvider?: string;
+        agentApiKey?: string;
+        agentBaseUrl?: string;
+        agentModel?: string;
       }>;
       exportFile: (payload: { sourcePath: string; suggestedName?: string }) => Promise<{
         cancelled: boolean;

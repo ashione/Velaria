@@ -20,6 +20,9 @@ class ClaudeAgentRuntime:
     def __init__(
         self,
         api_key: str,
+        provider: str = "anthropic",
+        auth_mode: str = "oauth",
+        base_url: str = "",
         model: str = "claude-sonnet-4-20250514",
         runtime_path: str = "",
         runtime_workspace: str = "",
@@ -40,7 +43,10 @@ class ClaudeAgentRuntime:
         from claude_agent_sdk import ClaudeSDKClient  # noqa: F401 -- validated at init
 
         self.model = model
+        self.provider = provider
+        self.auth_mode = auth_mode
         self.api_key = api_key
+        self.base_url = base_url
         self.registry = SessionRegistry(pathlib.Path(self.runtime_workspace) / "sessions.sqlite")
         self._sessions: dict[str, dict[str, Any]] = {}  # in-memory session state
 
@@ -209,7 +215,10 @@ class ClaudeAgentRuntime:
         entry = self.registry.lookup(session_id) if session_id else self.registry.most_recent_active()
         return {
             "runtime": "claude",
+            "provider": self.provider,
             "model": self.model,
+            "auth_mode": self.auth_mode,
+            "reuse_local_config": self.reuse_local_config,
             "workspace": self.runtime_workspace,
             "cwd": str(self.cwd),
             "session": entry,
@@ -235,6 +244,8 @@ class ClaudeAgentRuntime:
             env["VELARIA_SKILL_PATH"] = str(self.skill_path)
         if self.api_key:
             env["ANTHROPIC_API_KEY"] = self.api_key
+        if self.base_url:
+            env["ANTHROPIC_BASE_URL"] = self.base_url
         return env
 
 

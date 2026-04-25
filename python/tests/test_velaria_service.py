@@ -84,8 +84,12 @@ class VelariaServiceTest(unittest.TestCase):
                         "agentRuntimePath": "/opt/velaria/runtime/bin/codex",
                         "agentClaudeRuntimePath": "/opt/velaria/runtime/bin/claude",
                         "agentCodexRuntimePath": "/opt/velaria/runtime/bin/codex-app",
+                        "agentAuthMode": "api_key",
+                        "agentProvider": "custom",
+                        "agentApiKey": "test-key",
+                        "agentBaseUrl": "https://api.example.test/v1",
+                        "agentModel": "gpt-5.4-mini",
                         "agentRuntimeWorkspace": "/var/lib/velaria/agent-runtime",
-                        "agentReuseLocalConfig": False,
                         "agentRuntimeConfigPath": "/etc/velaria/codex-config.json",
                         "agentCodexNetworkAccess": False,
                     }
@@ -95,6 +99,11 @@ class VelariaServiceTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {"HOME": str(home)}):
                 config = velaria_service.get_ai_config()
         self.assertEqual(config["runtime"], "codex")
+        self.assertEqual(config["auth_mode"], "api_key")
+        self.assertEqual(config["provider"], "custom")
+        self.assertEqual(config["api_key"], "test-key")
+        self.assertEqual(config["base_url"], "https://api.example.test/v1")
+        self.assertEqual(config["model"], "gpt-5.4-mini")
         self.assertEqual(config["runtime_path"], "/opt/velaria/runtime/bin/codex")
         self.assertEqual(config["claude_runtime_path"], "/opt/velaria/runtime/bin/claude")
         self.assertEqual(config["codex_runtime_path"], "/opt/velaria/runtime/bin/codex-app")
@@ -103,10 +112,78 @@ class VelariaServiceTest(unittest.TestCase):
         self.assertEqual(config["runtime_config_path"], "/etc/velaria/codex-config.json")
         self.assertFalse(config["network_access"])
 
+    def test_ai_config_oauth_mode_reuses_local_login_and_ignores_api_key(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-agent-config-oauth-") as tmp:
+            home = pathlib.Path(tmp)
+            config_dir = home / ".velaria"
+            config_dir.mkdir()
+            (config_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "agentRuntime": "codex",
+                        "agentAuthMode": "oauth",
+                        "agentProvider": "openai",
+                        "agentApiKey": "should-not-be-used",
+                        "agentBaseUrl": "https://api.example.test/v1",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"HOME": str(home)}):
+                config = velaria_service.get_ai_config()
+        self.assertEqual(config["auth_mode"], "oauth")
+        self.assertEqual(config["provider"], "openai")
+        self.assertEqual(config["api_key"], "")
+        self.assertTrue(config["reuse_local_config"])
+
+    def test_ai_runtime_cache_refreshes_when_agent_config_changes(self):
+        import velaria_service.ai_handlers as ai_handlers
+
+        class Runtime:
+            def __init__(self, name):
+                self.name = name
+                self.shutdown_called = False
+
+            def shutdown(self):
+                self.shutdown_called = True
+
+        runtimes = []
+
+        def fake_create_runtime(config):
+            runtime = Runtime(config["model"])
+            runtimes.append(runtime)
+            return runtime
+
+        ai_handlers._runtime_instance = None
+        ai_handlers._runtime_config_key = ""
+        try:
+            with mock.patch(
+                "velaria_service.ai_handlers.get_ai_config",
+                side_effect=[
+                    {"runtime": "codex", "model": "gpt-5.4-mini", "auth_mode": "oauth"},
+                    {"runtime": "codex", "model": "gpt-5.4-mini", "auth_mode": "oauth"},
+                    {"runtime": "codex", "model": "gpt-5.4", "auth_mode": "api_key", "api_key": "test"},
+                ],
+            ):
+                with mock.patch("velaria.ai_runtime.create_runtime", side_effect=fake_create_runtime):
+                    first = ai_handlers._get_runtime()
+                    second = ai_handlers._get_runtime()
+                    third = ai_handlers._get_runtime()
+            self.assertIs(first, second)
+            self.assertIsNot(second, third)
+            self.assertTrue(first.shutdown_called)
+            self.assertEqual([runtime.name for runtime in runtimes], ["gpt-5.4-mini", "gpt-5.4"])
+        finally:
+            ai_handlers._runtime_instance = None
+            ai_handlers._runtime_config_key = ""
+
     def test_codex_runtime_defaults_to_local_codex_command(self):
         from velaria.ai_runtime import create_runtime
 
-        runtime = create_runtime({"runtime": "codex"})
+        try:
+            runtime = create_runtime({"runtime": "codex"})
+        except ImportError as exc:
+            raise unittest.SkipTest("codex-app-server-sdk is not installed") from exc
         try:
             self.assertEqual(runtime.model, "gpt-5.4-mini")
             self.assertEqual(runtime.status()["model"], "gpt-5.4-mini")

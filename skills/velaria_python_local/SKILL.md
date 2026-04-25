@@ -411,15 +411,18 @@ uv sync --project python --extra ai-claude
 ```json
 {
   "agentRuntime": "codex",
+  "agentAuthMode": "oauth",
+  "agentProvider": "openai",
+  "agentModel": "gpt-5.4-mini",
   "agentRuntimeWorkspace": "~/.velaria/ai-runtime",
-  "agentReuseLocalConfig": true,
   "agentCodexNetworkAccess": true
 }
 ```
 
 未显式设置 `agentModel` 时，Codex runtime 默认使用 `gpt-5.4-mini`。
 `agentRuntimeWorkspace` 是 runtime 工作目录，用于保存和恢复 agent thread。
-`agentReuseLocalConfig` 控制 runtime 进程是否复用当前用户配置；设为 `false` 时使用隔离 HOME。
+`agentAuthMode: "oauth"` 复用本地 Codex 或 Claude 登录；需要显式凭证时改为
+`agentAuthMode: "api_key"`，并设置 `agentApiKey` / `agentBaseUrl`。
 Codex workspace-write 网络访问默认开启；只有需要离线运行时才把 `agentCodexNetworkAccess` 设为 `false`。
 只有需要覆盖本地 Codex 可执行文件时才设置 `agentRuntimePath` / `agentCodexRuntimePath`。
 Claude Code runtime 可通过 `agentClaudeRuntimePath` 指定。代理直接使用标准环境变量，如 `http_proxy`、`https_proxy`、`all_proxy`。

@@ -51,7 +51,7 @@ export function App() {
   const [serviceInfo, setServiceInfo] = useState<ServiceInfo | null>(null);
   const [serviceStatus, setServiceStatus] = useState('status_bootstrapping');
   const [serviceMeta, setServiceMeta] = useState('status_waiting');
-  const [configForm, setConfigForm] = useState<AppConfig>({ bitableAppId: '', bitableAppSecret: '', aiProvider: 'openai', aiApiKey: '', aiBaseUrl: 'https://api.openai.com/v1', aiModel: 'gpt-4o-mini', aiRuntime: 'auto' });
+  const [configForm, setConfigForm] = useState<AppConfig>({ bitableAppId: '', bitableAppSecret: '', agentRuntime: 'codex', agentAuthMode: 'oauth', agentProvider: 'openai', agentApiKey: '', agentBaseUrl: 'https://api.openai.com/v1', agentModel: 'gpt-5.4-mini' });
   const [configMessage, setConfigMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
   const [datasets, setDatasets] = useState<DatasetRecord[]>(() => loadDatasets());
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
@@ -100,7 +100,7 @@ export function App() {
         const info = await window.velariaShell.getServiceInfo();
         const cfg = await window.velariaShell.getConfig();
         setServiceInfo(info);
-        setConfigForm({ bitableAppId: cfg.bitableAppId || '', bitableAppSecret: cfg.bitableAppSecret || '', aiProvider: (cfg.aiProvider as AppConfig['aiProvider']) || 'openai', aiApiKey: cfg.aiApiKey || '', aiBaseUrl: cfg.aiBaseUrl || 'https://api.openai.com/v1', aiModel: cfg.aiModel || 'gpt-4o-mini', aiRuntime: (cfg.aiRuntime as AppConfig['aiRuntime']) || 'auto' });
+        setConfigForm({ bitableAppId: cfg.bitableAppId || '', bitableAppSecret: cfg.bitableAppSecret || '', agentRuntime: (cfg.agentRuntime as AppConfig['agentRuntime']) || 'codex', agentAuthMode: (cfg.agentAuthMode as AppConfig['agentAuthMode']) || 'oauth', agentProvider: (cfg.agentProvider as AppConfig['agentProvider']) || 'openai', agentApiKey: cfg.agentApiKey || '', agentBaseUrl: cfg.agentBaseUrl || 'https://api.openai.com/v1', agentModel: cfg.agentModel || 'gpt-5.4-mini' });
         const health = await fetch(`${info.baseUrl}/health`).then((r) => r.json());
         setServiceStatus(t('status_ready_on', { port: health.port }));
         setServiceMeta(t('status_packaged', { packaged: String(info.packaged), version: health.version }));
@@ -240,13 +240,14 @@ export function App() {
       const saved = await window.velariaShell.saveConfig({
         bitableAppId: configForm.bitableAppId.trim() || undefined,
         bitableAppSecret: configForm.bitableAppSecret.trim() || undefined,
-        aiProvider: configForm.aiProvider || undefined,
-        aiApiKey: configForm.aiApiKey.trim() || undefined,
-        aiBaseUrl: configForm.aiBaseUrl.trim() || undefined,
-        aiModel: configForm.aiModel.trim() || undefined,
-        aiRuntime: configForm.aiRuntime || undefined,
+        agentRuntime: configForm.agentRuntime || undefined,
+        agentAuthMode: configForm.agentAuthMode || undefined,
+        agentProvider: configForm.agentProvider || undefined,
+        agentApiKey: configForm.agentAuthMode === 'api_key' ? configForm.agentApiKey.trim() || undefined : undefined,
+        agentBaseUrl: configForm.agentBaseUrl.trim() || undefined,
+        agentModel: configForm.agentModel.trim() || undefined,
       });
-      setConfigForm({ bitableAppId: saved.bitableAppId || '', bitableAppSecret: saved.bitableAppSecret || '', aiProvider: (saved.aiProvider as AppConfig['aiProvider']) || 'openai', aiApiKey: saved.aiApiKey || '', aiBaseUrl: saved.aiBaseUrl || 'https://api.openai.com/v1', aiModel: saved.aiModel || 'gpt-4o-mini', aiRuntime: (saved.aiRuntime as AppConfig['aiRuntime']) || 'auto' });
+      setConfigForm({ bitableAppId: saved.bitableAppId || '', bitableAppSecret: saved.bitableAppSecret || '', agentRuntime: (saved.agentRuntime as AppConfig['agentRuntime']) || 'codex', agentAuthMode: (saved.agentAuthMode as AppConfig['agentAuthMode']) || 'oauth', agentProvider: (saved.agentProvider as AppConfig['agentProvider']) || 'openai', agentApiKey: saved.agentApiKey || '', agentBaseUrl: saved.agentBaseUrl || 'https://api.openai.com/v1', agentModel: saved.agentModel || 'gpt-5.4-mini' });
       setConfigMessage({ kind: 'info', text: t('settings_saved') });
     } catch (error) {
       setConfigMessage({ kind: 'error', text: t('settings_save_failed', { error: String(error) }) });

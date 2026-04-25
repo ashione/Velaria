@@ -76,70 +76,92 @@ export function SettingsPanel(props: SettingsPanelProps) {
           <div className="panel-body stack">
             <div className="helper">{t('ai_settings_hint')}</div>
             <label>
-              <span>{t('ai_provider')}</span>
+              <span>{t('agent_runtime')}</span>
               <select
-                value={configForm.aiProvider}
+                value={configForm.agentRuntime}
                 onChange={(event) => {
-                  setConfigForm((current) => ({ ...current, aiProvider: event.target.value as AppConfig['aiProvider'] }));
+                  setConfigForm((current) => ({ ...current, agentRuntime: event.target.value as AppConfig['agentRuntime'] }));
+                  setConfigMessage(null);
+                }}
+              >
+                <option value="codex">Codex Runtime</option>
+                <option value="claude">Claude Code Runtime</option>
+              </select>
+            </label>
+            <label>
+              <span>{t('agent_auth_mode')}</span>
+              <select
+                value={configForm.agentAuthMode}
+                onChange={(event) => {
+                  const nextMode = event.target.value as AppConfig['agentAuthMode'];
+                  setConfigForm((current) => ({
+                    ...current,
+                    agentAuthMode: nextMode,
+                    agentApiKey: nextMode === 'oauth' ? '' : current.agentApiKey,
+                  }));
+                  setConfigMessage(null);
+                }}
+              >
+                <option value="oauth">{t('agent_auth_oauth')}</option>
+                <option value="api_key">{t('agent_auth_api_key')}</option>
+              </select>
+            </label>
+            <label>
+              <span>{t('agent_provider')}</span>
+              <select
+                value={configForm.agentProvider}
+                onChange={(event) => {
+                  setConfigForm((current) => ({ ...current, agentProvider: event.target.value as AppConfig['agentProvider'] }));
                   setConfigMessage(null);
                 }}
               >
                 <option value="openai">OpenAI Compatible</option>
-                <option value="claude">Claude (Anthropic)</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="custom">Custom</option>
               </select>
             </label>
+            {configForm.agentAuthMode === 'api_key' && (
+              <label>
+                <span>{t('agent_api_key')}</span>
+                <input
+                  type="password"
+                  value={configForm.agentApiKey}
+                  onChange={(event) => {
+                    setConfigForm((current) => ({ ...current, agentApiKey: event.target.value }));
+                    setConfigMessage(null);
+                  }}
+                  placeholder="sk-..."
+                />
+              </label>
+            )}
             <label>
-              <span>{t('ai_api_key')}</span>
+              <span>{t('agent_base_url')}</span>
               <input
-                type="password"
-                value={configForm.aiApiKey}
+                value={configForm.agentBaseUrl}
                 onChange={(event) => {
-                  setConfigForm((current) => ({ ...current, aiApiKey: event.target.value }));
-                  setConfigMessage(null);
-                }}
-                placeholder="sk-..."
-              />
-            </label>
-            <label>
-              <span>{t('ai_base_url')}</span>
-              <input
-                value={configForm.aiBaseUrl}
-                onChange={(event) => {
-                  setConfigForm((current) => ({ ...current, aiBaseUrl: event.target.value }));
+                  setConfigForm((current) => ({ ...current, agentBaseUrl: event.target.value }));
                   setConfigMessage(null);
                 }}
                 placeholder="https://api.openai.com/v1"
               />
             </label>
             <label>
-              <span>{t('ai_model')}</span>
+              <span>{t('agent_model')}</span>
               <input
-                value={configForm.aiModel}
+                value={configForm.agentModel}
                 onChange={(event) => {
-                  setConfigForm((current) => ({ ...current, aiModel: event.target.value }));
+                  setConfigForm((current) => ({ ...current, agentModel: event.target.value }));
                   setConfigMessage(null);
                 }}
-                placeholder="gpt-4o-mini"
+                placeholder="gpt-5.4-mini"
               />
             </label>
-            <label>
-              <span>{t('ai_runtime')}</span>
-              <select
-                value={configForm.aiRuntime}
-                onChange={(event) => {
-                  setConfigForm((current) => ({ ...current, aiRuntime: event.target.value as AppConfig['aiRuntime'] }));
-                  setConfigMessage(null);
-                }}
-              >
-                <option value="auto">Auto</option>
-                <option value="claude">Claude Agent SDK</option>
-                <option value="codex">Codex App Server</option>
-              </select>
-            </label>
             <div className="helper">
-              {configForm.aiApiKey
-                ? t('settings_secret_preview', { value: maskSecret(configForm.aiApiKey) })
-                : t('ai_no_api_key')}
+              {configForm.agentAuthMode === 'oauth'
+                ? t('agent_oauth_hint')
+                : configForm.agentApiKey
+                  ? t('settings_secret_preview', { value: maskSecret(configForm.agentApiKey) })
+                  : t('agent_no_api_key')}
             </div>
             <div className="actions">
               <button type="button" onClick={() => void saveConfig()}>

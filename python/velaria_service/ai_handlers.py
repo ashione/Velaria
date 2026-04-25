@@ -10,17 +10,21 @@ from ._helpers import get_ai_config
 
 
 _runtime_instance = None
+_runtime_config_key = ""
 _runtime_lock = threading.Lock()
 
 
 def _get_runtime():
-    global _runtime_instance
+    global _runtime_instance, _runtime_config_key
     with _runtime_lock:
-        if _runtime_instance is None:
+        config = get_ai_config()
+        config_key = json.dumps(config, sort_keys=True, default=str)
+        if _runtime_instance is None or _runtime_config_key != config_key:
+            if _runtime_instance is not None and hasattr(_runtime_instance, "shutdown"):
+                _runtime_instance.shutdown()
             from velaria.ai_runtime import create_runtime
-
-            config = get_ai_config()
             _runtime_instance = create_runtime(config)
+            _runtime_config_key = config_key
         return _runtime_instance
 
 

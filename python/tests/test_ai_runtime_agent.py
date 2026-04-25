@@ -520,10 +520,61 @@ class AiRuntimeAgentTest(unittest.TestCase):
                 self.assertTrue(pathlib.Path(mcp["env"]["VELARIA_SKILL_PATH"]).exists())
                 self.assertNotIn(str(pathlib.Path.cwd()), json.dumps(mcp["env"]))
                 status = runtime.status(session_id)
+                self.assertEqual(status["provider"], "openai")
+                self.assertEqual(status["auth_mode"], "oauth")
+                self.assertTrue(status["reuse_local_config"])
                 self.assertEqual(status["cwd"], runtime_cwd)
                 self.assertEqual(status["reasoning_effort"], "none")
                 self.assertTrue(status["network_access"])
                 self.assertNotIn("project_cwd", status)
+            finally:
+                runtime.shutdown()
+
+    def test_codex_runtime_api_key_mode_injects_provider_env(self):
+        from velaria.ai_runtime.codex_runtime import CodexRuntime
+
+        class FakeClient:
+            @classmethod
+            def connect_stdio(cls, **kwargs):
+                inst = cls()
+                inst.connect_kwargs = kwargs
+                return inst
+
+            async def start(self):
+                return None
+
+            async def start_thread(self, config):
+                self.started_config = config
+                return types.SimpleNamespace(thread_id="codex-thread-1")
+
+            async def close(self):
+                return None
+
+        with tempfile.TemporaryDirectory(prefix="velaria-codex-runtime-auth-") as tmp:
+            try:
+                runtime = CodexRuntime(
+                    provider="custom",
+                    auth_mode="api_key",
+                    api_key="test-key",
+                    base_url="https://api.example.test/v1",
+                    runtime_workspace=tmp,
+                    reuse_local_config=False,
+                )
+            except ImportError as exc:
+                raise unittest.SkipTest("codex-app-server-sdk is not installed") from exc
+            runtime._client_cls = FakeClient
+            try:
+                asyncio.run(runtime.start_thread({}))
+                fake = runtime._client
+                self.assertEqual(fake.connect_kwargs["env"]["OPENAI_API_KEY"], "test-key")
+                self.assertEqual(fake.connect_kwargs["env"]["OPENAI_BASE_URL"], "https://api.example.test/v1")
+                mcp_env = fake.started_config.config["mcp_servers"]["velaria"]["env"]
+                self.assertEqual(mcp_env["OPENAI_API_KEY"], "test-key")
+                self.assertEqual(mcp_env["OPENAI_BASE_URL"], "https://api.example.test/v1")
+                status = runtime.status()
+                self.assertEqual(status["provider"], "custom")
+                self.assertEqual(status["auth_mode"], "api_key")
+                self.assertFalse(status["reuse_local_config"])
             finally:
                 runtime.shutdown()
 

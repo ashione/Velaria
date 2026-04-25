@@ -119,11 +119,12 @@ export type ServiceInfo = {
 export type AppConfig = {
   bitableAppId: string;
   bitableAppSecret: string;
-  aiProvider: 'openai' | 'claude' | 'custom';
-  aiApiKey: string;
-  aiBaseUrl: string;
-  aiModel: string;
-  aiRuntime: 'auto' | 'claude' | 'codex';
+  agentRuntime: 'claude' | 'codex';
+  agentAuthMode: 'oauth' | 'api_key';
+  agentProvider: 'openai' | 'anthropic' | 'custom';
+  agentApiKey: string;
+  agentBaseUrl: string;
+  agentModel: string;
 };
 
 // 'monitors' is kept for code compatibility but hidden from navigation

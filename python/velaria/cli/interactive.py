@@ -996,8 +996,11 @@ def _print_status(status: dict[str, Any], *, title: str = "Status") -> None:
     session = status.get("session") if isinstance(status.get("session"), dict) else {}
     rows = [
         ("runtime", str(status.get("runtime") or "-")),
+        ("provider", str(status.get("provider") or "-")),
+        ("auth", str(status.get("auth_mode") or "-")),
         ("model", str(status.get("model") or "-")),
         ("network", "enabled" if status.get("network_access", True) else "disabled"),
+        ("local config", "reuse" if status.get("reuse_local_config", True) else "isolated"),
         ("session", str(session.get("session_id") or "-")),
         ("cwd", str(status.get("cwd") or "-")),
         ("workspace", str(status.get("workspace") or "-")),

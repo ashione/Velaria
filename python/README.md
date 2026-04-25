@@ -426,8 +426,10 @@ Minimal Codex runtime config:
 ```json
 {
   "agentRuntime": "codex",
+  "agentAuthMode": "oauth",
+  "agentProvider": "openai",
+  "agentModel": "gpt-5.4-mini",
   "agentRuntimeWorkspace": "~/.velaria/ai-runtime",
-  "agentReuseLocalConfig": true,
   "agentCodexNetworkAccess": true
 }
 ```
@@ -435,10 +437,11 @@ Minimal Codex runtime config:
 Codex uses the local `codex app-server` command and defaults to `gpt-5.4-mini`
 when `agentModel` is omitted. `agentRuntimeWorkspace` is the runtime working directory
 used to save and resume agent threads. If omitted, Velaria creates a
-project-scoped directory under `~/.velaria/ai-runtime/`. `agentReuseLocalConfig`
-controls whether the runtime process can reuse current user config; set it to
-`false` for an isolated runtime HOME. Use `agentRuntimePath` / `agentCodexRuntimePath`
-only when overriding the local Codex executable. Use `agentClaudeRuntimePath` for
+project-scoped directory under `~/.velaria/ai-runtime/`. `agentAuthMode: "oauth"`
+reuses the local Codex or Claude login. Use `agentAuthMode: "api_key"` together
+with `agentApiKey` and `agentBaseUrl` when the provider should be driven by
+explicit API credentials. Use `agentRuntimePath` / `agentCodexRuntimePath` only
+when overriding the local Codex executable. Use `agentClaudeRuntimePath` for
 Claude Code runtime. Codex workspace-write network access is enabled by default;
 set `agentCodexNetworkAccess` to `false` only for offline runtime sessions.
 The runtime inherits standard proxy environment variables such as `http_proxy`,

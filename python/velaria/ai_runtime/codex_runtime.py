@@ -35,9 +35,13 @@ class CodexRuntime:
 
     def __init__(
         self,
+        provider: str = "openai",
         model: str = "gpt-5.4-mini",
         reasoning_effort: str = "none",
         network_access: bool = True,
+        api_key: str = "",
+        base_url: str = "",
+        auth_mode: str = "oauth",
         runtime_path: str = "",
         runtime_workspace: str = "",
         reuse_local_config: bool = True,
@@ -57,6 +61,10 @@ class CodexRuntime:
         self._reuse_local_config = reuse_local_config
         self._runtime_config_path = runtime_config_path
         self._proxy_env = _normalize_proxy_env(proxy_env or {})
+        self._provider = provider
+        self._api_key = api_key
+        self._base_url = base_url
+        self._auth_mode = auth_mode
         from codex_app_server_sdk import CodexClient, ThreadConfig  # noqa: F401 -- validated at init
 
         self.model = model
@@ -211,8 +219,10 @@ class CodexRuntime:
         entry = self.registry.lookup(session_id) if session_id else self.registry.most_recent_active()
         return {
             "runtime": "codex",
+            "provider": self._provider,
             "model": self.model,
             "reasoning_effort": self.reasoning_effort,
+            "auth_mode": self._auth_mode,
             "network_access": self.network_access,
             "reuse_local_config": self._reuse_local_config,
             "proxy": bool(_proxy_env_from_process(self._proxy_env)),
@@ -402,6 +412,10 @@ class CodexRuntime:
         env["VELARIA_HOME"] = str(self._workspace)
         env["VELARIA_WORKSPACE"] = str(self._workspace)
         env["VELARIA_RUNTIME_WORKSPACE"] = str(self._workspace)
+        if self._api_key:
+            env["OPENAI_API_KEY"] = self._api_key
+        if self._base_url:
+            env["OPENAI_BASE_URL"] = self._base_url
         _apply_proxy_env(env, self._proxy_env)
         return env
 
@@ -413,6 +427,10 @@ class CodexRuntime:
             "UV_CACHE_DIR": str(self._cwd / ".cache" / "uv"),
             "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
         }
+        if self._api_key:
+            env["OPENAI_API_KEY"] = self._api_key
+        if self._base_url:
+            env["OPENAI_BASE_URL"] = self._base_url
         _apply_proxy_env(env, self._proxy_env)
         if self._skill_dir is not None:
             env["VELARIA_SKILL_DIR"] = str(self._skill_dir)

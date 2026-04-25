@@ -26,19 +26,26 @@ def generate_session_id() -> str:
 
 def create_runtime(config: dict[str, Any]) -> AiRuntime:
     runtime_type = str(config.get("runtime", "codex")).strip().lower()
-    api_key = str(config.get("api_key", ""))
+    provider = str(config.get("provider", "openai") or "openai").strip().lower()
+    auth_mode = _normalize_auth_mode(config.get("auth_mode", "oauth"))
+    api_key = str(config.get("api_key", "")) if auth_mode == "api_key" else ""
+    base_url = str(config.get("base_url", "")) if auth_mode == "api_key" else ""
     model = str(config.get("model", ""))
     reasoning_effort = str(config.get("reasoning_effort") or "none")
     network_access = _bool_config(config, "network_access", True)
+    reuse_local_config = auth_mode == "oauth"
 
     if runtime_type == "claude" or (runtime_type == "auto" and _has_claude_sdk()):
         from .claude_runtime import ClaudeAgentRuntime
         return ClaudeAgentRuntime(
+            provider=provider,
+            auth_mode=auth_mode,
             api_key=api_key,
+            base_url=base_url,
             model=model or "claude-sonnet-4-20250514",
             runtime_path=_runtime_path_for(config, "claude"),
             runtime_workspace=str(config.get("runtime_workspace") or ""),
-            reuse_local_config=bool(config.get("reuse_local_config", True)),
+            reuse_local_config=reuse_local_config,
             runtime_config_path=str(config.get("runtime_config_path") or ""),
             skill_dir=str(config.get("skill_dir") or ""),
             skill_path=str(config.get("skill_path") or ""),
@@ -48,12 +55,16 @@ def create_runtime(config: dict[str, Any]) -> AiRuntime:
     if runtime_type == "codex" or (runtime_type == "auto" and _has_codex_sdk()):
         from .codex_runtime import CodexRuntime
         return CodexRuntime(
+            provider=provider,
             model=model or "gpt-5.4-mini",
             reasoning_effort=reasoning_effort,
             network_access=network_access,
+            api_key=api_key,
+            base_url=base_url,
+            auth_mode=auth_mode,
             runtime_path=_runtime_path_for(config, "codex"),
             runtime_workspace=str(config.get("runtime_workspace") or ""),
-            reuse_local_config=bool(config.get("reuse_local_config", True)),
+            reuse_local_config=reuse_local_config,
             runtime_config_path=str(config.get("runtime_config_path") or ""),
             skill_dir=str(config.get("skill_dir") or ""),
             skill_path=str(config.get("skill_path") or ""),
@@ -99,6 +110,12 @@ def _bool_config(config: dict[str, Any], key: str, default: bool) -> bool:
             return False
     return bool(value)
 
+def _normalize_auth_mode(value: Any) -> str:
+    normalized = str(value or "oauth").strip().lower()
+    if normalized == "api_key":
+        return "api_key"
+    return "oauth"
+
 def load_ai_config() -> dict[str, Any]:
     config_path = Path.home() / ".velaria" / "config.json"
     if not config_path.exists():
@@ -107,9 +124,11 @@ def load_ai_config() -> dict[str, Any]:
         config = json.loads(config_path.read_text(encoding="utf-8"))
     except Exception:
         return {}
+    auth_mode = _normalize_auth_mode(config.get("agentAuthMode", "oauth"))
     return {
         "provider": config.get("agentProvider", "openai"),
-        "api_key": config.get("agentApiKey", ""),
+        "auth_mode": auth_mode,
+        "api_key": config.get("agentApiKey", "") if auth_mode == "api_key" else "",
         "base_url": config.get("agentBaseUrl", "https://api.openai.com/v1"),
         "model": config.get("agentModel", ""),
         "reasoning_effort": config.get("agentReasoningEffort", "none"),
@@ -118,7 +137,7 @@ def load_ai_config() -> dict[str, Any]:
         "claude_runtime_path": config.get("agentClaudeRuntimePath", ""),
         "codex_runtime_path": config.get("agentCodexRuntimePath", ""),
         "runtime_workspace": config.get("agentRuntimeWorkspace", ""),
-        "reuse_local_config": _bool_value(config.get("agentReuseLocalConfig", True), True),
+        "reuse_local_config": auth_mode == "oauth",
         "runtime_config_path": config.get("agentRuntimeConfigPath", ""),
         "network_access": config.get("agentCodexNetworkAccess", config.get("agentNetworkAccess", True)),
         "proxy_env": _proxy_env_from_config(config),
@@ -144,17 +163,3 @@ def _proxy_env_from_config(config: dict[str, Any]) -> dict[str, str]:
     if no_proxy:
         proxy_env["no_proxy"] = no_proxy
     return proxy_env
-
-
-def _bool_value(value: Any, default: bool) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off"}:
-            return False
-    return bool(value)

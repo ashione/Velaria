@@ -57,7 +57,7 @@ if [[ ! -f "${NATIVE_EXT}" ]]; then
   exit 1
 fi
 
-echo "[sidecar] packaging velaria_service.py with PyInstaller"
+echo "[sidecar] packaging velaria_service with PyInstaller"
 "${PYTHON_BIN}" -m PyInstaller \
   --noconfirm \
   --clean \
@@ -70,8 +70,9 @@ echo "[sidecar] packaging velaria_service.py with PyInstaller"
   --add-binary "${NATIVE_EXT}:velaria" \
   --add-data "${JIEBA_DIR}:velaria/jieba_dict" \
   --collect-submodules velaria \
+  --collect-submodules velaria_service \
   --collect-binaries velaria \
   --collect-data velaria \
-  "${ROOT_DIR}/python/velaria_service.py"
+  "${ROOT_DIR}/python/velaria_service/__init__.py"
 
 echo "[sidecar] done: ${OUT_DIR}/${SERVICE_NAME}"

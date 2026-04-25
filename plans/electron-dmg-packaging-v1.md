@@ -188,7 +188,7 @@ app/
     icons/
 
 python/
-  velaria_service.py
+  velaria_service/
 ```
 
 发布构建中间目录建议固定为：
@@ -236,7 +236,7 @@ Velaria.app/
 
 新增文件：
 
-- `python/velaria_service.py`
+- `python/velaria_service/`
 
 职责：
 
@@ -375,7 +375,7 @@ v1 固定顺序：
 执行项：
 
 1. 新建 `app/` 工程骨架。
-2. 新增 `python/velaria_service.py`。
+2. 新增 `python/velaria_service/`。
 3. 新增 `app/scripts/build-sidecar-macos.sh`。
 4. 用 PyInstaller 打出 sidecar。
 5. 新增 `electron-builder` 配置。
@@ -431,7 +431,7 @@ v1 固定顺序：
 
 1. 新建 `app/package.json`
 2. 新建 `app/electron-builder.yml`
-3. 新建 `python/velaria_service.py`
+3. 新建 `python/velaria_service/`
 4. 新建 `app/scripts/build-sidecar-macos.sh`
 5. 新建 `app/scripts/package-macos.sh`
 6. 在 `package.json` 中加入：

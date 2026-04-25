@@ -3,7 +3,7 @@
 ## Summary
 
 This document describes the current local agentic service surface implemented by
-`python/velaria_service.py`.
+`python/velaria_service/`.
 
 It is the repository-facing reference for:
 

@@ -112,11 +112,11 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 """,
-    sha256 = "da4b2af0730932ba122798a5e05e7709cd870544ddb62142e029e786d7b4b0db",
-    strip_prefix = "limonp-master",
+    sha256 = "0d98bd9c87bd82bcfc234107908969e7416145d8b5e996e43c5d2513c419b2c0",
+    strip_prefix = "limonp-1.0.2",
     type = "tar.gz",
     urls = [
-        "https://codeload.github.com/yanyiwu/limonp/tar.gz/refs/heads/master",
+        "https://codeload.github.com/yanyiwu/limonp/tar.gz/refs/tags/v1.0.2",
     ],
 )
 

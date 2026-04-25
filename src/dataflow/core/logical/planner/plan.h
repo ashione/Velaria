@@ -3,6 +3,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "src/dataflow/core/execution/file_source.h"
@@ -54,7 +55,11 @@ enum class ComputedColumnKind {
   NumericRound,
   DateYear,
   DateMonth,
-  DateDay
+  DateDay,
+  DateIsoYear,
+  DateIsoWeek,
+  DateWeek,
+  DateYearWeek
 };
 
 enum class AggImplKind {
@@ -130,6 +135,10 @@ struct SourceAggregatePushdownSpec {
 };
 
 struct SourceFilterPushdownSpec {
+  SourceFilterPushdownSpec() = default;
+  SourceFilterPushdownSpec(size_t column, Value rhs, std::string comparison_op)
+      : column_index(column), value(std::move(rhs)), op(std::move(comparison_op)) {}
+
   size_t column_index = 0;
   bool rhs_is_column = false;
   size_t rhs_column_index = 0;

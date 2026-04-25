@@ -843,7 +843,10 @@ StreamingDataFrame buildAggregateStream(const StreamingDataFrame& seed, const sq
   std::vector<std::string> group_keys;
   group_keys.reserve(query.group_by.size());
   for (const auto& key : query.group_by) {
-    group_keys.push_back(resolveColumnName(key, from));
+    if (key.is_string_function) {
+      throw SQLUnsupportedError("stream SQL does not support scalar expressions in GROUP BY");
+    }
+    group_keys.push_back(resolveColumnName(key.column, from));
   }
 
   std::optional<sql::SelectItem> aggregate_item;

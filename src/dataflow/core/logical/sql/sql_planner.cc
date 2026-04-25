@@ -90,6 +90,8 @@ ComputedColumnKind toComputedFunctionKind(sql::StringFunctionKind function) {
       return ComputedColumnKind::StringPosition;
     case sql::StringFunctionKind::Replace:
       return ComputedColumnKind::StringReplace;
+    case sql::StringFunctionKind::Cast:
+      return ComputedColumnKind::Cast;
     case sql::StringFunctionKind::Abs:
       return ComputedColumnKind::NumericAbs;
     case sql::StringFunctionKind::Ceil:
@@ -147,6 +149,8 @@ std::string defaultStringAlias(const sql::StringFunctionExpr& expr, std::size_t 
         return std::string("position");
       case sql::StringFunctionKind::Replace:
         return std::string("replace");
+      case sql::StringFunctionKind::Cast:
+        return std::string("cast");
       case sql::StringFunctionKind::Abs:
         return std::string("abs");
       case sql::StringFunctionKind::Ceil:
@@ -280,6 +284,11 @@ std::shared_ptr<::dataflow::PlanPredicateExpr> toPlanPredicateExpr(
     out->kind = ::dataflow::PlanPredicateExprKind::Comparison;
     out->comparison.column_index =
         static_cast<std::size_t>(std::stoull(expr->predicate.lhs.name));
+    if (expr->predicate.rhs_is_column_candidate) {
+      out->comparison.rhs_is_column = true;
+      out->comparison.rhs_column_index =
+          static_cast<std::size_t>(std::stoull(expr->predicate.rhs_column.name));
+    }
     out->comparison.value = expr->predicate.rhs;
     out->comparison.op = opToString(expr->predicate.op);
     return out;
@@ -461,6 +470,21 @@ void ensureStringFunctionSupported(const StringFunctionExpr& function) {
         throw SQLSemanticError("POSITION requires 2 arguments");
       }
       break;
+    case StringFunctionKind::Cast:
+      if (function.args.size() != 2 || function.args[1].is_column ||
+          function.args[1].is_function || function.args[1].literal.type() != DataType::String) {
+        throw SQLSemanticError("CAST expects CAST(value AS type)");
+      }
+      {
+        const auto target = function.args[1].literal.asString();
+        if (!(target == "STRING" || target == "TEXT" || target == "INT" ||
+              target == "INTEGER" || target == "INT64" || target == "BIGINT" ||
+              target == "DOUBLE" || target == "FLOAT" || target == "REAL" ||
+              target == "BOOL" || target == "BOOLEAN")) {
+          throw SQLSemanticError("CAST target type is not supported: " + target);
+        }
+      }
+      break;
     case StringFunctionKind::Ltrim:
     case StringFunctionKind::Rtrim:
       if (function.args.size() != 1) {
@@ -498,6 +522,11 @@ void ensureStringFunctionSupported(const StringFunctionExpr& function) {
         throw SQLSemanticError("date scalar function expects 1 argument");
       }
       break;
+  }
+  for (const auto& arg : function.args) {
+    if (arg.is_function && arg.function) {
+      ensureStringFunctionSupported(*arg.function);
+    }
   }
 }
 
@@ -652,10 +681,47 @@ class RelationContext {
     return indices;
   }
 
+  bool canResolveColumn(const ColumnRef& col) const {
+    try {
+      (void)resolveColumn(col, nullptr);
+      return true;
+    } catch (const SQLSemanticError&) {
+      return false;
+    }
+  }
+
  private:
   std::vector<RelationView> relations_;
   std::unordered_map<std::string, std::size_t> aliases_;
 };
+
+bool predicateHasRhsColumnComparison(const std::shared_ptr<PredicateExpr>& expr,
+                                     const RelationContext& ctx) {
+  if (!expr) return false;
+  if (expr->kind == PredicateExprKind::Comparison) {
+    return expr->predicate.rhs_is_column_candidate &&
+           ctx.canResolveColumn(expr->predicate.rhs_column);
+  }
+  return predicateHasRhsColumnComparison(expr->left, ctx) ||
+         predicateHasRhsColumnComparison(expr->right, ctx);
+}
+
+Predicate rebindPredicateColumns(const Predicate& predicate, const RelationContext& ctx) {
+  auto rebound = predicate;
+  const auto lhs_idx = ctx.resolveColumn(predicate.lhs, nullptr);
+  rebound.lhs.qualifier = "__index__";
+  rebound.lhs.name = std::to_string(lhs_idx);
+  if (predicate.rhs_is_column_candidate && ctx.canResolveColumn(predicate.rhs_column)) {
+    const auto rhs_idx = ctx.resolveColumn(predicate.rhs_column, nullptr);
+    rebound.rhs_is_column_candidate = true;
+    rebound.rhs_column.qualifier = "__index__";
+    rebound.rhs_column.name = std::to_string(rhs_idx);
+  } else {
+    rebound.rhs_is_column_candidate = false;
+    rebound.rhs_column = ColumnRef{};
+  }
+  return rebound;
+}
 
 std::vector<ComputedColumnArg> resolveStringFunctionArgs(const StringFunctionExpr& function,
                                                         const RelationContext& ctx) {
@@ -664,8 +730,17 @@ std::vector<ComputedColumnArg> resolveStringFunctionArgs(const StringFunctionExp
   args.reserve(function.args.size());
   for (const auto& arg : function.args) {
     ComputedColumnArg out_arg;
-    out_arg.is_literal = !arg.is_column;
-    if (arg.is_column) {
+    out_arg.is_literal = !arg.is_column && !arg.is_function;
+    out_arg.is_function = arg.is_function;
+    if (arg.is_function) {
+      if (!arg.function) {
+        throw SQLSemanticError("function argument is missing expression");
+      }
+      out_arg.source_column_index = static_cast<size_t>(-1);
+      out_arg.literal = Value();
+      out_arg.function = toComputedFunctionKind(arg.function->function);
+      out_arg.args = resolveStringFunctionArgs(*arg.function, ctx);
+    } else if (arg.is_column) {
       out_arg.source_column_index = ctx.resolveColumn(arg.column, nullptr);
       out_arg.literal = Value();
     } else {
@@ -685,7 +760,12 @@ std::string columnRefKey(const ColumnRef& column) {
   return column.qualifier + "." + column.name;
 }
 
+std::string stringFunctionExprKey(const StringFunctionExpr& function);
+
 std::string functionArgKey(const StringFunctionArg& arg) {
+  if (arg.is_function && arg.function) {
+    return stringFunctionExprKey(*arg.function);
+  }
   if (arg.is_column) {
     return "c:" + columnRefKey(arg.column);
   }
@@ -733,8 +813,17 @@ std::vector<ComputedColumnArg> resolveStreamStringFunctionArgs(const StringFunct
   args.reserve(function.args.size());
   for (const auto& arg : function.args) {
     ComputedColumnArg out_arg;
-    out_arg.is_literal = !arg.is_column;
-    if (arg.is_column) {
+    out_arg.is_literal = !arg.is_column && !arg.is_function;
+    out_arg.is_function = arg.is_function;
+    if (arg.is_function) {
+      if (!arg.function) {
+        throw SQLSemanticError("function argument is missing expression");
+      }
+      out_arg.source_column_index = static_cast<size_t>(-1);
+      out_arg.literal = Value();
+      out_arg.function = toComputedFunctionKind(arg.function->function);
+      out_arg.args = resolveStreamStringFunctionArgs(*arg.function, from);
+    } else if (arg.is_column) {
       out_arg.source_column_index = static_cast<size_t>(-1);
       out_arg.source_column_name = resolveStreamColumnName(arg.column, from);
       out_arg.literal = Value();
@@ -866,6 +955,8 @@ std::string computedFunctionName(ComputedColumnKind function) {
       return "position";
     case ComputedColumnKind::StringReplace:
       return "replace";
+    case ComputedColumnKind::Cast:
+      return "cast";
     case ComputedColumnKind::NumericAbs:
       return "abs";
     case ComputedColumnKind::NumericCeil:
@@ -893,6 +984,16 @@ std::string computedFunctionName(ComputedColumnKind function) {
 }
 
 std::string computedArgToString(const ComputedColumnArg& arg) {
+  if (arg.is_function) {
+    std::ostringstream out;
+    out << "function(" << computedFunctionName(arg.function) << "(";
+    for (std::size_t i = 0; i < arg.args.size(); ++i) {
+      if (i > 0) out << ", ";
+      out << computedArgToString(arg.args[i]);
+    }
+    out << "))";
+    return out.str();
+  }
   if (arg.is_literal) {
     return "literal(" + arg.literal.toString() + ")";
   }
@@ -1096,7 +1197,8 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
       throw SQLSemanticError("WHERE does not support aggregate expressions");
     }
     std::vector<Predicate> conjunctive;
-    if (collectConjunctivePredicates(query.where, &conjunctive)) {
+    if (!predicateHasRhsColumnComparison(query.where, ctx) &&
+        collectConjunctivePredicates(query.where, &conjunctive)) {
       for (const auto& predicate : conjunctive) {
         std::size_t idx = ctx.resolveColumn(predicate.lhs, nullptr);
         LogicalPlanStep filter;
@@ -1111,11 +1213,7 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
       LogicalPlanStep filter;
       filter.kind = LogicalStepKind::PredicateFilter;
       filter.predicate_expr = rewritePredicateExpr(query.where, [&](const Predicate& predicate) {
-        auto rebound = predicate;
-        const auto idx = ctx.resolveColumn(predicate.lhs, nullptr);
-        rebound.lhs.qualifier = "__index__";
-        rebound.lhs.name = std::to_string(idx);
-        return rebound;
+        return rebindPredicateColumns(predicate, ctx);
       });
       logical.steps.push_back(filter);
       current = current.filterPredicate(toPlanPredicateExpr(filter.predicate_expr));
@@ -1307,6 +1405,8 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
           auto rebound = pred;
           rebound.lhs.qualifier = "__index__";
           rebound.lhs.name = std::to_string(resolve_having_column(pred));
+          rebound.rhs_is_column_candidate = false;
+          rebound.rhs_column = ColumnRef{};
           return rebound;
         });
         logical.steps.push_back(having);

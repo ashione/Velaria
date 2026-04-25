@@ -337,14 +337,18 @@ std::optional<StringFunctionKind> tryParseStringFunction(const std::string& valu
   if (u == "ISO_WEEK") return StringFunctionKind::IsoWeek;
   if (u == "WEEK") return StringFunctionKind::Week;
   if (u == "YEARWEEK") return StringFunctionKind::YearWeek;
+  if (u == "CAST") return StringFunctionKind::Cast;
   return std::nullopt;
 }
+
+StringFunctionExpr parseStringFunctionExpr(ParseState& state, StringFunctionKind function);
 
 StringFunctionArg parseFunctionArg(ParseState& state, const Token& first) {
   StringFunctionArg arg;
   if (first.is_string || first.is_number || isKeyword(first.text, "NULL") ||
       isKeyword(first.text, "TRUE") || isKeyword(first.text, "FALSE")) {
     arg.is_column = false;
+    arg.is_function = false;
     arg.literal = parseValueToken(first);
     return arg;
   }
@@ -357,13 +361,22 @@ StringFunctionArg parseFunctionArg(ParseState& state, const Token& first) {
       throw SQLSyntaxError("invalid function argument");
     }
     arg.is_column = true;
+    arg.is_function = false;
     arg.column = ColumnRef{first.text, second.text};
     return arg;
   }
-  if (!state.isEnd() && state.peek().text == "(") {
-    throw SQLUnsupportedError("not supported in SQL v1: nested function calls");
+  if (!state.isEnd() && state.consumeSymbol("(")) {
+    auto function = tryParseStringFunction(first.text);
+    if (!function.has_value()) {
+      throw SQLUnsupportedError("not supported in SQL v1: scalar function " + first.text);
+    }
+    arg.is_column = false;
+    arg.is_function = true;
+    arg.function = std::make_shared<StringFunctionExpr>(parseStringFunctionExpr(state, *function));
+    return arg;
   }
   arg.is_column = true;
+  arg.is_function = false;
   arg.column = ColumnRef{"", first.text};
   return arg;
 }
@@ -371,6 +384,19 @@ StringFunctionArg parseFunctionArg(ParseState& state, const Token& first) {
 StringFunctionExpr parseStringFunctionExpr(ParseState& state, StringFunctionKind function) {
   StringFunctionExpr expr;
   expr.function = function;
+  if (function == StringFunctionKind::Cast) {
+    Token token = state.expectToken();
+    expr.args.push_back(parseFunctionArg(state, token));
+    state.expectWord("AS");
+    Token target_type = state.expectToken();
+    StringFunctionArg target;
+    target.is_column = false;
+    target.is_function = false;
+    target.literal = Value(toUpper(target_type.text));
+    expr.args.push_back(std::move(target));
+    state.expectSymbol(")");
+    return expr;
+  }
   if (state.consumeSymbol(")")) {
     return expr;
   }
@@ -443,6 +469,8 @@ Predicate parseComparisonPredicate(ParseState& state) {
   } else if (isClauseKeyword(rhs.text)) {
     throw SQLSyntaxError("unsupported predicate literal");
   } else {
+    out.rhs_is_column_candidate = true;
+    out.rhs_column = parseColumnWithFirst(state, rhs);
     out.rhs = parseValueToken(rhs);
   }
   if (rhs_parenthesized) {

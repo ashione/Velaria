@@ -47,6 +47,7 @@ enum class ComputedColumnKind {
   StringLtrim,
   StringRtrim,
   StringReplace,
+  Cast,
   NumericAbs,
   NumericCeil,
   NumericFloor,
@@ -134,6 +135,8 @@ struct SourceAggregatePushdownSpec {
 
 struct SourceFilterPushdownSpec {
   size_t column_index = 0;
+  bool rhs_is_column = false;
+  size_t rhs_column_index = 0;
   Value value;
   std::string op;
 };
@@ -168,9 +171,12 @@ struct SourcePushdownSpec {
 
 struct ComputedColumnArg {
   bool is_literal = false;
+  bool is_function = false;
   Value literal;
   size_t source_column_index = 0;
   std::string source_column_name;
+  ComputedColumnKind function = ComputedColumnKind::Copy;
+  std::vector<ComputedColumnArg> args;
 };
 
 struct PlanNode {

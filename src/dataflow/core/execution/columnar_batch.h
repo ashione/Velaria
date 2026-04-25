@@ -108,6 +108,9 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
                                        const std::string& op, std::size_t max_selected);
 RowSelection vectorizedFilterSelection(const ValueColumnView& input, const Value& rhs,
                                        const std::string& op, std::size_t max_selected);
+RowSelection vectorizedColumnCompareSelection(const ValueColumnView& lhs,
+                                             const ValueColumnView& rhs,
+                                             const std::string& op);
 Table projectTable(const Table& table, const std::vector<std::size_t>& indices,
                    const std::vector<std::string>& aliases = {},
                    bool materialize_rows = true);

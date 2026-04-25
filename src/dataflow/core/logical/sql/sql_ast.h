@@ -39,7 +39,8 @@ enum class StringFunctionKind {
   IsoYear,
   IsoWeek,
   Week,
-  YearWeek
+  YearWeek,
+  Cast
 };
 
 struct ColumnRef {
@@ -54,10 +55,14 @@ struct AggregateExpr {
   std::string alias;
 };
 
+struct StringFunctionExpr;
+
 struct StringFunctionArg {
   bool is_column = false;
+  bool is_function = false;
   ColumnRef column;
   Value literal;
+  std::shared_ptr<StringFunctionExpr> function;
 };
 
 struct StringFunctionExpr {
@@ -104,7 +109,9 @@ struct JoinItem {
 
 struct Predicate {
   bool lhs_is_aggregate = false;
+  bool rhs_is_column_candidate = false;
   ColumnRef lhs;
+  ColumnRef rhs_column;
   AggregateExpr lhs_aggregate;
   Value rhs;
   BinaryOperatorKind op = BinaryOperatorKind::Eq;

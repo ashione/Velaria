@@ -137,6 +137,36 @@ class StreamingV05Test(unittest.TestCase):
         self.assertEqual(rows["rows"][1][:6], [2026, 2, 202602, 1, 40, 40])
         self.assertAlmostEqual(float(rows["rows"][1][6]), 40.0, places=6)
 
+    def test_batch_sql_supports_cast_nested_substr_and_column_comparison(self):
+        session = velaria.Session()
+        table = pa.table(
+            {
+                "trade_date": ["2026-01-01", "2026-01-02", "2026-01-03"],
+                "open": [10.25, 8.50, 7.10],
+                "close": [9.75, 8.75, 6.05],
+                "open_text": ["10.25", "8.50", "7.10"],
+            }
+        )
+        df = session.create_dataframe_from_arrow(table)
+        session.create_temp_view("batch_price_input", df)
+
+        rows = self._run_batch_sql(
+            session,
+            "SELECT COUNT(*) AS down_days FROM batch_price_input WHERE open > close",
+        ).to_rows()
+        self.assertEqual(rows["schema"], ["down_days"])
+        self.assertEqual(rows["rows"], [[2]])
+
+        rows = self._run_batch_sql(
+            session,
+            "SELECT trade_date, SUBSTR(CAST(open AS STRING), 1, 4) AS open_prefix, "
+            "CAST(open_text AS DOUBLE) AS open_number "
+            "FROM batch_price_input ORDER BY trade_date LIMIT 1",
+        ).to_rows()
+        self.assertEqual(rows["schema"], ["trade_date", "open_prefix", "open_number"])
+        self.assertEqual(rows["rows"][0][1], "10.2")
+        self.assertAlmostEqual(float(rows["rows"][0][2]), 10.25, places=6)
+
     def test_stream_progress_contract_with_start_stream_sql(self):
         session = velaria.Session()
         table = pa.table(

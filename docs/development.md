@@ -109,7 +109,9 @@ cat > ~/.velaria/config.json << 'EOF'
   "aiRuntimePath": "/opt/velaria-runtime/bin/claude",
   "aiRuntimeWorkspace": "~/.velaria/ai-runtime",
   "aiReuseLocalConfig": true,
-  "aiCodexNetworkAccess": true
+  "aiCodexNetworkAccess": true,
+  "aiProxy": "http://127.0.0.1:7897",
+  "aiAllProxy": "socks5://127.0.0.1:7897"
 }
 EOF
 ```
@@ -123,7 +125,10 @@ a project-scoped directory under `~/.velaria/ai-runtime/`. `aiReuseLocalConfig`
 controls whether the runtime process can reuse the current user config; set it
 to `false` when the runtime should use an isolated HOME. Codex workspace-write
 network access is enabled by default; set `aiCodexNetworkAccess` to `false` only
-when the agent runtime must be offline.
+when the agent runtime must be offline. `aiProxy` sets both `http_proxy` and
+`https_proxy` for the runtime process; use `aiHttpProxy`, `aiHttpsProxy`,
+`aiAllProxy`, and `aiNoProxy` for separate values. Shell proxy variables are
+also inherited, and Velaria keeps localhost bypassed for local MCP/data URLs.
 
 Use AI from the CLI:
 

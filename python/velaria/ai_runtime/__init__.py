@@ -58,6 +58,7 @@ def create_runtime(config: dict[str, Any]) -> AiRuntime:
             skill_dir=str(config.get("skill_dir") or ""),
             skill_path=str(config.get("skill_path") or ""),
             cwd=str(config.get("cwd") or ""),
+            proxy_env=dict(config.get("proxy_env") or {}),
         )
 
     raise RuntimeError(
@@ -120,7 +121,26 @@ def load_ai_config() -> dict[str, Any]:
         "reuse_local_config": bool(config.get("aiReuseLocalConfig", True)),
         "runtime_config_path": config.get("aiRuntimeConfigPath", ""),
         "network_access": config.get("aiCodexNetworkAccess", config.get("aiNetworkAccess", True)),
+        "proxy_env": _proxy_env_from_config(config),
         "skill_dir": config.get("aiSkillDir", ""),
         "skill_path": config.get("aiSkillPath", ""),
         "cwd": str(Path.cwd()),
     }
+
+
+def _proxy_env_from_config(config: dict[str, Any]) -> dict[str, str]:
+    proxy_env: dict[str, str] = {}
+    shared_proxy = str(config.get("aiProxy") or "").strip()
+    http_proxy = str(config.get("aiHttpProxy") or shared_proxy).strip()
+    https_proxy = str(config.get("aiHttpsProxy") or shared_proxy).strip()
+    all_proxy = str(config.get("aiAllProxy") or "").strip()
+    no_proxy = str(config.get("aiNoProxy") or "").strip()
+    if http_proxy:
+        proxy_env["http_proxy"] = http_proxy
+    if https_proxy:
+        proxy_env["https_proxy"] = https_proxy
+    if all_proxy:
+        proxy_env["all_proxy"] = all_proxy
+    if no_proxy:
+        proxy_env["no_proxy"] = no_proxy
+    return proxy_env

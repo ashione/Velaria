@@ -149,6 +149,7 @@ Arrow / CSV / Python ingress
 - Electron 桌面 app 仍然只是本地原型，还不是稳定公开产品面
 - AI runtime 需要安装 `claude-agent-sdk` 或 `codex-app-server-sdk`（可选依赖）
 - Codex runtime 默认使用 `gpt-5.4-mini`，并默认开启 workspace-write 网络访问；可通过 `aiModel` / `aiCodexNetworkAccess` 覆盖
+- Codex runtime 会继承代理环境变量，并支持 `aiProxy` / `aiAllProxy` 改善 websocket 连接
 - 仓库不宣称已完成 distributed runtime
 
 稳定公开 surface：

@@ -340,6 +340,61 @@ class PythonCliContractTest(unittest.TestCase):
         self.assertRegex(output, r"schema\s+region, amount")
         self.assertRegex(output, r"result\s+2 rows \[region\]")
 
+    def test_interactive_mode_parses_codex_mcp_function_events(self):
+        tool_output = (
+            "Wall time: 0.1 seconds\n"
+            "Output:\n"
+            + json.dumps(
+                {
+                    "ok": True,
+                    "function": "velaria_dataset_process",
+                    "source_path": "/tmp/sales.csv",
+                    "source_url": "https://example.test/sales.csv",
+                    "table_name": "input_table",
+                    "query": "SELECT region FROM input_table",
+                    "schema": ["region", "total_amount"],
+                    "row_count": 2,
+                    "rows": [{"region": "cn", "total_amount": 15.0}],
+                    "run_id": "run_dataset",
+                    "artifacts": [{"artifact_id": "artifact_dataset", "run_id": "run_dataset"}],
+                }
+            )
+        )
+        events = [
+            {
+                "type": "tool_call",
+                "data": {
+                    "item": {
+                        "type": "function_call",
+                        "namespace": "mcp__velaria__",
+                        "name": "velaria_dataset_process",
+                    }
+                },
+            },
+            {
+                "type": "tool_result",
+                "content": tool_output,
+                "data": {"item": {"type": "function_call_output", "call_id": "call_1"}},
+            },
+            {"type": "assistant_text", "content": "done"},
+        ]
+        fake = _FakeAgentRuntime(events=events)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch("velaria.cli.interactive._runtime", None):
+            with _mock_agent_runtime(fake):
+                with mock.patch("builtins.input", side_effect=["process url", "/status", "/exit"]):
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        exit_code = velaria_cli.main(["-i"])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        output = stdout.getvalue()
+        self.assertIn("tool         mcp__velaria__.velaria_dataset_process", output)
+        self.assertIn("tool result  velaria_dataset_process: run run_dataset: 2 rows [region, total_amount]", output)
+        self.assertRegex(output, r"last run\s+run_dataset")
+        self.assertRegex(output, r"last artifact\s+artifact_dataset")
+        self.assertRegex(output, r"last tool\s+mcp__velaria__\.velaria_dataset_process")
+
     def test_interactive_mode_shortcuts_dataset_runs_and_artifacts_commands(self):
         fake = _FakeAgentRuntime()
         stdout = io.StringIO()

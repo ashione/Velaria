@@ -537,12 +537,19 @@ def _extract_tool_name(data: dict[str, Any]) -> str:
         value = data.get(key)
         if isinstance(value, str) and value:
             return value
+    payload = data.get("payload") if isinstance(data, dict) else None
+    if isinstance(payload, dict):
+        value = _extract_tool_name(payload)
+        if value:
+            return value
     item = data.get("item") if isinstance(data, dict) else None
     if isinstance(item, dict):
-        for key in ("name", "toolName", "serverName"):
-            value = item.get(key)
-            if isinstance(value, str) and value:
-                return value
+        name = str(item.get("name") or item.get("toolName") or item.get("tool") or "")
+        namespace = str(item.get("namespace") or item.get("serverName") or item.get("server") or "")
+        if namespace and name and not name.startswith(namespace):
+            return f"{namespace}.{name}"
+        if name or namespace:
+            return name or namespace
     return ""
 
 
@@ -787,7 +794,7 @@ def _format_result_state() -> str:
 def _update_state_from_event(event_type: str, content: str, data: dict[str, Any]) -> None:
     if event_type in {"tool_call", "tool_result"}:
         tool_name = _extract_tool_name(data) or _extract_tool_name_from_payload(content)
-        if tool_name:
+        if tool_name and (event_type == "tool_call" or not _state.last_tool):
             _state.last_tool = tool_name
     if event_type == "command" and content:
         _state.last_tool = "command"
@@ -878,17 +885,33 @@ def _parse_json_payload(text: str) -> dict[str, Any] | None:
     if not text or not text.strip():
         return None
     raw = text.strip()
-    try:
-        parsed = json.loads(raw)
-    except Exception:
-        lines = [line for line in raw.splitlines() if line.strip()]
-        if not lines:
-            return None
+    for candidate in _json_payload_candidates(raw):
         try:
-            parsed = json.loads(lines[-1])
+            parsed = json.loads(candidate)
         except Exception:
-            return None
-    return parsed if isinstance(parsed, dict) else None
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _json_payload_candidates(raw: str) -> list[str]:
+    candidates = [raw]
+    marker = "Output:"
+    if marker in raw:
+        candidates.append(raw.rsplit(marker, 1)[1].strip())
+    lines = [line for line in raw.splitlines() if line.strip()]
+    if lines:
+        candidates.append(lines[-1].strip())
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(raw[start : end + 1])
+    deduped: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
 
 
 def _first_dict_value(data: dict[str, Any], keys: set[str]) -> dict[str, Any] | None:

@@ -202,6 +202,8 @@ def _velaria_dataset_process(args: JsonDict) -> JsonDict:
     source_path, source_metadata = _materialize_source_path(raw_source_path)
     query = str(args["query"])
     table_name = str(args.get("table_name") or "input_table")
+    if table_name != "input_table" and _query_references_table(query, "input_table"):
+        table_name = "input_table"
     input_type = str(args.get("input_type") or "auto")
     delimiter = str(args.get("delimiter") or ",")
     preview_limit = max(0, min(int(args.get("limit") or 50), 200))
@@ -349,6 +351,12 @@ def _merge_dataset_result(target: JsonDict, result: JsonDict, limit: int) -> Non
     target["rows"] = rows[:limit]
 
 
+def _query_references_table(query: str, table_name: str) -> bool:
+    import re
+
+    return re.search(rf"\b{re.escape(table_name)}\b", query, flags=re.IGNORECASE) is not None
+
+
 def _velaria_cli_run(args: JsonDict) -> JsonDict:
     command = args.get("command")
     argv = args.get("argv")
@@ -490,10 +498,17 @@ def velaria_agent_instructions() -> str:
         "`velaria_dataset_process`; these functions localize the remote file "
         "inside the Velaria runtime workspace. Do not write curl, wget, Python "
         "download code, or generic shell download steps before trying the "
-        "Velaria function. If a source is an `.xls` or `.xlsx` URL, Velaria can "
-        "download it and convert it to CSV for SQL processing. If Velaria cannot "
-        "handle the requested workflow, explain that boundary and then use the "
-        "best available fallback.\n\n"
+        "Velaria function. Do not probe `velaria_cli.py --help` or inspect the "
+        "generic CLI before using the registered Velaria tools for ordinary "
+        "dataset work. Do not use web search to discover Velaria tools. If "
+        "direct `mcp__velaria__.*` tools are not visible because the runtime "
+        "deferred them, use `tool_search` with a Velaria-specific query and then "
+        "call the returned `mcp__velaria__` tool. Use web search only when the "
+        "user asks you to find an external data source or current external facts. "
+        "If a source is an `.xls` or `.xlsx` URL, Velaria can download it and "
+        "convert it to CSV for SQL processing. If Velaria cannot handle the "
+        "requested workflow, explain that boundary and then use the best "
+        "available fallback.\n\n"
         "Velaria SQL v1 supports SELECT projection/aliases, WHERE, GROUP BY, "
         "ORDER BY, LIMIT, minimal JOIN, INSERT INTO ... VALUES, INSERT INTO ... "
         "SELECT, CREATE TABLE, CREATE SOURCE TABLE, and CREATE SINK TABLE. Do "
@@ -632,7 +647,11 @@ def local_function_registry() -> dict[str, LocalFunction]:
                         "description": "Alias for source_path; local file path or HTTP(S) URL to process.",
                     },
                     "query": {"type": "string"},
-                    "table_name": {"type": "string", "default": "input_table"},
+                    "table_name": {
+                        "type": "string",
+                        "default": "input_table",
+                        "description": "Working SQL table name. Omit this unless the query uses a different table; default queries should use input_table.",
+                    },
                     "input_type": {"type": "string", "default": "auto"},
                     "delimiter": {"type": "string", "default": ","},
                     "output_path": {"type": "string"},

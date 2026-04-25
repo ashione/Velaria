@@ -45,6 +45,7 @@ class CodexRuntime:
         skill_dir: str = "",
         skill_path: str = "",
         cwd: str = "",
+        proxy_env: dict[str, str] | None = None,
     ):
         self._command = _codex_command(runtime_path)
         self._launch_cwd = pathlib.Path(cwd).expanduser().resolve() if cwd else pathlib.Path.cwd().resolve()
@@ -55,6 +56,7 @@ class CodexRuntime:
         self._skill_path = _resolve_velaria_skill_path(skill_path, self._skill_dir)
         self._reuse_local_config = reuse_local_config
         self._runtime_config_path = runtime_config_path
+        self._proxy_env = _normalize_proxy_env(proxy_env or {})
         from codex_app_server_sdk import CodexClient, ThreadConfig  # noqa: F401 -- validated at init
 
         self.model = model
@@ -174,6 +176,7 @@ class CodexRuntime:
                         f"thread.chat raw={getattr(event, 'step_type', '')} "
                         f"normalized={normalized.get('type') if normalized else 'filtered'}"
                     )
+                    self._trace_event_payload(event)
                     if normalized is not None:
                         events.put(normalized)
             except Exception as exc:
@@ -212,6 +215,7 @@ class CodexRuntime:
             "reasoning_effort": self.reasoning_effort,
             "network_access": self.network_access,
             "reuse_local_config": self._reuse_local_config,
+            "proxy": bool(_proxy_env_from_process(self._proxy_env)),
             "codex_home": str(self._codex_home),
             "workspace": str(self._workspace),
             "cwd": str(self._cwd),
@@ -365,6 +369,22 @@ class CodexRuntime:
         elapsed = time.perf_counter() - self._trace_start
         print(f"[velaria-trace {elapsed:8.3f}s] codex.{message}", file=sys.stderr, flush=True)
 
+    def _trace_event_payload(self, event: Any) -> None:
+        if not os.environ.get("VELARIA_TRACE_EVENTS"):
+            return
+        payload = {
+            "raw": str(getattr(event, "step_type", "") or ""),
+            "text": str(getattr(event, "text", "") or ""),
+            "data": getattr(event, "data", None) or {},
+        }
+        try:
+            rendered = json.dumps(payload, ensure_ascii=False, default=str)
+        except Exception:
+            rendered = str(payload)
+        if len(rendered) > 4000:
+            rendered = rendered[:3997] + "..."
+        self._trace(f"event_payload {rendered}")
+
     def _runtime_env(self) -> dict[str, str] | None:
         env = dict(os.environ)
         _prepare_isolated_codex_home(
@@ -376,14 +396,24 @@ class CodexRuntime:
         )
         env["HOME"] = str(self._workspace)
         env["CODEX_HOME"] = str(self._codex_home)
+        uv_cache_dir = self._cwd / ".cache" / "uv"
+        uv_cache_dir.mkdir(parents=True, exist_ok=True)
+        env["UV_CACHE_DIR"] = str(uv_cache_dir)
+        env["VELARIA_HOME"] = str(self._workspace)
+        env["VELARIA_WORKSPACE"] = str(self._workspace)
+        env["VELARIA_RUNTIME_WORKSPACE"] = str(self._workspace)
+        _apply_proxy_env(env, self._proxy_env)
         return env
 
     def _mcp_config(self) -> dict[str, Any]:
         env = {
+            "VELARIA_HOME": str(self._workspace),
             "VELARIA_WORKSPACE": str(self._workspace),
             "VELARIA_RUNTIME_WORKSPACE": str(self._workspace),
+            "UV_CACHE_DIR": str(self._cwd / ".cache" / "uv"),
             "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
         }
+        _apply_proxy_env(env, self._proxy_env)
         if self._skill_dir is not None:
             env["VELARIA_SKILL_DIR"] = str(self._skill_dir)
         if self._skill_path is not None:
@@ -427,18 +457,27 @@ def _codex_sdk_event(event: Any) -> dict[str, Any] | None:
     item = _codex_event_item(data)
     item_type = str(item.get("type") or raw_type)
 
-    if item_type == "userMessage":
+    if item_type in {"userMessage", "message"} and item.get("role") == "user":
         return None
-    if item_type == "assistantMessage":
+    if item_type in {"assistantMessage", "message"}:
         content = text or _codex_text_from_blocks(item.get("content"))
         return {"type": "assistant_text", "content": content, "data": data} if content else None
     if item_type == "reasoning":
         content = text or _codex_reasoning_text(item)
         return {"type": "thinking", "content": content, "data": data} if content else None
-    if item_type in {"functionCall", "toolCall", "mcpToolCall"}:
-        name = str(item.get("name") or item.get("toolName") or item.get("serverName") or "")
+    if item_type == "mcpToolCall" and item.get("result"):
+        content = text or _codex_tool_result_text(item)
+        return {"type": "tool_result", "content": content, "data": {**data, "item": item}}
+    if item_type in {"functionCall", "toolCall", "mcpToolCall", "function_call", "tool_search_call"}:
+        name = _codex_tool_name(item)
         return {"type": "tool_call", "content": name, "data": {**data, "item": item}}
-    if item_type in {"functionCallOutput", "toolResult", "mcpToolCallOutput"}:
+    if item_type in {
+        "functionCallOutput",
+        "toolResult",
+        "mcpToolCallOutput",
+        "function_call_output",
+        "tool_search_output",
+    }:
         content = text or _codex_tool_result_text(item)
         return {"type": "tool_result", "content": content, "data": {**data, "item": item}}
     if item_type in {"commandExecution", "exec"}:
@@ -455,6 +494,9 @@ def _codex_sdk_event(event: Any) -> dict[str, Any] | None:
 
 
 def _codex_event_item(data: dict[str, Any]) -> dict[str, Any]:
+    found = _find_codex_item(data)
+    if found is not None:
+        return found
     item = data.get("item")
     if isinstance(item, dict):
         return item
@@ -462,6 +504,57 @@ def _codex_event_item(data: dict[str, Any]) -> dict[str, Any]:
     if isinstance(params, dict) and isinstance(params.get("item"), dict):
         return params["item"]
     return {}
+
+
+def _find_codex_item(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        item_type = value.get("type")
+        if item_type in {
+            "functionCall",
+            "toolCall",
+            "mcpToolCall",
+            "function_call",
+            "tool_search_call",
+            "functionCallOutput",
+            "toolResult",
+            "mcpToolCallOutput",
+            "function_call_output",
+            "tool_search_output",
+            "message",
+            "assistantMessage",
+            "userMessage",
+            "reasoning",
+            "error",
+            "failed",
+        }:
+            return value
+        if value.get("name") and (value.get("namespace") or value.get("serverName") or value.get("toolName")):
+            return value
+        for key in ("payload", "item", "params", "event", "data"):
+            found = _find_codex_item(value.get(key))
+            if found is not None:
+                return found
+        for nested in value.values():
+            found = _find_codex_item(nested)
+            if found is not None:
+                return found
+    if isinstance(value, list):
+        for nested in value:
+            found = _find_codex_item(nested)
+            if found is not None:
+                return found
+    return None
+
+
+def _codex_tool_name(item: dict[str, Any]) -> str:
+    name = str(item.get("name") or item.get("toolName") or item.get("tool") or "")
+    namespace = str(item.get("namespace") or item.get("serverName") or item.get("server") or "")
+    function = item.get("function")
+    if not name and isinstance(function, dict):
+        name = str(function.get("name") or "")
+    if namespace and name and not name.startswith(namespace):
+        return f"{namespace}.{name}"
+    return name or namespace
 
 
 def _codex_text_from_blocks(blocks: Any) -> str:
@@ -493,6 +586,14 @@ def _codex_tool_result_text(item: dict[str, Any]) -> str:
         if isinstance(value, str):
             return value
         if isinstance(value, dict):
+            structured = value.get("structuredContent")
+            if isinstance(structured, dict):
+                return json.dumps(structured, ensure_ascii=False)
+            content = value.get("content")
+            if isinstance(content, list):
+                text = _codex_text_from_blocks(content)
+                if text:
+                    return text
             return json.dumps(value, ensure_ascii=False)
         if isinstance(value, list):
             text = _codex_text_from_blocks(value)
@@ -597,6 +698,39 @@ def _coerce_bool(value: Any, default: bool) -> bool:
         if normalized in {"0", "false", "no", "off"}:
             return False
     return bool(value)
+
+
+def _normalize_proxy_env(proxy_env: dict[str, str]) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for key, value in proxy_env.items():
+        key_text = str(key).strip()
+        value_text = str(value).strip()
+        if not key_text or not value_text:
+            continue
+        key_lower = key_text.lower()
+        if key_lower in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}:
+            normalized[key_lower] = value_text
+    return normalized
+
+
+def _proxy_env_from_process(configured: dict[str, str]) -> dict[str, str]:
+    merged = dict(configured)
+    for key in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+        if key not in merged:
+            value = os.environ.get(key) or os.environ.get(key.upper())
+            if value:
+                merged[key] = value
+    return merged
+
+
+def _apply_proxy_env(env: dict[str, str], configured: dict[str, str]) -> None:
+    proxies = _proxy_env_from_process(configured)
+    if not proxies:
+        return
+    proxies.setdefault("no_proxy", "127.0.0.1,localhost,::1")
+    for key, value in proxies.items():
+        env[key] = value
+        env[key.upper()] = value
 
 
 def _resolve_velaria_skill_path(skill_path: str, skill_dir: pathlib.Path | None) -> pathlib.Path | None:

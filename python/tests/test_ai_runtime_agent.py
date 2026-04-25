@@ -178,6 +178,37 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertEqual(result["schema"], ["region", "total"])
         self.assertEqual(result["row_count"], 1)
 
+    def test_dataset_process_uses_input_table_when_query_references_it(self):
+        captured = {}
+
+        def fake_main(argv):
+            captured["argv"] = argv
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "run_id": "run_dataset",
+                        "result": {"schema": ["region"], "rows": [{"region": "cn"}]},
+                    }
+                )
+            )
+            return 0
+
+        with mock.patch("velaria.cli.main", side_effect=fake_main):
+            result = execute_local_function(
+                "velaria_dataset_process",
+                {
+                    "source_path": "/tmp/sales.csv",
+                    "table_name": "sales",
+                    "query": "SELECT region FROM input_table",
+                    "save_run": True,
+                },
+            )
+        self.assertTrue(result["ok"])
+        table_arg = captured["argv"][captured["argv"].index("--table") + 1]
+        self.assertEqual(table_arg, "input_table")
+        self.assertEqual(result["table_name"], "input_table")
+
     def test_cli_function_surfaces_run_and_artifact_metadata(self):
         def fake_main(argv):
             print(
@@ -281,6 +312,9 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertIn("then call the Velaria local functions", instructions)
         self.assertIn("For HTTP(S) URLs", instructions)
         self.assertIn("Do not write curl, wget, Python download code", instructions)
+        self.assertIn("Do not probe `velaria_cli.py --help`", instructions)
+        self.assertIn("Do not use web search to discover Velaria tools", instructions)
+        self.assertIn("tool_search", instructions)
         self.assertIn("velaria_dataset_download", instructions)
         self.assertIn("velaria_dataset_import", instructions)
         self.assertIn("velaria_dataset_process", instructions)
@@ -329,6 +363,11 @@ class AiRuntimeAgentTest(unittest.TestCase):
                     runtime_workspace=tmp,
                     skill_dir=str(skill_dir),
                     cwd=str(pathlib.Path.cwd()),
+                    proxy_env={
+                        "http_proxy": "http://127.0.0.1:7897",
+                        "https_proxy": "http://127.0.0.1:7897",
+                        "all_proxy": "socks5://127.0.0.1:7897",
+                    },
                 )
             except ImportError as exc:
                 raise unittest.SkipTest("codex-app-server-sdk is not installed") from exc
@@ -342,6 +381,17 @@ class AiRuntimeAgentTest(unittest.TestCase):
                 self.assertEqual(fake.connect_kwargs["cwd"], runtime_cwd)
                 self.assertEqual(fake.connect_kwargs["env"]["HOME"], str(pathlib.Path(tmp)))
                 self.assertEqual(fake.connect_kwargs["env"]["CODEX_HOME"], str(pathlib.Path(tmp) / ".codex"))
+                self.assertEqual(
+                    fake.connect_kwargs["env"]["UV_CACHE_DIR"],
+                    str(pathlib.Path(tmp) / "workspace" / ".cache" / "uv"),
+                )
+                self.assertEqual(fake.connect_kwargs["env"]["VELARIA_HOME"], str(pathlib.Path(tmp)))
+                self.assertEqual(fake.connect_kwargs["env"]["VELARIA_WORKSPACE"], str(pathlib.Path(tmp)))
+                self.assertEqual(fake.connect_kwargs["env"]["VELARIA_RUNTIME_WORKSPACE"], str(pathlib.Path(tmp)))
+                self.assertEqual(fake.connect_kwargs["env"]["http_proxy"], "http://127.0.0.1:7897")
+                self.assertEqual(fake.connect_kwargs["env"]["HTTPS_PROXY"], "http://127.0.0.1:7897")
+                self.assertEqual(fake.connect_kwargs["env"]["all_proxy"], "socks5://127.0.0.1:7897")
+                self.assertEqual(fake.connect_kwargs["env"]["no_proxy"], "127.0.0.1,localhost,::1")
                 isolated_config = pathlib.Path(fake.connect_kwargs["env"]["CODEX_HOME"]) / "config.toml"
                 isolated_config_text = isolated_config.read_text(encoding="utf-8")
                 self.assertIn('model = "gpt-5.4-mini"', isolated_config_text)
@@ -370,6 +420,13 @@ class AiRuntimeAgentTest(unittest.TestCase):
                 self.assertEqual(mcp["default_tools_approval_mode"], "approve")
                 self.assertIn("velaria_dataset_import", mcp["enabled_tools"])
                 self.assertIn("velaria_dataset_download", mcp["enabled_tools"])
+                self.assertEqual(mcp["env"]["VELARIA_HOME"], str(pathlib.Path(tmp)))
+                self.assertEqual(
+                    mcp["env"]["UV_CACHE_DIR"],
+                    str(pathlib.Path(tmp) / "workspace" / ".cache" / "uv"),
+                )
+                self.assertEqual(mcp["env"]["http_proxy"], "http://127.0.0.1:7897")
+                self.assertEqual(mcp["env"]["ALL_PROXY"], "socks5://127.0.0.1:7897")
                 self.assertEqual(mcp["env"]["VELARIA_WORKSPACE"], str(pathlib.Path(tmp)))
                 self.assertEqual(mcp["env"]["VELARIA_RUNTIME_WORKSPACE"], str(pathlib.Path(tmp)))
                 self.assertEqual(mcp["env"]["VELARIA_SKILL_DIR"], str(skill_dir.resolve()))
@@ -383,6 +440,74 @@ class AiRuntimeAgentTest(unittest.TestCase):
                 self.assertNotIn("project_cwd", status)
             finally:
                 runtime.shutdown()
+
+    def test_codex_runtime_normalizes_mcp_function_events(self):
+        from velaria.ai_runtime.codex_runtime import _codex_sdk_event
+
+        call_event = types.SimpleNamespace(
+            step_type="tool",
+            text="",
+            data={
+                "params": {
+                    "event": {
+                        "payload": {
+                            "type": "function_call",
+                            "namespace": "mcp__velaria__",
+                            "name": "velaria_dataset_process",
+                            "arguments": "{}",
+                        }
+                    }
+                }
+            },
+        )
+        normalized_call = _codex_sdk_event(call_event)
+        self.assertEqual(normalized_call["type"], "tool_call")
+        self.assertEqual(normalized_call["content"], "mcp__velaria__.velaria_dataset_process")
+
+        output = json.dumps({"ok": True, "function": "velaria_dataset_process", "run_id": "run_dataset"})
+        result_event = types.SimpleNamespace(
+            step_type="tool",
+            text="",
+            data={
+                "params": {
+                    "event": {
+                        "payload": {
+                            "type": "function_call_output",
+                            "call_id": "call_1",
+                            "output": f"Wall time: 0.1 seconds\nOutput:\n{output}",
+                        }
+                    }
+                }
+            },
+        )
+        normalized_result = _codex_sdk_event(result_event)
+        self.assertEqual(normalized_result["type"], "tool_result")
+        self.assertIn('"run_id": "run_dataset"', normalized_result["content"])
+
+        mcp_event = types.SimpleNamespace(
+            step_type="tool",
+            text="",
+            data={
+                "params": {
+                    "item": {
+                        "type": "mcpToolCall",
+                        "server": "velaria",
+                        "tool": "velaria_read",
+                        "status": "completed",
+                        "result": {
+                            "structuredContent": {
+                                "ok": True,
+                                "function": "velaria_read",
+                                "schema": ["region", "amount"],
+                            }
+                        },
+                    }
+                }
+            },
+        )
+        normalized_mcp = _codex_sdk_event(mcp_event)
+        self.assertEqual(normalized_mcp["type"], "tool_result")
+        self.assertIn('"function": "velaria_read"', normalized_mcp["content"])
 
     def test_codex_runtime_uses_explicit_model_when_configured(self):
         from velaria.ai_runtime.codex_runtime import CodexRuntime

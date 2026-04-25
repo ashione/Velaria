@@ -20,6 +20,8 @@ embedding = [
     "sentence-transformers>=5.3.0",
     "socksio>=1.0.0",
 ]
+ai-claude = ["claude-agent-sdk>=0.1.60"]
+ai-codex = ["codex-app-server-sdk>=0.1.0"]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

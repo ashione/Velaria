@@ -621,6 +621,7 @@ def get_ai_config() -> dict[str, Any]:
             "api_key": config.get("aiApiKey", ""),
             "base_url": config.get("aiBaseUrl", "https://api.openai.com/v1"),
             "model": config.get("aiModel", "gpt-4o-mini"),
+            "runtime": config.get("aiRuntime", "auto"),
         }
     return {}
 

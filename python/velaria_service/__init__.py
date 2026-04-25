@@ -98,7 +98,14 @@ from .agentic_handlers import (  # noqa: F401
 )
 
 # Re-export AI handlers
-from .ai_handlers import handle_generate_sql  # noqa: F401
+from .ai_handlers import (  # noqa: F401
+    handle_analyze,
+    handle_close_session,
+    handle_create_session,
+    handle_generate_sql,
+    handle_get_session,
+    handle_list_sessions,
+)
 
 
 def main() -> int:

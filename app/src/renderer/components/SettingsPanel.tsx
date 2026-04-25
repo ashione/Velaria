@@ -122,6 +122,20 @@ export function SettingsPanel(props: SettingsPanelProps) {
                 placeholder="gpt-4o-mini"
               />
             </label>
+            <label>
+              <span>{t('ai_runtime')}</span>
+              <select
+                value={configForm.aiRuntime}
+                onChange={(event) => {
+                  setConfigForm((current) => ({ ...current, aiRuntime: event.target.value as AppConfig['aiRuntime'] }));
+                  setConfigMessage(null);
+                }}
+              >
+                <option value="auto">Auto</option>
+                <option value="claude">Claude Agent SDK</option>
+                <option value="codex">Codex App Server</option>
+              </select>
+            </label>
             <div className="helper">
               {configForm.aiApiKey
                 ? t('settings_secret_preview', { value: maskSecret(configForm.aiApiKey) })

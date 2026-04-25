@@ -321,6 +321,10 @@ export const I18N: Record<Locale, Record<string, string>> = {
     ai_generating: 'Generating...',
     ai_generate_failed: 'AI generation failed: {error}',
     ai_no_api_key: 'Please configure an AI API key in Settings first.',
+    ai_runtime: 'Runtime',
+    ai_session_active: 'Session active',
+    ai_session_start: 'Start Session',
+    ai_session_close: 'End Session',
   },
   zh: {
     app_title: 'Velaria 原型',
@@ -634,5 +638,9 @@ export const I18N: Record<Locale, Record<string, string>> = {
     ai_generating: '生成中...',
     ai_generate_failed: 'AI 生成失败: {error}',
     ai_no_api_key: '请先在设置中配置 AI API Key。',
+    ai_runtime: '运行时',
+    ai_session_active: '会话活跃',
+    ai_session_start: '开启会话',
+    ai_session_close: '结束会话',
   },
 };

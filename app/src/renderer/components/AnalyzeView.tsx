@@ -44,6 +44,8 @@ export type AnalyzeViewProps = {
   getKeywordUiStatus: (dataset: DatasetRecord | null) => 'disabled' | 'configured' | 'building' | 'failed' | 'ready';
   setSelectedRunId: (id: string | null) => void;
   refreshRuns: (id?: string | null) => void;
+  aiSessionId: string | null;
+  setAiSessionId: (id: string | null) => void;
 };
 
 export function AnalyzeView(props: AnalyzeViewProps) {
@@ -54,6 +56,7 @@ export function AnalyzeView(props: AnalyzeViewProps) {
     removeDataset, buildEmbeddingDataset, buildKeywordIndexDataset,
     getEmbeddingStatusLabel, getEmbeddingUiStatus, getKeywordUiStatus,
     setSelectedRunId, refreshRuns,
+    aiSessionId, setAiSessionId,
   } = props;
 
   /* ---------- local state ---------- */
@@ -136,12 +139,40 @@ export function AnalyzeView(props: AnalyzeViewProps) {
     setAnalysisState((c) => ({ ...c, query: `SELECT * FROM ${quoteIdentifier(table)} WHERE ${quoteIdentifier(filterBuilder.column)} ${filterBuilder.operator} ${quoteLiteral(filterBuilder.value)} LIMIT 50`, preset: 'filter' }));
   }
 
+  async function startAiSession() {
+    if (!currentDataset) return;
+    try {
+      const result = await api('/api/v1/ai/sessions', {
+        method: 'POST',
+        body: JSON.stringify({
+          dataset_context: {
+            schema: currentDataset.schema,
+            source_path: currentDataset.sourcePath,
+            table_name: analysisState.tableName || 'input_table',
+          },
+        }),
+      });
+      if (result.ok && result.session_id) setAiSessionId(result.session_id);
+    } catch { /* session creation is optional, ignore */ }
+  }
+
+  async function closeAiSession() {
+    if (!aiSessionId) return;
+    try {
+      await api(`/api/v1/ai/sessions/${aiSessionId}`, { method: 'DELETE' });
+    } catch { /* ignore */ }
+    setAiSessionId(null);
+  }
+
   async function generateSqlWithAi() {
     if (!aiPrompt.trim() || !currentDataset) return;
     setAiLoading(true);
     setAiError(null);
     try {
-      const result = await api('/api/v1/ai/generate-sql', {
+      const endpoint = aiSessionId
+        ? `/api/v1/ai/sessions/${aiSessionId}/generate-sql`
+        : '/api/v1/ai/generate-sql';
+      const result = await api(endpoint, {
         method: 'POST',
         body: JSON.stringify({
           prompt: aiPrompt.trim(),
@@ -334,6 +365,16 @@ export function AnalyzeView(props: AnalyzeViewProps) {
                   </div>
                 </label>
                 {aiError && <div className="notice error">{aiError}</div>}
+                <div className="ai-session-controls">
+                  {aiSessionId ? (
+                    <>
+                      <span className="ai-session-badge">{t('ai_session_active')}: {aiSessionId.slice(-8)}</span>
+                      <button type="button" className="ghost" onClick={() => void closeAiSession()}>{t('ai_session_close')}</button>
+                    </>
+                  ) : (
+                    <button type="button" className="ghost" onClick={() => void startAiSession()} disabled={!currentDataset}>{t('ai_session_start')}</button>
+                  )}
+                </div>
               </div>
               <label><span>{t('sql_query')}</span><div className="editor-shell"><pre className="editor-highlight" dangerouslySetInnerHTML={{ __html: highlightedSql }} /><textarea className="editor-input" spellCheck={false} value={analysisState.query} onChange={(e) => setAnalysisState((c) => ({ ...c, query: e.target.value }))} /></div></label>
               <div className="actions primary-actions">

@@ -56,6 +56,7 @@ from velaria.cli import embedding as _embedding
 from velaria.cli import run_cmd as _run_cmd
 from velaria.cli import artifacts as _artifacts
 from velaria.cli import agentic as _agentic
+from velaria.cli import ai_cmd as _ai_cmd
 
 
 def _build_parser():
@@ -77,6 +78,7 @@ def _build_parser():
     _run_cmd.register(subparsers)
     _artifacts.register(subparsers)
     _agentic.register(subparsers)
+    _ai_cmd.register(subparsers)
 
     return parser
 
@@ -215,6 +217,9 @@ def main(argv: list[str] | None = None) -> int:
                 return _agentic._focus_events_update_cli(args, status_name="consumed")
             if args.focus_events_command == "archive":
                 return _agentic._focus_events_update_cli(args, status_name="archived")
+
+        if args.command == "ai":
+            return _ai_cmd._dispatch_ai(args)
 
         raise CliUsageError("unsupported command", phase="command_dispatch")
     except SystemExit as exc:

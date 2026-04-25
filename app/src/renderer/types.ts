@@ -123,6 +123,7 @@ export type AppConfig = {
   aiApiKey: string;
   aiBaseUrl: string;
   aiModel: string;
+  aiRuntime: 'auto' | 'claude' | 'codex';
 };
 
 // 'monitors' is kept for code compatibility but hidden from navigation

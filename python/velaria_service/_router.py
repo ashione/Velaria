@@ -80,7 +80,14 @@ from .agentic_handlers import (
     _normalize_monitor_create_payload,
     _validate_monitor_payload,
 )
-from .ai_handlers import handle_generate_sql
+from .ai_handlers import (
+    handle_analyze,
+    handle_close_session,
+    handle_create_session,
+    handle_generate_sql,
+    handle_get_session,
+    handle_list_sessions,
+)
 
 
 try:
@@ -506,6 +513,12 @@ class VelariaService:
                             return
                         finally:
                             index.close()
+                    if parts == ("ai", "sessions"):
+                        self._send_json(HTTPStatus.OK, handle_list_sessions())
+                        return
+                    if len(parts) == 3 and parts[0] == "ai" and parts[1] == "sessions":
+                        self._send_json(HTTPStatus.OK, handle_get_session(parts[2]))
+                        return
                     raise ApiRouteNotFoundError(f"unknown endpoint: {path}")
                 except Exception as exc:
                     status, payload = _error_response(exc)
@@ -561,6 +574,18 @@ class VelariaService:
                         with AgenticStore() as store:
                             self._send_json(HTTPStatus.OK, handle_grounding(store, payload))
                             return
+                    if parts == ("ai", "sessions"):
+                        result = handle_create_session(payload)
+                        self._send_json(HTTPStatus.CREATED, result)
+                        return
+                    if len(parts) == 4 and parts[0] == "ai" and parts[1] == "sessions" and parts[3] == "generate-sql":
+                        result = handle_generate_sql(payload, session_id=parts[2])
+                        self._send_json(HTTPStatus.OK, result)
+                        return
+                    if len(parts) == 4 and parts[0] == "ai" and parts[1] == "sessions" and parts[3] == "analyze":
+                        result = handle_analyze(payload, session_id=parts[2])
+                        self._send_json(HTTPStatus.OK, result)
+                        return
                     if parts == ("ai", "generate-sql"):
                         result = handle_generate_sql(payload)
                         self._send_json(HTTPStatus.OK, result)
@@ -1124,6 +1149,9 @@ class VelariaService:
                     parts = _api_parts(path)
                     if parts is None:
                         raise ApiRouteNotFoundError(f"unknown endpoint: {path}")
+                    if len(parts) == 3 and parts[0] == "ai" and parts[1] == "sessions":
+                        self._send_json(HTTPStatus.OK, handle_close_session(parts[2]))
+                        return
                     if len(parts) == 2 and parts[0] == "monitors":
                         service._stop_realtime_runner(parts[1])
                         with AgenticStore() as store:

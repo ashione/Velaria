@@ -51,7 +51,7 @@ export function App() {
   const [serviceInfo, setServiceInfo] = useState<ServiceInfo | null>(null);
   const [serviceStatus, setServiceStatus] = useState('status_bootstrapping');
   const [serviceMeta, setServiceMeta] = useState('status_waiting');
-  const [configForm, setConfigForm] = useState<AppConfig>({ bitableAppId: '', bitableAppSecret: '', aiProvider: 'openai', aiApiKey: '', aiBaseUrl: 'https://api.openai.com/v1', aiModel: 'gpt-4o-mini' });
+  const [configForm, setConfigForm] = useState<AppConfig>({ bitableAppId: '', bitableAppSecret: '', aiProvider: 'openai', aiApiKey: '', aiBaseUrl: 'https://api.openai.com/v1', aiModel: 'gpt-4o-mini', aiRuntime: 'auto' });
   const [configMessage, setConfigMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
   const [datasets, setDatasets] = useState<DatasetRecord[]>(() => loadDatasets());
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
@@ -65,6 +65,7 @@ export function App() {
   const [monitorMessage, setMonitorMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
   const [datasetMessage, setDatasetMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
   const [embeddingBuilds, setEmbeddingBuilds] = useState<Record<string, EmbeddingBuildState>>({});
+  const [aiSessionId, setAiSessionId] = useState<string | null>(null);
 
   const { api, waitForRunCompletion } = useService(serviceInfo);
 
@@ -99,7 +100,7 @@ export function App() {
         const info = await window.velariaShell.getServiceInfo();
         const cfg = await window.velariaShell.getConfig();
         setServiceInfo(info);
-        setConfigForm({ bitableAppId: cfg.bitableAppId || '', bitableAppSecret: cfg.bitableAppSecret || '', aiProvider: (cfg.aiProvider as AppConfig['aiProvider']) || 'openai', aiApiKey: cfg.aiApiKey || '', aiBaseUrl: cfg.aiBaseUrl || 'https://api.openai.com/v1', aiModel: cfg.aiModel || 'gpt-4o-mini' });
+        setConfigForm({ bitableAppId: cfg.bitableAppId || '', bitableAppSecret: cfg.bitableAppSecret || '', aiProvider: (cfg.aiProvider as AppConfig['aiProvider']) || 'openai', aiApiKey: cfg.aiApiKey || '', aiBaseUrl: cfg.aiBaseUrl || 'https://api.openai.com/v1', aiModel: cfg.aiModel || 'gpt-4o-mini', aiRuntime: (cfg.aiRuntime as AppConfig['aiRuntime']) || 'auto' });
         const health = await fetch(`${info.baseUrl}/health`).then((r) => r.json());
         setServiceStatus(t('status_ready_on', { port: health.port }));
         setServiceMeta(t('status_packaged', { packaged: String(info.packaged), version: health.version }));
@@ -243,8 +244,9 @@ export function App() {
         aiApiKey: configForm.aiApiKey.trim() || undefined,
         aiBaseUrl: configForm.aiBaseUrl.trim() || undefined,
         aiModel: configForm.aiModel.trim() || undefined,
+        aiRuntime: configForm.aiRuntime || undefined,
       });
-      setConfigForm({ bitableAppId: saved.bitableAppId || '', bitableAppSecret: saved.bitableAppSecret || '', aiProvider: (saved.aiProvider as AppConfig['aiProvider']) || 'openai', aiApiKey: saved.aiApiKey || '', aiBaseUrl: saved.aiBaseUrl || 'https://api.openai.com/v1', aiModel: saved.aiModel || 'gpt-4o-mini' });
+      setConfigForm({ bitableAppId: saved.bitableAppId || '', bitableAppSecret: saved.bitableAppSecret || '', aiProvider: (saved.aiProvider as AppConfig['aiProvider']) || 'openai', aiApiKey: saved.aiApiKey || '', aiBaseUrl: saved.aiBaseUrl || 'https://api.openai.com/v1', aiModel: saved.aiModel || 'gpt-4o-mini', aiRuntime: (saved.aiRuntime as AppConfig['aiRuntime']) || 'auto' });
       setConfigMessage({ kind: 'info', text: t('settings_saved') });
     } catch (error) {
       setConfigMessage({ kind: 'error', text: t('settings_save_failed', { error: String(error) }) });
@@ -369,7 +371,8 @@ export function App() {
             currentDataset={currentDataset} embeddingBuilds={embeddingBuilds}
             removeDataset={removeDataset} buildEmbeddingDataset={(id) => void buildEmbeddingDataset(id)} buildKeywordIndexDataset={(id) => void buildKeywordIndexDataset(id)}
             getEmbeddingStatusLabel={getEmbeddingStatusLabel} getEmbeddingUiStatus={getEmbeddingUiStatus} getKeywordUiStatus={getKeywordUiStatus}
-            setSelectedRunId={setSelectedRunId} refreshRuns={(id) => void refreshRuns(id)} />
+            setSelectedRunId={setSelectedRunId} refreshRuns={(id) => void refreshRuns(id)}
+            aiSessionId={aiSessionId} setAiSessionId={setAiSessionId} />
         )}
         {view === 'runs' && (
           <RunsView t={t} api={api}

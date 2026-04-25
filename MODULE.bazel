@@ -112,7 +112,7 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 """,
-    sha256 = "60f5e896affef9736cce83e79887ae6ad2a6c5cc4435740a7b845ec9dffeecfb",
+    sha256 = "da4b2af0730932ba122798a5e05e7709cd870544ddb62142e029e786d7b4b0db",
     strip_prefix = "limonp-master",
     type = "tar.gz",
     urls = [

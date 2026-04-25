@@ -400,7 +400,7 @@ uv run --with velaria --with pandas --with openpyxl \\
 
 ## 6. AI 辅助分析
 
-需要先安装 AI runtime 依赖：
+Codex runtime 依赖随默认 Python 包安装。只有使用 Claude Code runtime 时才需要额外安装：
 
 ```bash
 uv sync --project python --extra ai-claude

@@ -64,6 +64,7 @@ py_library(
     imports = ["."],
     deps = [
         requirement("jieba"),
+        requirement("codex_app_server_sdk"),
         requirement("mcp"),
         requirement("openpyxl"),
         requirement("pandas"),
@@ -221,6 +222,7 @@ py_wheel(
         "pandas",
         "openpyxl",
         "mcp",
+        "codex-app-server-sdk",
         "prompt-toolkit",
         "rich",
         "xlrd",

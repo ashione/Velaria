@@ -10,6 +10,7 @@ dependencies = [
   "openpyxl>=3.1,<4",
   "jieba>=0.42,<1",
   "mcp>=1.27,<2",
+  "codex-app-server-sdk>=0.1.0",
   "prompt-toolkit>=3,<4",
   "rich>=13,<15",
   "xlrd>=2,<3",
@@ -25,7 +26,6 @@ embedding = [
     "socksio>=1.0.0",
 ]
 ai-claude = ["claude-agent-sdk>=0.1.60"]
-ai-codex = ["codex-app-server-sdk>=0.1.0"]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

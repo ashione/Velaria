@@ -67,6 +67,7 @@ echo "[sidecar] packaging velaria_service with PyInstaller"
   --workpath "${BUILD_DIR}/work" \
   --specpath "${BUILD_DIR}/spec" \
   --hidden-import velaria._velaria \
+  --hidden-import codex_app_server_sdk \
   --add-binary "${NATIVE_EXT}:velaria" \
   --add-data "${JIEBA_DIR}:velaria/jieba_dict" \
   --collect-submodules velaria \

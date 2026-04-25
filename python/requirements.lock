@@ -4,6 +4,7 @@ attrs==26.1.0
 certifi==2026.2.25
 cffi==2.0.0 ; platform_python_implementation != 'PyPy'
 click==8.3.2 ; sys_platform != 'emscripten'
+codex-app-server-sdk==0.3.2
 colorama==0.4.6 ; sys_platform == 'win32'
 cryptography==47.0.0
 et-xmlfile==2.0.0
@@ -45,4 +46,5 @@ typing-inspection==0.4.2
 tzdata==2025.3
 uvicorn==0.46.0 ; sys_platform != 'emscripten'
 wcwidth==0.6.0
+websockets==16.0
 xlrd==2.0.2

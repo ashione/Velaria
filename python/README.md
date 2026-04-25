@@ -399,12 +399,11 @@ curl -sS http://127.0.0.1:37491/api/v1/runs/keyword-search \
 
 ### Agent Runtime (Optional)
 
-Install agent runtime dependencies:
+Codex runtime dependencies are installed with the default Python package. Install
+Claude runtime support only when using Claude Code:
 
 ```bash
 uv sync --project python --extra ai-claude    # Claude Agent SDK
-# or
-uv sync --project python --extra ai-codex     # Codex App Server
 ```
 
 The agent runtime provides:

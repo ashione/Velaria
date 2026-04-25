@@ -119,6 +119,7 @@ Velaria/
 
 - 优先保证语义一致性、边界可诊断、最小可用先行。
 - 修改前先明确影响范围：`SQL / Planner / Executor / Session / Stream / Runtime`。
+- 涉及 SQL、Planner、Executor、Session、Stream、Runtime、Agent runtime 或 CLI 交互链路的改动，修改前必须先跑当前基线端到端验证或最小可复现 smoke，并记录基线结果；修改后再跑同一链路和必要回归，确保问题是被修复而不是被测试环境变化掩盖。
 - 小步推进，每次改动围绕一个可验证目标，不做无关重构。
 - 保持现有 C++/Bazel 风格，新增示例源码统一使用 `.cc`，头文件使用 `.h`。
 - `session` 对外入口统一使用 `DataflowSession`。

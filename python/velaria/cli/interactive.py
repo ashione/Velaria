@@ -18,6 +18,8 @@ from velaria.cli._common import _json_dumps
 _current_session_id: str | None = None
 _runtime: Any | None = None
 _prewarm_thread: threading.Thread | None = None
+_session_start_thread: threading.Thread | None = None
+_session_start_error: str = ""
 _trace_start = time.perf_counter()
 
 
@@ -62,14 +64,21 @@ def _wants_interactive(argv: list[str]) -> bool:
 
 
 def _run_interactive_loop(argv: list[str] | None = None) -> int:
-    global _state
+    global _state, _current_session_id, _session_start_thread, _session_start_error
     _state = VelariaInteractiveState()
+    _current_session_id = None
+    _session_start_thread = None
+    _session_start_error = ""
     args = _parse_interactive_args(argv or [])
     from velaria.cli import main
 
     _print_banner()
-    with _trace_span("interactive.ensure_session"):
-        _ensure_agent_session(new_session=True, session_id=args.session)
+    if args.session:
+        with _trace_span("interactive.ensure_session"):
+            _ensure_agent_session(new_session=True, session_id=args.session)
+    else:
+        with _trace_span("interactive.start_session_background"):
+            _start_agent_session_async()
     with _trace_span("interactive.print_startup_status"):
         _print_startup_status()
     with _trace_span("interactive.start_prewarm"):
@@ -167,7 +176,8 @@ def _get_runtime():
 
 
 def _shutdown_runtime() -> None:
-    global _runtime, _prewarm_thread
+    global _runtime, _prewarm_thread, _session_start_thread, _session_start_error
+    _wait_agent_session_start(timeout=0.2, quiet=True)
     if _prewarm_thread is not None and _prewarm_thread.is_alive():
         with _trace_span("interactive.shutdown_join_prewarm"):
             _prewarm_thread.join(timeout=0.2)
@@ -179,12 +189,17 @@ def _shutdown_runtime() -> None:
             pass
     _runtime = None
     _prewarm_thread = None
+    _session_start_thread = None
+    _session_start_error = ""
 
 
 def _start_runtime_prewarm() -> None:
     global _prewarm_thread
     runtime = _runtime
     if runtime is None or not hasattr(runtime, "prewarm"):
+        return
+    if _session_start_thread is not None and _session_start_thread.is_alive():
+        _state.runtime_warmup = "warming"
         return
     if _prewarm_thread is not None and _prewarm_thread.is_alive():
         return
@@ -247,6 +262,63 @@ def _ensure_agent_session(*, new_session: bool = False, session_id: str | None =
         _print_note("runtime unavailable", str(exc), level="error")
 
 
+def _start_agent_session_async(dataset_context: dict[str, Any] | None = None) -> None:
+    global _session_start_thread, _session_start_error
+    if _current_session_id:
+        return
+    if _session_start_thread is not None and _session_start_thread.is_alive():
+        return
+    try:
+        with _trace_span("interactive.get_runtime_background_start"):
+            runtime = _get_runtime()
+    except Exception as exc:
+        _session_start_error = str(exc)
+        _print_note("runtime unavailable", str(exc), level="error")
+        return
+    _session_start_error = ""
+    _state.runtime_warmup = "warming"
+    _print_note("starting", "agent thread is starting in background")
+
+    def _target() -> None:
+        global _current_session_id, _session_start_error
+        try:
+            with _trace_span("interactive.background_start_thread"):
+                session_id = asyncio.run(runtime.start_thread(dataset_context or {}))
+            _current_session_id = session_id
+            _state.runtime_warmup = "warm"
+            _print_note("started", session_id)
+        except Exception as exc:
+            _current_session_id = None
+            _session_start_error = str(exc)
+            _state.runtime_warmup = f"failed: {exc}"
+            _print_note("runtime unavailable", str(exc), level="error")
+
+    _session_start_thread = threading.Thread(
+        target=_target,
+        name="velaria-agent-session-start",
+        daemon=True,
+    )
+    _session_start_thread.start()
+
+
+def _wait_agent_session_start(timeout: float | None = None, *, quiet: bool = False) -> bool:
+    thread = _session_start_thread
+    if thread is None:
+        return bool(_current_session_id)
+    if thread.is_alive():
+        if not quiet:
+            _print_note("starting", "waiting for agent thread")
+        with _trace_span(f"interactive.wait_session_start timeout={timeout}"):
+            thread.join(timeout=timeout)
+    if thread.is_alive():
+        return False
+    if _session_start_error:
+        if not quiet:
+            _print_note("runtime unavailable", _session_start_error, level="error")
+        return False
+    return bool(_current_session_id)
+
+
 def _try_resume(runtime: Any, session_id: str) -> bool:
     try:
         return bool(asyncio.run(runtime.resume_thread(session_id)))
@@ -288,9 +360,8 @@ def _handle_control_command(command: str) -> None:
         runtime = _safe_runtime()
         if runtime is None:
             return
-        _current_session_id = asyncio.run(runtime.start_thread({}))
-        _print_note("started", _current_session_id)
-        _print_startup_status()
+        _current_session_id = None
+        _start_agent_session_async({})
         return
     if cmd == "/sessions":
         runtime = _safe_runtime()
@@ -352,7 +423,8 @@ def _safe_runtime():
 
 def _send_agent_message(prompt: str) -> None:
     if not _current_session_id:
-        _ensure_agent_session(new_session=True)
+        _start_agent_session_async()
+        _wait_agent_session_start(timeout=None)
     if not _current_session_id:
         _print_note("session", "no active session", level="warn")
         return
@@ -875,9 +947,14 @@ def _print_banner() -> None:
 
 def _print_startup_status() -> None:
     runtime = _safe_runtime()
-    if runtime is None or not _current_session_id:
+    if runtime is None:
         return
-    _print_status(runtime.status(_current_session_id), title="Session")
+    if _current_session_id:
+        status = runtime.status(_current_session_id)
+    else:
+        status = runtime.status("__velaria_pending_session__")
+        status["session"] = None
+    _print_status(status, title="Session")
     _print_dataset_state(title="Velaria State")
 
 

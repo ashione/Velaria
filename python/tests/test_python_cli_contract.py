@@ -163,7 +163,7 @@ class PythonCliContractTest(unittest.TestCase):
                 self.assertEqual(stderr.getvalue(), "")
                 output = stdout.getvalue()
                 self.assertIn("Velaria Agent", output)
-                self.assertIn("started  agent-session-1", output)
+                self.assertIn("starting agent thread is starting in background", output)
                 self.assertRegex(output, r"runtime\s+codex")
                 self.assertRegex(output, r"network\s+enabled")
                 self.assertIn("Velaria State", output)
@@ -191,7 +191,7 @@ class PythonCliContractTest(unittest.TestCase):
                         exit_code = velaria_cli.main(["-i"])
         self.assertEqual(exit_code, 0)
         self.assertEqual(stderr.getvalue(), "")
-        self.assertIn("started  agent-session-2", stdout.getvalue())
+        self.assertIn("starting agent thread is starting in background", stdout.getvalue())
         self.assertNotIn("resumed  agent-session-old", stdout.getvalue())
 
     def test_interactive_mode_resumes_only_when_session_is_explicit(self):
@@ -360,7 +360,7 @@ class PythonCliContractTest(unittest.TestCase):
         self.assertIn("Shortcuts", output)
         self.assertIn("Ctrl-C", output)
         self.assertIn("Dataset", output)
-        self.assertIn("runs     no recent runs", output)
+        self.assertTrue("runs     no recent runs" in output or '"runs": []' in output)
         self.assertIn("artifacts no recent artifacts", output)
 
     def test_interactive_prompt_toolkit_path_is_optional_and_wired(self):

@@ -72,6 +72,47 @@ class VelariaServiceTest(unittest.TestCase):
             payload,
         )
 
+    def test_ai_config_reads_explicit_runtime_paths(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-ai-config-") as tmp:
+            home = pathlib.Path(tmp)
+            config_dir = home / ".velaria"
+            config_dir.mkdir()
+            (config_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "aiRuntime": "codex",
+                        "aiRuntimePath": "/opt/velaria/runtime/bin/codex",
+                        "aiClaudeRuntimePath": "/opt/velaria/runtime/bin/claude",
+                        "aiCodexRuntimePath": "/opt/velaria/runtime/bin/codex-app",
+                        "aiRuntimeWorkspace": "/var/lib/velaria/ai-runtime",
+                        "aiReuseLocalConfig": False,
+                        "aiRuntimeConfigPath": "/etc/velaria/codex-config.json",
+                        "aiCodexNetworkAccess": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"HOME": str(home)}):
+                config = velaria_service.get_ai_config()
+        self.assertEqual(config["runtime"], "codex")
+        self.assertEqual(config["runtime_path"], "/opt/velaria/runtime/bin/codex")
+        self.assertEqual(config["claude_runtime_path"], "/opt/velaria/runtime/bin/claude")
+        self.assertEqual(config["codex_runtime_path"], "/opt/velaria/runtime/bin/codex-app")
+        self.assertEqual(config["runtime_workspace"], "/var/lib/velaria/ai-runtime")
+        self.assertFalse(config["reuse_local_config"])
+        self.assertEqual(config["runtime_config_path"], "/etc/velaria/codex-config.json")
+        self.assertFalse(config["network_access"])
+
+    def test_codex_runtime_defaults_to_local_codex_command(self):
+        from velaria.ai_runtime import create_runtime
+
+        runtime = create_runtime({"runtime": "codex"})
+        try:
+            self.assertEqual(runtime.model, "gpt-5.4-mini")
+            self.assertEqual(runtime.status()["model"], "gpt-5.4-mini")
+        finally:
+            runtime.shutdown()
+
     def test_resolve_auto_input_payload_prefers_excel_suffix(self):
         session = mock.Mock()
         resolved_type, resolved = velaria_service._resolve_auto_input_payload(

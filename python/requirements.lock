@@ -1,10 +1,43 @@
-jieba==0.42.1
-numpy==1.26.4
+annotated-types==0.7.0
+anyio==4.13.0
+attrs==26.1.0
+certifi==2026.2.25
+cffi==2.0.0 ; platform_python_implementation != 'PyPy'
+click==8.3.2 ; sys_platform != 'emscripten'
+colorama==0.4.6 ; sys_platform == 'win32'
+cryptography==47.0.0
 et-xmlfile==2.0.0
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+httpx-sse==0.4.3
+idna==3.11
+jieba==0.42.1
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+mcp==1.27.0
+numpy==2.4.4
 openpyxl==3.1.5
 pandas==2.3.3
-six==1.17.0
-python-dateutil==2.9.0.post0
-pytz==2025.2
-tzdata==2025.2
+prompt-toolkit==3.0.52
 pyarrow==23.0.1
+pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
+pydantic==2.13.3
+pydantic-core==2.46.3
+pydantic-settings==2.14.0
+pyjwt==2.12.1
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.2
+python-multipart==0.0.26
+pytz==2026.1.post1
+pywin32==311 ; sys_platform == 'win32'
+referencing==0.37.0
+rpds-py==0.30.0
+six==1.17.0
+sse-starlette==3.3.4
+starlette==1.0.0
+typing-extensions==4.15.0
+typing-inspection==0.4.2
+tzdata==2025.3
+uvicorn==0.46.0 ; sys_platform != 'emscripten'
+wcwidth==0.6.0

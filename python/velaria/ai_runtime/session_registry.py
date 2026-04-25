@@ -84,6 +84,14 @@ class SessionRegistry:
             for r in rows
         ]
 
+    def most_recent_active(self) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM ai_sessions WHERE status='active' ORDER BY last_active_at DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        return {**dict(row), "dataset_context": json.loads(row["dataset_context_json"])}
+
     def close(self) -> None:
         self._conn.close()
 

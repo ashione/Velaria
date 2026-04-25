@@ -120,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(argv) if argv is not None else sys.argv[1:]
     _sync_compat_bindings()
     if _wants_interactive(argv):
-        return _run_interactive_loop()
+        return _run_interactive_loop(argv)
     try:
         parser = _build_parser()
         args = parser.parse_args(argv)

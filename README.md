@@ -148,6 +148,7 @@ Current constraints:
 - Python callbacks / Python UDFs are not part of the hot path
 - the Electron desktop app is still a local prototype, not a stable product surface
 - AI runtime requires `claude-agent-sdk` or `codex-app-server-sdk` (optional dependencies)
+- Codex runtime defaults to `gpt-5.4-mini` with workspace-write network access unless `aiModel` / `aiCodexNetworkAccess` is set
 - the repository does not claim a completed distributed runtime
 
 Stable public surfaces:

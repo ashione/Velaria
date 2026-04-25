@@ -5,6 +5,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import types
 import unittest
 from builtins import EOFError
 from contextlib import redirect_stderr, redirect_stdout
@@ -34,6 +35,69 @@ class _FakeArrowResult:
 class _FakeDataFrame:
     def to_arrow(self):
         return _FakeArrowResult()
+
+
+class _FakeAgentRuntime:
+    def __init__(self, events=None):
+        self.sessions = []
+        self.closed = []
+        self.messages = []
+        self.events = events
+
+    async def start_thread(self, dataset_context=None):
+        session_id = f"agent-session-{len(self.sessions) + 1}"
+        self.sessions.insert(
+            0,
+            {
+                "session_id": session_id,
+                "runtime_type": "codex",
+                "runtime_session_ref": f"thread-{len(self.sessions) + 1}",
+                "status": "active",
+                "last_active_at": "2026-04-25T00:00:00Z",
+                "dataset_context": dataset_context or {},
+            },
+        )
+        return session_id
+
+    async def resume_thread(self, session_id):
+        return any(s["session_id"] == session_id for s in self.sessions)
+
+    async def list_threads(self):
+        return list(self.sessions)
+
+    async def close_thread(self, session_id):
+        self.closed.append(session_id)
+        self.sessions = [s for s in self.sessions if s["session_id"] != session_id]
+
+    async def send_message(self, session_id, prompt):
+        from velaria.ai_runtime.agent import AgentEvent
+
+        self.messages.append((session_id, prompt))
+        if self.events is None:
+            yield AgentEvent("assistant_text", f"agent heard: {prompt}", session_id=session_id)
+            return
+        for event in self.events:
+            if isinstance(event, AgentEvent):
+                yield event
+            else:
+                yield AgentEvent(session_id=session_id, **event)
+
+    def status(self, session_id=None):
+        return {
+            "runtime": "codex",
+            "model": "gpt-5.4-mini",
+            "cwd": "/tmp/workspace",
+            "workspace": "/tmp/runtime",
+            "session": {"session_id": session_id},
+            "tools": ["velaria_read", "velaria_sql"],
+        }
+
+    def shutdown(self):
+        pass
+
+
+def _mock_agent_runtime(fake):
+    return mock.patch("velaria.ai_runtime.create_runtime", return_value=fake)
 
 
 class PythonCliContractTest(unittest.TestCase):
@@ -83,56 +147,403 @@ class PythonCliContractTest(unittest.TestCase):
 
     def test_interactive_mode_accepts_commands_and_exits_cleanly(self):
         with tempfile.TemporaryDirectory(prefix="velaria-cli-interactive-") as tmp:
+            fake = _FakeAgentRuntime()
             with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
                 stdout = io.StringIO()
                 stderr = io.StringIO()
-                with mock.patch(
-                    "builtins.input",
-                    side_effect=["run list --limit 1", "help run diff", "quit"],
-                ):
-                    with redirect_stdout(stdout), redirect_stderr(stderr):
-                        exit_code = velaria_cli.main(["-i"])
+                with mock.patch("velaria.cli.interactive._runtime", None):
+                    with _mock_agent_runtime(fake):
+                        with mock.patch(
+                            "builtins.input",
+                            side_effect=["/status", ":run list --limit 1", ":help run diff", "/exit"],
+                        ):
+                            with redirect_stdout(stdout), redirect_stderr(stderr):
+                                exit_code = velaria_cli.main(["-i"])
                 self.assertEqual(exit_code, 0)
                 self.assertEqual(stderr.getvalue(), "")
                 output = stdout.getvalue()
-                self.assertIn("Velaria interactive mode.", output)
+                self.assertIn("Velaria Agent", output)
+                self.assertIn("started  agent-session-1", output)
+                self.assertRegex(output, r"runtime\s+codex")
+                self.assertRegex(output, r"network\s+enabled")
+                self.assertIn("Velaria State", output)
                 self.assertIn('"ok": true', output)
                 self.assertIn("usage:", output)
 
+    def test_interactive_mode_starts_new_thread_by_default(self):
+        fake = _FakeAgentRuntime()
+        fake.sessions.append(
+            {
+                "session_id": "agent-session-old",
+                "runtime_type": "codex",
+                "runtime_session_ref": "thread-old",
+                "status": "active",
+                "last_active_at": "2026-04-24T00:00:00Z",
+                "dataset_context": {},
+            }
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch("velaria.cli.interactive._runtime", None):
+            with _mock_agent_runtime(fake):
+                with mock.patch("builtins.input", side_effect=["/exit"]):
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        exit_code = velaria_cli.main(["-i"])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertIn("started  agent-session-2", stdout.getvalue())
+        self.assertNotIn("resumed  agent-session-old", stdout.getvalue())
+
+    def test_interactive_mode_resumes_only_when_session_is_explicit(self):
+        fake = _FakeAgentRuntime()
+        fake.sessions.append(
+            {
+                "session_id": "agent-session-old",
+                "runtime_type": "codex",
+                "runtime_session_ref": "thread-old",
+                "status": "active",
+                "last_active_at": "2026-04-24T00:00:00Z",
+                "dataset_context": {},
+            }
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch("velaria.cli.interactive._runtime", None):
+            with _mock_agent_runtime(fake):
+                with mock.patch("builtins.input", side_effect=["/exit"]):
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        exit_code = velaria_cli.main(["-i", "--session", "agent-session-old"])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertIn("resumed  agent-session-old", stdout.getvalue())
+        self.assertNotIn("started  agent-session-2", stdout.getvalue())
+
     def test_interactive_mode_reports_command_errors_without_exiting_session(self):
         with tempfile.TemporaryDirectory(prefix="velaria-cli-interactive-errors-") as tmp:
+            fake = _FakeAgentRuntime()
             with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
                 stdout = io.StringIO()
                 stderr = io.StringIO()
-                with mock.patch(
-                    "builtins.input",
-                    side_effect=[
-                        "run show --run-id missing-run",
-                        "help run result",
-                        "run list --limit 1",
-                        "quit",
-                    ],
-                ):
-                    with redirect_stdout(stdout), redirect_stderr(stderr):
-                        exit_code = velaria_cli.main(["-i"])
+                with mock.patch("velaria.cli.interactive._runtime", None):
+                    with _mock_agent_runtime(fake):
+                        with mock.patch(
+                            "builtins.input",
+                            side_effect=[
+                                ":run show --run-id missing-run",
+                                ":help run result",
+                                ":run list --limit 1",
+                                "/exit",
+                            ],
+                        ):
+                            with redirect_stdout(stdout), redirect_stderr(stderr):
+                                exit_code = velaria_cli.main(["-i"])
                 self.assertEqual(exit_code, 0)
                 self.assertEqual(stderr.getvalue(), "")
                 output = stdout.getvalue()
-                self.assertIn("Velaria interactive mode.", output)
+                self.assertIn("Velaria Agent", output)
                 self.assertIn('"ok": false', output)
                 self.assertIn('"phase": "run_lookup"', output)
                 self.assertIn('"ok": true', output)
                 self.assertIn("usage:", output)
 
     def test_interactive_mode_eof_exits_cleanly(self):
+        fake = _FakeAgentRuntime()
         stdout = io.StringIO()
         stderr = io.StringIO()
-        with mock.patch("builtins.input", side_effect=EOFError):
-            with redirect_stdout(stdout), redirect_stderr(stderr):
-                exit_code = velaria_cli.main(["-i"])
+        with mock.patch("velaria.cli.interactive._runtime", None):
+            with _mock_agent_runtime(fake):
+                with mock.patch("builtins.input", side_effect=EOFError):
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        exit_code = velaria_cli.main(["-i"])
         self.assertEqual(exit_code, 0)
         self.assertEqual(stderr.getvalue(), "")
-        self.assertIn("Velaria interactive mode.", stdout.getvalue())
+        self.assertIn("Velaria Agent", stdout.getvalue())
+
+    def test_interactive_mode_sends_plain_text_to_agent(self):
+        fake = _FakeAgentRuntime()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch("velaria.cli.interactive._runtime", None):
+            with _mock_agent_runtime(fake):
+                with mock.patch("builtins.input", side_effect=["analyze this dataset", "/exit"]):
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        exit_code = velaria_cli.main(["-i"])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(fake.messages, [("agent-session-1", "analyze this dataset")])
+        self.assertIn("agent heard: analyze this dataset", stdout.getvalue())
+
+    def test_interactive_mode_answers_simple_greeting_locally(self):
+        fake = _FakeAgentRuntime()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch("velaria.cli.interactive._runtime", None):
+            with _mock_agent_runtime(fake):
+                with mock.patch("builtins.input", side_effect=["hello", "/exit"]):
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        exit_code = velaria_cli.main(["-i"])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(fake.messages, [])
+        self.assertIn("Hello, I am Velaria Agent.", stdout.getvalue())
+
+    def test_interactive_mode_streams_events_and_updates_velaria_state(self):
+        events = [
+            {"type": "thinking", "content": "checking dataset"},
+            {"type": "tool_call", "content": "velaria_read", "data": {"name": "velaria_read"}},
+            {
+                "type": "tool_result",
+                "content": json.dumps(
+                    {
+                        "ok": True,
+                        "function": "velaria_read",
+                        "source_path": "/tmp/sales.csv",
+                        "schema": ["region", "amount"],
+                        "row_count": 3,
+                    }
+                ),
+            },
+            {"type": "command", "content": "run list --limit 5"},
+            {
+                "type": "tool_result",
+                "content": json.dumps(
+                    {
+                        "ok": True,
+                        "function": "velaria_sql",
+                        "source_path": "/tmp/sales.csv",
+                        "table_name": "input_table",
+                        "query": "SELECT region FROM input_table",
+                        "schema": ["region"],
+                        "row_count": 2,
+                    }
+                ),
+            },
+            {"type": "assistant_text", "content": "done"},
+        ]
+        fake = _FakeAgentRuntime(events=events)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch("velaria.cli.interactive._runtime", None):
+            with _mock_agent_runtime(fake):
+                with mock.patch("builtins.input", side_effect=["analyze sales", "/status", "/dataset", "/exit"]):
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        exit_code = velaria_cli.main(["-i"])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        output = stdout.getvalue()
+        self.assertIn("thinking     checking dataset", output)
+        self.assertIn("tool         velaria_read", output)
+        self.assertIn("tool result  velaria_read: 3 rows from sales.csv [region, amount]", output)
+        self.assertIn("command      run list --limit 5", output)
+        self.assertIn("tool result  velaria_sql: 2 rows [region]", output)
+        self.assertRegex(output, r"dataset\s+sales\.csv")
+        self.assertRegex(output, r"schema\s+region, amount")
+        self.assertRegex(output, r"result\s+2 rows \[region\]")
+
+    def test_interactive_mode_shortcuts_dataset_runs_and_artifacts_commands(self):
+        fake = _FakeAgentRuntime()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory(prefix="velaria-cli-interactive-state-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                with mock.patch("velaria.cli.interactive._runtime", None):
+                    with _mock_agent_runtime(fake):
+                        with mock.patch(
+                            "builtins.input",
+                            side_effect=["/shortcuts", "/keys", "/dataset", "/runs", "/artifacts", "/exit"],
+                        ):
+                            with redirect_stdout(stdout), redirect_stderr(stderr):
+                                exit_code = velaria_cli.main(["-i"])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        output = stdout.getvalue()
+        self.assertIn("Shortcuts", output)
+        self.assertIn("Ctrl-C", output)
+        self.assertIn("Dataset", output)
+        self.assertIn("runs     no recent runs", output)
+        self.assertIn("artifacts no recent artifacts", output)
+
+    def test_interactive_prompt_toolkit_path_is_optional_and_wired(self):
+        interactive = importlib.import_module("velaria.cli.interactive")
+
+        class FakePromptSession:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class FakeWordCompleter:
+            def __init__(self, words, ignore_case=False):
+                self.words = words
+                self.ignore_case = ignore_case
+
+        class FakeHistory:
+            pass
+
+        class FakeKeyBindings:
+            def __init__(self):
+                self.bindings = []
+                self.handlers = {}
+
+            def add(self, *keys):
+                self.bindings.append(keys)
+
+                def decorator(fn):
+                    self.handlers[keys] = fn
+                    return fn
+
+                return decorator
+
+        modules = {
+            "prompt_toolkit": types.SimpleNamespace(PromptSession=FakePromptSession),
+            "prompt_toolkit.completion": types.SimpleNamespace(WordCompleter=FakeWordCompleter),
+            "prompt_toolkit.history": types.SimpleNamespace(InMemoryHistory=FakeHistory),
+            "prompt_toolkit.key_binding": types.SimpleNamespace(KeyBindings=FakeKeyBindings),
+        }
+        with mock.patch.dict(sys.modules, modules):
+            with mock.patch.object(interactive, "_should_use_prompt_toolkit", return_value=True):
+                session = interactive._build_prompt_session()
+        self.assertIsInstance(session, FakePromptSession)
+        self.assertIn("bottom_toolbar", session.kwargs)
+        self.assertIn("completer", session.kwargs)
+        self.assertIn("key_bindings", session.kwargs)
+        self.assertFalse(session.kwargs["multiline"])
+        self.assertFalse(session.kwargs["complete_while_typing"])
+        self.assertEqual(session.kwargs["reserve_space_for_menu"], 3)
+        bindings = session.kwargs["key_bindings"]
+        self.assertIn(("c-c",), bindings.bindings)
+        self.assertIn(("c-d",), bindings.bindings)
+        self.assertIn(("c-l",), bindings.bindings)
+        self.assertIn(("tab",), bindings.bindings)
+        self.assertIn(("escape", "enter"), bindings.bindings)
+        self.assertIn("/status", session.kwargs["completer"].words)
+
+        class FakeBuffer:
+            def __init__(self, text=""):
+                self.text = text
+                self.reset_called = False
+                self.delete_called = False
+                self.completion_started = False
+                self.accepted = False
+
+            def reset(self):
+                self.reset_called = True
+
+            def delete(self):
+                self.delete_called = True
+
+            def start_completion(self, select_first=False):
+                self.completion_started = True
+                self.select_first = select_first
+
+            def validate_and_handle(self):
+                self.accepted = True
+
+        class FakeApp:
+            def __init__(self, buffer):
+                self.current_buffer = buffer
+                self.exited_with = None
+                self.renderer = mock.Mock()
+
+            def exit(self, *, exception=None):
+                self.exited_with = exception
+
+        text_buffer = FakeBuffer("draft")
+        bindings.handlers[("c-c",)](types.SimpleNamespace(app=FakeApp(text_buffer)))
+        self.assertTrue(text_buffer.reset_called)
+        empty_app = FakeApp(FakeBuffer(""))
+        bindings.handlers[("c-d",)](types.SimpleNamespace(app=empty_app))
+        self.assertIs(empty_app.exited_with, EOFError)
+        tab_buffer = FakeBuffer("/")
+        bindings.handlers[("tab",)](types.SimpleNamespace(app=FakeApp(tab_buffer)))
+        self.assertTrue(tab_buffer.completion_started)
+        enter_buffer = FakeBuffer("line 1\nline 2")
+        bindings.handlers[("escape", "enter")](types.SimpleNamespace(app=FakeApp(enter_buffer)))
+        self.assertTrue(enter_buffer.accepted)
+
+        with mock.patch.object(interactive, "_should_use_prompt_toolkit", return_value=False):
+            self.assertIsNone(interactive._build_prompt_session())
+
+    def test_prompt_toolkit_prompt_uses_plain_text_prompt(self):
+        interactive = importlib.import_module("velaria.cli.interactive")
+
+        class FakePromptSession:
+            def __init__(self):
+                self.message = None
+
+            def prompt(self, message):
+                self.message = message
+                return "/status"
+
+        session = FakePromptSession()
+        self.assertEqual(interactive._read_prompt(session), "/status")
+        self.assertEqual(session.message, "› ")
+        self.assertNotIn("\033", session.message)
+
+    def test_interactive_turn_keyboard_interrupt_marks_cancelled(self):
+        interactive = importlib.import_module("velaria.cli.interactive")
+
+        class InterruptingRuntime(_FakeAgentRuntime):
+            async def send_message(self, session_id, prompt):
+                self.messages.append((session_id, prompt))
+                raise KeyboardInterrupt
+                yield
+
+        interactive._state = interactive.VelariaInteractiveState()
+        interactive._current_session_id = "agent-session-1"
+        interactive._runtime = InterruptingRuntime()
+        stdout = io.StringIO()
+        try:
+            with redirect_stdout(stdout):
+                interactive._send_agent_message("long running")
+            self.assertEqual(interactive._state.turn_state, "cancelled")
+            self.assertIn("cancelled turn interrupted", stdout.getvalue())
+        finally:
+            interactive._current_session_id = None
+            interactive._runtime = None
+
+    def test_interactive_state_updates_from_function_payloads(self):
+        interactive = importlib.import_module("velaria.cli.interactive")
+        interactive._state = interactive.VelariaInteractiveState()
+
+        interactive._update_state_from_payload(
+            {
+                "function": "velaria_read",
+                "source_path": "/tmp/sales.csv",
+                "table_name": "input_table",
+                "schema": ["region", "amount"],
+                "row_count": 3,
+            }
+        )
+        self.assertEqual(interactive._state.dataset_name, "sales.csv")
+        self.assertEqual(interactive._state.schema, ["region", "amount"])
+        self.assertEqual(interactive._state.row_count, 3)
+
+        interactive._update_state_from_payload(
+            {
+                "function": "velaria_sql",
+                "source_path": "/tmp/sales.csv",
+                "table_name": "input_table",
+                "query": "SELECT region FROM input_table",
+                "schema": ["region"],
+                "row_count": 2,
+            }
+        )
+        self.assertEqual(interactive._state.result_schema, ["region"])
+        self.assertEqual(interactive._state.result_row_count, 2)
+
+        interactive._update_state_from_payload(
+            {
+                "function": "velaria_cli_run",
+                "stdout": json.dumps(
+                    {
+                        "ok": True,
+                        "run_id": "run_state",
+                        "artifacts": [{"artifact_id": "artifact_state"}],
+                    }
+                ),
+            }
+        )
+        self.assertEqual(interactive._state.last_run_id, "run_state")
+        self.assertEqual(interactive._state.last_artifact_id, "artifact_state")
 
     def test_help_is_available_for_top_level_and_subcommands(self):
         cases = [

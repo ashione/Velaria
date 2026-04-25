@@ -105,17 +105,29 @@ cat > ~/.velaria/config.json << 'EOF'
   "aiProvider": "claude",
   "aiApiKey": "your-api-key",
   "aiRuntime": "claude",
-  "aiModel": "claude-sonnet-4-20250514"
+  "aiModel": "claude-sonnet-4-20250514",
+  "aiRuntimePath": "/opt/velaria-runtime/bin/claude",
+  "aiRuntimeWorkspace": "~/.velaria/ai-runtime",
+  "aiReuseLocalConfig": true,
+  "aiCodexNetworkAccess": true
 }
 EOF
 ```
 
-Start service and use AI:
+`aiRuntimePath` is optional. Codex can omit it and use the local
+`codex app-server` command; set `aiRuntimePath` / `aiCodexRuntimePath` only when
+overriding that executable. Claude Code runtime can use `aiClaudeRuntimePath` or
+`aiRuntimePath`. `aiRuntimeWorkspace` is the runtime working directory used for
+agent threads, generated config, and MCP/function logs. If omitted, Velaria uses
+a project-scoped directory under `~/.velaria/ai-runtime/`. `aiReuseLocalConfig`
+controls whether the runtime process can reuse the current user config; set it
+to `false` when the runtime should use an isolated HOME. Codex workspace-write
+network access is enabled by default; set `aiCodexNetworkAccess` to `false` only
+when the agent runtime must be offline.
+
+Use AI from the CLI:
 
 ```bash
-PYTHONPATH=python uv run --project python python -m velaria_service --port 37491
-
-# In another terminal:
 uv run --project python python python/velaria_cli.py ai generate-sql \
   --prompt "top 5 by score" --schema "name,score,region"
 ```
@@ -124,8 +136,16 @@ Interactive mode:
 
 ```bash
 uv run --project python python python/velaria_cli.py -i
-velaria> ai 找出分数最高的5个人
+velaria> 找出分数最高的5个人
+velaria> /status
+velaria> :run list --limit 5
 ```
+
+The interactive CLI is an agent runtime wrapper. It starts or resumes the
+configured Codex/Claude runtime directly, injects the Velaria skill, and exposes
+Velaria local functions through the runtime bridge / MCP server. `velaria_service`
+remains the HTTP sidecar for the desktop app and other app clients; it is not
+required for CLI interactive mode.
 
 Build:
 

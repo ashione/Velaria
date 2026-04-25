@@ -48,9 +48,12 @@ py_library(
         "velaria/keyword_index.py",
         "velaria/ai_runtime/__init__.py",
         "velaria/ai_runtime/_tools.py",
-        "velaria/ai_runtime/session_registry.py",
+        "velaria/ai_runtime/agent.py",
         "velaria/ai_runtime/claude_runtime.py",
         "velaria/ai_runtime/codex_runtime.py",
+        "velaria/ai_runtime/functions.py",
+        "velaria/ai_runtime/mcp_server.py",
+        "velaria/ai_runtime/session_registry.py",
         "velaria/workspace/__init__.py",
         "velaria/workspace/artifact_index.py",
         "velaria/workspace/paths.py",
@@ -61,8 +64,10 @@ py_library(
     imports = ["."],
     deps = [
         requirement("jieba"),
+        requirement("mcp"),
         requirement("openpyxl"),
         requirement("pandas"),
+        requirement("prompt_toolkit"),
         requirement("pyarrow"),
     ],
     visibility = ["//visibility:public"],
@@ -213,6 +218,8 @@ py_wheel(
         "pyarrow",
         "pandas",
         "openpyxl",
+        "mcp",
+        "prompt-toolkit",
     ],
 )
 
@@ -247,6 +254,7 @@ py_test(
     imports = ["."],
     deps = [
         ":velaria_py_pkg",
+        requirement("mcp"),
         requirement("pyarrow"),
     ],
 )
@@ -358,6 +366,17 @@ py_test(
 )
 
 py_test(
+    name = "ai_runtime_agent_test",
+    srcs = ["tests/test_ai_runtime_agent.py"],
+    main = "tests/test_ai_runtime_agent.py",
+    imports = ["."],
+    deps = [
+        ":velaria_py_pkg",
+        requirement("pyarrow"),
+    ],
+)
+
+py_test(
     name = "workspace_runs_test",
     srcs = ["tests/test_workspace_runs.py"],
     main = "tests/test_workspace_runs.py",
@@ -384,6 +403,7 @@ test_suite(
     tests = [
         ":arrow_stream_ingestion_test",
         ":artifact_index_test",
+        ":ai_runtime_agent_test",
         ":bitable_group_by_owner_integration_test",
         ":bitable_stream_source_test",
         ":custom_stream_source_test",

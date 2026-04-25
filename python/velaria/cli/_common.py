@@ -168,7 +168,7 @@ def _emit_error_json(
 
 
 def _interactive_banner() -> int:
-    print("Velaria interactive mode. Type 'help' for usage, 'exit' to quit.")
+    print("Velaria interactive mode. Type '/help' for usage, '/exit' to quit.")
     return 0
 
 

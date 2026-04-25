@@ -620,8 +620,15 @@ def get_ai_config() -> dict[str, Any]:
             "provider": config.get("aiProvider", "openai"),
             "api_key": config.get("aiApiKey", ""),
             "base_url": config.get("aiBaseUrl", "https://api.openai.com/v1"),
-            "model": config.get("aiModel", "gpt-4o-mini"),
-            "runtime": config.get("aiRuntime", "auto"),
+            "model": config.get("aiModel", ""),
+            "runtime": config.get("aiRuntime", "codex"),
+            "runtime_path": config.get("aiRuntimePath", ""),
+            "claude_runtime_path": config.get("aiClaudeRuntimePath", ""),
+            "codex_runtime_path": config.get("aiCodexRuntimePath", ""),
+            "runtime_workspace": config.get("aiRuntimeWorkspace", ""),
+            "reuse_local_config": bool(config.get("aiReuseLocalConfig", True)),
+            "runtime_config_path": config.get("aiRuntimeConfigPath", ""),
+            "network_access": config.get("aiCodexNetworkAccess", config.get("aiNetworkAccess", True)),
         }
     return {}
 

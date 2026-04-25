@@ -31,8 +31,8 @@ The supported Python ecosystem includes:
 - vector search and vector explain APIs
 - offline embedding pipeline helpers for versioned vector assets
 - offline keyword-index build helpers and reusable BM25 keyword-search assets
-- AI runtime layer for Claude Agent SDK and Codex App Server integration
-- CLI `ai` subcommand for AI-assisted SQL generation and session management
+- agent runtime wrapper for Claude Code / Claude Agent SDK and Codex App Server integration
+- interactive agent CLI via `velaria_cli.py -i`
 
 ### Examples
 
@@ -409,19 +409,49 @@ uv sync --project python --extra ai-codex     # Codex App Server
 
 The AI runtime provides:
 
+- Codex/Claude-backed interactive agent runtime via `velaria_cli.py -i`
+- Thread persistence under `aiRuntimeWorkspace`
+- Automatic injection of `skills/velaria_python_local/SKILL.md`
+- Velaria local functions exposed through the runtime bridge / MCP server:
+  `velaria_read`, `velaria_schema`, `velaria_sql`, `velaria_explain`,
+  `velaria_cli_run`, `velaria_artifact_preview`
 - Natural language to SQL generation via `velaria_cli.py ai generate-sql`
-- Session-based agent analysis via `velaria_cli.py ai session` and `velaria_cli.py ai analyze`
-- Interactive AI mode via `velaria_cli.py -i` then `ai <prompt>`
-- Velaria tools exposed to AI agents: `velaria_sql`, `velaria_read`, `velaria_schema`, `velaria_explain`
+- Session-based compatibility commands via `velaria_cli.py ai session` and
+  `velaria_cli.py ai analyze`
+
+Minimal Codex runtime config:
+
+```json
+{
+  "aiRuntime": "codex",
+  "aiRuntimeWorkspace": "~/.velaria/ai-runtime",
+  "aiReuseLocalConfig": true,
+  "aiCodexNetworkAccess": true
+}
+```
+
+Codex uses the local `codex app-server` command and defaults to `gpt-5.4-mini`
+when `aiModel` is omitted. `aiRuntimeWorkspace` is the runtime working directory
+used to save and resume agent threads. If omitted, Velaria creates a
+project-scoped directory under `~/.velaria/ai-runtime/`. `aiReuseLocalConfig`
+controls whether the runtime process can reuse current user config; set it to
+`false` for an isolated runtime HOME. Use `aiRuntimePath` / `aiCodexRuntimePath`
+only when overriding the local Codex executable. Use `aiClaudeRuntimePath` for
+Claude Code runtime. Codex workspace-write network access is enabled by default;
+set `aiCodexNetworkAccess` to `false` only for offline runtime sessions.
 
 AI CLI examples:
 
 ```bash
+uv run --project python python python/velaria_cli.py -i
+
+# Inside interactive mode, plain text goes to the active agent thread.
+velaria> 读取 data/sales.csv，按 region 汇总 amount，并保存 run
+velaria> /status
+velaria> :run list --limit 5
+
 uv run --project python python python/velaria_cli.py ai generate-sql \
   --prompt "top 5 by score" --schema "name,score,region"
-
-uv run --project python python python/velaria_cli.py ai session start --schema "name,score"
-uv run --project python python python/velaria_cli.py ai session list
 ```
 
 Current SQL mapping carried by Python:

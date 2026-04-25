@@ -105,17 +105,28 @@ cat > ~/.velaria/config.json << 'EOF'
   "aiProvider": "claude",
   "aiApiKey": "your-api-key",
   "aiRuntime": "claude",
-  "aiModel": "claude-sonnet-4-20250514"
+  "aiModel": "claude-sonnet-4-20250514",
+  "aiRuntimePath": "/opt/velaria-runtime/bin/claude",
+  "aiRuntimeWorkspace": "~/.velaria/ai-runtime",
+  "aiReuseLocalConfig": true,
+  "aiCodexNetworkAccess": true
 }
 EOF
 ```
 
-启动 service 并使用 AI：
+`aiRuntimePath` 是可选项。Codex 可以省略它并使用本地 `codex app-server`
+命令；只有需要覆盖该可执行文件时才设置 `aiRuntimePath` /
+`aiCodexRuntimePath`。Claude Code runtime 可以使用 `aiClaudeRuntimePath` 或
+`aiRuntimePath`。`aiRuntimeWorkspace` 是 runtime 工作目录，用于保存 agent
+thread、生成配置以及 MCP/function 日志；如果省略，Velaria 会使用
+`~/.velaria/ai-runtime/` 下的项目级目录。`aiReuseLocalConfig` 控制 runtime
+进程是否复用当前用户配置；设为 `false` 时 runtime 会使用隔离 HOME。
+Codex workspace-write 网络访问默认开启；只有需要离线运行 agent runtime
+时才把 `aiCodexNetworkAccess` 设为 `false`。
+
+从 CLI 使用 AI：
 
 ```bash
-PYTHONPATH=python uv run --project python python -m velaria_service --port 37491
-
-# 在另一个终端：
 uv run --project python python python/velaria_cli.py ai generate-sql \
   --prompt "top 5 by score" --schema "name,score,region"
 ```
@@ -124,8 +135,15 @@ uv run --project python python python/velaria_cli.py ai generate-sql \
 
 ```bash
 uv run --project python python python/velaria_cli.py -i
-velaria> ai 找出分数最高的5个人
+velaria> 找出分数最高的5个人
+velaria> /status
+velaria> :run list --limit 5
 ```
+
+交互式 CLI 是 agent runtime wrapper：它会直接启动或恢复已配置的
+Codex/Claude runtime，注入 Velaria skill，并通过 runtime bridge / MCP server
+暴露 Velaria local functions。`velaria_service` 仍作为桌面 app 和其他 app
+client 使用的 HTTP sidecar，交互式 CLI 不需要先启动 service。
 
 构建：
 

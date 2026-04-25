@@ -171,13 +171,13 @@ class CodexRuntime:
         async def _producer() -> None:
             try:
                 async for event in thread.chat(prompt):
-                    normalized = _codex_sdk_event(event)
+                    normalized_events = _codex_sdk_events(event)
                     self._trace(
                         f"thread.chat raw={getattr(event, 'step_type', '')} "
-                        f"normalized={normalized.get('type') if normalized else 'filtered'}"
+                        f"normalized={','.join(e.get('type', '') for e in normalized_events) or 'filtered'}"
                     )
                     self._trace_event_payload(event)
-                    if normalized is not None:
+                    for normalized in normalized_events:
                         events.put(normalized)
             except Exception as exc:
                 events.put({"type": "error", "content": str(exc), "data": {}})
@@ -451,26 +451,36 @@ def _build_sql_user_message(
 
 
 def _codex_sdk_event(event: Any) -> dict[str, Any] | None:
+    events = _codex_sdk_events(event)
+    return events[-1] if events else None
+
+
+def _codex_sdk_events(event: Any) -> list[dict[str, Any]]:
     data = getattr(event, "data", None) or {}
     text = str(getattr(event, "text", "") or "")
     raw_type = str(getattr(event, "step_type", "") or "")
     item = _codex_event_item(data)
     item_type = str(item.get("type") or raw_type)
+    event_data = _codex_tool_event_data(data, item)
 
     if item_type in {"userMessage", "message"} and item.get("role") == "user":
-        return None
+        return []
     if item_type in {"assistantMessage", "message"}:
         content = text or _codex_text_from_blocks(item.get("content"))
-        return {"type": "assistant_text", "content": content, "data": data} if content else None
+        return [{"type": "assistant_text", "content": content, "data": data}] if content else []
     if item_type == "reasoning":
         content = text or _codex_reasoning_text(item)
-        return {"type": "thinking", "content": content, "data": data} if content else None
+        return [{"type": "thinking", "content": content, "data": data}] if content else []
     if item_type == "mcpToolCall" and item.get("result"):
         content = text or _codex_tool_result_text(item)
-        return {"type": "tool_result", "content": content, "data": {**data, "item": item}}
+        name = _codex_tool_name(item)
+        return [
+            {"type": "tool_call", "content": name, "data": event_data},
+            {"type": "tool_result", "content": content, "data": event_data},
+        ]
     if item_type in {"functionCall", "toolCall", "mcpToolCall", "function_call", "tool_search_call"}:
         name = _codex_tool_name(item)
-        return {"type": "tool_call", "content": name, "data": {**data, "item": item}}
+        return [{"type": "tool_call", "content": name, "data": event_data}]
     if item_type in {
         "functionCallOutput",
         "toolResult",
@@ -479,18 +489,35 @@ def _codex_sdk_event(event: Any) -> dict[str, Any] | None:
         "tool_search_output",
     }:
         content = text or _codex_tool_result_text(item)
-        return {"type": "tool_result", "content": content, "data": {**data, "item": item}}
+        return [{"type": "tool_result", "content": content, "data": event_data}]
     if item_type in {"commandExecution", "exec"}:
         content = text or str(item.get("command") or item.get("cmd") or "")
-        return {"type": "command", "content": content, "data": {**data, "item": item}}
+        return [{"type": "command", "content": content, "data": {**data, "item": item}}]
     if item_type in {"error", "failed"}:
         content = text or str(item.get("message") or item.get("error") or "")
-        return {"type": "error", "content": content, "data": {**data, "item": item}}
+        return [{"type": "error", "content": content, "data": {**data, "item": item}}]
     if raw_type in {"done", "completed", "turnDone"}:
-        return {"type": "done", "content": "", "data": data}
+        return [{"type": "done", "content": "", "data": data}]
     if text:
-        return {"type": raw_type or "assistant_text", "content": text, "data": data}
-    return None
+        return [{"type": raw_type or "assistant_text", "content": text, "data": data}]
+    return []
+
+
+def _codex_tool_event_data(data: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    event_data = {**data, "item": item}
+    name = _codex_tool_name(item)
+    if name:
+        event_data["tool_name"] = name
+    status = item.get("status")
+    if isinstance(status, str) and status:
+        event_data["tool_status"] = status
+    arguments = item.get("arguments")
+    if arguments is not None:
+        event_data["tool_arguments"] = arguments
+    duration = item.get("durationMs")
+    if duration is not None:
+        event_data["duration_ms"] = duration
+    return event_data
 
 
 def _codex_event_item(data: dict[str, Any]) -> dict[str, Any]:
@@ -552,6 +579,8 @@ def _codex_tool_name(item: dict[str, Any]) -> str:
     function = item.get("function")
     if not name and isinstance(function, dict):
         name = str(function.get("name") or "")
+    if namespace == "velaria" and name:
+        return name
     if namespace and name and not name.startswith(namespace):
         return f"{namespace}.{name}"
     return name or namespace

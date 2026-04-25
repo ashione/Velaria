@@ -442,7 +442,7 @@ class AiRuntimeAgentTest(unittest.TestCase):
                 runtime.shutdown()
 
     def test_codex_runtime_normalizes_mcp_function_events(self):
-        from velaria.ai_runtime.codex_runtime import _codex_sdk_event
+        from velaria.ai_runtime.codex_runtime import _codex_sdk_event, _codex_sdk_events
 
         call_event = types.SimpleNamespace(
             step_type="tool",
@@ -508,6 +508,11 @@ class AiRuntimeAgentTest(unittest.TestCase):
         normalized_mcp = _codex_sdk_event(mcp_event)
         self.assertEqual(normalized_mcp["type"], "tool_result")
         self.assertIn('"function": "velaria_read"', normalized_mcp["content"])
+        normalized_mcp_events = _codex_sdk_events(mcp_event)
+        self.assertEqual([event["type"] for event in normalized_mcp_events], ["tool_call", "tool_result"])
+        self.assertEqual(normalized_mcp_events[0]["content"], "velaria_read")
+        self.assertEqual(normalized_mcp_events[0]["data"]["tool_status"], "completed")
+        self.assertEqual(normalized_mcp_events[1]["data"]["tool_name"], "velaria_read")
 
     def test_codex_runtime_uses_explicit_model_when_configured(self):
         from velaria.ai_runtime.codex_runtime import CodexRuntime

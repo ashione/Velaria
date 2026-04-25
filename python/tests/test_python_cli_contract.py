@@ -363,11 +363,19 @@ class PythonCliContractTest(unittest.TestCase):
         events = [
             {
                 "type": "tool_call",
+                "content": "velaria_dataset_process",
                 "data": {
+                    "tool_name": "velaria_dataset_process",
+                    "tool_arguments": {
+                        "source_path": "/tmp/sales.csv",
+                        "table_name": "input_table",
+                        "query": "SELECT region FROM input_table",
+                        "save_run": True,
+                    },
                     "item": {
-                        "type": "function_call",
-                        "namespace": "mcp__velaria__",
-                        "name": "velaria_dataset_process",
+                        "type": "mcpToolCall",
+                        "server": "velaria",
+                        "tool": "velaria_dataset_process",
                     }
                 },
             },
@@ -389,11 +397,45 @@ class PythonCliContractTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(stderr.getvalue(), "")
         output = stdout.getvalue()
-        self.assertIn("tool         mcp__velaria__.velaria_dataset_process", output)
+        self.assertIn("tool         velaria_dataset_process", output)
+        self.assertIn("source_path=/tmp/sales.csv", output)
+        self.assertIn("query=\"SELECT region FROM input_table\"", output)
         self.assertIn("tool result  velaria_dataset_process: run run_dataset: 2 rows [region, total_amount]", output)
         self.assertRegex(output, r"last run\s+run_dataset")
         self.assertRegex(output, r"last artifact\s+artifact_dataset")
-        self.assertRegex(output, r"last tool\s+mcp__velaria__\.velaria_dataset_process")
+        self.assertRegex(output, r"last tool\s+velaria_dataset_process")
+
+    def test_interactive_mode_summarizes_failed_tool_results_before_dataset_branches(self):
+        events = [
+            {
+                "type": "tool_call",
+                "content": "velaria_dataset_process",
+                "data": {"tool_name": "velaria_dataset_process", "tool_status": "failed"},
+            },
+            {
+                "type": "tool_result",
+                "content": json.dumps(
+                    {
+                        "ok": False,
+                        "function": "velaria_dataset_process",
+                        "error": "source download failed",
+                    }
+                ),
+            },
+        ]
+        fake = _FakeAgentRuntime(events=events)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch("velaria.cli.interactive._runtime", None):
+            with _mock_agent_runtime(fake):
+                with mock.patch("builtins.input", side_effect=["process url", "/exit"]):
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        exit_code = velaria_cli.main(["-i"])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        output = stdout.getvalue()
+        self.assertIn("tool         velaria_dataset_process status=failed", output)
+        self.assertIn("tool result  velaria_dataset_process: failed source download failed", output)
 
     def test_interactive_mode_shortcuts_dataset_runs_and_artifacts_commands(self):
         fake = _FakeAgentRuntime()

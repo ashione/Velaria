@@ -609,28 +609,10 @@ def _dataset_docs_from_store(store: AgenticStore) -> list[dict[str, Any]]:
 
 
 def get_ai_config() -> dict[str, Any]:
-    """Read AI provider config from ``~/.velaria/config.json``."""
-    config_path = Path.home() / ".velaria" / "config.json"
-    if config_path.exists():
-        try:
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-        return {
-            "provider": config.get("aiProvider", "openai"),
-            "api_key": config.get("aiApiKey", ""),
-            "base_url": config.get("aiBaseUrl", "https://api.openai.com/v1"),
-            "model": config.get("aiModel", ""),
-            "runtime": config.get("aiRuntime", "codex"),
-            "runtime_path": config.get("aiRuntimePath", ""),
-            "claude_runtime_path": config.get("aiClaudeRuntimePath", ""),
-            "codex_runtime_path": config.get("aiCodexRuntimePath", ""),
-            "runtime_workspace": config.get("aiRuntimeWorkspace", ""),
-            "reuse_local_config": bool(config.get("aiReuseLocalConfig", True)),
-            "runtime_config_path": config.get("aiRuntimeConfigPath", ""),
-            "network_access": config.get("aiCodexNetworkAccess", config.get("aiNetworkAccess", True)),
-        }
-    return {}
+    """Read Agent runtime config from ``~/.velaria/config.json``."""
+    from velaria.ai_runtime import load_ai_config
+
+    return load_ai_config()
 
 
 def _field_docs_from_store(store: AgenticStore) -> list[dict[str, Any]]:

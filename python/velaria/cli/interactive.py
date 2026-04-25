@@ -503,8 +503,7 @@ def _render_event(event: Any) -> None:
             _print_event("thinking", content)
         return
     if event_type == "tool_call":
-        name = _extract_tool_name(data) or content
-        _print_event("tool", name)
+        _print_event("tool", _format_tool_call(content, data))
         return
     if event_type == "tool_result":
         summary = _summarize_tool_result(content, data)
@@ -533,6 +532,9 @@ def _render_event(event: Any) -> None:
 
 
 def _extract_tool_name(data: dict[str, Any]) -> str:
+    value = data.get("tool_name") if isinstance(data, dict) else None
+    if isinstance(value, str) and value:
+        return value
     for key in ("name", "toolName", "tool", "function"):
         value = data.get(key)
         if isinstance(value, str) and value:
@@ -546,6 +548,8 @@ def _extract_tool_name(data: dict[str, Any]) -> str:
     if isinstance(item, dict):
         name = str(item.get("name") or item.get("toolName") or item.get("tool") or "")
         namespace = str(item.get("namespace") or item.get("serverName") or item.get("server") or "")
+        if namespace == "velaria" and name:
+            return name
         if namespace and name and not name.startswith(namespace):
             return f"{namespace}.{name}"
         if name or namespace:
@@ -1045,22 +1049,22 @@ def _print_table(title: str, headers: tuple[str, ...], rows: list[tuple[str, ...
 
 
 def _print_note(label: str, message: str, *, level: str = "info") -> None:
-    print(f"{_style(label.ljust(8), level)} {message}")
+    print(f"{_style(label.ljust(8), level)} {message}", flush=True)
 
 
 def _print_event(label: str, message: str) -> None:
-    print(f"{_style(label.ljust(12), 'event')} {_wrap_value(message, 13)}")
+    print(f"{_style(label.ljust(12), 'event')} {_wrap_value(message, 13)}", flush=True)
 
 
 def _print_assistant_text(message: str) -> None:
     if not _should_render_markdown():
-        print(message)
+        print(message, flush=True)
         return
     try:
         from rich.console import Console
         from rich.markdown import Markdown
     except Exception:
-        print(message)
+        print(message, flush=True)
         return
     console = Console(
         file=sys.stdout,
@@ -1069,6 +1073,7 @@ def _print_assistant_text(message: str) -> None:
         highlight=False,
     )
     console.print(Markdown(message))
+    sys.stdout.flush()
 
 
 def _should_render_markdown() -> bool:
@@ -1091,6 +1096,121 @@ def _compact_content(content: str) -> str:
     if len(text) <= 600:
         return text
     return text[:597] + "..."
+
+
+def _format_tool_call(content: str, data: dict[str, Any]) -> str:
+    name = _extract_tool_name(data) or content or "tool"
+    args = _tool_arguments(data)
+    status = _tool_status(data)
+    parts = [name]
+    arg_summary = _format_tool_arguments(args)
+    if arg_summary:
+        parts.append(arg_summary)
+    if status and status not in {"completed", "complete", "success"}:
+        parts.append(f"status={status}")
+    return _compact_line(" ".join(parts), limit=240)
+
+
+def _tool_status(data: dict[str, Any]) -> str:
+    value = data.get("tool_status") if isinstance(data, dict) else None
+    if isinstance(value, str) and value:
+        return value
+    item = data.get("item") if isinstance(data, dict) else None
+    if isinstance(item, dict):
+        status = item.get("status")
+        if isinstance(status, str):
+            return status
+    return ""
+
+
+def _tool_arguments(data: dict[str, Any]) -> dict[str, Any] | str | None:
+    for value in (
+        data.get("tool_arguments") if isinstance(data, dict) else None,
+        data.get("arguments") if isinstance(data, dict) else None,
+    ):
+        parsed = _parse_tool_arguments(value)
+        if parsed is not None:
+            return parsed
+    item = data.get("item") if isinstance(data, dict) else None
+    if isinstance(item, dict):
+        for key in ("arguments", "input"):
+            parsed = _parse_tool_arguments(item.get(key))
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _parse_tool_arguments(value: Any) -> dict[str, Any] | str | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return raw
+        if isinstance(parsed, dict):
+            return parsed
+        return raw
+    return str(value)
+
+
+def _format_tool_arguments(args: dict[str, Any] | str | None) -> str:
+    if args is None:
+        return ""
+    if isinstance(args, str):
+        return _compact_line(args, limit=180)
+    preferred = [
+        "path",
+        "url",
+        "source_path",
+        "source_url",
+        "source_id",
+        "table_name",
+        "query",
+        "artifact_id",
+        "run_id",
+        "save_run",
+        "limit",
+    ]
+    pieces: list[str] = []
+    used: set[str] = set()
+    for key in preferred:
+        if key in args:
+            pieces.append(f"{key}={_format_tool_argument_value(args[key])}")
+            used.add(key)
+    for key, value in args.items():
+        if key in used:
+            continue
+        pieces.append(f"{key}={_format_tool_argument_value(value)}")
+        if len(pieces) >= 5:
+            break
+    return _compact_line(" ".join(pieces), limit=190)
+
+
+def _format_tool_argument_value(value: Any) -> str:
+    if isinstance(value, str):
+        text = value.replace("\n", " ").strip()
+    elif isinstance(value, (int, float, bool)) or value is None:
+        text = json.dumps(value, ensure_ascii=False)
+    else:
+        text = json.dumps(value, ensure_ascii=False)
+    if len(text) > 72:
+        text = text[:69] + "..."
+    if " " in text:
+        return json.dumps(text, ensure_ascii=False)
+    return text
+
+
+def _compact_line(content: str, *, limit: int) -> str:
+    text = " ".join(content.strip().split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
 
 
 def _looks_like_runtime_payload(content: str) -> bool:
@@ -1117,6 +1237,8 @@ def _summarize_tool_result(content: str, data: dict[str, Any]) -> str:
         or _state.last_tool
         or "tool"
     )
+    if payload.get("ok") is False:
+        return f"{function}: failed {payload.get('error') or payload.get('phase') or 'unknown'}"
     if function == "velaria_dataset_import":
         source = pathlib_basename(str(payload.get("source_path") or ""))
         schema = ", ".join(str(v) for v in payload.get("schema") or [])
@@ -1149,8 +1271,6 @@ def _summarize_tool_result(content: str, data: dict[str, Any]) -> str:
         return f"{function}: exit {payload.get('exit_code', '?')}"
     if payload.get("run_id"):
         return f"{function}: run {payload.get('run_id')}"
-    if payload.get("ok") is False:
-        return f"{function}: error {payload.get('error', 'unknown')}"
     return _compact_content(json.dumps(payload, ensure_ascii=False))
 
 

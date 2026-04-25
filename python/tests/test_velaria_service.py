@@ -73,21 +73,21 @@ class VelariaServiceTest(unittest.TestCase):
         )
 
     def test_ai_config_reads_explicit_runtime_paths(self):
-        with tempfile.TemporaryDirectory(prefix="velaria-ai-config-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="velaria-agent-config-") as tmp:
             home = pathlib.Path(tmp)
             config_dir = home / ".velaria"
             config_dir.mkdir()
             (config_dir / "config.json").write_text(
                 json.dumps(
                     {
-                        "aiRuntime": "codex",
-                        "aiRuntimePath": "/opt/velaria/runtime/bin/codex",
-                        "aiClaudeRuntimePath": "/opt/velaria/runtime/bin/claude",
-                        "aiCodexRuntimePath": "/opt/velaria/runtime/bin/codex-app",
-                        "aiRuntimeWorkspace": "/var/lib/velaria/ai-runtime",
-                        "aiReuseLocalConfig": False,
-                        "aiRuntimeConfigPath": "/etc/velaria/codex-config.json",
-                        "aiCodexNetworkAccess": False,
+                        "agentRuntime": "codex",
+                        "agentRuntimePath": "/opt/velaria/runtime/bin/codex",
+                        "agentClaudeRuntimePath": "/opt/velaria/runtime/bin/claude",
+                        "agentCodexRuntimePath": "/opt/velaria/runtime/bin/codex-app",
+                        "agentRuntimeWorkspace": "/var/lib/velaria/agent-runtime",
+                        "agentReuseLocalConfig": False,
+                        "agentRuntimeConfigPath": "/etc/velaria/codex-config.json",
+                        "agentCodexNetworkAccess": False,
                     }
                 ),
                 encoding="utf-8",
@@ -98,9 +98,30 @@ class VelariaServiceTest(unittest.TestCase):
         self.assertEqual(config["runtime_path"], "/opt/velaria/runtime/bin/codex")
         self.assertEqual(config["claude_runtime_path"], "/opt/velaria/runtime/bin/claude")
         self.assertEqual(config["codex_runtime_path"], "/opt/velaria/runtime/bin/codex-app")
-        self.assertEqual(config["runtime_workspace"], "/var/lib/velaria/ai-runtime")
+        self.assertEqual(config["runtime_workspace"], "/var/lib/velaria/agent-runtime")
         self.assertFalse(config["reuse_local_config"])
         self.assertEqual(config["runtime_config_path"], "/etc/velaria/codex-config.json")
+        self.assertFalse(config["network_access"])
+
+    def test_ai_config_keeps_legacy_ai_keys_as_compatibility_aliases(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-agent-legacy-config-") as tmp:
+            home = pathlib.Path(tmp)
+            config_dir = home / ".velaria"
+            config_dir.mkdir()
+            (config_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "aiRuntime": "codex",
+                        "aiRuntimeWorkspace": "/var/lib/velaria/ai-runtime",
+                        "aiCodexNetworkAccess": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"HOME": str(home)}):
+                config = velaria_service.get_ai_config()
+        self.assertEqual(config["runtime"], "codex")
+        self.assertEqual(config["runtime_workspace"], "/var/lib/velaria/ai-runtime")
         self.assertFalse(config["network_access"])
 
     def test_codex_runtime_defaults_to_local_codex_command(self):

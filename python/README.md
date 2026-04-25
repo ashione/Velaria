@@ -397,9 +397,9 @@ curl -sS http://127.0.0.1:37491/api/v1/runs/keyword-search \
   }'
 ```
 
-### AI Runtime (Optional)
+### Agent Runtime (Optional)
 
-Install AI runtime dependencies:
+Install agent runtime dependencies:
 
 ```bash
 uv sync --project python --extra ai-claude    # Claude Agent SDK
@@ -407,10 +407,10 @@ uv sync --project python --extra ai-claude    # Claude Agent SDK
 uv sync --project python --extra ai-codex     # Codex App Server
 ```
 
-The AI runtime provides:
+The agent runtime provides:
 
 - Codex/Claude-backed interactive agent runtime via `velaria_cli.py -i`
-- Thread persistence under `aiRuntimeWorkspace`
+- Thread persistence under `agentRuntimeWorkspace`
 - Automatic injection of `skills/velaria_python_local/SKILL.md`
 - Velaria local functions exposed through the runtime bridge / MCP server:
   `velaria_read`, `velaria_schema`, `velaria_sql`, `velaria_explain`,
@@ -423,22 +423,24 @@ Minimal Codex runtime config:
 
 ```json
 {
-  "aiRuntime": "codex",
-  "aiRuntimeWorkspace": "~/.velaria/ai-runtime",
-  "aiReuseLocalConfig": true,
-  "aiCodexNetworkAccess": true
+  "agentRuntime": "codex",
+  "agentRuntimeWorkspace": "~/.velaria/ai-runtime",
+  "agentReuseLocalConfig": true,
+  "agentCodexNetworkAccess": true
 }
 ```
 
 Codex uses the local `codex app-server` command and defaults to `gpt-5.4-mini`
-when `aiModel` is omitted. `aiRuntimeWorkspace` is the runtime working directory
+when `agentModel` is omitted. `agentRuntimeWorkspace` is the runtime working directory
 used to save and resume agent threads. If omitted, Velaria creates a
-project-scoped directory under `~/.velaria/ai-runtime/`. `aiReuseLocalConfig`
+project-scoped directory under `~/.velaria/ai-runtime/`. `agentReuseLocalConfig`
 controls whether the runtime process can reuse current user config; set it to
-`false` for an isolated runtime HOME. Use `aiRuntimePath` / `aiCodexRuntimePath`
-only when overriding the local Codex executable. Use `aiClaudeRuntimePath` for
+`false` for an isolated runtime HOME. Use `agentRuntimePath` / `agentCodexRuntimePath`
+only when overriding the local Codex executable. Use `agentClaudeRuntimePath` for
 Claude Code runtime. Codex workspace-write network access is enabled by default;
-set `aiCodexNetworkAccess` to `false` only for offline runtime sessions.
+set `agentCodexNetworkAccess` to `false` only for offline runtime sessions.
+The runtime inherits standard proxy environment variables such as `http_proxy`,
+`https_proxy`, and `all_proxy`.
 
 AI CLI examples:
 

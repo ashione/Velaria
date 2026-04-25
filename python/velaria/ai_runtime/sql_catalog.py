@@ -48,7 +48,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "STRING",
         "description": "Return lowercase text.",
         "examples": ["SELECT LOWER(region) AS region_lower FROM input_table"],
-        "keywords": ["string", "lowercase", "case", "normalize text"],
+        "keywords": ["string", "lowercase", "case", "normalize text", "小写", "字符串规范化"],
     },
     {
         "name": "UPPER",
@@ -57,7 +57,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "STRING",
         "description": "Return uppercase text.",
         "examples": ["SELECT UPPER(region) AS region_upper FROM input_table"],
-        "keywords": ["string", "uppercase", "case"],
+        "keywords": ["string", "uppercase", "case", "大写", "字符串规范化"],
     },
     {
         "name": "TRIM",
@@ -66,7 +66,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "STRING",
         "description": "Trim leading and trailing whitespace.",
         "examples": ["SELECT TRIM(name) AS name_clean FROM input_table"],
-        "keywords": ["string", "whitespace", "clean"],
+        "keywords": ["string", "whitespace", "clean", "去空格", "字符串清洗"],
     },
     {
         "name": "LTRIM",
@@ -75,7 +75,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "STRING",
         "description": "Trim leading whitespace.",
         "examples": ["SELECT LTRIM(name) AS name_left_clean FROM input_table"],
-        "keywords": ["string", "whitespace", "clean", "left trim"],
+        "keywords": ["string", "whitespace", "clean", "left trim", "去左空格", "字符串清洗"],
     },
     {
         "name": "RTRIM",
@@ -84,7 +84,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "STRING",
         "description": "Trim trailing whitespace.",
         "examples": ["SELECT RTRIM(name) AS name_right_clean FROM input_table"],
-        "keywords": ["string", "whitespace", "clean", "right trim"],
+        "keywords": ["string", "whitespace", "clean", "right trim", "去右空格", "字符串清洗"],
     },
     {
         "name": "LENGTH",
@@ -94,7 +94,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "INT",
         "description": "Return string length.",
         "examples": ["SELECT LENGTH(TODAY()) AS today_len"],
-        "keywords": ["string", "length", "size", "len"],
+        "keywords": ["string", "length", "size", "len", "字符串长度", "长度"],
     },
     {
         "name": "SUBSTR",
@@ -104,7 +104,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "STRING",
         "description": "Return a substring using one-based start positions.",
         "examples": ["SELECT SUBSTR(CAST(open AS STRING), 1, 6) AS open_prefix FROM input_table"],
-        "keywords": ["string", "substring", "prefix", "slice"],
+        "keywords": ["string", "substring", "prefix", "slice", "截取", "子串", "前缀"],
     },
     {
         "name": "LEFT",
@@ -113,7 +113,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "STRING",
         "description": "Return the leftmost characters.",
         "examples": ["SELECT LEFT(region, 2) AS region_prefix FROM input_table"],
-        "keywords": ["string", "prefix", "left"],
+        "keywords": ["string", "prefix", "left", "左侧", "前缀"],
     },
     {
         "name": "RIGHT",
@@ -122,7 +122,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "STRING",
         "description": "Return the rightmost characters.",
         "examples": ["SELECT RIGHT(code, 3) AS code_suffix FROM input_table"],
-        "keywords": ["string", "suffix", "right"],
+        "keywords": ["string", "suffix", "right", "右侧", "后缀"],
     },
     {
         "name": "POSITION",
@@ -131,7 +131,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "INT",
         "description": "Return the one-based position of a substring, or 0 when absent.",
         "examples": ["SELECT POSITION('-', payload) AS dash_pos FROM input_table"],
-        "keywords": ["string", "find", "position", "contains"],
+        "keywords": ["string", "find", "position", "contains", "位置", "查找", "包含"],
     },
     {
         "name": "REPLACE",
@@ -140,7 +140,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "STRING",
         "description": "Replace all occurrences of a substring.",
         "examples": ["SELECT REPLACE(region, 'ap', 'AP') AS region_clean FROM input_table"],
-        "keywords": ["string", "replace", "clean", "normalize"],
+        "keywords": ["string", "replace", "clean", "normalize", "替换", "字符串清洗"],
     },
     {
         "name": "REVERSE",
@@ -149,7 +149,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "STRING",
         "description": "Reverse text.",
         "examples": ["SELECT REVERSE(code) AS reversed_code FROM input_table"],
-        "keywords": ["string", "reverse"],
+        "keywords": ["string", "reverse", "反转"],
     },
     {
         "name": "CONCAT",
@@ -158,7 +158,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "STRING",
         "description": "Concatenate values as strings.",
         "examples": ["SELECT CONCAT(region, '-', id) AS region_id FROM input_table"],
-        "keywords": ["string", "join text", "combine"],
+        "keywords": ["string", "join text", "combine", "拼接", "字符串拼接"],
     },
     {
         "name": "CONCAT_WS",
@@ -167,7 +167,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "STRING",
         "description": "Concatenate values with a separator.",
         "examples": ["SELECT CONCAT_WS('-', region, id) AS region_id FROM input_table"],
-        "keywords": ["string", "join text", "combine", "separator"],
+        "keywords": ["string", "join text", "combine", "separator", "拼接", "分隔符"],
     },
     {
         "name": "CAST",
@@ -176,7 +176,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "requested type",
         "description": "Convert a value to a supported scalar type.",
         "examples": ["SELECT CAST(open_text AS DOUBLE) AS open_value FROM input_table"],
-        "keywords": ["cast", "convert", "type", "numeric", "string"],
+        "keywords": ["cast", "convert", "type", "numeric", "string", "类型转换", "转数值", "转字符串"],
     },
     {
         "name": "ABS",
@@ -185,7 +185,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "DOUBLE",
         "description": "Return absolute value.",
         "examples": ["SELECT ABS(delta) AS abs_delta FROM input_table"],
-        "keywords": ["numeric", "absolute", "magnitude"],
+        "keywords": ["numeric", "absolute", "magnitude", "绝对值"],
     },
     {
         "name": "ROUND",
@@ -194,7 +194,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "DOUBLE",
         "description": "Round a number to the nearest integer value.",
         "examples": ["SELECT ROUND(amount) AS rounded_amount FROM input_table"],
-        "keywords": ["numeric", "round", "integer"],
+        "keywords": ["numeric", "round", "integer", "四舍五入", "取整"],
     },
     {
         "name": "CEIL",
@@ -203,7 +203,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "DOUBLE",
         "description": "Return the smallest integer value greater than or equal to the input.",
         "examples": ["SELECT CEIL(amount) AS amount_ceiling FROM input_table"],
-        "keywords": ["numeric", "ceil", "ceiling", "round up"],
+        "keywords": ["numeric", "ceil", "ceiling", "round up", "向上取整"],
     },
     {
         "name": "FLOOR",
@@ -212,7 +212,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "DOUBLE",
         "description": "Return the largest integer value less than or equal to the input.",
         "examples": ["SELECT FLOOR(amount) AS amount_floor FROM input_table"],
-        "keywords": ["numeric", "floor", "round down"],
+        "keywords": ["numeric", "floor", "round down", "向下取整"],
     },
     {
         "name": "YEAR",
@@ -221,7 +221,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "INT",
         "description": "Extract UTC calendar year from epoch milliseconds, timestamp, or date text.",
         "examples": ["SELECT YEAR(trade_date) AS year FROM input_table"],
-        "keywords": ["date", "time", "year", "extract"],
+        "keywords": ["date", "time", "year", "extract", "年份", "提取年"],
     },
     {
         "name": "MONTH",
@@ -230,7 +230,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "INT",
         "description": "Extract UTC month number.",
         "examples": ["SELECT MONTH(trade_date) AS month FROM input_table"],
-        "keywords": ["date", "time", "month", "extract"],
+        "keywords": ["date", "time", "month", "extract", "月份", "提取月"],
     },
     {
         "name": "DAY",
@@ -239,7 +239,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "INT",
         "description": "Extract UTC day-of-month.",
         "examples": ["SELECT DAY(trade_date) AS day FROM input_table"],
-        "keywords": ["date", "time", "day", "extract"],
+        "keywords": ["date", "time", "day", "extract", "日期", "日", "提取日"],
     },
     {
         "name": "ISO_WEEK",
@@ -249,7 +249,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "INT",
         "description": "Extract ISO week number. WEEK uses the same ISO week semantics.",
         "examples": ["SELECT ISO_WEEK(trade_date) AS iso_week FROM input_table"],
-        "keywords": ["date", "time", "week", "iso", "weekly", "group by week"],
+        "keywords": ["date", "time", "week", "iso", "weekly", "group by week", "按周", "周汇总", "周"],
     },
     {
         "name": "ISO_YEAR",
@@ -258,7 +258,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "INT",
         "description": "Extract ISO week-year; use with ISO_WEEK for cross-year weekly grouping.",
         "examples": ["SELECT ISO_YEAR(trade_date) AS iso_year FROM input_table"],
-        "keywords": ["date", "time", "iso", "year", "weekly", "cross year"],
+        "keywords": ["date", "time", "iso", "year", "weekly", "cross year", "按周", "周汇总", "跨年周"],
     },
     {
         "name": "YEARWEEK",
@@ -267,7 +267,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "INT",
         "description": "Return compact ISO year/week key as YYYYWW.",
         "examples": ["SELECT YEARWEEK(trade_date) AS year_week FROM input_table"],
-        "keywords": ["date", "time", "yearweek", "weekly", "group by week"],
+        "keywords": ["date", "time", "yearweek", "weekly", "group by week", "按周", "周汇总", "年月周"],
     },
     {
         "name": "NOW",
@@ -276,7 +276,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "STRING",
         "description": "Return current UTC timestamp text.",
         "examples": ["SELECT NOW() AS generated_at"],
-        "keywords": ["current", "now", "timestamp", "time", "generated at"],
+        "keywords": ["current", "now", "timestamp", "time", "generated at", "当前时间", "现在", "时间戳"],
     },
     {
         "name": "CURRENT_TIMESTAMP",
@@ -286,7 +286,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "STRING",
         "description": "Return current UTC timestamp text. currentTimestamp() is accepted as an alias.",
         "examples": ["SELECT currentTimestamp() AS generated_at"],
-        "keywords": ["current", "timestamp", "now", "time"],
+        "keywords": ["current", "timestamp", "now", "time", "当前时间戳", "当前时间", "时间戳"],
     },
     {
         "name": "TODAY",
@@ -295,7 +295,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
         "returns": "STRING",
         "description": "Return current UTC date text as YYYY-MM-DD.",
         "examples": ["SELECT TODAY() AS run_date"],
-        "keywords": ["current", "today", "date", "run date"],
+        "keywords": ["current", "today", "date", "run date", "今天", "当前日期", "日期"],
     },
     {
         "name": "UNIX_TIMESTAMP",
@@ -307,7 +307,7 @@ SQL_FUNCTIONS: list[dict[str, Any]] = [
             "SELECT UNIX_TIMESTAMP() AS generated_epoch_s",
             "SELECT UNIX_TIMESTAMP(trade_date) AS trade_epoch_s FROM input_table",
         ],
-        "keywords": ["unix", "epoch", "seconds", "timestamp", "convert date"],
+        "keywords": ["unix", "epoch", "seconds", "timestamp", "convert date", "unix时间戳", "时间戳", "转时间戳", "秒级时间"],
     },
 ]
 
@@ -317,7 +317,7 @@ SQL_PATTERNS: list[dict[str, Any]] = [
         "name": "weekly_aggregation",
         "category": "date",
         "description": "Aggregate rows by ISO week using ISO_YEAR and ISO_WEEK.",
-        "keywords": ["weekly", "week", "按周", "group by week", "weekly aggregate"],
+        "keywords": ["weekly", "week", "按周", "周汇总", "汇总", "group by week", "weekly aggregate"],
         "template": (
             "SELECT ISO_YEAR({date_col}) AS iso_year, ISO_WEEK({date_col}) AS iso_week, "
             "COUNT(*) AS n, AVG({value_col}) AS avg_value "
@@ -331,7 +331,7 @@ SQL_PATTERNS: list[dict[str, Any]] = [
         "name": "yearweek_aggregation",
         "category": "date",
         "description": "Aggregate rows by compact ISO YYYYWW key.",
-        "keywords": ["yearweek", "weekly", "week key", "YYYYWW"],
+        "keywords": ["yearweek", "weekly", "week key", "YYYYWW", "按周", "周汇总", "年月周"],
         "template": (
             "SELECT YEARWEEK({date_col}) AS year_week, COUNT(*) AS n, AVG({value_col}) AS avg_value "
             "FROM {table_name} GROUP BY YEARWEEK({date_col}) ORDER BY year_week"
@@ -342,11 +342,11 @@ SQL_PATTERNS: list[dict[str, Any]] = [
     {
         "name": "current_run_metadata",
         "category": "time",
-        "description": "Add current date/time metadata to query output.",
-        "keywords": ["current", "today", "now", "timestamp", "metadata", "generated"],
+        "description": "Return one row of current date/time metadata in a SQL v1-safe form.",
+        "keywords": ["current", "today", "now", "timestamp", "metadata", "generated", "当前时间", "当前日期", "生成时间"],
         "template": (
-            "SELECT *, TODAY() AS run_date, NOW() AS generated_at, "
-            "UNIX_TIMESTAMP() AS generated_epoch_s FROM {table_name}"
+            "SELECT TODAY() AS run_date, NOW() AS generated_at, "
+            "UNIX_TIMESTAMP() AS generated_epoch_s FROM {table_name} LIMIT 1"
         ),
         "parameters": ["table_name"],
         "functions": ["TODAY", "NOW", "UNIX_TIMESTAMP"],
@@ -355,7 +355,7 @@ SQL_PATTERNS: list[dict[str, Any]] = [
         "name": "date_to_epoch",
         "category": "time",
         "description": "Convert a timestamp/date column to Unix seconds.",
-        "keywords": ["unix", "epoch", "timestamp", "convert", "date"],
+        "keywords": ["unix", "epoch", "timestamp", "convert", "date", "时间戳", "转时间戳", "日期转换"],
         "template": "SELECT {date_col}, UNIX_TIMESTAMP({date_col}) AS epoch_s FROM {table_name}",
         "parameters": ["table_name", "date_col"],
         "functions": ["UNIX_TIMESTAMP"],
@@ -495,7 +495,9 @@ def _terms(value: str) -> list[str]:
             continue
         terms.append(part)
         if re.search(r"[\u4e00-\u9fff]", part) and len(part) > 2:
-            terms.extend(part[index : index + 2] for index in range(0, len(part) - 1))
+            for width in (2, 3):
+                if len(part) >= width:
+                    terms.extend(part[index : index + width] for index in range(0, len(part) - width + 1))
     return terms
 
 

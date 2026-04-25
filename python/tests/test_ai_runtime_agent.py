@@ -330,6 +330,12 @@ class AiRuntimeAgentTest(unittest.TestCase):
         replace = execute_local_function("velaria_sql_function_search", {"name": "REPLACE"})
         self.assertTrue(replace["ok"])
         self.assertEqual(replace["matches"][0]["signature"], "REPLACE(text, search, replacement)")
+        timestamp = execute_local_function("velaria_sql_function_search", {"query": "转时间戳"})
+        self.assertTrue(timestamp["ok"])
+        self.assertTrue(any(match["name"] == "UNIX_TIMESTAMP" for match in timestamp["matches"]))
+        text_clean = execute_local_function("velaria_sql_function_search", {"query": "字符串替换"})
+        self.assertTrue(text_clean["ok"])
+        self.assertTrue(any(match["name"] == "REPLACE" for match in text_clean["matches"]))
 
         patterns = execute_local_function(
             "velaria_sql_query_patterns",
@@ -341,6 +347,27 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertTrue(patterns["ok"])
         self.assertIn("ISO_WEEK(observation_date)", patterns["patterns"][0]["template"])
         self.assertIn("AVG(NASDAQ100)", patterns["patterns"][0]["template"])
+        current_time = execute_local_function(
+            "velaria_sql_query_patterns",
+            {"task": "增加当前时间"},
+        )
+        self.assertTrue(current_time["ok"])
+        self.assertEqual(current_time["patterns"][0]["name"], "current_run_metadata")
+        with tempfile.TemporaryDirectory(prefix="velaria-sql-catalog-patterns-") as tmp:
+            csv_path = pathlib.Path(tmp) / "series.csv"
+            csv_path.write_text(
+                "observation_date,NASDAQ100\n2026-01-05,100\n2026-01-06,110\n2026-01-12,130\n",
+                encoding="utf-8",
+            )
+            weekly_sql = patterns["patterns"][0]["template"]
+            weekly = execute_local_function("velaria_sql", {"source_path": str(csv_path), "query": weekly_sql})
+            self.assertTrue(weekly["ok"], weekly)
+            self.assertEqual(weekly["row_count"], 2)
+
+            metadata_sql = current_time["patterns"][0]["template"]
+            metadata = execute_local_function("velaria_sql", {"source_path": str(csv_path), "query": metadata_sql})
+            self.assertTrue(metadata["ok"], metadata)
+            self.assertEqual(metadata["schema"], ["run_date", "generated_at", "generated_epoch_s"])
 
     def test_mcp_server_exposes_tools_and_skill_resource(self):
         init = _handle_request({"jsonrpc": "2.0", "id": 1, "method": "initialize"})

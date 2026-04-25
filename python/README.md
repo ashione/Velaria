@@ -410,7 +410,7 @@ The agent runtime provides:
 
 - Codex/Claude-backed interactive agent runtime via `velaria_cli.py -i`
 - Thread persistence under `agentRuntimeWorkspace`
-- Automatic injection of `skills/velaria_python_local/SKILL.md`
+- On-demand exposure of the Velaria usage skill as an MCP resource
 - Velaria local functions exposed through the runtime bridge / MCP server:
   `velaria_read`, `velaria_schema`, `velaria_sql`, `velaria_explain`,
   `velaria_dataset_download`, `velaria_dataset_import`,

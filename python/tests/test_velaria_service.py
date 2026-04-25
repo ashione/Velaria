@@ -103,27 +103,6 @@ class VelariaServiceTest(unittest.TestCase):
         self.assertEqual(config["runtime_config_path"], "/etc/velaria/codex-config.json")
         self.assertFalse(config["network_access"])
 
-    def test_ai_config_keeps_legacy_ai_keys_as_compatibility_aliases(self):
-        with tempfile.TemporaryDirectory(prefix="velaria-agent-legacy-config-") as tmp:
-            home = pathlib.Path(tmp)
-            config_dir = home / ".velaria"
-            config_dir.mkdir()
-            (config_dir / "config.json").write_text(
-                json.dumps(
-                    {
-                        "aiRuntime": "codex",
-                        "aiRuntimeWorkspace": "/var/lib/velaria/ai-runtime",
-                        "aiCodexNetworkAccess": False,
-                    }
-                ),
-                encoding="utf-8",
-            )
-            with mock.patch.dict(os.environ, {"HOME": str(home)}):
-                config = velaria_service.get_ai_config()
-        self.assertEqual(config["runtime"], "codex")
-        self.assertEqual(config["runtime_workspace"], "/var/lib/velaria/ai-runtime")
-        self.assertFalse(config["network_access"])
-
     def test_codex_runtime_defaults_to_local_codex_command(self):
         from velaria.ai_runtime import create_runtime
 

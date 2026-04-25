@@ -108,80 +108,33 @@ def load_ai_config() -> dict[str, Any]:
     except Exception:
         return {}
     return {
-        "provider": _config_value(config, "agentProvider", "aiProvider", default="openai"),
-        "api_key": _config_value(config, "agentApiKey", "aiApiKey", default=""),
-        "base_url": _config_value(config, "agentBaseUrl", "aiBaseUrl", default="https://api.openai.com/v1"),
-        "model": _config_value(config, "agentModel", "aiModel", default=""),
-        "reasoning_effort": _config_value(config, "agentReasoningEffort", "aiReasoningEffort", default="none"),
-        "runtime": _config_value(config, "agentRuntime", "aiRuntime", default="codex"),
-        "runtime_path": _config_value(config, "agentRuntimePath", "aiRuntimePath", default=""),
-        "claude_runtime_path": _config_value(
-            config,
-            "agentClaudeRuntimePath",
-            "aiClaudeRuntimePath",
-            default="",
-        ),
-        "codex_runtime_path": _config_value(
-            config,
-            "agentCodexRuntimePath",
-            "aiCodexRuntimePath",
-            default="",
-        ),
-        "runtime_workspace": _config_value(
-            config,
-            "agentRuntimeWorkspace",
-            "aiRuntimeWorkspace",
-            default="",
-        ),
-        "reuse_local_config": _bool_config_value(
-            config,
-            "agentReuseLocalConfig",
-            "aiReuseLocalConfig",
-            default=True,
-        ),
-        "runtime_config_path": _config_value(
-            config,
-            "agentRuntimeConfigPath",
-            "aiRuntimeConfigPath",
-            default="",
-        ),
-        "network_access": _config_value(
-            config,
-            "agentCodexNetworkAccess",
-            "agentNetworkAccess",
-            "aiCodexNetworkAccess",
-            "aiNetworkAccess",
-            default=True,
-        ),
+        "provider": config.get("agentProvider", "openai"),
+        "api_key": config.get("agentApiKey", ""),
+        "base_url": config.get("agentBaseUrl", "https://api.openai.com/v1"),
+        "model": config.get("agentModel", ""),
+        "reasoning_effort": config.get("agentReasoningEffort", "none"),
+        "runtime": config.get("agentRuntime", "codex"),
+        "runtime_path": config.get("agentRuntimePath", ""),
+        "claude_runtime_path": config.get("agentClaudeRuntimePath", ""),
+        "codex_runtime_path": config.get("agentCodexRuntimePath", ""),
+        "runtime_workspace": config.get("agentRuntimeWorkspace", ""),
+        "reuse_local_config": _bool_value(config.get("agentReuseLocalConfig", True), True),
+        "runtime_config_path": config.get("agentRuntimeConfigPath", ""),
+        "network_access": config.get("agentCodexNetworkAccess", config.get("agentNetworkAccess", True)),
         "proxy_env": _proxy_env_from_config(config),
-        "skill_dir": _config_value(config, "agentSkillDir", "aiSkillDir", default=""),
-        "skill_path": _config_value(config, "agentSkillPath", "aiSkillPath", default=""),
+        "skill_dir": config.get("agentSkillDir", ""),
+        "skill_path": config.get("agentSkillPath", ""),
         "cwd": str(Path.cwd()),
     }
 
 
-def _config_value(config: dict[str, Any], *keys: str, default: Any = "") -> Any:
-    for key in keys:
-        if key in config:
-            return config[key]
-    return default
-
-
-def _bool_config_value(config: dict[str, Any], *keys: str, default: bool) -> bool:
-    return _bool_value(_config_value(config, *keys, default=default), default)
-
-
 def _proxy_env_from_config(config: dict[str, Any]) -> dict[str, str]:
     proxy_env: dict[str, str] = {}
-    shared_proxy = str(_config_value(config, "agentProxy", "aiProxy", default="") or "").strip()
-    http_proxy = str(
-        _config_value(config, "agentHttpProxy", "aiHttpProxy", default=shared_proxy) or ""
-    ).strip()
-    https_proxy = str(
-        _config_value(config, "agentHttpsProxy", "aiHttpsProxy", default=shared_proxy) or ""
-    ).strip()
-    all_proxy = str(_config_value(config, "agentAllProxy", "aiAllProxy", default="") or "").strip()
-    no_proxy = str(_config_value(config, "agentNoProxy", "aiNoProxy", default="") or "").strip()
+    shared_proxy = str(config.get("agentProxy") or "").strip()
+    http_proxy = str(config.get("agentHttpProxy") or shared_proxy).strip()
+    https_proxy = str(config.get("agentHttpsProxy") or shared_proxy).strip()
+    all_proxy = str(config.get("agentAllProxy") or "").strip()
+    no_proxy = str(config.get("agentNoProxy") or "").strip()
     if http_proxy:
         proxy_env["http_proxy"] = http_proxy
     if https_proxy:

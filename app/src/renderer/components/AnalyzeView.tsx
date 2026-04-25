@@ -66,6 +66,9 @@ export function AnalyzeView(props: AnalyzeViewProps) {
   const [keywordMessage, setKeywordMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
   const [lastResult, setLastResult] = useState<LastResultState>({ kind: 'sql', title: 'SQL', html: '<div class="empty">No run yet.</div>' });
   const [sqlUnderstandingExpanded, setSqlUnderstandingExpanded] = useState(false);
+  const [aiPrompt, setAiPrompt] = useState('');
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
 
   /* ---------- sync from current dataset ---------- */
   useEffect(() => {
@@ -131,6 +134,33 @@ export function AnalyzeView(props: AnalyzeViewProps) {
     if (!filterBuilder.column || !filterBuilder.value.trim()) return;
     const table = analysisState.tableName || 'input_table';
     setAnalysisState((c) => ({ ...c, query: `SELECT * FROM ${quoteIdentifier(table)} WHERE ${quoteIdentifier(filterBuilder.column)} ${filterBuilder.operator} ${quoteLiteral(filterBuilder.value)} LIMIT 50`, preset: 'filter' }));
+  }
+
+  async function generateSqlWithAi() {
+    if (!aiPrompt.trim() || !currentDataset) return;
+    setAiLoading(true);
+    setAiError(null);
+    try {
+      const result = await api('/api/v1/ai/generate-sql', {
+        method: 'POST',
+        body: JSON.stringify({
+          prompt: aiPrompt.trim(),
+          schema: currentDataset.schema,
+          table_name: analysisState.tableName || 'input_table',
+          sample_rows: (currentDataset.preview?.rows || []).slice(0, 3),
+        }),
+      });
+      if (result.ok && result.sql) {
+        setAnalysisState((c) => ({ ...c, query: result.sql }));
+        setAiPrompt('');
+      } else {
+        setAiError(t('ai_generate_failed', { error: result.error || 'Unknown error' }));
+      }
+    } catch (error) {
+      setAiError(t('ai_generate_failed', { error: String(error) }));
+    } finally {
+      setAiLoading(false);
+    }
   }
 
   async function runAnalysis() {
@@ -282,6 +312,28 @@ export function AnalyzeView(props: AnalyzeViewProps) {
                   <div className="helper">{t('keyword_locked_config_hint', { columns: currentDataset?.keywordConfig.textColumns.join(', ') || '\u2014', analyzer: currentDataset?.keywordConfig.analyzer || '\u2014' })}</div>
                   <div className="field-grid"><label><span>{t('keyword_top_k')}</span><input value={keywordSearch.topK} onChange={(e) => setKeywordSearch((c) => ({ ...c, topK: e.target.value }))} disabled={!currentDataset} /></label></div>
                 </div>
+              </div>
+              <div className="ai-assist">
+                <label>
+                  <span>{t('ai_prompt_label')}</span>
+                  <div className="ai-input-row">
+                    <input
+                      value={aiPrompt}
+                      onChange={(e) => setAiPrompt(e.target.value)}
+                      placeholder={t('ai_prompt_placeholder')}
+                      disabled={aiLoading || !currentDataset}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); generateSqlWithAi(); } }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void generateSqlWithAi()}
+                      disabled={aiLoading || !aiPrompt.trim() || !currentDataset}
+                    >
+                      {aiLoading ? t('ai_generating') : t('ai_generate_sql')}
+                    </button>
+                  </div>
+                </label>
+                {aiError && <div className="notice error">{aiError}</div>}
               </div>
               <label><span>{t('sql_query')}</span><div className="editor-shell"><pre className="editor-highlight" dangerouslySetInnerHTML={{ __html: highlightedSql }} /><textarea className="editor-input" spellCheck={false} value={analysisState.query} onChange={(e) => setAnalysisState((c) => ({ ...c, query: e.target.value }))} /></div></label>
               <div className="actions primary-actions">

@@ -814,6 +814,24 @@ table {
   display: none;
 }
 
+.ai-assist {
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 252, 246, 0.6);
+}
+
+.ai-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.ai-input-row input {
+  flex: 1;
+}
+
 @media (max-width: 1200px) {
   .shell {
     grid-template-columns: 1fr;

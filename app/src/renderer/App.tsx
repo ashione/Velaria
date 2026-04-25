@@ -51,7 +51,7 @@ export function App() {
   const [serviceInfo, setServiceInfo] = useState<ServiceInfo | null>(null);
   const [serviceStatus, setServiceStatus] = useState('status_bootstrapping');
   const [serviceMeta, setServiceMeta] = useState('status_waiting');
-  const [configForm, setConfigForm] = useState<AppConfig>({ bitableAppId: '', bitableAppSecret: '' });
+  const [configForm, setConfigForm] = useState<AppConfig>({ bitableAppId: '', bitableAppSecret: '', aiProvider: 'openai', aiApiKey: '', aiBaseUrl: 'https://api.openai.com/v1', aiModel: 'gpt-4o-mini' });
   const [configMessage, setConfigMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
   const [datasets, setDatasets] = useState<DatasetRecord[]>(() => loadDatasets());
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
@@ -99,7 +99,7 @@ export function App() {
         const info = await window.velariaShell.getServiceInfo();
         const cfg = await window.velariaShell.getConfig();
         setServiceInfo(info);
-        setConfigForm({ bitableAppId: cfg.bitableAppId || '', bitableAppSecret: cfg.bitableAppSecret || '' });
+        setConfigForm({ bitableAppId: cfg.bitableAppId || '', bitableAppSecret: cfg.bitableAppSecret || '', aiProvider: (cfg.aiProvider as AppConfig['aiProvider']) || 'openai', aiApiKey: cfg.aiApiKey || '', aiBaseUrl: cfg.aiBaseUrl || 'https://api.openai.com/v1', aiModel: cfg.aiModel || 'gpt-4o-mini' });
         const health = await fetch(`${info.baseUrl}/health`).then((r) => r.json());
         setServiceStatus(t('status_ready_on', { port: health.port }));
         setServiceMeta(t('status_packaged', { packaged: String(info.packaged), version: health.version }));
@@ -239,8 +239,12 @@ export function App() {
       const saved = await window.velariaShell.saveConfig({
         bitableAppId: configForm.bitableAppId.trim() || undefined,
         bitableAppSecret: configForm.bitableAppSecret.trim() || undefined,
+        aiProvider: configForm.aiProvider || undefined,
+        aiApiKey: configForm.aiApiKey.trim() || undefined,
+        aiBaseUrl: configForm.aiBaseUrl.trim() || undefined,
+        aiModel: configForm.aiModel.trim() || undefined,
       });
-      setConfigForm({ bitableAppId: saved.bitableAppId || '', bitableAppSecret: saved.bitableAppSecret || '' });
+      setConfigForm({ bitableAppId: saved.bitableAppId || '', bitableAppSecret: saved.bitableAppSecret || '', aiProvider: (saved.aiProvider as AppConfig['aiProvider']) || 'openai', aiApiKey: saved.aiApiKey || '', aiBaseUrl: saved.aiBaseUrl || 'https://api.openai.com/v1', aiModel: saved.aiModel || 'gpt-4o-mini' });
       setConfigMessage({ kind: 'info', text: t('settings_saved') });
     } catch (error) {
       setConfigMessage({ kind: 'error', text: t('settings_save_failed', { error: String(error) }) });

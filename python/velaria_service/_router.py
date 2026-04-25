@@ -80,6 +80,7 @@ from .agentic_handlers import (
     _normalize_monitor_create_payload,
     _validate_monitor_payload,
 )
+from .ai_handlers import handle_generate_sql
 
 
 try:
@@ -560,6 +561,10 @@ class VelariaService:
                         with AgenticStore() as store:
                             self._send_json(HTTPStatus.OK, handle_grounding(store, payload))
                             return
+                    if parts == ("ai", "generate-sql"):
+                        result = handle_generate_sql(payload)
+                        self._send_json(HTTPStatus.OK, result)
+                        return
                     if parts == ("monitors", "from-intent"):
                         with AgenticStore() as store:
                             generated = _monitor_from_intent_payload(store, payload)

@@ -608,6 +608,23 @@ def _dataset_docs_from_store(store: AgenticStore) -> list[dict[str, Any]]:
     return docs
 
 
+def get_ai_config() -> dict[str, Any]:
+    """Read AI provider config from ``~/.velaria/config.json``."""
+    config_path = Path.home() / ".velaria" / "config.json"
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return {
+            "provider": config.get("aiProvider", "openai"),
+            "api_key": config.get("aiApiKey", ""),
+            "base_url": config.get("aiBaseUrl", "https://api.openai.com/v1"),
+            "model": config.get("aiModel", "gpt-4o-mini"),
+        }
+    return {}
+
+
 def _field_docs_from_store(store: AgenticStore) -> list[dict[str, Any]]:
     docs: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()

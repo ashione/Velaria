@@ -51,6 +51,7 @@ from ._helpers import (  # noqa: F401
     _score_semantics,
     _timestamp_suffix,
     _update_run_progress,
+    get_ai_config,
     _ARROW_SUFFIXES,
     _BITABLE_PAGE_SIZE,
     _BITABLE_TIMEOUT_SECONDS,
@@ -95,6 +96,9 @@ from .agentic_handlers import (  # noqa: F401
     _normalize_monitor_create_payload,
     _validate_monitor_payload,
 )
+
+# Re-export AI handlers
+from .ai_handlers import handle_generate_sql  # noqa: F401
 
 
 def main() -> int:

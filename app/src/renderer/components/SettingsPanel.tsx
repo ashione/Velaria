@@ -69,6 +69,71 @@ export function SettingsPanel(props: SettingsPanelProps) {
             </div>
           </div>
         </section>
+        <section className="panel half">
+          <div className="panel-head">
+            <h2>{t('ai_settings_title')}</h2>
+          </div>
+          <div className="panel-body stack">
+            <div className="helper">{t('ai_settings_hint')}</div>
+            <label>
+              <span>{t('ai_provider')}</span>
+              <select
+                value={configForm.aiProvider}
+                onChange={(event) => {
+                  setConfigForm((current) => ({ ...current, aiProvider: event.target.value as AppConfig['aiProvider'] }));
+                  setConfigMessage(null);
+                }}
+              >
+                <option value="openai">OpenAI Compatible</option>
+                <option value="claude">Claude (Anthropic)</option>
+              </select>
+            </label>
+            <label>
+              <span>{t('ai_api_key')}</span>
+              <input
+                type="password"
+                value={configForm.aiApiKey}
+                onChange={(event) => {
+                  setConfigForm((current) => ({ ...current, aiApiKey: event.target.value }));
+                  setConfigMessage(null);
+                }}
+                placeholder="sk-..."
+              />
+            </label>
+            <label>
+              <span>{t('ai_base_url')}</span>
+              <input
+                value={configForm.aiBaseUrl}
+                onChange={(event) => {
+                  setConfigForm((current) => ({ ...current, aiBaseUrl: event.target.value }));
+                  setConfigMessage(null);
+                }}
+                placeholder="https://api.openai.com/v1"
+              />
+            </label>
+            <label>
+              <span>{t('ai_model')}</span>
+              <input
+                value={configForm.aiModel}
+                onChange={(event) => {
+                  setConfigForm((current) => ({ ...current, aiModel: event.target.value }));
+                  setConfigMessage(null);
+                }}
+                placeholder="gpt-4o-mini"
+              />
+            </label>
+            <div className="helper">
+              {configForm.aiApiKey
+                ? t('settings_secret_preview', { value: maskSecret(configForm.aiApiKey) })
+                : t('ai_no_api_key')}
+            </div>
+            <div className="actions">
+              <button type="button" onClick={() => void saveConfig()}>
+                {t('settings_save')}
+              </button>
+            </div>
+          </div>
+        </section>
       </div>
     </section>
   );

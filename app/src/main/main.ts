@@ -13,6 +13,10 @@ type SidecarProcess = ChildProcessByStdio<null, Readable, Readable>;
 type AppConfig = {
   bitableAppId?: string;
   bitableAppSecret?: string;
+  aiProvider?: string;
+  aiApiKey?: string;
+  aiBaseUrl?: string;
+  aiModel?: string;
 };
 
 let sidecarProcess: SidecarProcess | null = null;
@@ -65,6 +69,22 @@ async function readAppConfig(): Promise<AppConfig> {
         typeof parsed.bitableAppSecret === 'string' && parsed.bitableAppSecret.trim()
           ? parsed.bitableAppSecret.trim()
           : undefined,
+      aiProvider:
+        typeof parsed.aiProvider === 'string' && parsed.aiProvider.trim()
+          ? parsed.aiProvider.trim()
+          : undefined,
+      aiApiKey:
+        typeof parsed.aiApiKey === 'string' && parsed.aiApiKey.trim()
+          ? parsed.aiApiKey.trim()
+          : undefined,
+      aiBaseUrl:
+        typeof parsed.aiBaseUrl === 'string' && parsed.aiBaseUrl.trim()
+          ? parsed.aiBaseUrl.trim()
+          : undefined,
+      aiModel:
+        typeof parsed.aiModel === 'string' && parsed.aiModel.trim()
+          ? parsed.aiModel.trim()
+          : undefined,
     };
   } catch {
     return {};
@@ -80,6 +100,22 @@ async function writeAppConfig(payload: AppConfig): Promise<AppConfig> {
     bitableAppSecret:
       typeof payload.bitableAppSecret === 'string' && payload.bitableAppSecret.trim()
         ? payload.bitableAppSecret.trim()
+        : undefined,
+    aiProvider:
+      typeof payload.aiProvider === 'string' && payload.aiProvider.trim()
+        ? payload.aiProvider.trim()
+        : undefined,
+    aiApiKey:
+      typeof payload.aiApiKey === 'string' && payload.aiApiKey.trim()
+        ? payload.aiApiKey.trim()
+        : undefined,
+    aiBaseUrl:
+      typeof payload.aiBaseUrl === 'string' && payload.aiBaseUrl.trim()
+        ? payload.aiBaseUrl.trim()
+        : undefined,
+    aiModel:
+      typeof payload.aiModel === 'string' && payload.aiModel.trim()
+        ? payload.aiModel.trim()
         : undefined,
   };
   await fs.mkdir(configDir(), { recursive: true });

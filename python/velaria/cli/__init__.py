@@ -47,11 +47,20 @@ from velaria.cli._common import (  # noqa: F811
 )
 
 from velaria.cli.interactive import _run_interactive_loop, _wants_interactive  # noqa: F401
-from velaria.cli.run_cmd import _find_run_result_artifact, _execute_stream_sql_once  # noqa: F401
-from velaria.cli.vector_search import _run_vector_search  # noqa: F401
+from velaria.cli.run_cmd import (  # noqa: F401
+    _execute_stream_sql_once as _run_cmd_execute_stream_sql_once,
+    _find_run_result_artifact,
+    _run_action_with_timeout,
+)
+from velaria.cli.vector_search import _run_vector_search as _vector_search_run_vector_search
 
 # Re-export symbols that tests mock on the velaria.cli module
-from velaria import Session, build_file_embeddings  # noqa: F401
+from velaria import (  # noqa: F401
+    Session,
+    build_file_embeddings,
+    query_file_embeddings,
+    run_file_mixed_text_hybrid_search,
+)
 
 from velaria.cli import file_sql as _file_sql
 from velaria.cli import vector_search as _vector_search
@@ -60,6 +69,27 @@ from velaria.cli import run_cmd as _run_cmd
 from velaria.cli import artifacts as _artifacts
 from velaria.cli import agentic as _agentic
 from velaria.cli import ai_cmd as _ai_cmd
+
+
+def _sync_compat_bindings() -> None:
+    _file_sql.Session = Session
+    _vector_search.Session = Session
+    _embedding.Session = Session
+    _embedding.build_file_embeddings = build_file_embeddings
+    _embedding.query_file_embeddings = query_file_embeddings
+    _embedding.run_file_mixed_text_hybrid_search = run_file_mixed_text_hybrid_search
+    _run_cmd.Session = Session
+    _run_cmd._run_action_with_timeout = _run_action_with_timeout
+
+
+def _run_vector_search(*args: Any, **kwargs: Any) -> int:
+    _sync_compat_bindings()
+    return _vector_search_run_vector_search(*args, **kwargs)
+
+
+def _execute_stream_sql_once(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    _sync_compat_bindings()
+    return _run_cmd_execute_stream_sql_once(*args, **kwargs)
 
 
 def _build_parser():
@@ -88,6 +118,7 @@ def _build_parser():
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(argv) if argv is not None else sys.argv[1:]
+    _sync_compat_bindings()
     if _wants_interactive(argv):
         return _run_interactive_loop()
     try:

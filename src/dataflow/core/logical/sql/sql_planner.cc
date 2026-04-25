@@ -114,6 +114,14 @@ ComputedColumnKind toComputedFunctionKind(sql::StringFunctionKind function) {
       return ComputedColumnKind::DateWeek;
     case sql::StringFunctionKind::YearWeek:
       return ComputedColumnKind::DateYearWeek;
+    case sql::StringFunctionKind::Now:
+      return ComputedColumnKind::TimeNow;
+    case sql::StringFunctionKind::Today:
+      return ComputedColumnKind::TimeToday;
+    case sql::StringFunctionKind::CurrentTimestamp:
+      return ComputedColumnKind::TimeCurrentTimestamp;
+    case sql::StringFunctionKind::UnixTimestamp:
+      return ComputedColumnKind::TimeUnixTimestamp;
   }
   return ComputedColumnKind::StringConcat;
 }
@@ -173,6 +181,14 @@ std::string defaultStringAlias(const sql::StringFunctionExpr& expr, std::size_t 
         return std::string("week");
       case sql::StringFunctionKind::YearWeek:
         return std::string("yearweek");
+      case sql::StringFunctionKind::Now:
+        return std::string("now");
+      case sql::StringFunctionKind::Today:
+        return std::string("today");
+      case sql::StringFunctionKind::CurrentTimestamp:
+        return std::string("current_timestamp");
+      case sql::StringFunctionKind::UnixTimestamp:
+        return std::string("unix_timestamp");
     }
     return std::string("string_func");
   }(expr.function);
@@ -520,6 +536,18 @@ void ensureStringFunctionSupported(const StringFunctionExpr& function) {
     case StringFunctionKind::YearWeek:
       if (function.args.size() != 1) {
         throw SQLSemanticError("date scalar function expects 1 argument");
+      }
+      break;
+    case StringFunctionKind::Now:
+    case StringFunctionKind::Today:
+    case StringFunctionKind::CurrentTimestamp:
+      if (!function.args.empty()) {
+        throw SQLSemanticError("current time scalar function expects 0 arguments");
+      }
+      break;
+    case StringFunctionKind::UnixTimestamp:
+      if (function.args.size() > 1) {
+        throw SQLSemanticError("UNIX_TIMESTAMP expects 0 or 1 argument");
       }
       break;
   }
@@ -979,6 +1007,14 @@ std::string computedFunctionName(ComputedColumnKind function) {
       return "week";
     case ComputedColumnKind::DateYearWeek:
       return "yearweek";
+    case ComputedColumnKind::TimeNow:
+      return "now";
+    case ComputedColumnKind::TimeToday:
+      return "today";
+    case ComputedColumnKind::TimeCurrentTimestamp:
+      return "current_timestamp";
+    case ComputedColumnKind::TimeUnixTimestamp:
+      return "unix_timestamp";
   }
   return "copy";
 }
@@ -1098,35 +1134,74 @@ LogicalPlan SqlPlanner::buildLogicalPlan(const SqlQuery& query, const ViewCatalo
     if (query.join.has_value() || query.where || query.keyword_search.has_value() ||
         query.hybrid_search.has_value() || !query.group_by.empty() ||
         query.having) {
-      throw SQLSemanticError("SELECT without FROM only supports literal projection");
-    }
-    if (std::any_of(query.select_items.begin(), query.select_items.end(),
-                    [](const SelectItem& item) { return item.is_string_function; })) {
-      throwUnsupportedSqlV1("string function is not supported without FROM");
+      throw SQLSemanticError("SELECT without FROM only supports literal and scalar projection");
     }
     std::vector<std::string> fields;
     Row row;
     fields.reserve(query.select_items.size());
     row.reserve(query.select_items.size());
+    std::vector<std::size_t> project_indices(query.select_items.size(), 0);
+    std::vector<std::string> project_aliases(query.select_items.size());
+    struct ScalarProjection {
+      SelectItem item;
+      std::string name;
+      std::size_t select_position = 0;
+    };
+    std::vector<ScalarProjection> scalar_items;
     for (std::size_t i = 0; i < query.select_items.size(); ++i) {
       const auto& item = query.select_items[i];
-      if (!item.is_literal || item.is_all || item.is_table_all || item.is_aggregate ||
-          !item.column.name.empty()) {
-        throwUnsupportedSqlV1("SELECT without FROM only supports literal projection");
+      if (item.is_literal && !item.is_all && !item.is_table_all && !item.is_aggregate &&
+          !item.is_string_function && item.column.name.empty()) {
+        const auto name = item.alias.empty() ? "expr" + std::to_string(i + 1) : item.alias;
+        fields.push_back(name);
+        row.push_back(item.literal);
+        project_indices[i] = fields.size() - 1;
+        project_aliases[i] = name;
+        continue;
       }
-      fields.push_back(item.alias.empty() ? "expr" + std::to_string(i + 1) : item.alias);
-      row.push_back(item.literal);
+      if (item.is_string_function && !item.is_all && !item.is_table_all && !item.is_aggregate &&
+          item.column.name.empty()) {
+        const auto name =
+            item.alias.empty() ? defaultStringAlias(item.string_function, i) : item.alias;
+        scalar_items.push_back({item, name, i});
+        project_aliases[i] = name;
+        continue;
+      }
+      throwUnsupportedSqlV1("SELECT without FROM only supports literal and scalar projection");
     }
     logical.seed = DataFrame(Table(Schema(std::move(fields)), std::vector<Row>{std::move(row)}));
+    DataFrame current = logical.seed;
     LogicalPlanStep scan;
     scan.kind = LogicalStepKind::Scan;
     scan.source_name = "__values__";
     scan.source = logical.seed;
     logical.steps.push_back(scan);
+    RelationContext empty_ctx;
+    for (const auto& scalar : scalar_items) {
+      auto args = resolveStringFunctionArgs(scalar.item.string_function, empty_ctx);
+      const auto function = toComputedFunctionKind(scalar.item.string_function.function);
+      const auto output_index = current.schema().fields.size();
+      LogicalPlanStep with_column;
+      with_column.kind = LogicalStepKind::WithColumn;
+      with_column.with_column_name = scalar.name;
+      with_column.with_function = function;
+      with_column.with_args = std::move(args);
+      logical.steps.push_back(with_column);
+      current = current.withColumn(scalar.name, function, with_column.with_args);
+      project_indices[scalar.select_position] = output_index;
+    }
+    if (!project_indices.empty()) {
+      LogicalPlanStep project;
+      project.kind = LogicalStepKind::Project;
+      project.project_indices = project_indices;
+      project.project_aliases = project_aliases;
+      logical.steps.push_back(project);
+      current = current.selectByIndices(project_indices, project_aliases);
+    }
     if (!query.order_by.empty()) {
       LogicalPlanStep order;
       order.kind = LogicalStepKind::OrderBy;
-      order.order_indices = resolveOrderColumns(query, logical.seed.schema());
+      order.order_indices = resolveOrderColumns(query, current.schema());
       order.order_ascending = resolveOrderDirections(query);
       logical.steps.push_back(order);
     }

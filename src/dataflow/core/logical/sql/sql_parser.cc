@@ -337,6 +337,12 @@ std::optional<StringFunctionKind> tryParseStringFunction(const std::string& valu
   if (u == "ISO_WEEK") return StringFunctionKind::IsoWeek;
   if (u == "WEEK") return StringFunctionKind::Week;
   if (u == "YEARWEEK") return StringFunctionKind::YearWeek;
+  if (u == "NOW") return StringFunctionKind::Now;
+  if (u == "TODAY") return StringFunctionKind::Today;
+  if (u == "CURRENT_TIMESTAMP" || u == "CURRENTTIMESTAMP") {
+    return StringFunctionKind::CurrentTimestamp;
+  }
+  if (u == "UNIX_TIMESTAMP") return StringFunctionKind::UnixTimestamp;
   if (u == "CAST") return StringFunctionKind::Cast;
   return std::nullopt;
 }

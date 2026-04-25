@@ -111,7 +111,7 @@ Arrow / CSV / Python ingress
   - 支持列投影/别名、`WHERE`（含 `AND` / `OR` 与列对列谓词）、按列/标量表达式 `GROUP BY`、`ORDER BY`、`LIMIT`、当前最小 `JOIN`、`UNION` / `UNION ALL` 的 `SELECT`
   - 当前已支持 batch `KEYWORD SEARCH(...) QUERY '...' TOP_K ...`，以及关键词预筛选辅助的 `HYBRID SEARCH ...`
 - 当前 batch builtins：
-  - string：`LOWER`、`UPPER`、`TRIM`、`LTRIM`、`RTRIM`、`LENGTH`、`LEN`、`CHAR_LENGTH`、`CHARACTER_LENGTH`、`REVERSE`、`CONCAT`、`CONCAT_WS`、`LEFT`、`RIGHT`、`SUBSTR` / `SUBSTRING`、`POSITION`、`REPLACE`、`CAST`；投影中的已支持标量函数可以嵌套
+  - scalar：字符串函数如 `LOWER`、`UPPER`、`TRIM`、`LTRIM`、`RTRIM`、`LENGTH`、`LEN`、`CHAR_LENGTH`、`CHARACTER_LENGTH`、`REVERSE`、`CONCAT`、`CONCAT_WS`、`LEFT`、`RIGHT`、`SUBSTR` / `SUBSTRING`、`POSITION`、`REPLACE`、`CAST`；数值函数如 `ABS`、`CEIL`、`FLOOR`、`ROUND`；日期/时间函数如 `YEAR`、`MONTH`、`DAY`、`ISO_YEAR`、`ISO_WEEK`、`WEEK`、`YEARWEEK`、`NOW`、`TODAY`、`CURRENT_TIMESTAMP`、`currentTimestamp`、`UNIX_TIMESTAMP`；投影中的已支持标量函数可以嵌套
   - numeric/date：`ABS`、`CEIL`、`FLOOR`、`ROUND`、`YEAR`、`MONTH`、`DAY`、`ISO_YEAR`、`ISO_WEEK`、`WEEK`、`YEARWEEK`
 - stream 路径：
   - `readStream(...)`、`readStreamCsvDir(...)`

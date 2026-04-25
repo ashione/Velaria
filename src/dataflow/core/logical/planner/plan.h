@@ -59,7 +59,11 @@ enum class ComputedColumnKind {
   DateIsoYear,
   DateIsoWeek,
   DateWeek,
-  DateYearWeek
+  DateYearWeek,
+  TimeNow,
+  TimeToday,
+  TimeCurrentTimestamp,
+  TimeUnixTimestamp
 };
 
 enum class AggImplKind {

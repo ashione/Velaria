@@ -364,6 +364,21 @@ void runParserRegression() {
       });
 
   expectNoThrow(
+      "parser_time_function_projection_parsed",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT NOW() AS now_value, today() AS day_value, currentTimestamp() AS current_ts, "
+            "CURRENT_TIMESTAMP() AS current_ts_2, UNIX_TIMESTAMP('2026-01-01') AS epoch_s "
+            "FROM users u");
+        expect(st.query.select_items.size() == 5, "parser_time_function_projection_size");
+        expect(st.query.select_items[0].is_string_function, "parser_now_function");
+        expect(st.query.select_items[1].is_string_function, "parser_today_function");
+        expect(st.query.select_items[2].is_string_function, "parser_current_timestamp_function");
+        expect(st.query.select_items[3].is_string_function, "parser_current_timestamp_keyword_function");
+        expect(st.query.select_items[4].is_string_function, "parser_unix_timestamp_function");
+      });
+
+  expectNoThrow(
       "parser_nested_cast_string_function",
       []() {
         const auto st = dataflow::sql::SqlParser::parse(
@@ -852,6 +867,41 @@ void runSemanticRegression() {
   expect(alias_and_extra_string_function_batch.rows[0][3].toString() == "capa",
          "string_function_reverse_region");
 
+  Table no_from_time_batch = s.submit(
+      "SELECT NOW() AS now_value, TODAY() AS today_value, currentTimestamp() AS current_ts, "
+      "UNIX_TIMESTAMP() AS epoch_s");
+  expect(no_from_time_batch.rows.size() == 1, "time_function_no_from_rows");
+  expect(no_from_time_batch.schema.fields.size() == 4, "time_function_no_from_columns");
+  expect(no_from_time_batch.rows[0][0].toString().size() >= 19, "time_function_now_shape");
+  expect(no_from_time_batch.rows[0][1].toString().size() == 10, "time_function_today_shape");
+  expect(no_from_time_batch.rows[0][2].toString().size() >= 19,
+         "time_function_current_timestamp_shape");
+  expect(no_from_time_batch.rows[0][3].asInt64() > 1700000000,
+         "time_function_unix_timestamp_current_value");
+
+  Table no_from_mixed_time_batch = s.submit(
+      "SELECT NOW() AS now_value, 7 AS marker, TODAY() AS today_value");
+  expect(no_from_mixed_time_batch.rows.size() == 1, "time_function_no_from_mixed_rows");
+  expect(no_from_mixed_time_batch.rows[0][1].asInt64() == 7,
+         "time_function_no_from_mixed_literal_position");
+  expect(no_from_mixed_time_batch.rows[0][2].toString().size() == 10,
+         "time_function_no_from_mixed_scalar_position");
+
+  Table stable_time_batch = s.submit(
+      "SELECT UNIX_TIMESTAMP('2026-01-01') AS epoch_s, "
+      "YEAR(TODAY()) AS current_year, LENGTH(TODAY()) AS today_len "
+      "FROM t_users_v1 LIMIT 1");
+  expect(stable_time_batch.rows.size() == 1, "time_function_stable_rows");
+  expect(stable_time_batch.rows[0][0].asInt64() == 1767225600,
+         "time_function_unix_timestamp_literal");
+  expect(stable_time_batch.rows[0][1].asInt64() >= 2020, "time_function_today_year");
+  expect(stable_time_batch.rows[0][2].asInt64() == 10, "time_function_today_length");
+
+  Table grouped_time_batch = s.submit(
+      "SELECT TODAY() AS today_value, COUNT(*) AS n FROM t_users_v1 GROUP BY TODAY()");
+  expect(grouped_time_batch.rows.size() == 1, "time_function_grouped_rows");
+  expect(grouped_time_batch.rows[0][1].asInt64() == 3, "time_function_grouped_count");
+
   Table ordered_batch = s.submit(
       "SELECT user_id, region, score FROM t_users_v1 ORDER BY score DESC, user_id ASC LIMIT 3");
   expect(ordered_batch.rows.size() == 3, "order_by_batch_rows");
@@ -906,6 +956,20 @@ void runSemanticRegression() {
         s.submit("SELECT REVERSE(region, '-') FROM t_users_v1");
       },
       "REVERSE expects 1 argument");
+
+  expectThrows(
+      "planner_now_arity_error",
+      [&]() {
+        s.submit("SELECT NOW(1) FROM t_users_v1");
+      },
+      "current time scalar function expects 0 arguments");
+
+  expectThrows(
+      "planner_unix_timestamp_arity_error",
+      [&]() {
+        s.submit("SELECT UNIX_TIMESTAMP('2026-01-01', '2026-01-02') FROM t_users_v1");
+      },
+      "UNIX_TIMESTAMP expects 0 or 1 argument");
 
   expectThrows(
       "planner_string_function_arity_error",

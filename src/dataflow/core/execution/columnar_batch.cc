@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -29,6 +30,11 @@ struct IsoWeekFields {
 
 int64_t parseEpochMillis(const std::string& raw);
 std::tm toUtcTm(std::time_t seconds);
+
+int64_t currentEpochMillis() {
+  const auto now = std::chrono::system_clock::now();
+  return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+}
 
 int daysFromCivil(int year, unsigned month, unsigned day) {
   year -= month <= 2;
@@ -81,6 +87,14 @@ std::string formatTimestampMillis(int64_t millis) {
   if (remainder != 0) {
     out << "." << std::setfill('0') << std::setw(3) << std::llabs(remainder);
   }
+  return out.str();
+}
+
+std::string formatDateMillis(int64_t millis) {
+  const auto seconds = static_cast<std::time_t>(millis / 1000);
+  auto tm = toUtcTm(seconds);
+  std::ostringstream out;
+  out << std::put_time(&tm, "%Y-%m-%d");
   return out.str();
 }
 
@@ -579,6 +593,11 @@ int64_t parseEpochMillis(const std::string& raw) {
     in.clear();
     in.str(raw);
     in >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
+  }
+  if (in.fail()) {
+    in.clear();
+    in.str(raw);
+    in >> std::get_time(&tm, "%Y-%m-%d");
   }
   if (in.fail()) {
     throw std::runtime_error("unsupported timestamp format: " + raw);
@@ -2208,6 +2227,10 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
     return out;
   };
 
+  auto constant_values = [&](Value value) {
+    return std::vector<Value>(row_count, std::move(value));
+  };
+
   auto materialize_string_args = [&]() {
     std::vector<StringColumnBuffer> columns;
     columns.reserve(bound.size());
@@ -2462,6 +2485,35 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
             viewValueColumn(*table, resolve_source_index(bound[0])), function);
       }
       return materialize_date_field(bound[0], function);
+    case ComputedColumnKind::TimeNow:
+    case ComputedColumnKind::TimeCurrentTimestamp:
+      if (!bound.empty()) {
+        throw std::runtime_error("current time scalar function expects 0 arguments");
+      }
+      return constant_values(Value(formatTimestampMillis(currentEpochMillis())));
+    case ComputedColumnKind::TimeToday:
+      if (!bound.empty()) {
+        throw std::runtime_error("TODAY expects 0 arguments");
+      }
+      return constant_values(Value(formatDateMillis(currentEpochMillis())));
+    case ComputedColumnKind::TimeUnixTimestamp:
+      if (bound.empty()) {
+        return constant_values(Value(currentEpochMillis() / 1000));
+      }
+      if (bound.size() != 1) {
+        throw std::runtime_error("UNIX_TIMESTAMP expects 0 or 1 argument");
+      }
+      {
+        const auto values = materialize_value_arg(bound[0]);
+        std::vector<Value> out(values.size());
+        for (std::size_t i = 0; i < values.size(); ++i) {
+          if (values[i].isNull()) {
+            continue;
+          }
+          out[i] = Value(valueAsEpochMillis(values[i]) / 1000);
+        }
+        return out;
+      }
   }
   throw std::runtime_error("unsupported computed function");
 }

@@ -111,7 +111,7 @@ Available today:
   - `SELECT` with projection/alias, `WHERE` (including `AND` / `OR` and column-to-column predicates), `GROUP BY` columns/scalar expressions, `ORDER BY`, `LIMIT`, current minimal `JOIN`, `UNION` / `UNION ALL`
   - batch `KEYWORD SEARCH(...) QUERY '...' TOP_K ...` and current keyword-assisted `HYBRID SEARCH ...`
 - current batch builtins:
-  - string: `LOWER`, `UPPER`, `TRIM`, `LTRIM`, `RTRIM`, `LENGTH`, `LEN`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, `REVERSE`, `CONCAT`, `CONCAT_WS`, `LEFT`, `RIGHT`, `SUBSTR` / `SUBSTRING`, `POSITION`, `REPLACE`, `CAST`; supported scalar functions can be nested in projections
+  - scalar: string functions such as `LOWER`, `UPPER`, `TRIM`, `LTRIM`, `RTRIM`, `LENGTH`, `LEN`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, `REVERSE`, `CONCAT`, `CONCAT_WS`, `LEFT`, `RIGHT`, `SUBSTR` / `SUBSTRING`, `POSITION`, `REPLACE`, `CAST`; numeric functions such as `ABS`, `CEIL`, `FLOOR`, `ROUND`; date/time functions such as `YEAR`, `MONTH`, `DAY`, `ISO_YEAR`, `ISO_WEEK`, `WEEK`, `YEARWEEK`, `NOW`, `TODAY`, `CURRENT_TIMESTAMP`, `currentTimestamp`, `UNIX_TIMESTAMP`; supported scalar functions can be nested in projections
   - numeric/date: `ABS`, `CEIL`, `FLOOR`, `ROUND`, `YEAR`, `MONTH`, `DAY`, `ISO_YEAR`, `ISO_WEEK`, `WEEK`, `YEARWEEK`
 - stream path:
   - `readStream(...)`, `readStreamCsvDir(...)`

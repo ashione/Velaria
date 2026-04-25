@@ -40,6 +40,10 @@ enum class StringFunctionKind {
   IsoWeek,
   Week,
   YearWeek,
+  Now,
+  Today,
+  CurrentTimestamp,
+  UnixTimestamp,
   Cast
 };
 

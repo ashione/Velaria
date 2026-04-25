@@ -82,6 +82,28 @@ class StreamingV05Test(unittest.TestCase):
             self.assertEqual(int(day), exp[3])
             self.assertEqual(lower_name, exp[4])
 
+    def test_batch_sql_supports_time_functions(self):
+        session = velaria.Session()
+        table = pa.table({"id": [1, 2], "ts": ["2026-01-01", "2026-01-02"]})
+        df = session.create_dataframe_from_arrow(table)
+        session.create_temp_view("batch_time_input", df)
+
+        rows = self._run_batch_sql(
+            session,
+            "SELECT id, UNIX_TIMESTAMP('2026-01-01') AS epoch_s, "
+            "YEAR(TODAY()) AS current_year, LENGTH(TODAY()) AS today_len, "
+            "UNIX_TIMESTAMP(ts) AS ts_epoch "
+            "FROM batch_time_input ORDER BY id",
+        ).to_rows()
+
+        self.assertEqual(
+            rows["schema"], ["id", "epoch_s", "current_year", "today_len", "ts_epoch"]
+        )
+        self.assertEqual(int(rows["rows"][0][1]), 1767225600)
+        self.assertGreaterEqual(int(rows["rows"][0][2]), 2020)
+        self.assertEqual(int(rows["rows"][0][3]), 10)
+        self.assertEqual([int(row[4]) for row in rows["rows"]], [1767225600, 1767312000])
+
     def test_batch_sql_supports_order_by(self):
         session = velaria.Session()
         table = pa.table(

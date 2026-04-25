@@ -86,6 +86,47 @@ Same-host flow:
 client -> scheduler(jobmaster) -> worker -> in-proc operator chain -> result
 ```
 
+## AI Runtime
+
+Bootstrap AI dependencies:
+
+```bash
+uv sync --project python --extra ai-claude
+# or
+uv sync --project python --extra ai-codex
+```
+
+Configure AI provider:
+
+```bash
+mkdir -p ~/.velaria
+cat > ~/.velaria/config.json << 'EOF'
+{
+  "aiProvider": "claude",
+  "aiApiKey": "your-api-key",
+  "aiRuntime": "claude",
+  "aiModel": "claude-sonnet-4-20250514"
+}
+EOF
+```
+
+Start service and use AI:
+
+```bash
+PYTHONPATH=python uv run --project python python -m velaria_service --port 37491
+
+# In another terminal:
+uv run --project python python python/velaria_cli.py ai generate-sql \
+  --prompt "top 5 by score" --schema "name,score,region"
+```
+
+Interactive mode:
+
+```bash
+uv run --project python python python/velaria_cli.py -i
+velaria> ai 找出分数最高的5个人
+```
+
 Build:
 
 ```bash

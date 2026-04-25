@@ -391,7 +391,53 @@ uv run --with velaria --with pandas --with openpyxl \\
   --query "SELECT name, COUNT(*) AS cnt FROM sheet_data GROUP BY name"
 ```
 
-## 6. Skill 自检
+## 6. AI 辅助分析
+
+需要先安装 AI runtime 依赖：
+
+```bash
+uv sync --project python --extra ai-claude
+```
+
+配置 AI provider（在 `~/.velaria/config.json` 中设置 `aiApiKey`）。
+
+### CLI 模式
+
+```bash
+# 自然语言生成 SQL
+uv run --project python python python/velaria_cli.py ai generate-sql \
+  --prompt "按地区统计平均分数" \
+  --schema "name,score,region,department"
+
+# Session 管理
+uv run --project python python python/velaria_cli.py ai session start --schema "name,score"
+uv run --project python python python/velaria_cli.py ai session list
+uv run --project python python python/velaria_cli.py ai session close --session-id <id>
+```
+
+### 交互模式
+
+```bash
+uv run --project python python python/velaria_cli.py -i
+velaria> ai 找出每个部门分数最高的人
+[ai] 按 department 分组，选出每组中 score 最高的记录
+SELECT department, name, score FROM input_table ...
+Run this SQL? [y/N]
+
+velaria> ai session start
+[ai] session started: ai_session_xxxxx
+
+velaria> ai analyze 分析整体数据分布
+[AssistantMessage] ...
+```
+
+### App 模式
+
+在 Settings 页面配置 AI Provider（支持 OpenAI 兼容接口或 Claude）。
+在 Analyze 页面使用 AI SQL Assistant 输入框生成 SQL。
+支持 Session 管理（开启/关闭会话）以保持上下文。
+
+## 7. Skill 自检
 
 ```bash
 uv run --with velaria --with "pyarrow==23.0.1" \\
@@ -400,7 +446,7 @@ uv run --with velaria --with "pyarrow==23.0.1" \\
 
 输出 `ok` 代表最小场景（CSV batch + streaming sink）通过。
 
-## 7. 最小执行清单
+## 8. 最小执行清单
 
 1. 先创建或激活一个本地环境，并安装 `velaria`
 2. 选一个脚本加载数据，确保 `session.create_temp_view(...)` 成功

@@ -34,7 +34,7 @@ Velaria/
 │   ├── examples/                 # 所有 demo/benchmark/CLI 入口 (.cc)
 │   └── tests/                    # C++ 回归测试 (.cc)
 ├── python/
-│   ├── velaria/                  # Python 包（cli/, embedding, keyword_index, agentic_*, bitable, excel, custom_stream, workspace/）
+│   ├── velaria/                  # Python 包（cli/, ai_runtime/, embedding, keyword_index, agentic_*, bitable, excel, custom_stream, workspace/）
 │   ├── tests/                    # Python 测试
 │   ├── examples/                 # Python 示例
 │   ├── benchmarks/               # Python 基准
@@ -73,6 +73,13 @@ Velaria/
 | jieba | >=0.42,<1 | 中文分词 |
 | sentence-transformers | >=5.3.0 (optional: embedding) | 离线 embedding 生成 |
 | socksio | >=1.0.0 (optional: embedding) | SOCKS 代理支持 |
+
+## AI Runtime（可选依赖）
+
+| 依赖 | 版本范围 | 用途 |
+|------|---------|------|
+| claude-agent-sdk | >=0.1.60 (optional: ai-claude) | Claude Agent SDK runtime |
+| codex-app-server-sdk | >=0.1.0 (optional: ai-codex) | Codex App Server runtime |
 
 ## Bazel 构建目标一览
 
@@ -196,6 +203,9 @@ uv sync --project python --python python3.13
 
 # 3. 桌面 app（可选）
 cd app && npm install && cd ..
+
+# 4. AI Runtime（可选）
+uv sync --project python --extra ai-claude    # 或 --extra ai-codex
 ```
 
 ## 常用命令
@@ -228,6 +238,18 @@ uv run --project python python python/examples/demo_batch_sql_arrow.py
 uv run --project python python python/examples/demo_stream_sql.py
 uv run --project python python python/examples/demo_vector_search.py
 uv run --project python python python/velaria_cli.py --help
+```
+
+### AI 辅助分析
+
+```bash
+uv run --project python python python/velaria_cli.py ai generate-sql \
+  --prompt "找出每个部门的平均分数" \
+  --schema "name,score,region,department"
+
+uv run --project python python python/velaria_cli.py ai session start --schema "name,score"
+uv run --project python python python/velaria_cli.py ai session list
+uv run --project python python python/velaria_cli.py ai session close --session-id <id>
 ```
 
 ### 一次 build/smoke 摘要

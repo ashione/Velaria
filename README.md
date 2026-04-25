@@ -49,6 +49,7 @@ Owns:
 - offline keyword-index generation helpers and reusable BM25 keyword search assets
 - Excel / Bitable / custom stream adapters
 - local workspace and run tracking
+- AI-assisted data analysis via Claude Agent SDK or Codex App Server runtime
 
 Does not own:
 
@@ -134,6 +135,9 @@ Available today:
 - desktop import flow can asynchronously build reusable embedding datasets and keyword indexes from the same saved dataset
 - macOS desktop packaging prototype producing `.dmg`
 - AI / agent / skill integration through the supported Python ecosystem layer, with workspace and artifact management for result reuse and local data management
+- AI-assisted SQL generation from natural language via configurable LLM runtime
+- CLI `ai` subcommand for SQL generation, session management, and agent analysis
+- desktop app AI SQL assistant with session controls in Analyze page
 - same-host actor/rpc/jobmaster smoke path
 
 Current constraints:
@@ -143,6 +147,7 @@ Current constraints:
 - SQL v1 does not expand to `CTE`, subquery, richer join semantics, or aggregate `KEYWORD SEARCH` / `HYBRID SEARCH`
 - Python callbacks / Python UDFs are not part of the hot path
 - the Electron desktop app is still a local prototype, not a stable product surface
+- AI runtime requires `claude-agent-sdk` or `codex-app-server-sdk` (optional dependencies)
 - the repository does not claim a completed distributed runtime
 
 Stable public surfaces:

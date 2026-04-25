@@ -31,6 +31,8 @@ The supported Python ecosystem includes:
 - vector search and vector explain APIs
 - offline embedding pipeline helpers for versioned vector assets
 - offline keyword-index build helpers and reusable BM25 keyword-search assets
+- AI runtime layer for Claude Agent SDK and Codex App Server integration
+- CLI `ai` subcommand for AI-assisted SQL generation and session management
 
 ### Examples
 
@@ -393,6 +395,33 @@ curl -sS http://127.0.0.1:37491/api/v1/runs/keyword-search \
     "where_sql": "bucket = 1",
     "top_k": 10
   }'
+```
+
+### AI Runtime (Optional)
+
+Install AI runtime dependencies:
+
+```bash
+uv sync --project python --extra ai-claude    # Claude Agent SDK
+# or
+uv sync --project python --extra ai-codex     # Codex App Server
+```
+
+The AI runtime provides:
+
+- Natural language to SQL generation via `velaria_cli.py ai generate-sql`
+- Session-based agent analysis via `velaria_cli.py ai session` and `velaria_cli.py ai analyze`
+- Interactive AI mode via `velaria_cli.py -i` then `ai <prompt>`
+- Velaria tools exposed to AI agents: `velaria_sql`, `velaria_read`, `velaria_schema`, `velaria_explain`
+
+AI CLI examples:
+
+```bash
+uv run --project python python python/velaria_cli.py ai generate-sql \
+  --prompt "top 5 by score" --schema "name,score,region"
+
+uv run --project python python python/velaria_cli.py ai session start --schema "name,score"
+uv run --project python python python/velaria_cli.py ai session list
 ```
 
 Current SQL mapping carried by Python:

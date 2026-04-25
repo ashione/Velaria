@@ -86,6 +86,47 @@ xattr -dr com.apple.quarantine /Applications/Velaria.app
 client -> scheduler(jobmaster) -> worker -> in-proc operator chain -> result
 ```
 
+## AI Runtime
+
+安装 AI 依赖：
+
+```bash
+uv sync --project python --extra ai-claude
+# 或
+uv sync --project python --extra ai-codex
+```
+
+配置 AI provider：
+
+```bash
+mkdir -p ~/.velaria
+cat > ~/.velaria/config.json << 'EOF'
+{
+  "aiProvider": "claude",
+  "aiApiKey": "your-api-key",
+  "aiRuntime": "claude",
+  "aiModel": "claude-sonnet-4-20250514"
+}
+EOF
+```
+
+启动 service 并使用 AI：
+
+```bash
+PYTHONPATH=python uv run --project python python -m velaria_service --port 37491
+
+# 在另一个终端：
+uv run --project python python python/velaria_cli.py ai generate-sql \
+  --prompt "top 5 by score" --schema "name,score,region"
+```
+
+交互模式：
+
+```bash
+uv run --project python python python/velaria_cli.py -i
+velaria> ai 找出分数最高的5个人
+```
+
 构建：
 
 ```bash

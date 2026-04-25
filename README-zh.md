@@ -49,6 +49,7 @@ Velaria 围绕一个 kernel 和两个非 kernel 层组织。
 - 离线 keyword index 生成 helper 与可复用 BM25 关键词检索资产管理
 - Excel / Bitable / custom stream adapter
 - 本地 workspace 与 run tracking
+- 通过 Claude Agent SDK 或 Codex App Server runtime 实现 AI 辅助数据分析
 
 不负责：
 
@@ -134,6 +135,9 @@ Arrow / CSV / Python ingress
 - 桌面端导入流可以在保存同一份数据集后，异步构建可复用的 embedding 数据集与 keyword index
 - macOS 桌面原型打包，当前可产出 `.dmg`
 - 可通过正式支持的 Python 生态层接入 AI / agent / skill，并利用 workspace 与 artifact 管理能力复用结果、管理本地数据
+- 支持通过可配置 LLM runtime 将自然语言转换为 SQL
+- CLI `ai` 子命令支持 SQL 生成、session 管理与 agent 分析
+- 桌面 app Analyze 页面内置 AI SQL 助手与 session 管理
 - 同机 actor/rpc/jobmaster smoke 路径
 
 当前约束：
@@ -143,6 +147,7 @@ Arrow / CSV / Python ingress
 - SQL v1 不扩展到 `CTE`、子查询、更复杂 join 语义，也不支持 aggregate `KEYWORD SEARCH` / `HYBRID SEARCH`
 - Python callback / Python UDF 不进入热路径
 - Electron 桌面 app 仍然只是本地原型，还不是稳定公开产品面
+- AI runtime 需要安装 `claude-agent-sdk` 或 `codex-app-server-sdk`（可选依赖）
 - 仓库不宣称已完成 distributed runtime
 
 稳定公开 surface：

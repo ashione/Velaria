@@ -2267,11 +2267,18 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
   auto materialize_date_field = [&](const BoundComputedArg& arg,
                                     ComputedColumnKind date_function) {
     std::vector<Value> output(row_count);
+    std::vector<Value> materialized_arg;
+    const bool use_materialized_arg = arg.is_literal || arg.is_function;
+    if (use_materialized_arg) {
+      materialized_arg = materialize_value_arg(arg);
+      if (materialized_arg.size() != row_count) {
+        throw std::runtime_error("computed function argument row count mismatch");
+      }
+    }
     for (std::size_t i = 0; i < row_count; ++i) {
       Value value;
-      if (arg.is_literal || arg.is_function) {
-        auto values = materialize_value_arg(arg);
-        value = values[i];
+      if (use_materialized_arg) {
+        value = materialized_arg[i];
       } else {
         const auto input = viewValueColumn(*table, resolve_source_index(arg));
         if (i >= valueColumnViewRowCount(input)) {
@@ -2436,20 +2443,23 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
     case ComputedColumnKind::DateIsoYear:
       if (bound.size() != 1) throw std::runtime_error("ISO_YEAR expects 1 argument");
       if (!bound[0].is_literal && !bound[0].is_function) {
-        return vectorizedDateIsoField(viewValueColumn(*table, resolve_source_index(bound[0])), function);
+        return vectorizedDateIsoField(
+            viewValueColumn(*table, resolve_source_index(bound[0])), function);
       }
       return materialize_date_field(bound[0], function);
     case ComputedColumnKind::DateIsoWeek:
     case ComputedColumnKind::DateWeek:
       if (bound.size() != 1) throw std::runtime_error("WEEK expects 1 argument");
       if (!bound[0].is_literal && !bound[0].is_function) {
-        return vectorizedDateIsoField(viewValueColumn(*table, resolve_source_index(bound[0])), function);
+        return vectorizedDateIsoField(
+            viewValueColumn(*table, resolve_source_index(bound[0])), function);
       }
       return materialize_date_field(bound[0], function);
     case ComputedColumnKind::DateYearWeek:
       if (bound.size() != 1) throw std::runtime_error("YEARWEEK expects 1 argument");
       if (!bound[0].is_literal && !bound[0].is_function) {
-        return vectorizedDateIsoField(viewValueColumn(*table, resolve_source_index(bound[0])), function);
+        return vectorizedDateIsoField(
+            viewValueColumn(*table, resolve_source_index(bound[0])), function);
       }
       return materialize_date_field(bound[0], function);
   }

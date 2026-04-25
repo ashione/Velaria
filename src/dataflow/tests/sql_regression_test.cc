@@ -565,6 +565,14 @@ void runSemanticRegression() {
   expect(cast_substr.rows.size() == 1, "planner_cast_substr_rows");
   expect(cast_substr.rows[0][1].toString() == "10.2", "planner_cast_substr_prefix");
   expect(cast_substr.rows[0][2].asDouble() == 10.25, "planner_cast_string_to_double");
+  s.submit("CREATE TABLE t_date_expr_v1 (ts_ms INT)");
+  s.submit("INSERT INTO t_date_expr_v1 VALUES (1767225600000)");
+  Table nested_date_expr = s.submit(
+      "SELECT YEAR(CAST(ts_ms AS STRING)) AS y, YEARWEEK(CAST(ts_ms AS STRING)) AS yw "
+      "FROM t_date_expr_v1");
+  expect(nested_date_expr.rows.size() == 1, "planner_nested_date_expr_rows");
+  expect(nested_date_expr.rows[0][0].asInt64() == 2026, "planner_nested_date_expr_year");
+  expect(nested_date_expr.rows[0][1].asInt64() == 202601, "planner_nested_date_expr_yearweek");
 
   s.submit("CREATE TABLE t_users_archive_v1 (user_id INT, region STRING, score INT)");
   s.submit("INSERT INTO t_users_archive_v1 VALUES (2, 'emea', 18), (4, 'latam', 21)");

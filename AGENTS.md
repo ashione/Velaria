@@ -1,13 +1,112 @@
 # AGENTS.md
 
-本仓库（Velaria）用于纯 C++20 数据流引擎调研与演进，当前工作重心是先稳住本地最小闭环，再逐步把执行链路扩展到本地多进程与后续分布式运行时。
+本仓库（Velaria，当前版本 `v0.2.10`）用于纯 C++20 数据流引擎调研与演进，当前工作重心是先稳住本地最小闭环，再逐步把执行链路扩展到本地多进程与后续分布式运行时。
 
 ## 适用范围
 
-- 主要语言：`C++20`
-- 构建系统：`Bazel`
-- 当前重点目录：`sql`、`runtime`、`planner`、`api`、`stream`、`catalog`
+- 主要语言：`C++20`（核心内核）、`Python 3.12+`（生态层）、`TypeScript`（桌面 app 原型）
+- 构建系统：`Bazel`（C++ 侧，依赖 `rules_cc 0.2.17`、`rules_python 1.7.0`）、`uv`（Python 侧）、`npm + electron-builder`（桌面 app）
+- 当前重点目录：`src/dataflow/core/`（内核）、`src/dataflow/experimental/`（实验运行时）、`python/`（Python 生态）、`app/`（桌面原型）
 - 当前执行路线：`operator chain in-proc + cross-process RPC + simple jobmaster`
+
+## 仓库结构概览
+
+```
+Velaria/
+├── src/dataflow/
+│   ├── core/                     # 内核
+│   │   ├── contract/api/         # DataflowSession, DataFrame 公开接口
+│   │   ├── contract/catalog/     # Catalog 元数据
+│   │   ├── contract/source_sink_abi.h  # Source/Sink ABI
+│   │   ├── execution/            # 执行层：Value, Table, ColumnarBatch, CSV, FileSource, NanoArrow IPC
+│   │   ├── execution/runtime/    # Executor, ExecutionOptimizer, AggregateLayout, SIMD Dispatch, VectorIndex
+│   │   ├── execution/serial/     # Serializer
+│   │   ├── execution/stream/     # Stream, BinaryRowBatch
+│   │   └── logical/              # SQL Parser, SQL Planner, Plan
+│   ├── ai/                       # AI Plugin Runtime
+│   ├── experimental/
+│   │   ├── rpc/                  # ActorRPC Codec, RPC Codec, Serialization
+│   │   ├── runner/               # Actor Runner
+│   │   ├── runtime/              # ActorRuntime, ByteTransport, JobMaster, RPC Runner
+│   │   ├── stream/               # Actor Stream Runtime, Actor Execution Optimizer
+│   │   └── transport/            # IPC Transport
+│   ├── interop/python/           # Python native binding (python_module.cc)
+│   ├── examples/                 # 所有 demo/benchmark/CLI 入口 (.cc)
+│   └── tests/                    # C++ 回归测试 (.cc)
+├── python/
+│   ├── velaria/                  # Python 包（cli/, embedding, keyword_index, agentic_*, bitable, excel, custom_stream, workspace/）
+│   ├── tests/                    # Python 测试
+│   ├── examples/                 # Python 示例
+│   ├── benchmarks/               # Python 基准
+│   ├── experimental/             # Python 实验功能
+│   ├── pyproject.toml            # Python 项目配置（deps: pyarrow, pandas, openpyxl, jieba）
+│   └── velaria_service/          # 本地 service 包（_router, handlers, helpers）
+├── app/                          # Electron 桌面 app 原型
+│   ├── src/main/                 # Electron main process
+│   ├── src/preload/              # Preload scripts
+│   ├── src/renderer/             # 前端渲染层
+│   └── scripts/                  # build-sidecar, package-macos
+├── docs/                         # 设计文档与 benchmark 报告
+├── plans/                        # 演进计划与路线图
+├── scripts/                      # 构建、回归、发布、benchmark 脚本
+├── skills/                       # 用户面技能说明
+├── tools/                        # Bazel 辅助规则 (python_configure.bzl)
+├── BUILD.bazel                   # 根 Bazel 构建文件
+└── MODULE.bazel                  # Bazel 模块定义（nanoarrow 0.8.0, cppjieba 5.6.3, limonp）
+```
+
+## C++ 外部依赖（Bazel 管理）
+
+| 依赖 | 版本 | 用途 |
+|------|------|------|
+| nanoarrow | 0.8.0 | Arrow 列式格式与 IPC 编解码 |
+| cppjieba | 5.6.3 | 中文分词（keyword search） |
+| limonp | master | cppjieba 工具库依赖 |
+
+## Python 依赖（uv 管理）
+
+| 依赖 | 版本范围 | 用途 |
+|------|---------|------|
+| pyarrow | >=23,<24 | Arrow 交换层 |
+| pandas | >=2.1,<3 | 数据帧操作 |
+| openpyxl | >=3.1,<4 | Excel 文件读取 |
+| jieba | >=0.42,<1 | 中文分词 |
+| sentence-transformers | >=5.3.0 (optional: embedding) | 离线 embedding 生成 |
+| socksio | >=1.0.0 (optional: embedding) | SOCKS 代理支持 |
+
+## Bazel 构建目标一览
+
+### 核心库
+
+- `dataflow_core` — 主内核库（batch/stream/SQL/vector/SIMD）
+- `dataflow_actor_rpc_codec` — Actor RPC 编解码
+- `dataflow_transport` — 传输层
+- `dataflow_actor_runtime` — Actor 运行时
+- `dataflow_actor_runner` — Actor Runner（含 scheduler/worker/client 依赖）
+- `dataflow_stream_actor_runtime` — Stream Actor 运行时
+
+### 可执行入口
+
+- `sql_demo`, `df_demo`, `stream_demo`, `stream_sql_demo` — 单节点 demo
+- `actor_rpc_scheduler`, `actor_rpc_worker`, `actor_rpc_client` — 多进程组件
+- `actor_rpc_smoke` — RPC 冒烟测试
+- `velaria_cli` — C++ CLI
+- `_velaria_native` / `velaria_pyext` — Python 原生扩展
+
+### Benchmark
+
+- `stream_benchmark`, `stream_actor_benchmark` — 流式基准
+- `tpch_q1_style_benchmark` — TPC-H Q1 风格基准
+- `batch_aggregate_benchmark` — 批聚合基准
+- `string_builtin_benchmark` — 字符串内置函数基准
+- `vector_search_benchmark` — 向量搜索基准
+- `file_source_benchmark` — 文件源基准
+
+### 回归测试套件
+
+- `core_regression` — 核心回归（columnar_batch, planner, source_sink_abi, sql, simd, stream, vector, source_materialization, file_source）
+- `python_ecosystem_regression` — Python 生态回归
+- `experimental_regression` — 实验运行时回归
 
 ## 开发协作规则
 
@@ -19,15 +118,15 @@
 - 现阶段不做 JVM/Python 宿主栈移植，核心计算逻辑保持纯 C++ 实现。
 - 单节点示例命令保持可用，不要为了多进程实验破坏 `sql_demo / df_demo / stream_demo`。
 - 所有 Python 相关命令统一显式使用 `uv` 执行，包括测试、脚本、依赖安装；不要直接调用 `python` / `pip`。
-- 涉及 `python_api`、多维表格导入、embedding pipeline、desktop sidecar 的开发与验证时，默认可继续使用 `python_api/.venv`；如需隔离环境，使用 `UV_PROJECT_ENVIRONMENT=<env-name> uv ... --project python_api` 显式指定，不要在文档或规则里写死某个特定环境名。
+- 涉及 `python`、多维表格导入、embedding pipeline、desktop sidecar 的开发与验证时，默认可继续使用 `python/.venv`；如需隔离环境，使用 `UV_PROJECT_ENVIRONMENT=<env-name> uv ... --project python` 显式指定，不要在文档或规则里写死某个特定环境名。
 - `README.md` 保持英文，`README-zh.md` 保持中文；后续修改 README 内容时必须同步更新这两份文档。
 - `skills/*.md` 面向最终用户使用说明，不写仓库内部编译、Bazel 构建、源码同步或其他实现侧操作；只保留用户可直接执行的使用方式、参数说明与输入输出约束。
-- 仓库文档若展示 Python CLI 命令，必须使用仓库内真实可见入口：源码脚本 `uv run --project python_api python python_api/velaria_cli.py ...`，或已打包产物 `./dist/velaria-cli ...`；不要默认写成全局可执行的 `velaria-cli ...`，除非文档已明确提供安装该命令的步骤。
+- 仓库文档若展示 Python CLI 命令，必须使用仓库内真实可见入口：源码脚本 `uv run --project python python python/velaria_cli.py ...`，或已打包产物 `./dist/velaria-cli ...`；不要默认写成全局可执行的 `velaria-cli ...`，除非文档已明确提供安装该命令的步骤。
 
 ## 本轮协作沉淀
 
-- 根 `README.md` / `README-zh.md` 只保留项目目标、分层模型、稳定 contract、当前范围、真实入口与最小运行/验证路径；避免写过长的大段说明，细节下沉到 `python_api/README.md`。
-- 新增 Python 生态能力时，根 README 只做高层概念归位：说明它属于 `Python Ecosystem`，负责什么、不负责什么；具体参数、CLI 示例与端到端用法写进 `python_api/README.md`。
+- 根 `README.md` / `README-zh.md` 只保留项目目标、分层模型、稳定 contract、当前范围、真实入口与最小运行/验证路径；避免写过长的大段说明，细节下沉到 `python/README.md`。
+- 新增 Python 生态能力时，根 README 只做高层概念归位：说明它属于 `Python Ecosystem`，负责什么、不负责什么；具体参数、CLI 示例与端到端用法写进 `python/README.md`。
 - `skills/*.md` 的示例命令必须直接可执行，优先写源码入口或打包产物入口；不要假设存在额外安装步骤、shell alias 或全局命令。
 - Python 生态层的新能力如果面向 agent/skill 调用，默认要求 stdout 维持机器可读 JSON，日志落文件，失败路径也不能退化成 traceback 噪音。
 - 类似 workspace/run tracking 这类 Python 侧能力，要明确保持 kernel contract 不变：`explain` 继续对齐 `logical/physical/strategy`，`progress` 继续直接使用原生 `snapshotJson()`，不要在生态层发明第二套语义。
@@ -73,6 +172,32 @@
 - 失败与恢复：task 发送失败触发本地失败落盘并通知客户端；链内失败进入 jobmaster 重试逻辑（当前重试策略按配置）。
 - worker 供给：scheduler 默认自动启动本地 worker（`--local-workers`，默认 1）；如指定 `--no-auto-worker` 则走手工挂载模式。
 
+## 环境准备
+
+### 必要工具
+
+| 工具 | 用途 | 安装方式 |
+|------|------|---------|
+| Bazel | C++ 构建 | `brew install bazel` |
+| uv | Python 包管理 | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| Python 3.12+ | Python 运行时 | `brew install python@3.13` |
+| Node.js + npm | 桌面 app | `brew install node` |
+
+### 首次 bootstrap
+
+```bash
+# 1. C++ 构建验证
+bazel build //:sql_demo //:df_demo //:stream_demo
+
+# 2. Python 生态 bootstrap
+bazel build //:velaria_pyext
+bazel run //python:sync_native_extension
+uv sync --project python --python python3.13
+
+# 3. 桌面 app（可选）
+cd app && npm install && cd ..
+```
+
 ## 常用命令
 
 ### 构建
@@ -96,6 +221,15 @@ bazel run //:actor_rpc_worker -- --connect 127.0.0.1:61000 --node-id worker-1
 bazel run //:actor_rpc_client -- --connect 127.0.0.1:61000 --payload "demo payload"
 ```
 
+### Python 示例
+
+```bash
+uv run --project python python python/examples/demo_batch_sql_arrow.py
+uv run --project python python python/examples/demo_stream_sql.py
+uv run --project python python python/examples/demo_vector_search.py
+uv run --project python python python/velaria_cli.py --help
+```
+
 ### 一次 build/smoke 摘要
 
 ```bash
@@ -105,15 +239,42 @@ bazel build //:sql_demo //:df_demo //:stream_demo \
   && echo '[summary] build+smoke ok'
 ```
 
+### 回归测试
+
+```bash
+# C++ 核心回归
+bazel test //:core_regression
+
+# Python 生态回归
+bazel test //:python_ecosystem_regression
+
+# 实验运行时回归
+bazel test //:experimental_regression
+
+# 脚本入口
+./scripts/run_core_regression.sh
+./scripts/run_python_ecosystem_regression.sh
+./scripts/run_experimental_regression.sh
+./scripts/run_stream_observability_regression.sh
+```
+
 ### Python 测试
 
 ```bash
-uv sync --project python_api
-uv run --project python_api python -m unittest
+uv sync --project python
+uv run --project python python -m unittest
 bazel build //:velaria_pyext
-bazel test //python_api:custom_stream_source_test
-bazel test //python_api:streaming_v05_test
-bazel test //python_api:arrow_stream_ingestion_test
+bazel test //python:custom_stream_source_test
+bazel test //python:streaming_v05_test
+bazel test //python:arrow_stream_ingestion_test
+```
+
+### 桌面 app
+
+```bash
+cd app && npm install && npm start
+bash app/scripts/build-sidecar-macos.sh
+bash app/scripts/package-macos.sh
 ```
 
 ## 最小验收清单

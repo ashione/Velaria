@@ -24,8 +24,8 @@ trap 'rm -rf "$tmp_root"' EXIT
 report_dir="$tmp_root/report"
 stage_csv="${VELARIA_STAGE_BENCH_CSV:-}"
 default_rounds="3"
-PYTHONPATH="${PYTHONPATH:-${ROOT}/python_api}" \
-  uv run --project python_api python python_api/benchmarks/bench_stage_paths.py \
+PYTHONPATH="${PYTHONPATH:-${ROOT}/python}" \
+  uv run --project python python python/benchmarks/bench_stage_paths.py \
   --outdir "$report_dir" \
   --scenario "${VELARIA_STAGE_BENCH_SCENARIO:-groupby_count_max}" \
   --rows "${VELARIA_STAGE_BENCH_ROWS:-20000}" \
@@ -34,7 +34,7 @@ PYTHONPATH="${PYTHONPATH:-${ROOT}/python_api}" \
   ${VELARIA_STAGE_BENCH_SKIP_HARDCODE:+--skip-hardcode} \
   ${stage_csv:+--csv "$stage_csv"}
 
-uv run --project python_api python - "$report_dir/summary.json" <<'PY'
+uv run --project python python - "$report_dir/summary.json" <<'PY'
 import json
 import pathlib
 import sys

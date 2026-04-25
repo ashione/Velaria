@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PY_DIR="${ROOT_DIR}/python_api"
+PY_DIR="${ROOT_DIR}/python"
 OUT_DIR="${1:-${ROOT_DIR}/dist}"
 EXE_NAME="${2:-velaria-cli}"
 

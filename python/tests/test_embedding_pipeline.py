@@ -334,7 +334,7 @@ class EmbeddingPipelineTest(unittest.TestCase):
 
         try:
             with mock.patch("velaria.embedding.importlib.import_module", side_effect=_missing):
-                with self.assertRaisesRegex(ImportError, "uv sync --project python_api --extra embedding"):
+                with self.assertRaisesRegex(ImportError, "uv sync --project python --extra embedding"):
                     provider.embed(["alpha"], model=DEFAULT_LOCAL_EMBEDDING_MODEL)
         finally:
             self._restore_module("sentence_transformers", original)

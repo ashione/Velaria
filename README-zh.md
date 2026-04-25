@@ -41,7 +41,7 @@ Velaria 围绕一个 kernel 和两个非 kernel 层组织。
 
 负责：
 
-- `python_api` 里的 native binding
+- `python` 里的 native binding
 - Arrow 输入与输出
 - CLI、打包与 `uv` 工作流
 - 本地 app-side service 与 Electron 原型支持
@@ -161,7 +161,7 @@ Arrow / CSV / Python ingress
 - runtime contract：[docs/runtime-contract.md](./docs/runtime-contract.md)
 - 本地 agentic service / 协议：[docs/agentic-service-api.md](./docs/agentic-service-api.md)
 - streaming runtime 形态：[docs/streaming_runtime_design.md](./docs/streaming_runtime_design.md)
-- Python 生态细节：[python_api/README.md](./python_api/README.md)
+- Python 生态细节：[python/README.md](./python/README.md)
 - 当前维护中的主 plan：[plans/core-runtime-columnar-plan.md](./plans/core-runtime-columnar-plan.md)
 - `plans/` 目录索引：[plans/README-zh.md](./plans/README-zh.md)
 
@@ -211,17 +211,17 @@ regex_df = session.read_line_file(
 CLI 示例：
 
 ```bash
-uv run --project python_api python python_api/velaria_cli.py file-sql \
+uv run --project python python python/velaria_cli.py file-sql \
   --csv /tmp/input.csv \
   --input-type csv \
   --query "SELECT * FROM input_table LIMIT 5"
 
-uv run --project python_api python python_api/velaria_cli.py file-sql \
+uv run --project python python python/velaria_cli.py file-sql \
   --input-path /tmp/input.jsonl \
   --input-type auto \
   --query "SELECT * FROM input_table LIMIT 5"
 
-uv run --project python_api python python_api/velaria_cli.py file-sql \
+uv run --project python python python/velaria_cli.py file-sql \
   --input-path /tmp/events.log \
   --input-type line \
   --line-mode regex \
@@ -238,7 +238,7 @@ bazel run //:df_demo
 bazel run //:stream_demo
 bazel run //:file_source_benchmark -- 200000 3
 # 会输出 CSV / line / JSON file-source 子 case 的 JSON 行
-uv run --project python_api python python_api/velaria_cli.py --help
+uv run --project python python python/velaria_cli.py --help
 ./dist/velaria-cli --help
 ```
 

@@ -22,7 +22,7 @@
 如果目标是做一个可视化 app，当前仓库最合理的方向不是“先把 C++ 内核直接做成 UI 应用”，而是：
 
 - 把 Velaria 继续保持为执行核心
-- 把 `python_api` 视为 app 的本地后端承载层
+- 把 `python` 视为 app 的本地后端承载层
 - 在其上补一个可视化前端
 - 再把分析型存储格式作为 app 的持久数据层逐步接入
 
@@ -67,8 +67,8 @@
 
 参考：
 
-- [python_api/README.md](../python_api/README.md)
-- [excel.py](../python_api/velaria/excel.py)
+- [python/README.md](../python/README.md)
+- [excel.py](../python/velaria/excel.py)
 - [runtime-contract.md](../docs/runtime-contract.md)
 
 结论：
@@ -90,9 +90,9 @@ Python CLI 已经证明这些能力可以被组织成“命令 -> 结构化 JSON
 
 参考：
 
-- [python_api/README.md](../python_api/README.md)
+- [python/README.md](../python/README.md)
 - [runtime-contract.md](../docs/runtime-contract.md)
-- [cli.py](../python_api/velaria/cli.py)
+- [cli.py](../python/velaria/cli.py)
 
 ### 2.3 导出与结果预览能力
 
@@ -109,7 +109,7 @@ Python CLI 已经证明这些能力可以被组织成“命令 -> 结构化 JSON
 
 参考：
 
-- [cli.py](../python_api/velaria/cli.py)
+- [cli.py](../python/velaria/cli.py)
 
 ### 2.4 run / artifact / workspace 管理能力
 
@@ -128,8 +128,8 @@ Python CLI 已经证明这些能力可以被组织成“命令 -> 结构化 JSON
 
 参考：
 
-- [workspace/run_store.py](../python_api/velaria/workspace/run_store.py)
-- [workspace/artifact_index.py](../python_api/velaria/workspace/artifact_index.py)
+- [workspace/run_store.py](../python/velaria/workspace/run_store.py)
+- [workspace/artifact_index.py](../python/velaria/workspace/artifact_index.py)
 
 结论：
 
@@ -446,7 +446,7 @@ artifact / saved table
 ### Phase 1
 
 - 先做本地 app service
-- 复用 `python_api` 与 workspace / artifact 逻辑
+- 复用 `python` 与 workspace / artifact 逻辑
 - 通过 service 暴露 import / analyze / export / run / preview
 
 ### Phase 2
@@ -469,7 +469,7 @@ artifact / saved table
 
 如果按这个方向推进，后续仓库工作应该分成三条线：
 
-- `python_api`
+- `python`
   - app service
   - workspace / artifact / preview 继续作为后端基础
 - `core`
@@ -481,7 +481,7 @@ artifact / saved table
 
 这里最重要的一点是：
 
-- app 应该建立在现有 `python_api` 之上
+- app 应该建立在现有 `python` 之上
 - 而不是绕开它，直接让前端去拼接 C++ 层细节
 
 ## 13. 最终结论
@@ -491,14 +491,14 @@ artifact / saved table
 因此正确的技术判断是：
 
 - 先把 app 的产品边界和本地服务层定下来
-- 把现有 `python_api + workspace + artifact` 视为 app 后端基础
+- 把现有 `python + workspace + artifact` 视为 app 后端基础
 - 把分析型存储格式放在“用户明确保存的数据层”
 - 不把自有存储格式误当成整个 app 的解决方案
 
 换句话说：
 
 - `Velaria kernel` 是执行内核
-- `python_api` 是 app backend 的起点
+- `python` 是 app backend 的起点
 - `visual app` 是产品层
 - `analysis bundle` 是持久化子系统
 

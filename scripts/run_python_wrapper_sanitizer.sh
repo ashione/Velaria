@@ -32,12 +32,12 @@ STRESS_ITERATIONS="${VELARIA_WRAPPER_STRESS_ITERATIONS:-1}"
 # allocations from pyarrow/numpy do not drown out regressions in our code.
 MODES="${VELARIA_WRAPPER_MODES:-rows}"
 
-bazel build --config=asan //:velaria_pyext //python_api:bench_realtime_wrapper_stress
-bazel run --config=asan //python_api:sync_native_extension
+bazel build --config=asan //:velaria_pyext //python:bench_realtime_wrapper_stress
+bazel run --config=asan //python:sync_native_extension
 
-uv sync --project python_api --python "${VELARIA_PYTHON_BIN}"
+uv sync --project python --python "${VELARIA_PYTHON_BIN}"
 
-PYTHON_BIN="${ROOT}/python_api/.venv/bin/python"
+PYTHON_BIN="${ROOT}/python/.venv/bin/python"
 
 export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1:abort_on_error=1:strict_init_order=1:check_initialization_order=1:fast_unwind_on_malloc=0:detect_stack_use_after_return=1}"
 export LSAN_OPTIONS="${LSAN_OPTIONS:-report_objects=1:print_suppressions=1:suppressions=${ROOT}/scripts/lsan_pyarrow.supp}"
@@ -50,8 +50,8 @@ if command -v gcc >/dev/null 2>&1; then
 fi
 
 for mode in ${MODES}; do
-  PYTHONPATH="${PYTHONPATH:-${ROOT}/python_api}" \
-    "${PYTHON_BIN}" python_api/benchmarks/bench_realtime_wrapper_stress.py "${STRESS_ITERATIONS}" "${mode}"
+  PYTHONPATH="${PYTHONPATH:-${ROOT}/python}" \
+    "${PYTHON_BIN}" python/benchmarks/bench_realtime_wrapper_stress.py "${STRESS_ITERATIONS}" "${mode}"
 done
 
 echo "[summary] python wrapper sanitizer smoke ok"

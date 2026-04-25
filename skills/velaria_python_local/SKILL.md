@@ -10,7 +10,7 @@ description: How to use a locally installed Velaria Python package for local ana
 
 本 Skill 默认只使用 `uv` 执行。仓库内可直接使用的入口只有两类：
 
-- 源码入口：`uv run --project python_api python python_api/velaria_cli.py ...`
+- 源码入口：`uv run --project python python python/velaria_cli.py ...`
 - 打包产物：`./dist/velaria-cli ...`
 
 如果你已经把 wheel 安装到了独立环境，也可以使用安装后的 `velaria-cli` / `velaria_cli`，但下面的示例统一使用仓库内可见入口。
@@ -28,7 +28,7 @@ uv pip install velaria
 # 或
 uv pip install /path/to/velaria-<version>-<python_tag>-<abi_tag>-<platform_tag>.whl
 
-uv run --project python_api python python_api/velaria_cli.py --help
+uv run --project python python python/velaria_cli.py --help
 uv run python -c "import velaria; print(velaria.__version__)"
 ```
 
@@ -61,13 +61,13 @@ print(result.to_pylist())
 如果你更适合用 CLI 而不是临时 Python 片段，在已安装 `velaria` 的环境里也可以直接使用 workspace/run store。
 
 所有 CLI 顶层命令和子命令都支持 `--help`，例如
-`uv run --project python_api python python_api/velaria_cli.py run diff --help`。
-`uv run --project python_api python python_api/velaria_cli.py -i` 可以进入交互式模式。
+`uv run --project python python python/velaria_cli.py run diff --help`。
+`uv run --project python python python/velaria_cli.py -i` 可以进入交互式模式。
 
 ```bash
-uv run --project python_api python python_api/velaria_cli.py -i
+uv run --project python python python/velaria_cli.py -i
 
-uv run --project python_api python python_api/velaria_cli.py run start -- file-sql \
+uv run --project python python python/velaria_cli.py run start -- file-sql \
   --run-name "regional_row_count" \
   --description "regional row count for the current CSV snapshot" \
   --tag regional \
@@ -75,11 +75,11 @@ uv run --project python_api python python_api/velaria_cli.py run start -- file-s
   --csv path/to/file.csv \
   --query "SELECT region, COUNT(*) AS cnt FROM input_table GROUP BY region"
 
-uv run --project python_api python python_api/velaria_cli.py run list --tag regional --query "row count" --limit 20
-uv run --project python_api python python_api/velaria_cli.py run result --run-id <run_id>
-uv run --project python_api python python_api/velaria_cli.py run diff --run-id <run_id> --other-run-id <other_run_id>
-uv run --project python_api python python_api/velaria_cli.py run show --run-id <run_id>
-uv run --project python_api python python_api/velaria_cli.py artifacts list --run-id <run_id>
+uv run --project python python python/velaria_cli.py run list --tag regional --query "row count" --limit 20
+uv run --project python python python/velaria_cli.py run result --run-id <run_id>
+uv run --project python python python/velaria_cli.py run diff --run-id <run_id> --other-run-id <other_run_id>
+uv run --project python python python/velaria_cli.py run show --run-id <run_id>
+uv run --project python python python/velaria_cli.py artifacts list --run-id <run_id>
 ```
 
 ## 3.1 当前 SQL v1 边界
@@ -122,7 +122,7 @@ stream SQL 当前边界：
 基础语法：
 
 ```bash
-uv run --project python_api python python_api/velaria_cli.py run start -- <action> ...
+uv run --project python python python/velaria_cli.py run start -- <action> ...
 ```
 
 公共参数：
@@ -237,7 +237,7 @@ uv run --project python_api python python_api/velaria_cli.py run start -- <actio
 基础语法：
 
 ```bash
-uv run --project python_api python python_api/velaria_cli.py run list \
+uv run --project python python python/velaria_cli.py run list \
   [--status succeeded] [--action file-sql] [--tag slow-query] [--query triage] [--limit 20]
 ```
 
@@ -366,7 +366,7 @@ uv run --with velaria --with "pyarrow==23.0.1" \\
 ```bash
 uv run --with velaria --with pandas --with openpyxl \\
   python /Users/bytedance/Velaria/skills/velaria_python_local/scripts/query_excel_to_sql.py \\
-  "/Users/bytedance/Velaria/python_api/tests/fixtures/employee_import_mock.xlsx" \\
+  "/Users/bytedance/Velaria/python/tests/fixtures/employee_import_mock.xlsx" \\
   --sheet "员工" \\
   --query "SELECT name, dept, COUNT(*) AS cnt FROM excel_data GROUP BY name, dept"
 ```
@@ -387,7 +387,7 @@ uv run --with velaria --with pandas --with openpyxl \\
 ```bash
 uv run --with velaria --with pandas --with openpyxl \\
   python /Users/bytedance/Velaria/skills/velaria_python_local/scripts/read_xlsx.py \\
-  "/Users/bytedance/Velaria/python_api/tests/fixtures/employee_import_mock.xlsx" --sheet "员工" \\
+  "/Users/bytedance/Velaria/python/tests/fixtures/employee_import_mock.xlsx" --sheet "员工" \\
   --query "SELECT name, COUNT(*) AS cnt FROM sheet_data GROUP BY name"
 ```
 
@@ -406,6 +406,6 @@ uv run --with velaria --with "pyarrow==23.0.1" \\
 2. 选一个脚本加载数据，确保 `session.create_temp_view(...)` 成功
 3. 用 `session.sql(...)`/脚本 `--query` 将你的业务分析逻辑落到 SQL
 4. 若需可追踪执行、状态查看和 artifact 预览，优先使用
-   `uv run --project python_api python python_api/velaria_cli.py run ...`
+   `uv run --project python python python/velaria_cli.py run ...`
    与
-   `uv run --project python_api python python_api/velaria_cli.py artifacts ...`
+   `uv run --project python python python/velaria_cli.py artifacts ...`

@@ -37,7 +37,7 @@ function jiebaDictDir() {
   if (app.isPackaged) {
     return path.join(process.resourcesPath, 'bin', 'velaria-service', '_internal', 'velaria', 'jieba_dict');
   }
-  const devPath = path.join(repoRoot(), 'python_api', 'velaria', 'jieba_dict');
+  const devPath = path.join(repoRoot(), 'python', 'velaria', 'jieba_dict');
   return existsSync(devPath) ? devPath : '';
 }
 
@@ -112,9 +112,9 @@ function startSidecar() {
       [
         'run',
         '--project',
-        path.join(root, 'python_api'),
+        path.join(root, 'python'),
         'python',
-        path.join(root, 'python_api', 'velaria_service.py'),
+        path.join(root, 'python', 'velaria_service.py'),
         '--port',
         String(DEFAULT_PORT),
       ],
@@ -151,7 +151,7 @@ function startBackgroundEmbeddingPrep() {
   const root = repoRoot();
   const syncRef = spawn(
     'uv',
-    ['sync', '--project', path.join(root, 'python_api'), '--extra', 'embedding'],
+    ['sync', '--project', path.join(root, 'python'), '--extra', 'embedding'],
     {
       cwd: root,
       env: {
@@ -178,7 +178,7 @@ function startBackgroundEmbeddingPrep() {
       [
         'run',
         '--project',
-        path.join(root, 'python_api'),
+        path.join(root, 'python'),
         '--extra',
         'embedding',
         'python',

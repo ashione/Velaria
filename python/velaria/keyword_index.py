@@ -101,7 +101,7 @@ def _tokenize_keyword_text_jieba(text: str) -> list[str]:
     except ImportError as exc:  # pragma: no cover - env dependent
         raise ImportError(
             "jieba analyzer requires the `jieba` Python package. "
-            "Install it in python_api before building keyword indexes with analyzer=jieba."
+            "Install it in python before building keyword indexes with analyzer=jieba."
         ) from exc
     tokens = [token.strip() for token in jieba.cut_for_search(text) if token.strip()]
     normalized: list[str] = []

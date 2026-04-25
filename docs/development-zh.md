@@ -9,36 +9,36 @@
 
 ```bash
 bazel build //:velaria_pyext
-bazel run //python_api:sync_native_extension
-uv sync --project python_api --python python3.13
+bazel run //python:sync_native_extension
+uv sync --project python --python python3.13
 ```
 
 运行示例：
 
 ```bash
-uv run --project python_api python python_api/examples/demo_batch_sql_arrow.py
-uv run --project python_api python python_api/examples/demo_stream_sql.py
-uv run --project python_api python python_api/examples/demo_vector_search.py
+uv run --project python python python/examples/demo_batch_sql_arrow.py
+uv run --project python python python/examples/demo_stream_sql.py
+uv run --project python python python/examples/demo_vector_search.py
 ```
 
 tracked run 示例：
 
 ```bash
-uv run --project python_api python python_api/velaria_cli.py -i
+uv run --project python python python/velaria_cli.py -i
 
-uv run --project python_api python python_api/velaria_cli.py run start -- file-sql \
+uv run --project python python python/velaria_cli.py run start -- file-sql \
   --run-name "score_demo" \
   --description "score filter result for demo input" \
   --tag demo \
   --csv /path/to/input.csv \
   --query "SELECT * FROM input_table LIMIT 5"
 
-uv run --project python_api python python_api/velaria_cli.py run list --tag demo --query "score"
-uv run --project python_api python python_api/velaria_cli.py run result --run-id <run_id>
-uv run --project python_api python python_api/velaria_cli.py run diff --run-id <run_id> --other-run-id <other_run_id>
-uv run --project python_api python python_api/velaria_cli.py run show --run-id <run_id>
-uv run --project python_api python python_api/velaria_cli.py artifacts list --run-id <run_id>
-uv run --project python_api python python_api/velaria_cli.py artifacts preview --artifact-id <artifact_id>
+uv run --project python python python/velaria_cli.py run list --tag demo --query "score"
+uv run --project python python python/velaria_cli.py run result --run-id <run_id>
+uv run --project python python python/velaria_cli.py run diff --run-id <run_id> --other-run-id <other_run_id>
+uv run --project python python python/velaria_cli.py run show --run-id <run_id>
+uv run --project python python python/velaria_cli.py artifacts list --run-id <run_id>
+uv run --project python python python/velaria_cli.py artifacts preview --artifact-id <artifact_id>
 ```
 
 桌面 app 原型：

@@ -10,7 +10,7 @@ def main() -> int:
         raise SystemExit("usage: sync_native_extension.py <built-_velaria.so>")
     workspace = pathlib.Path(os.environ.get("BUILD_WORKSPACE_DIRECTORY", pathlib.Path.cwd())).resolve()
     src = pathlib.Path(sys.argv[1]).resolve()
-    dst = workspace / "python_api" / "velaria" / "_velaria.so"
+    dst = workspace / "python" / "velaria" / "_velaria.so"
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists():
         current_mode = dst.stat().st_mode

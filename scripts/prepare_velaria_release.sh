@@ -21,9 +21,9 @@ fi
 VERSION="$1"
 TAG="${2:-v${VERSION}}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION_BZL="${ROOT_DIR}/python_api/version.bzl"
-VERSION_PY="${ROOT_DIR}/python_api/velaria/_version.py"
-UV_LOCK="${ROOT_DIR}/python_api/uv.lock"
+VERSION_BZL="${ROOT_DIR}/python/version.bzl"
+VERSION_PY="${ROOT_DIR}/python/velaria/_version.py"
+UV_LOCK="${ROOT_DIR}/python/uv.lock"
 
 case "${TAG}" in
   "v${VERSION}"|"release-v${VERSION}")

@@ -307,13 +307,13 @@ The following targets anchor this contract:
   - `//:stream_strategy_explain_test`
   - `//:vector_runtime_test`
 - python ecosystem
-  - `//python_api:streaming_v05_test`
-  - `//python_api:arrow_stream_ingestion_test`
-  - `//python_api:file_source_api_test`
-  - `//python_api:python_cli_contract_test`
-  - `//python_api:workspace_runs_test`
-  - `//python_api:vector_search_test`
-  - `//python_api:read_excel_test`
-  - `//python_api:custom_stream_source_test`
-  - `//python_api:bitable_stream_source_test`
-  - `//python_api:bitable_group_by_owner_integration_test`
+  - `//python:streaming_v05_test`
+  - `//python:arrow_stream_ingestion_test`
+  - `//python:file_source_api_test`
+  - `//python:python_cli_contract_test`
+  - `//python:workspace_runs_test`
+  - `//python:vector_search_test`
+  - `//python:read_excel_test`
+  - `//python:custom_stream_source_test`
+  - `//python:bitable_stream_source_test`
+  - `//python:bitable_group_by_owner_integration_test`

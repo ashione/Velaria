@@ -41,7 +41,7 @@ Owns:
 
 Owns:
 
-- native binding in `python_api`
+- native binding in `python`
 - Arrow ingress/output
 - CLI, packaging, and `uv` workflow
 - local app-side service and Electron prototype support
@@ -161,7 +161,7 @@ For more detail, use:
 - runtime contract: [docs/runtime-contract.md](./docs/runtime-contract.md)
 - local agentic service / protocol: [docs/agentic-service-api.md](./docs/agentic-service-api.md)
 - streaming runtime shape: [docs/streaming_runtime_design.md](./docs/streaming_runtime_design.md)
-- Python ecosystem details: [python_api/README.md](./python_api/README.md)
+- Python ecosystem details: [python/README.md](./python/README.md)
 - current maintained plan: [plans/core-runtime-columnar-plan.md](./plans/core-runtime-columnar-plan.md)
 - plan directory guide: [plans/README.md](./plans/README.md)
 
@@ -211,17 +211,17 @@ regex_df = session.read_line_file(
 CLI examples:
 
 ```bash
-uv run --project python_api python python_api/velaria_cli.py file-sql \
+uv run --project python python python/velaria_cli.py file-sql \
   --csv /tmp/input.csv \
   --input-type csv \
   --query "SELECT * FROM input_table LIMIT 5"
 
-uv run --project python_api python python_api/velaria_cli.py file-sql \
+uv run --project python python python/velaria_cli.py file-sql \
   --input-path /tmp/input.jsonl \
   --input-type auto \
   --query "SELECT * FROM input_table LIMIT 5"
 
-uv run --project python_api python python_api/velaria_cli.py file-sql \
+uv run --project python python python/velaria_cli.py file-sql \
   --input-path /tmp/events.log \
   --input-type line \
   --line-mode regex \
@@ -238,7 +238,7 @@ bazel run //:df_demo
 bazel run //:stream_demo
 bazel run //:file_source_benchmark -- 200000 3
 # emits CSV / line / JSON file-source sub-cases as JSON lines
-uv run --project python_api python python_api/velaria_cli.py --help
+uv run --project python python python/velaria_cli.py --help
 ./dist/velaria-cli --help
 ```
 

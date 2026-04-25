@@ -478,6 +478,25 @@ class PythonCliContractTest(unittest.TestCase):
         self.assertEqual(session.message, "› ")
         self.assertNotIn("\033", session.message)
 
+    def test_assistant_text_renders_markdown_when_enabled(self):
+        interactive = importlib.import_module("velaria.cli.interactive")
+        from velaria.ai_runtime.agent import AgentEvent
+
+        stdout = io.StringIO()
+        with mock.patch.object(interactive, "_should_render_markdown", return_value=True):
+            with redirect_stdout(stdout):
+                interactive._render_event(
+                    AgentEvent(
+                        "assistant_text",
+                        "**Summary**\n\n- region: CN",
+                        session_id="agent-session-1",
+                    )
+                )
+        output = stdout.getvalue()
+        self.assertIn("Summary", output)
+        self.assertIn("region: CN", output)
+        self.assertNotIn("**Summary**", output)
+
     def test_interactive_turn_keyboard_interrupt_marks_cancelled(self):
         interactive = importlib.import_module("velaria.cli.interactive")
 

@@ -85,6 +85,41 @@ class AiRuntimeAgentTest(unittest.TestCase):
                 self.assertEqual(processed["row_count"], 2)
                 self.assertEqual(processed["rows"][0]["region"], "cn")
 
+    def test_dataset_import_downloads_url_to_velaria_workspace_first(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-agent-url-dataset-") as tmp:
+            source_csv = pathlib.Path(tmp) / "remote-sales.csv"
+            source_csv.write_text("region,amount\ncn,10\n", encoding="utf-8")
+            workspace = pathlib.Path(tmp) / "runtime"
+            home = pathlib.Path(tmp) / "home"
+
+            def fake_urlretrieve(url, target):
+                pathlib.Path(target).write_text(source_csv.read_text(encoding="utf-8"), encoding="utf-8")
+                return str(target), None
+
+            with mock.patch.dict(
+                os.environ,
+                {"VELARIA_HOME": str(home), "VELARIA_RUNTIME_WORKSPACE": str(workspace)},
+            ):
+                with mock.patch("urllib.request.urlretrieve", side_effect=fake_urlretrieve):
+                    imported = execute_local_function(
+                        "velaria_dataset_import",
+                        {
+                            "path": "https://example.test/data/sales.csv",
+                            "source_id": "remote_sales",
+                            "table_name": "sales",
+                        },
+                    )
+
+            self.assertTrue(imported["ok"])
+            self.assertEqual(imported["source_url"], "https://example.test/data/sales.csv")
+            self.assertTrue(pathlib.Path(imported["source_path"]).exists())
+            self.assertIn(str(workspace / "imports" / "downloads"), imported["source_path"])
+            self.assertEqual(imported["schema"], ["region", "amount"])
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": str(home)}):
+                with AgenticStore() as store:
+                    source = store.get_source("remote_sales")
+            self.assertEqual(source["spec"]["source_url"], "https://example.test/data/sales.csv")
+
     def test_dataset_process_saved_run_surfaces_run_metadata(self):
         def fake_main(argv):
             print(
@@ -209,6 +244,9 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertIn("product identity", instructions)
         self.assertIn("velaria://skills/velaria-python-local", instructions)
         self.assertIn("Available Velaria local functions", instructions)
+        self.assertIn("Default workflow policy for data tasks", instructions)
+        self.assertIn("first get the data into a Velaria-processable local format", instructions)
+        self.assertIn("then call the Velaria local functions", instructions)
         self.assertIn("velaria_dataset_import", instructions)
         self.assertIn("velaria_dataset_process", instructions)
         self.assertIn("velaria_sql", instructions)

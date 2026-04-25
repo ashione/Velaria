@@ -69,6 +69,8 @@ py_library(
         requirement("pandas"),
         requirement("prompt_toolkit"),
         requirement("pyarrow"),
+        requirement("rich"),
+        requirement("xlrd"),
     ],
     visibility = ["//visibility:public"],
 )
@@ -220,6 +222,8 @@ py_wheel(
         "openpyxl",
         "mcp",
         "prompt-toolkit",
+        "rich",
+        "xlrd",
     ],
 )
 

@@ -424,7 +424,7 @@ def _render_event(event: Any) -> None:
     _update_state_from_event(event_type, content, data)
     if event_type == "assistant_text":
         if content:
-            print(content)
+            _print_assistant_text(content)
         return
     if event_type == "thinking":
         if content:
@@ -457,7 +457,7 @@ def _render_event(event: Any) -> None:
     if _looks_like_runtime_payload(content):
         return
     if content:
-        print(content)
+        _print_assistant_text(content)
 
 
 def _extract_tool_name(data: dict[str, Any]) -> str:
@@ -950,6 +950,32 @@ def _print_note(label: str, message: str, *, level: str = "info") -> None:
 
 def _print_event(label: str, message: str) -> None:
     print(f"{_style(label.ljust(12), 'event')} {_wrap_value(message, 13)}")
+
+
+def _print_assistant_text(message: str) -> None:
+    if not _should_render_markdown():
+        print(message)
+        return
+    try:
+        from rich.console import Console
+        from rich.markdown import Markdown
+    except Exception:
+        print(message)
+        return
+    console = Console(
+        file=sys.stdout,
+        force_terminal=_supports_color(),
+        soft_wrap=True,
+        highlight=False,
+    )
+    console.print(Markdown(message))
+
+
+def _should_render_markdown() -> bool:
+    configured = os.environ.get("VELARIA_MARKDOWN")
+    if configured is not None:
+        return configured.strip().lower() not in {"0", "false", "no", "off"}
+    return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 
 
 def _wrap_value(value: str, indent: int) -> str:

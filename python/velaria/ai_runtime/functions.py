@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
 import pathlib
 import shlex
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -42,12 +45,21 @@ def _table_preview(table: Any, limit: int) -> JsonDict:
 
 def _velaria_read(args: JsonDict) -> JsonDict:
     from velaria import Session
+    from velaria import read_excel
 
-    path = str(args["path"])
+    original_path = str(args["path"])
+    path, source_metadata = _materialize_source_path(original_path)
     limit = int(args.get("limit") or 20)
     session = Session()
-    table = session.read(path).to_arrow()
-    return {"source_path": path, **_table_preview(table, limit)}
+    if _is_excel_path(path):
+        table = read_excel(session, path).to_arrow()
+    else:
+        table = session.read(path).to_arrow()
+    return {
+        "source_path": path,
+        **source_metadata,
+        **_table_preview(table, limit),
+    }
 
 
 def _velaria_schema(args: JsonDict) -> JsonDict:
@@ -63,12 +75,17 @@ def _velaria_schema(args: JsonDict) -> JsonDict:
 
 def _prepare_session_with_source(args: JsonDict):
     from velaria import Session
+    from velaria import read_excel
 
     session = Session()
-    source_path = str(args.get("source_path") or args.get("path") or "")
+    raw_source_path = str(args.get("source_path") or args.get("path") or "")
     table_name = str(args.get("table_name") or "input_table")
-    if source_path:
-        df = session.read(source_path)
+    if raw_source_path:
+        source_path, _metadata = _materialize_source_path(raw_source_path)
+        if _is_excel_path(source_path):
+            df = read_excel(session, source_path)
+        else:
+            df = session.read(source_path)
         session.create_temp_view(table_name, df)
     return session
 
@@ -76,13 +93,15 @@ def _prepare_session_with_source(args: JsonDict):
 def _velaria_sql(args: JsonDict) -> JsonDict:
     query = str(args["query"])
     limit = int(args.get("limit") or 50)
-    source_path = str(args.get("source_path") or args.get("path") or "")
+    original_source_path = str(args.get("source_path") or args.get("path") or "")
+    source_path, source_metadata = _materialize_source_path(original_source_path) if original_source_path else ("", {})
     table_name = str(args.get("table_name") or "input_table")
     session = _prepare_session_with_source(args)
     table = session.sql(query).to_arrow()
     return {
         "query": query,
         "source_path": source_path,
+        **source_metadata,
         "table_name": table_name,
         **_table_preview(table, limit),
     }
@@ -101,7 +120,8 @@ def _velaria_explain(args: JsonDict) -> JsonDict:
 def _velaria_dataset_import(args: JsonDict) -> JsonDict:
     from velaria.agentic_store import AgenticStore
 
-    path = str(args["path"])
+    original_path = str(args["path"])
+    path, source_metadata = _materialize_source_path(original_path)
     input_type = str(args.get("input_type") or "auto")
     table_name = str(args.get("table_name") or "input_table")
     limit = int(args.get("limit") or 20)
@@ -118,6 +138,7 @@ def _velaria_dataset_import(args: JsonDict) -> JsonDict:
                 "spec": {
                     "path": path,
                     "input_path": path,
+                    **source_metadata,
                     "input_type": input_type,
                     "table_name": table_name,
                 },
@@ -128,6 +149,7 @@ def _velaria_dataset_import(args: JsonDict) -> JsonDict:
                 },
                 "metadata": {
                     "source_path": path,
+                    **source_metadata,
                     "input_type": input_type,
                     "row_count": preview["row_count"],
                     **metadata,
@@ -138,6 +160,7 @@ def _velaria_dataset_import(args: JsonDict) -> JsonDict:
         "source": source,
         "source_id": source["source_id"],
         "source_path": path,
+        **source_metadata,
         "input_type": input_type,
         "table_name": table_name,
         "schema": preview["schema"],
@@ -147,15 +170,19 @@ def _velaria_dataset_import(args: JsonDict) -> JsonDict:
 
 
 def _velaria_dataset_process(args: JsonDict) -> JsonDict:
-    source_path = str(args.get("source_path") or args.get("path") or "")
-    if not source_path:
+    raw_source_path = str(args.get("source_path") or args.get("path") or "")
+    if not raw_source_path:
         return {"ok": False, "error": "source_path or path is required"}
+    source_path, source_metadata = _materialize_source_path(raw_source_path)
     query = str(args["query"])
     table_name = str(args.get("table_name") or "input_table")
     input_type = str(args.get("input_type") or "auto")
     delimiter = str(args.get("delimiter") or ",")
     preview_limit = max(0, min(int(args.get("limit") or 50), 200))
     save_run = bool(args.get("save_run", True))
+    if _is_excel_path(source_path):
+        source_path = _convert_excel_to_csv(source_path)
+        input_type = "csv"
     if save_run:
         argv = [
             "run",
@@ -191,6 +218,7 @@ def _velaria_dataset_process(args: JsonDict) -> JsonDict:
         result.update(
             {
                 "source_path": source_path,
+                **source_metadata,
                 "table_name": table_name,
                 "query": query,
                 "input_type": input_type,
@@ -217,6 +245,7 @@ def _velaria_dataset_process(args: JsonDict) -> JsonDict:
     _merge_dataset_result(payload, payload, preview_limit)
     return {
         "source_path": source_path,
+        **source_metadata,
         "table_name": table_name,
         "query": query,
         "input_type": input_type,
@@ -225,6 +254,66 @@ def _velaria_dataset_process(args: JsonDict) -> JsonDict:
         "rows": payload.get("rows") or [],
         "artifacts": executed.get("artifacts") or [],
     }
+
+
+def _materialize_source_path(raw_path: str) -> tuple[str, JsonDict]:
+    if not _is_url(raw_path):
+        return raw_path, {}
+    target = _download_source_url(raw_path)
+    return str(target), {"source_url": raw_path}
+
+
+def _is_url(value: str) -> bool:
+    parsed = urllib.parse.urlparse(value)
+    return parsed.scheme in {"http", "https"}
+
+
+def _download_source_url(url: str) -> pathlib.Path:
+    parsed = urllib.parse.urlparse(url)
+    basename = pathlib.Path(urllib.parse.unquote(parsed.path)).name
+    if not basename:
+        suffix = ""
+        basename = "source"
+    else:
+        suffix = pathlib.Path(basename).suffix
+    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:12]
+    stem = pathlib.Path(basename).stem or "source"
+    filename = f"{stem}-{digest}{suffix}"
+    target_dir = _runtime_import_dir() / "downloads"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / filename
+    if not target.exists():
+        urllib.request.urlretrieve(url, target)
+    return target
+
+
+def _runtime_import_dir() -> pathlib.Path:
+    root = (
+        os.environ.get("VELARIA_RUNTIME_WORKSPACE")
+        or os.environ.get("VELARIA_WORKSPACE")
+        or str(pathlib.Path.home() / ".velaria")
+    )
+    path = pathlib.Path(root).expanduser() / "imports"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _is_excel_path(path: str) -> bool:
+    return pathlib.Path(path).suffix.lower() in {".xlsx", ".xlsm", ".xls"}
+
+
+def _convert_excel_to_csv(path: str) -> str:
+    try:
+        import pandas as pd
+    except Exception as exc:
+        raise RuntimeError("pandas is required to convert Excel inputs for Velaria SQL") from exc
+    source = pathlib.Path(path)
+    target_dir = _runtime_import_dir() / "converted"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{source.stem}.csv"
+    frame = pd.read_excel(str(source))
+    frame.to_csv(target, index=False)
+    return str(target)
 
 
 def _merge_dataset_result(target: JsonDict, result: JsonDict, limit: int) -> None:
@@ -361,6 +450,17 @@ def velaria_agent_instructions() -> str:
         "`velaria_dataset_import` for dataset registration/import and "
         "`velaria_dataset_process` for dataset SQL processing before falling "
         "back to raw shell or generic CLI commands.\n\n"
+        "Default workflow policy for data tasks: when the user asks to inspect, "
+        "import, clean, summarize, query, transform, or save datasets, first get "
+        "the data into a Velaria-processable local format such as CSV, JSON, "
+        "Arrow, Parquet, or supported Excel, then call the Velaria local "
+        "functions. Use `velaria_read`/`velaria_schema` to inspect local files, "
+        "`velaria_dataset_import` to register datasets, `velaria_sql` for "
+        "ad-hoc queries, `velaria_dataset_process` to save runs/artifacts, and "
+        "`velaria_artifact_preview` to inspect saved outputs. It is acceptable "
+        "to write small conversion or download code when needed to prepare data "
+        "for Velaria. If Velaria cannot handle the requested workflow, explain "
+        "that boundary and then use the best available fallback.\n\n"
         "Velaria SQL v1 supports SELECT projection/aliases, WHERE, GROUP BY, "
         "ORDER BY, LIMIT, minimal JOIN, INSERT INTO ... VALUES, INSERT INTO ... "
         "SELECT, CREATE TABLE, CREATE SOURCE TABLE, and CREATE SINK TABLE. Do "

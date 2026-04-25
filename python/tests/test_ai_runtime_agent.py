@@ -16,6 +16,7 @@ from velaria.ai_runtime.functions import (
     velaria_agent_instructions,
 )
 from velaria.ai_runtime.mcp_server import SKILL_URI, _handle_request
+from velaria.ai_runtime.sql_catalog import SQL_CATALOG_URI
 
 
 class AiRuntimeAgentTest(unittest.TestCase):
@@ -314,6 +315,33 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertEqual(result["run_id"], "run_test")
         self.assertEqual(result["artifacts"][0]["artifact_id"], "artifact_test")
 
+    def test_sql_catalog_tools_support_on_demand_function_and_pattern_lookup(self):
+        caps = execute_local_function("velaria_sql_capabilities", {})
+        self.assertTrue(caps["ok"])
+        self.assertEqual(caps["resource_uri"], SQL_CATALOG_URI)
+        self.assertIn("date", caps["function_categories"])
+
+        found = execute_local_function(
+            "velaria_sql_function_search",
+            {"query": "current timestamp", "category": "time"},
+        )
+        self.assertTrue(found["ok"])
+        self.assertTrue(any(match["name"] == "CURRENT_TIMESTAMP" for match in found["matches"]))
+        replace = execute_local_function("velaria_sql_function_search", {"name": "REPLACE"})
+        self.assertTrue(replace["ok"])
+        self.assertEqual(replace["matches"][0]["signature"], "REPLACE(text, search, replacement)")
+
+        patterns = execute_local_function(
+            "velaria_sql_query_patterns",
+            {
+                "task": "按周汇总",
+                "columns": ["observation_date", "NASDAQ100"],
+            },
+        )
+        self.assertTrue(patterns["ok"])
+        self.assertIn("ISO_WEEK(observation_date)", patterns["patterns"][0]["template"])
+        self.assertIn("AVG(NASDAQ100)", patterns["patterns"][0]["template"])
+
     def test_mcp_server_exposes_tools_and_skill_resource(self):
         init = _handle_request({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         self.assertEqual(init["result"]["serverInfo"]["name"], "velaria")
@@ -326,6 +354,9 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertIn("velaria_dataset_download", names)
         self.assertIn("velaria_dataset_normalize", names)
         self.assertIn("velaria_dataset_process", names)
+        self.assertIn("velaria_sql_capabilities", names)
+        self.assertIn("velaria_sql_function_search", names)
+        self.assertIn("velaria_sql_query_patterns", names)
         import_tool = next(tool for tool in tools["result"]["tools"] if tool["name"] == "velaria_dataset_import")
         self.assertEqual(import_tool["annotations"]["destructiveHint"], False)
         self.assertEqual(import_tool["annotations"]["openWorldHint"], True)
@@ -333,6 +364,27 @@ class AiRuntimeAgentTest(unittest.TestCase):
         download_tool = next(tool for tool in tools["result"]["tools"] if tool["name"] == "velaria_dataset_download")
         self.assertEqual(download_tool["annotations"]["openWorldHint"], True)
         self.assertIn("url", download_tool["inputSchema"]["required"])
+
+        searched = _handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 21,
+                "method": "tools/call",
+                "params": {
+                    "name": "velaria_sql_function_search",
+                    "arguments": {"name": "UNIX_TIMESTAMP"},
+                },
+            }
+        )
+        search_payload = json.loads(searched["result"]["content"][0]["text"])
+        self.assertTrue(search_payload["ok"])
+        self.assertEqual(search_payload["matches"][0]["name"], "UNIX_TIMESTAMP")
+        self.assertIn("UNIX_TIMESTAMP([timestamp_or_date])", search_payload["matches"][0]["signature"])
+
+        resources = _handle_request({"jsonrpc": "2.0", "id": 22, "method": "resources/list"})
+        resource_uris = {resource["uri"] for resource in resources["result"]["resources"]}
+        self.assertIn(SKILL_URI, resource_uris)
+        self.assertIn(SQL_CATALOG_URI, resource_uris)
 
         resource = _handle_request(
             {
@@ -345,6 +397,17 @@ class AiRuntimeAgentTest(unittest.TestCase):
         text = resource["result"]["contents"][0]["text"]
         self.assertIn("Velaria Local Python Skill", text)
         self.assertEqual(text, load_velaria_skill_text())
+        sql_resource = _handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 23,
+                "method": "resources/read",
+                "params": {"uri": SQL_CATALOG_URI},
+            }
+        )
+        sql_text = sql_resource["result"]["contents"][0]["text"]
+        self.assertIn("Velaria SQL Catalog", sql_text)
+        self.assertIn("UNIX_TIMESTAMP([timestamp_or_date])", sql_text)
 
     def test_mcp_stdio_transport_lists_and_calls_tools(self):
         from mcp import ClientSession
@@ -364,6 +427,8 @@ class AiRuntimeAgentTest(unittest.TestCase):
                     self.assertIn("velaria_schema", names)
                     self.assertIn("velaria_dataset_download", names)
                     self.assertIn("velaria_dataset_process", names)
+                    self.assertIn("velaria_sql_function_search", names)
+                    self.assertIn("velaria_sql_query_patterns", names)
                     process_tool = next(tool for tool in tools.tools if tool.name == "velaria_dataset_process")
                     self.assertFalse(process_tool.annotations.destructiveHint)
                     self.assertTrue(process_tool.annotations.openWorldHint)
@@ -377,8 +442,19 @@ class AiRuntimeAgentTest(unittest.TestCase):
                     self.assertTrue(payload["ok"])
                     self.assertEqual(payload["function"], "velaria_schema")
 
+                    found = await session.call_tool(
+                        "velaria_sql_function_search",
+                        {"query": "weekly aggregation", "category": "date"},
+                    )
+                    self.assertFalse(found.isError)
+                    found_payload = json.loads(found.content[0].text)
+                    self.assertTrue(found_payload["ok"])
+                    self.assertTrue(any(match["name"] == "ISO_WEEK" for match in found_payload["matches"]))
+
                     resource = await session.read_resource(SKILL_URI)
                     self.assertIn("Velaria Local Python Skill", resource.contents[0].text)
+                    sql_resource = await session.read_resource(SQL_CATALOG_URI)
+                    self.assertIn("Velaria SQL Catalog", sql_resource.contents[0].text)
 
         asyncio.run(exercise())
 
@@ -392,6 +468,7 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertIn("You are Velaria Agent", instructions)
         self.assertIn("product identity", instructions)
         self.assertIn("velaria://skills/velaria-python-local", instructions)
+        self.assertIn(SQL_CATALOG_URI, instructions)
         self.assertIn("Available Velaria local functions", instructions)
         self.assertIn("Default workflow policy for data tasks", instructions)
         self.assertIn("first get the data into a Velaria-processable local format", instructions)
@@ -405,8 +482,12 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertIn("velaria_dataset_import", instructions)
         self.assertIn("velaria_dataset_process", instructions)
         self.assertIn("velaria_sql", instructions)
+        self.assertIn("velaria_sql_capabilities", instructions)
+        self.assertIn("velaria_sql_function_search", instructions)
+        self.assertIn("velaria_sql_query_patterns", instructions)
         self.assertNotIn(skill, instructions)
         self.assertNotIn("## 1. 环境准备", instructions)
+        self.assertNotIn("Built-in scalar functions include", instructions)
 
     def test_codex_runtime_config_injects_velaria_catalog_and_mcp(self):
         from velaria.ai_runtime.codex_runtime import CodexRuntime
@@ -489,6 +570,7 @@ class AiRuntimeAgentTest(unittest.TestCase):
                 self.assertIn('args = ["-m", "velaria.ai_runtime.mcp_server"]', isolated_config_text)
                 self.assertIn('enabled_tools = [', isolated_config_text)
                 self.assertIn('"velaria_dataset_import"', isolated_config_text)
+                self.assertIn('"velaria_sql_function_search"', isolated_config_text)
                 self.assertIn('[mcp_servers."velaria".env]', isolated_config_text)
                 self.assertIn('"VELARIA_HOME"', isolated_config_text)
                 self.assertNotIn("plugins", isolated_config_text)
@@ -504,6 +586,7 @@ class AiRuntimeAgentTest(unittest.TestCase):
                 self.assertIn("You are Velaria Agent", config.base_instructions)
                 self.assertIn("You are Velaria Agent", config.developer_instructions)
                 self.assertIn("velaria://skills/velaria-python-local", config.developer_instructions)
+                self.assertIn(SQL_CATALOG_URI, config.developer_instructions)
                 self.assertIn("velaria_sql", config.developer_instructions)
                 self.assertNotIn("## 1. 环境准备", config.developer_instructions)
                 self.assertIn("mcp_servers", config.config)
@@ -513,6 +596,8 @@ class AiRuntimeAgentTest(unittest.TestCase):
                 self.assertEqual(mcp["default_tools_approval_mode"], "approve")
                 self.assertIn("velaria_dataset_import", mcp["enabled_tools"])
                 self.assertIn("velaria_dataset_download", mcp["enabled_tools"])
+                self.assertIn("velaria_sql_function_search", mcp["enabled_tools"])
+                self.assertIn("velaria_sql_query_patterns", mcp["enabled_tools"])
                 self.assertEqual(mcp["env"]["VELARIA_HOME"], str(pathlib.Path(tmp)))
                 self.assertEqual(
                     mcp["env"]["UV_CACHE_DIR"],

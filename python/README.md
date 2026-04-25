@@ -415,7 +415,11 @@ The agent runtime provides:
   `velaria_read`, `velaria_schema`, `velaria_sql`, `velaria_explain`,
   `velaria_dataset_download`, `velaria_dataset_import`,
   `velaria_dataset_normalize`, `velaria_dataset_process`,
-  `velaria_cli_run`, `velaria_artifact_preview`
+  `velaria_cli_run`, `velaria_artifact_preview`,
+  `velaria_sql_capabilities`, `velaria_sql_function_search`,
+  `velaria_sql_query_patterns`
+- On-demand SQL reference resource `velaria://sql/catalog` for SQL v1
+  capabilities, scalar functions, and reusable query patterns
 - Natural language to SQL generation via `velaria_cli.py ai generate-sql`
 - Session-based compatibility commands via `velaria_cli.py ai session` and
   `velaria_cli.py ai analyze`

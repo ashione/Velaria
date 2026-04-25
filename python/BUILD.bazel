@@ -54,6 +54,7 @@ py_library(
         "velaria/ai_runtime/functions.py",
         "velaria/ai_runtime/mcp_server.py",
         "velaria/ai_runtime/session_registry.py",
+        "velaria/ai_runtime/sql_catalog.py",
         "velaria/workspace/__init__.py",
         "velaria/workspace/artifact_index.py",
         "velaria/workspace/paths.py",

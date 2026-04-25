@@ -15,6 +15,13 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from .sql_catalog import (
+    SQL_CATALOG_URI,
+    search_sql_functions,
+    sql_capabilities,
+    suggest_sql_patterns,
+)
+
 
 JsonDict = dict[str, Any]
 
@@ -671,6 +678,32 @@ def _velaria_artifact_preview(args: JsonDict) -> JsonDict:
         index.close()
 
 
+def _velaria_sql_capabilities(args: JsonDict) -> JsonDict:
+    section = str(args.get("section") or "")
+    return sql_capabilities(section)
+
+
+def _velaria_sql_function_search(args: JsonDict) -> JsonDict:
+    return search_sql_functions(
+        query=str(args.get("query") or ""),
+        category=str(args.get("category") or ""),
+        name=str(args.get("name") or ""),
+        limit=int(args.get("limit") or 10),
+    )
+
+
+def _velaria_sql_query_patterns(args: JsonDict) -> JsonDict:
+    columns = args.get("columns")
+    if not isinstance(columns, list):
+        columns = []
+    return suggest_sql_patterns(
+        task=str(args.get("task") or ""),
+        table_name=str(args.get("table_name") or "input_table"),
+        columns=[str(column) for column in columns],
+        limit=int(args.get("limit") or 5),
+    )
+
+
 def _skill_path() -> pathlib.Path | None:
     configured = os.environ.get("VELARIA_SKILL_PATH")
     if configured:
@@ -745,18 +778,15 @@ def velaria_agent_instructions() -> str:
         "convert it to CSV for SQL processing. If Velaria cannot handle the "
         "requested workflow, explain that boundary and then use the best "
         "available fallback.\n\n"
-        "Velaria SQL v1 supports SELECT projection/aliases, WHERE including "
-        "column-to-column predicates, GROUP BY, ORDER BY, LIMIT, minimal JOIN, "
-        "INSERT INTO ... VALUES, INSERT INTO ... SELECT, CREATE TABLE, CREATE "
-        "SOURCE TABLE, and CREATE SINK TABLE. Do not generate CTEs, subqueries, "
-        "HAVING, stored procedures, or broad ANSI window SQL. Built-in scalar "
-        "functions include string/numeric/date functions such as SUBSTR, "
-        "SUBSTRING, REPLACE, CAST, ABS, YEAR, MONTH, DAY, ISO_YEAR, ISO_WEEK, "
-        "WEEK, YEARWEEK, NOW, TODAY, CURRENT_TIMESTAMP, currentTimestamp, and "
-        "UNIX_TIMESTAMP; supported scalar functions can be nested in "
-        "projection expressions and GROUP BY may use supported scalar "
-        "expressions directly. SOURCE TABLE is read-only; SINK TABLE can be "
-        "written but must not be used as a query input.\n\n"
+        "Velaria SQL v1 details are available on demand through "
+        "`velaria_sql_capabilities`, `velaria_sql_function_search`, "
+        "`velaria_sql_query_patterns`, and the MCP resource "
+        f"`{SQL_CATALOG_URI}`. Use these when selecting SQL functions or "
+        "patterns for business tasks instead of guessing or relying on a "
+        "long prompt-embedded function list. Do not generate CTEs, subqueries, "
+        "stored procedures, or broad ANSI window SQL unless the SQL catalog "
+        "explicitly says the construct is supported. SOURCE TABLE is read-only; "
+        "SINK TABLE can be written but must not be used as a query input.\n\n"
         "Python and CLI commands in this repository must be run through uv. The "
         "repository-visible CLI entry is `uv run --project python python "
         "python/velaria_cli.py ...`.\n\n"
@@ -765,7 +795,8 @@ def velaria_agent_instructions() -> str:
         "The full Velaria usage skill is available as an MCP resource at "
         "`velaria://skills/velaria-python-local`. Load that resource only when "
         "you need detailed workflow guidance, examples, parameters, or boundary "
-        "rules for a Velaria task."
+        "rules for a Velaria task. The SQL catalog is available as an MCP "
+        f"resource at `{SQL_CATALOG_URI}`."
     )
 
 
@@ -964,6 +995,61 @@ def local_function_registry() -> dict[str, LocalFunction]:
             ),
             _velaria_artifact_preview,
         ),
+        "velaria_sql_capabilities": LocalFunction(
+            "velaria_sql_capabilities",
+            "Return Velaria SQL v1 capabilities, boundaries, categories, and the SQL catalog resource URI. Use this before choosing advanced SQL constructs.",
+            _tool_schema(
+                {
+                    "section": {
+                        "type": "string",
+                        "description": "Optional section: clauses, boundaries, notes, functions, or patterns.",
+                    },
+                }
+            ),
+            _velaria_sql_capabilities,
+        ),
+        "velaria_sql_function_search": LocalFunction(
+            "velaria_sql_function_search",
+            "Search the Velaria SQL scalar function catalog by name, category, or natural-language intent. Use this when the user asks for date/time/string/numeric SQL behavior.",
+            _tool_schema(
+                {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural-language search text such as 'current timestamp', 'weekly aggregation', or 'convert date to unix seconds'.",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Optional category filter such as string, numeric, date, time, or conversion.",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Optional exact function name or alias, such as UNIX_TIMESTAMP or currentTimestamp.",
+                    },
+                    "limit": {"type": "integer", "default": 10},
+                }
+            ),
+            _velaria_sql_function_search,
+        ),
+        "velaria_sql_query_patterns": LocalFunction(
+            "velaria_sql_query_patterns",
+            "Return SQL-safe query templates for common Velaria tasks such as weekly aggregation, current run metadata, and date-to-epoch conversion.",
+            _tool_schema(
+                {
+                    "task": {
+                        "type": "string",
+                        "description": "Task description, for example '按周汇总 close' or 'add current timestamp metadata'.",
+                    },
+                    "table_name": {"type": "string", "default": "input_table"},
+                    "columns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional available column names used to fill pattern placeholders.",
+                    },
+                    "limit": {"type": "integer", "default": 5},
+                }
+            ),
+            _velaria_sql_query_patterns,
+        ),
     }
 
 
@@ -986,6 +1072,9 @@ def _tool_annotations(name: str) -> JsonDict:
         "velaria_explain",
         "velaria_sql",
         "velaria_artifact_preview",
+        "velaria_sql_capabilities",
+        "velaria_sql_function_search",
+        "velaria_sql_query_patterns",
     }
     idempotent = name not in {"velaria_dataset_process", "velaria_cli_run"}
     open_world = name in {

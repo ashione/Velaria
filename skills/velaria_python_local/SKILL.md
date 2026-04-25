@@ -13,6 +13,7 @@ description: How to use a locally installed Velaria Python package for local ana
 - HTTP(S) 数据集 URL：先用 `velaria_dataset_download` 本地化，或直接把 URL 传给 `velaria_dataset_import` / `velaria_read` / `velaria_sql` / `velaria_dataset_process`。
 - 本地文件：用 `velaria_dataset_import` 注册、`velaria_read` / `velaria_schema` 检查、`velaria_sql` 查询、`velaria_dataset_process` 保存 run/artifact。
 - 编码、中文列名、`invalid token byte` 或 SQL 标识符问题：先用 `velaria_dataset_normalize` 转成 UTF-8 CSV 和 SQL-safe 字段名，再按返回的 `schema` / `column_mapping` 写 SQL。
+- SQL 函数、能力边界和常见模板：按需用 `velaria_sql_capabilities`、`velaria_sql_function_search`、`velaria_sql_query_patterns` 或资源 `velaria://sql/catalog` 检索，不要凭记忆猜函数。
 - 不要在 Velaria 工具失败前先写 `curl`、`wget` 或自定义 Python 下载脚本；只有 Velaria 工具无法覆盖时再回退到通用方式。
 
 本 Skill 默认只使用 `uv` 执行。仓库内可直接使用的入口只有两类：

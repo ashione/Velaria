@@ -828,6 +828,13 @@ def _update_state_from_payload(payload: dict[str, Any]) -> None:
         _state.schema = [str(v) for v in payload.get("schema") or []]
         if isinstance(payload.get("row_count"), int):
             _state.row_count = int(payload["row_count"])
+    if function == "velaria_dataset_normalize":
+        _state.source_path = str(payload.get("source_path") or payload.get("normalized_path") or _state.source_path)
+        _state.dataset_name = pathlib_basename(_state.source_path) or _state.dataset_name
+        _state.table_name = str(payload.get("table_name") or _state.table_name or "input_table")
+        _state.schema = [str(v) for v in payload.get("schema") or []]
+        if isinstance(payload.get("row_count"), int):
+            _state.row_count = int(payload["row_count"])
     if function == "velaria_sql" or ("query" in payload and "schema" in payload):
         _state.result_schema = [str(v) for v in payload.get("schema") or []]
         if isinstance(payload.get("row_count"), int):
@@ -1250,6 +1257,10 @@ def _summarize_tool_result(content: str, data: dict[str, Any]) -> str:
             f"{function}: {source_id or source or 'dataset'} "
             f"{payload.get('row_count', '?')} rows [{schema or 'no schema'}]"
         )
+    if function == "velaria_dataset_normalize":
+        source = pathlib_basename(str(payload.get("source_path") or payload.get("normalized_path") or ""))
+        schema = ", ".join(str(v) for v in payload.get("schema") or [])
+        return f"{function}: {source or 'normalized dataset'} {payload.get('row_count', '?')} rows [{schema or 'no schema'}]"
     if function == "velaria_dataset_process":
         schema = ", ".join(str(v) for v in payload.get("schema") or [])
         run = payload.get("run_id")

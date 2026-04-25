@@ -145,6 +145,27 @@ class AiRuntimeAgentTest(unittest.TestCase):
             self.assertEqual(downloaded["row_count"], 1)
             self.assertEqual(downloaded["rows"], [{"region": "cn", "amount": 10}])
 
+    def test_dataset_normalize_converts_legacy_encoding_and_sql_safe_columns(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-agent-normalize-") as tmp:
+            csv_path = pathlib.Path(tmp) / "csi300.csv"
+            csv_path.write_bytes("交易日,收盘价,成交量\n2026-01-02,12.5,100\n".encode("gbk"))
+            workspace = pathlib.Path(tmp) / "runtime"
+            with mock.patch.dict(os.environ, {"VELARIA_RUNTIME_WORKSPACE": str(workspace)}):
+                normalized = execute_local_function(
+                    "velaria_dataset_normalize",
+                    {"source_path": str(csv_path), "limit": 1},
+                )
+            self.assertTrue(normalized["ok"])
+            self.assertEqual(normalized["function"], "velaria_dataset_normalize")
+            self.assertEqual(normalized["schema"], ["trade_date", "close", "volume"])
+            self.assertEqual(
+                normalized["column_mapping"],
+                {"交易日": "trade_date", "收盘价": "close", "成交量": "volume"},
+            )
+            self.assertEqual(normalized["row_count"], 1)
+            self.assertTrue(pathlib.Path(normalized["normalized_path"]).exists())
+            self.assertIn(str(workspace / "imports" / "normalized"), normalized["normalized_path"])
+
     def test_dataset_process_saved_run_surfaces_run_metadata(self):
         def fake_main(argv):
             print(
@@ -209,6 +230,70 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertEqual(table_arg, "input_table")
         self.assertEqual(result["table_name"], "input_table")
 
+    def test_dataset_process_uses_query_table_when_table_name_is_omitted(self):
+        captured = {}
+
+        def fake_main(argv):
+            captured["argv"] = argv
+            print(json.dumps({"ok": True, "run_id": "run_dataset", "result": {"schema": ["region"], "rows": []}}))
+            return 0
+
+        with mock.patch("velaria.cli.main", side_effect=fake_main):
+            result = execute_local_function(
+                "velaria_dataset_process",
+                {
+                    "source_path": "/tmp/sales.csv",
+                    "query": "SELECT region FROM sales",
+                    "save_run": True,
+                },
+            )
+        self.assertTrue(result["ok"])
+        table_arg = captured["argv"][captured["argv"].index("--table") + 1]
+        self.assertEqual(table_arg, "sales")
+        self.assertEqual(result["table_name"], "sales")
+
+    def test_dataset_process_auto_normalizes_non_ascii_sql_columns(self):
+        captured = {}
+
+        def fake_main(argv):
+            captured["argv"] = argv
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "run_id": "run_csi",
+                        "result": {
+                            "schema": ["trade_date", "close"],
+                            "rows": [{"trade_date": "2026-01-02", "close": 12.5}],
+                        },
+                    }
+                )
+            )
+            return 0
+
+        with tempfile.TemporaryDirectory(prefix="velaria-agent-process-normalize-") as tmp:
+            csv_path = pathlib.Path(tmp) / "csi300.csv"
+            csv_path.write_bytes("交易日,收盘价\n2026-01-02,12.5\n".encode("gbk"))
+            workspace = pathlib.Path(tmp) / "runtime"
+            with mock.patch.dict(os.environ, {"VELARIA_RUNTIME_WORKSPACE": str(workspace)}):
+                with mock.patch("velaria.cli.main", side_effect=fake_main):
+                    result = execute_local_function(
+                        "velaria_dataset_process",
+                        {
+                            "source_path": str(csv_path),
+                            "query": "SELECT 交易日, 收盘价 FROM input_table ORDER BY 交易日 DESC",
+                            "save_run": True,
+                        },
+                    )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["query"], "SELECT trade_date, close FROM input_table ORDER BY trade_date DESC")
+        self.assertIn("normalization", result)
+        self.assertEqual(result["schema"], ["trade_date", "close"])
+        csv_arg = captured["argv"][captured["argv"].index("--csv") + 1]
+        self.assertIn("normalized", csv_arg)
+        query_arg = captured["argv"][captured["argv"].index("--query") + 1]
+        self.assertEqual(query_arg, "SELECT trade_date, close FROM input_table ORDER BY trade_date DESC")
+
     def test_cli_function_surfaces_run_and_artifact_metadata(self):
         def fake_main(argv):
             print(
@@ -239,6 +324,7 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertIn("velaria_sql", names)
         self.assertIn("velaria_dataset_import", names)
         self.assertIn("velaria_dataset_download", names)
+        self.assertIn("velaria_dataset_normalize", names)
         self.assertIn("velaria_dataset_process", names)
         import_tool = next(tool for tool in tools["result"]["tools"] if tool["name"] == "velaria_dataset_import")
         self.assertEqual(import_tool["annotations"]["destructiveHint"], False)

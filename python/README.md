@@ -414,6 +414,8 @@ The agent runtime provides:
 - Automatic injection of `skills/velaria_python_local/SKILL.md`
 - Velaria local functions exposed through the runtime bridge / MCP server:
   `velaria_read`, `velaria_schema`, `velaria_sql`, `velaria_explain`,
+  `velaria_dataset_download`, `velaria_dataset_import`,
+  `velaria_dataset_normalize`, `velaria_dataset_process`,
   `velaria_cli_run`, `velaria_artifact_preview`
 - Natural language to SQL generation via `velaria_cli.py ai generate-sql`
 - Session-based compatibility commands via `velaria_cli.py ai session` and

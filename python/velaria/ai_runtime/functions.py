@@ -7,7 +7,9 @@ import io
 import json
 import os
 import pathlib
+import re
 import shlex
+import unicodedata
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -51,9 +53,22 @@ def _velaria_read(args: JsonDict) -> JsonDict:
     path, source_metadata = _materialize_source_path(original_path)
     limit = int(args.get("limit") or 20)
     session = Session()
-    if _is_excel_path(path):
-        table = read_excel(session, path).to_arrow()
-    else:
+    try:
+        if _is_excel_path(path):
+            table = read_excel(session, path).to_arrow()
+        else:
+            table = session.read(path).to_arrow()
+    except Exception as exc:
+        if not _is_csv_path(path):
+            raise
+        normalized = _normalize_source_for_sql(path, limit=limit)
+        path = str(normalized["normalized_path"])
+        source_metadata = {
+            **source_metadata,
+            "original_source_path": original_path,
+            "normalization": normalized,
+            "read_fallback_error": str(exc),
+        }
         table = session.read(path).to_arrow()
     return {
         "source_path": path,
@@ -92,13 +107,32 @@ def _prepare_session_with_source(args: JsonDict):
     return session
 
 
+def _prepare_query_source(args: JsonDict, query: str) -> tuple[str, JsonDict, str, str]:
+    original_source_path = str(args.get("source_path") or args.get("path") or "")
+    source_path, source_metadata = _materialize_source_path(original_source_path) if original_source_path else ("", {})
+    table_name = _resolve_query_table_name(str(args.get("table_name") or "input_table"), query)
+    if source_path and _should_normalize_source(args, source_path, query):
+        normalized = _normalize_source_for_sql(
+            source_path,
+            delimiter=str(args.get("delimiter") or ","),
+            limit=int(args.get("limit") or 50),
+        )
+        source_path = str(normalized["normalized_path"])
+        source_metadata = {
+            **source_metadata,
+            "normalization": normalized,
+            "original_source_path": original_source_path or source_path,
+        }
+        query = _rewrite_query_columns(query, normalized.get("column_mapping") or {})
+        table_name = _resolve_query_table_name(table_name, query)
+    return source_path, source_metadata, table_name, query
+
+
 def _velaria_sql(args: JsonDict) -> JsonDict:
     query = str(args["query"])
     limit = int(args.get("limit") or 50)
-    original_source_path = str(args.get("source_path") or args.get("path") or "")
-    source_path, source_metadata = _materialize_source_path(original_source_path) if original_source_path else ("", {})
-    table_name = str(args.get("table_name") or "input_table")
-    session = _prepare_session_with_source(args)
+    source_path, source_metadata, table_name, query = _prepare_query_source(args, query)
+    session = _prepare_session_with_source({**args, "source_path": source_path, "table_name": table_name})
     table = session.sql(query).to_arrow()
     return {
         "query": query,
@@ -111,12 +145,19 @@ def _velaria_sql(args: JsonDict) -> JsonDict:
 
 def _velaria_explain(args: JsonDict) -> JsonDict:
     query = str(args["query"])
-    session = _prepare_session_with_source(args)
+    source_path, source_metadata, table_name, query = _prepare_query_source(args, query)
+    session = _prepare_session_with_source({**args, "source_path": source_path, "table_name": table_name})
     if hasattr(session, "explain_sql"):
         explain = session.explain_sql(query)
     else:
         explain = session.sql(query).explain()
-    return {"explain": str(explain)}
+    return {
+        "explain": str(explain),
+        "query": query,
+        "source_path": source_path,
+        **source_metadata,
+        "table_name": table_name,
+    }
 
 
 def _velaria_dataset_import(args: JsonDict) -> JsonDict:
@@ -131,6 +172,9 @@ def _velaria_dataset_import(args: JsonDict) -> JsonDict:
     metadata = args.get("metadata") if isinstance(args.get("metadata"), dict) else {}
 
     preview = _velaria_read({"path": path, "limit": limit})
+    path = str(preview.get("source_path") or path)
+    if isinstance(preview.get("normalization"), dict):
+        source_metadata = {**source_metadata, "normalization": preview["normalization"]}
     with AgenticStore() as store:
         source = store.upsert_source(
             {
@@ -185,6 +229,9 @@ def _velaria_dataset_download(args: JsonDict) -> JsonDict:
     }
     if bool(args.get("preview", True)):
         preview = _velaria_read({"path": str(target), "limit": limit})
+        result["source_path"] = str(preview.get("source_path") or result["source_path"])
+        if isinstance(preview.get("normalization"), dict):
+            result["normalization"] = preview["normalization"]
         result.update(
             {
                 "schema": preview.get("schema") or [],
@@ -201,9 +248,7 @@ def _velaria_dataset_process(args: JsonDict) -> JsonDict:
         return {"ok": False, "error": "source_path or path is required"}
     source_path, source_metadata = _materialize_source_path(raw_source_path)
     query = str(args["query"])
-    table_name = str(args.get("table_name") or "input_table")
-    if table_name != "input_table" and _query_references_table(query, "input_table"):
-        table_name = "input_table"
+    table_name = _resolve_query_table_name(str(args.get("table_name") or "input_table"), query)
     input_type = str(args.get("input_type") or "auto")
     delimiter = str(args.get("delimiter") or ",")
     preview_limit = max(0, min(int(args.get("limit") or 50), 200))
@@ -211,6 +256,17 @@ def _velaria_dataset_process(args: JsonDict) -> JsonDict:
     if _is_excel_path(source_path):
         source_path = _convert_excel_to_csv(source_path)
         input_type = "csv"
+    if _should_normalize_source(args, source_path, query):
+        normalized = _normalize_source_for_sql(source_path, delimiter=delimiter, limit=preview_limit)
+        source_path = str(normalized["normalized_path"])
+        source_metadata = {
+            **source_metadata,
+            "normalization": normalized,
+            "original_source_path": raw_source_path,
+        }
+        query = _rewrite_query_columns(query, normalized.get("column_mapping") or {})
+        input_type = "csv"
+        table_name = _resolve_query_table_name(table_name, query)
     if save_run:
         argv = [
             "run",
@@ -330,6 +386,10 @@ def _is_excel_path(path: str) -> bool:
     return pathlib.Path(path).suffix.lower() in {".xlsx", ".xlsm", ".xls"}
 
 
+def _is_csv_path(path: str) -> bool:
+    return pathlib.Path(path).suffix.lower() == ".csv"
+
+
 def _convert_excel_to_csv(path: str) -> str:
     try:
         import pandas as pd
@@ -344,6 +404,184 @@ def _convert_excel_to_csv(path: str) -> str:
     return str(target)
 
 
+def _velaria_dataset_normalize(args: JsonDict) -> JsonDict:
+    raw_source_path = str(args.get("source_path") or args.get("path") or "")
+    if not raw_source_path:
+        return {"ok": False, "error": "source_path or path is required"}
+    source_path, source_metadata = _materialize_source_path(raw_source_path)
+    normalized = _normalize_source_for_sql(
+        source_path,
+        delimiter=str(args.get("delimiter") or ","),
+        encoding=str(args.get("encoding") or "auto"),
+        rename_columns=bool(args.get("rename_columns", True)),
+        output_path=str(args.get("output_path") or ""),
+        limit=int(args.get("limit") or 20),
+    )
+    return {
+        "source_path": str(normalized["normalized_path"]),
+        **source_metadata,
+        "original_source_path": source_path,
+        "table_name": str(args.get("table_name") or "input_table"),
+        **normalized,
+    }
+
+
+def _normalize_source_for_sql(
+    source_path: str,
+    *,
+    delimiter: str = ",",
+    encoding: str = "auto",
+    rename_columns: bool = True,
+    output_path: str = "",
+    limit: int = 20,
+) -> JsonDict:
+    frame, detected_encoding = _read_source_frame(source_path, delimiter=delimiter, encoding=encoding)
+    original_columns = [str(column) for column in frame.columns]
+    mapping = _sql_safe_column_mapping(original_columns) if rename_columns else {name: name for name in original_columns}
+    frame = frame.rename(columns=mapping)
+    target = pathlib.Path(output_path).expanduser() if output_path else _normalized_output_path(source_path, mapping)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(target, index=False, encoding="utf-8")
+    preview_rows = frame.head(max(0, min(int(limit), 200))).to_dict(orient="records")
+    return {
+        "normalized_path": str(target),
+        "encoding": detected_encoding,
+        "schema": [str(column) for column in frame.columns],
+        "original_schema": original_columns,
+        "column_mapping": mapping,
+        "row_count": int(len(frame)),
+        "rows": preview_rows,
+    }
+
+
+def _read_source_frame(source_path: str, *, delimiter: str, encoding: str) -> tuple[Any, str]:
+    try:
+        import pandas as pd
+    except Exception as exc:
+        raise RuntimeError("pandas is required to normalize tabular datasets") from exc
+    if _is_excel_path(source_path):
+        return pd.read_excel(source_path), "excel"
+    encodings = [encoding] if encoding and encoding != "auto" else [
+        "utf-8",
+        "utf-8-sig",
+        "gb18030",
+        "gbk",
+        "big5",
+        "latin1",
+    ]
+    last_error: Exception | None = None
+    for candidate in encodings:
+        try:
+            return pd.read_csv(source_path, sep=delimiter, encoding=candidate), candidate
+        except UnicodeDecodeError as exc:
+            last_error = exc
+        except Exception as exc:
+            last_error = exc
+            if candidate not in {"latin1"}:
+                continue
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"failed to normalize source: {source_path}")
+
+
+def _normalized_output_path(source_path: str, mapping: dict[str, str]) -> pathlib.Path:
+    source = pathlib.Path(source_path)
+    digest_input = json.dumps(mapping, ensure_ascii=False, sort_keys=True) + str(source.resolve())
+    digest = hashlib.sha1(digest_input.encode("utf-8")).hexdigest()[:12]
+    return _runtime_import_dir() / "normalized" / f"{source.stem}-normalized-{digest}.csv"
+
+
+def _sql_safe_column_mapping(columns: list[str]) -> dict[str, str]:
+    used: set[str] = set()
+    mapping: dict[str, str] = {}
+    for index, original in enumerate(columns, start=1):
+        candidate = _COMMON_COLUMN_ALIASES.get(original.strip(), "")
+        if not candidate:
+            candidate = _ascii_identifier(original)
+        if not candidate:
+            candidate = f"col_{index}"
+        candidate = _unique_identifier(candidate, used)
+        used.add(candidate)
+        mapping[original] = candidate
+    return mapping
+
+
+_COMMON_COLUMN_ALIASES = {
+    "交易日": "trade_date",
+    "日期": "trade_date",
+    "时间": "event_time",
+    "开盘价": "open",
+    "开盘": "open",
+    "收盘价": "close",
+    "收盘": "close",
+    "最高价": "high",
+    "最高": "high",
+    "最低价": "low",
+    "最低": "low",
+    "成交量": "volume",
+    "成交额": "amount",
+    "涨跌幅": "change_pct",
+    "涨跌额": "change_amount",
+    "代码": "symbol",
+    "证券代码": "symbol",
+    "名称": "name",
+    "证券简称": "name",
+}
+
+
+def _ascii_identifier(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value)
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii").lower()
+    ascii_text = re.sub(r"[^a-z0-9_]+", "_", ascii_text).strip("_")
+    if ascii_text and ascii_text[0].isdigit():
+        ascii_text = f"col_{ascii_text}"
+    return ascii_text
+
+
+def _unique_identifier(candidate: str, used: set[str]) -> str:
+    if candidate not in used:
+        return candidate
+    suffix = 2
+    while f"{candidate}_{suffix}" in used:
+        suffix += 1
+    return f"{candidate}_{suffix}"
+
+
+def _should_normalize_source(args: JsonDict, source_path: str, query: str) -> bool:
+    if args.get("normalize") is True:
+        return True
+    if args.get("normalize") is False or args.get("auto_normalize") is False:
+        return False
+    if not _is_csv_path(source_path):
+        return False
+    if _contains_non_ascii(query):
+        return True
+    return not _looks_utf8_decodable(source_path)
+
+
+def _contains_non_ascii(text: str) -> bool:
+    return any(ord(ch) > 127 for ch in text)
+
+
+def _looks_utf8_decodable(path: str) -> bool:
+    try:
+        with open(path, "rb") as handle:
+            handle.read(65536).decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        return False
+    except Exception:
+        return True
+
+
+def _rewrite_query_columns(query: str, mapping: dict[str, str]) -> str:
+    rewritten = query
+    for original, normalized in sorted(mapping.items(), key=lambda item: len(item[0]), reverse=True):
+        if original and original != normalized:
+            rewritten = rewritten.replace(original, normalized)
+    return rewritten
+
+
 def _merge_dataset_result(target: JsonDict, result: JsonDict, limit: int) -> None:
     rows = result.get("rows") if isinstance(result.get("rows"), list) else []
     target["schema"] = result.get("schema") or target.get("schema") or []
@@ -355,6 +593,25 @@ def _query_references_table(query: str, table_name: str) -> bool:
     import re
 
     return re.search(rf"\b{re.escape(table_name)}\b", query, flags=re.IGNORECASE) is not None
+
+
+def _resolve_query_table_name(configured_table: str, query: str) -> str:
+    configured = configured_table or "input_table"
+    if configured != "input_table" and _query_references_table(query, "input_table"):
+        return "input_table"
+    referenced = _first_query_table_name(query)
+    if referenced and _is_sql_identifier(referenced):
+        return referenced
+    return configured
+
+
+def _first_query_table_name(query: str) -> str:
+    match = re.search(r"\b(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_]*)\b", query, flags=re.IGNORECASE)
+    return match.group(1) if match else ""
+
+
+def _is_sql_identifier(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value))
 
 
 def _velaria_cli_run(args: JsonDict) -> JsonDict:
@@ -483,8 +740,9 @@ def velaria_agent_instructions() -> str:
         "local functions/MCP tools for Velaria operations. Use "
         "`velaria_dataset_download` for HTTP(S) dataset localization, "
         "`velaria_dataset_import` for dataset registration/import, and "
-        "`velaria_dataset_process` for dataset SQL processing before falling "
-        "back to raw shell or generic CLI commands.\n\n"
+        "`velaria_dataset_normalize` for encoding/column-name normalization, "
+        "and `velaria_dataset_process` for dataset SQL processing before "
+        "falling back to raw shell or generic CLI commands.\n\n"
         "Default workflow policy for data tasks: when the user asks to inspect, "
         "import, clean, summarize, query, transform, or save datasets, first get "
         "the data into a Velaria-processable local format such as CSV, JSON, "
@@ -492,7 +750,10 @@ def velaria_agent_instructions() -> str:
         "functions. Use `velaria_read`/`velaria_schema` to inspect local files, "
         "`velaria_dataset_import` to register datasets, `velaria_sql` for "
         "ad-hoc queries, `velaria_dataset_process` to save runs/artifacts, and "
-        "`velaria_artifact_preview` to inspect saved outputs. For HTTP(S) URLs, "
+        "`velaria_artifact_preview` to inspect saved outputs. If a dataset has "
+        "non-UTF-8 bytes, non-ASCII column names, or SQL identifier errors such "
+        "as invalid token bytes, call `velaria_dataset_normalize` and then query "
+        "the returned SQL-safe schema/column_mapping. For HTTP(S) URLs, "
         "call `velaria_dataset_download` or pass the URL directly to "
         "`velaria_dataset_import`, `velaria_read`, `velaria_sql`, or "
         "`velaria_dataset_process`; these functions localize the remote file "
@@ -633,9 +894,40 @@ def local_function_registry() -> dict[str, LocalFunction]:
             ),
             _velaria_dataset_download,
         ),
+        "velaria_dataset_normalize": LocalFunction(
+            "velaria_dataset_normalize",
+            "Normalize a CSV or supported Excel dataset into a Velaria-processable UTF-8 CSV with SQL-safe column names. Use this after encoding errors, invalid token bytes, or non-ASCII column names.",
+            _tool_schema(
+                {
+                    "source_path": {
+                        "type": "string",
+                        "description": "Local file path or HTTP(S) URL to normalize.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Alias for source_path.",
+                    },
+                    "encoding": {
+                        "type": "string",
+                        "default": "auto",
+                        "description": "CSV encoding. auto tries UTF-8, UTF-8 BOM, GB18030, GBK, Big5, and Latin-1.",
+                    },
+                    "delimiter": {"type": "string", "default": ","},
+                    "rename_columns": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Rename columns to SQL-safe ASCII identifiers and return column_mapping.",
+                    },
+                    "output_path": {"type": "string"},
+                    "table_name": {"type": "string", "default": "input_table"},
+                    "limit": {"type": "integer", "default": 20},
+                },
+            ),
+            _velaria_dataset_normalize,
+        ),
         "velaria_dataset_process": LocalFunction(
             "velaria_dataset_process",
-            "Process a Velaria local file or HTTP(S) dataset URL with SQL, optionally saving a workspace run and result artifact. URL inputs are downloaded into the Velaria runtime workspace first.",
+            "Process a Velaria local file or HTTP(S) dataset URL with SQL, optionally saving a workspace run and result artifact. URL inputs are downloaded into the Velaria runtime workspace first. The function aligns table_name with the SQL FROM table and auto-normalizes CSV sources when SQL contains non-ASCII identifiers or the file is not UTF-8.",
             _tool_schema(
                 {
                     "source_path": {
@@ -661,6 +953,8 @@ def local_function_registry() -> dict[str, LocalFunction]:
                     "tags": {"type": "array", "items": {"type": "string"}},
                     "timeout_ms": {"type": "integer"},
                     "limit": {"type": "integer", "default": 50},
+                    "normalize": {"type": "boolean"},
+                    "auto_normalize": {"type": "boolean", "default": True},
                 },
                 ["query"],
             ),
@@ -720,6 +1014,7 @@ def _tool_annotations(name: str) -> JsonDict:
         "velaria_explain",
         "velaria_dataset_import",
         "velaria_dataset_download",
+        "velaria_dataset_normalize",
         "velaria_dataset_process",
     }
     return {

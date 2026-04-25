@@ -495,38 +495,13 @@ def _sql_safe_column_mapping(columns: list[str]) -> dict[str, str]:
     used: set[str] = set()
     mapping: dict[str, str] = {}
     for index, original in enumerate(columns, start=1):
-        candidate = _COMMON_COLUMN_ALIASES.get(original.strip(), "")
-        if not candidate:
-            candidate = _ascii_identifier(original)
+        candidate = _ascii_identifier(original)
         if not candidate:
             candidate = f"col_{index}"
         candidate = _unique_identifier(candidate, used)
         used.add(candidate)
         mapping[original] = candidate
     return mapping
-
-
-_COMMON_COLUMN_ALIASES = {
-    "交易日": "trade_date",
-    "日期": "trade_date",
-    "时间": "event_time",
-    "开盘价": "open",
-    "开盘": "open",
-    "收盘价": "close",
-    "收盘": "close",
-    "最高价": "high",
-    "最高": "high",
-    "最低价": "low",
-    "最低": "low",
-    "成交量": "volume",
-    "成交额": "amount",
-    "涨跌幅": "change_pct",
-    "涨跌额": "change_amount",
-    "代码": "symbol",
-    "证券代码": "symbol",
-    "名称": "name",
-    "证券简称": "name",
-}
 
 
 def _ascii_identifier(value: str) -> str:

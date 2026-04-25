@@ -147,8 +147,8 @@ class AiRuntimeAgentTest(unittest.TestCase):
 
     def test_dataset_normalize_converts_legacy_encoding_and_sql_safe_columns(self):
         with tempfile.TemporaryDirectory(prefix="velaria-agent-normalize-") as tmp:
-            csv_path = pathlib.Path(tmp) / "csi300.csv"
-            csv_path.write_bytes("交易日,收盘价,成交量\n2026-01-02,12.5,100\n".encode("gbk"))
+            csv_path = pathlib.Path(tmp) / "legacy.csv"
+            csv_path.write_bytes("日期,金额,数量\n2026-01-02,12.5,100\n".encode("gbk"))
             workspace = pathlib.Path(tmp) / "runtime"
             with mock.patch.dict(os.environ, {"VELARIA_RUNTIME_WORKSPACE": str(workspace)}):
                 normalized = execute_local_function(
@@ -157,10 +157,10 @@ class AiRuntimeAgentTest(unittest.TestCase):
                 )
             self.assertTrue(normalized["ok"])
             self.assertEqual(normalized["function"], "velaria_dataset_normalize")
-            self.assertEqual(normalized["schema"], ["trade_date", "close", "volume"])
+            self.assertEqual(normalized["schema"], ["col_1", "col_2", "col_3"])
             self.assertEqual(
                 normalized["column_mapping"],
-                {"交易日": "trade_date", "收盘价": "close", "成交量": "volume"},
+                {"日期": "col_1", "金额": "col_2", "数量": "col_3"},
             )
             self.assertEqual(normalized["row_count"], 1)
             self.assertTrue(pathlib.Path(normalized["normalized_path"]).exists())
@@ -261,10 +261,10 @@ class AiRuntimeAgentTest(unittest.TestCase):
                 json.dumps(
                     {
                         "ok": True,
-                        "run_id": "run_csi",
+                        "run_id": "run_legacy",
                         "result": {
-                            "schema": ["trade_date", "close"],
-                            "rows": [{"trade_date": "2026-01-02", "close": 12.5}],
+                            "schema": ["col_1", "col_2"],
+                            "rows": [{"col_1": "2026-01-02", "col_2": 12.5}],
                         },
                     }
                 )
@@ -272,8 +272,8 @@ class AiRuntimeAgentTest(unittest.TestCase):
             return 0
 
         with tempfile.TemporaryDirectory(prefix="velaria-agent-process-normalize-") as tmp:
-            csv_path = pathlib.Path(tmp) / "csi300.csv"
-            csv_path.write_bytes("交易日,收盘价\n2026-01-02,12.5\n".encode("gbk"))
+            csv_path = pathlib.Path(tmp) / "legacy.csv"
+            csv_path.write_bytes("日期,金额\n2026-01-02,12.5\n".encode("gbk"))
             workspace = pathlib.Path(tmp) / "runtime"
             with mock.patch.dict(os.environ, {"VELARIA_RUNTIME_WORKSPACE": str(workspace)}):
                 with mock.patch("velaria.cli.main", side_effect=fake_main):
@@ -281,18 +281,18 @@ class AiRuntimeAgentTest(unittest.TestCase):
                         "velaria_dataset_process",
                         {
                             "source_path": str(csv_path),
-                            "query": "SELECT 交易日, 收盘价 FROM input_table ORDER BY 交易日 DESC",
+                            "query": "SELECT 日期, 金额 FROM input_table ORDER BY 日期 DESC",
                             "save_run": True,
                         },
                     )
         self.assertTrue(result["ok"])
-        self.assertEqual(result["query"], "SELECT trade_date, close FROM input_table ORDER BY trade_date DESC")
+        self.assertEqual(result["query"], "SELECT col_1, col_2 FROM input_table ORDER BY col_1 DESC")
         self.assertIn("normalization", result)
-        self.assertEqual(result["schema"], ["trade_date", "close"])
+        self.assertEqual(result["schema"], ["col_1", "col_2"])
         csv_arg = captured["argv"][captured["argv"].index("--csv") + 1]
         self.assertIn("normalized", csv_arg)
         query_arg = captured["argv"][captured["argv"].index("--query") + 1]
-        self.assertEqual(query_arg, "SELECT trade_date, close FROM input_table ORDER BY trade_date DESC")
+        self.assertEqual(query_arg, "SELECT col_1, col_2 FROM input_table ORDER BY col_1 DESC")
 
     def test_cli_function_surfaces_run_and_artifact_metadata(self):
         def fake_main(argv):

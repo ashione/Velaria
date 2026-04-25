@@ -50,6 +50,9 @@ from velaria.cli.interactive import _run_interactive_loop, _wants_interactive  #
 from velaria.cli.run_cmd import _find_run_result_artifact, _execute_stream_sql_once  # noqa: F401
 from velaria.cli.vector_search import _run_vector_search  # noqa: F401
 
+# Re-export symbols that tests mock on the velaria.cli module
+from velaria import Session, build_file_embeddings  # noqa: F401
+
 from velaria.cli import file_sql as _file_sql
 from velaria.cli import vector_search as _vector_search
 from velaria.cli import embedding as _embedding

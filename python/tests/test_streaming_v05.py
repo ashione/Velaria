@@ -167,6 +167,34 @@ class StreamingV05Test(unittest.TestCase):
         self.assertEqual(rows["rows"][0][1], "10.2")
         self.assertAlmostEqual(float(rows["rows"][0][2]), 10.25, places=6)
 
+    def test_batch_sql_csi300_fixture_cast_and_column_comparison(self):
+        fixture = pathlib.Path(__file__).resolve().parent / "fixtures" / "csi300_normalized.csv"
+        session = velaria.Session()
+        df = session.read_csv(str(fixture))
+        session.create_temp_view("csi300_fixture", df)
+
+        rows = self._run_batch_sql(
+            session,
+            "SELECT COUNT(*) AS down_days FROM csi300_fixture WHERE open > close",
+        ).to_rows()
+        self.assertEqual(rows["schema"], ["down_days"])
+        self.assertEqual(rows["rows"], [[2248]])
+
+        rows = self._run_batch_sql(
+            session,
+            "SELECT trade_date, SUBSTR(CAST(open AS STRING), 1, 6) AS open_prefix "
+            "FROM csi300_fixture ORDER BY trade_date DESC LIMIT 3",
+        ).to_rows()
+        self.assertEqual(rows["schema"], ["trade_date", "open_prefix"])
+        self.assertEqual(
+            rows["rows"],
+            [
+                ["2024-10-11", "3969.7"],
+                ["2024-10-10", "3979.6"],
+                ["2024-10-09", "4168.8"],
+            ],
+        )
+
     def test_stream_progress_contract_with_start_stream_sql(self):
         session = velaria.Session()
         table = pa.table(

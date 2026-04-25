@@ -269,6 +269,7 @@ py_test(
     name = "streaming_v05_test",
     srcs = ["tests/test_streaming_v05.py"],
     main = "tests/test_streaming_v05.py",
+    data = ["tests/fixtures/csi300_normalized.csv"],
     imports = ["."],
     deps = [
         ":velaria_py_pkg",

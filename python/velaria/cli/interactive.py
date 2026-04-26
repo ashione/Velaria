@@ -30,6 +30,7 @@ _turn_status_paused = False
 
 _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 _SPINNER_INTERVAL_SECONDS = 0.12
+_turn_status_frame = _SPINNER_FRAMES[0]
 
 
 @dataclass
@@ -491,11 +492,12 @@ def _mark_turn_interrupted() -> None:
 
 
 def _start_turn_status() -> bool:
-    global _turn_status_thread, _turn_status_stop
+    global _turn_status_thread, _turn_status_stop, _turn_status_frame
     if not _should_show_turn_status():
         return False
     _stop_turn_status()
     _turn_status_stop = threading.Event()
+    _turn_status_frame = _SPINNER_FRAMES[0]
 
     def _target() -> None:
         index = 0
@@ -539,12 +541,13 @@ def _should_show_turn_status() -> bool:
 
 
 def _draw_turn_status(frame: str) -> None:
-    global _turn_status_line_visible
+    global _turn_status_frame, _turn_status_line_visible
     if not _should_show_turn_status():
         return
     with _turn_status_lock:
         if _turn_status_paused:
             return
+        _turn_status_frame = frame
         text = _compact_line(_turn_status_text(frame), limit=_terminal_width())
         sys.stdout.write("\r" + _style(text, "event") + _clear_to_end_of_line())
         sys.stdout.flush()
@@ -586,10 +589,19 @@ def _turn_status_output_paused():
             sys.stdout.write("\r" + _clear_to_end_of_line() + "\r")
             sys.stdout.flush()
             _turn_status_line_visible = False
-        try:
-            yield
-        finally:
+    try:
+        yield
+    finally:
+        with _turn_status_lock:
             _turn_status_paused = old
+
+
+def _restore_turn_status_line() -> None:
+    if _turn_status_stop is None or _turn_status_stop.is_set():
+        return
+    if _state.turn_state != "running":
+        return
+    _draw_turn_status(_turn_status_frame)
 
 
 def _clear_to_end_of_line() -> str:
@@ -637,48 +649,52 @@ def _render_event(event: Any) -> None:
         _stop_turn_status()
     else:
         _clear_turn_status_line()
-    if event_type == "assistant_text":
+    try:
+        if event_type == "assistant_text":
+            if content:
+                with _turn_status_output_paused():
+                    _print_assistant_text(content)
+            return
+        if event_type == "thinking":
+            if content:
+                with _turn_status_output_paused():
+                    _print_event("thinking", content)
+            return
+        if event_type == "tool_call":
+            with _turn_status_output_paused():
+                _print_event("tool", _format_tool_call(content, data))
+            return
+        if event_type == "tool_result":
+            summary = _summarize_tool_result(content, data)
+            if summary:
+                with _turn_status_output_paused():
+                    _print_event("tool result", summary)
+            return
+        if event_type == "command":
+            if content:
+                with _turn_status_output_paused():
+                    _print_event("command", content)
+            return
+        if event_type == "file":
+            if content:
+                with _turn_status_output_paused():
+                    _print_event("file", content)
+            return
+        if event_type == "done":
+            _state.turn_state = "done"
+            _print_note("done", _elapsed_turn())
+            return
+        if event_type == "error":
+            _print_note("error", content or _json_dumps(data), level="error")
+            return
+        if _looks_like_runtime_payload(content):
+            return
         if content:
             with _turn_status_output_paused():
                 _print_assistant_text(content)
-        return
-    if event_type == "thinking":
-        if content:
-            with _turn_status_output_paused():
-                _print_event("thinking", content)
-        return
-    if event_type == "tool_call":
-        with _turn_status_output_paused():
-            _print_event("tool", _format_tool_call(content, data))
-        return
-    if event_type == "tool_result":
-        summary = _summarize_tool_result(content, data)
-        if summary:
-            with _turn_status_output_paused():
-                _print_event("tool result", summary)
-        return
-    if event_type == "command":
-        if content:
-            with _turn_status_output_paused():
-                _print_event("command", content)
-        return
-    if event_type == "file":
-        if content:
-            with _turn_status_output_paused():
-                _print_event("file", content)
-        return
-    if event_type == "done":
-        _state.turn_state = "done"
-        _print_note("done", _elapsed_turn())
-        return
-    if event_type == "error":
-        _print_note("error", content or _json_dumps(data), level="error")
-        return
-    if _looks_like_runtime_payload(content):
-        return
-    if content:
-        with _turn_status_output_paused():
-            _print_assistant_text(content)
+    finally:
+        if event_type not in {"done", "error"}:
+            _restore_turn_status_line()
 
 
 def _extract_tool_name(data: dict[str, Any]) -> str:

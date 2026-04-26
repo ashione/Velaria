@@ -37,6 +37,11 @@ class _FakeDataFrame:
         return _FakeArrowResult()
 
 
+class _FakeTty(io.StringIO):
+    def isatty(self):
+        return True
+
+
 class _FakeAgentRuntime:
     def __init__(self, events=None):
         self.sessions = []
@@ -660,6 +665,47 @@ class PythonCliContractTest(unittest.TestCase):
         self.assertIn("Summary", output)
         self.assertIn("region: CN", output)
         self.assertNotIn("**Summary**", output)
+
+    def test_turn_status_restores_after_stream_event_output(self):
+        interactive = importlib.import_module("velaria.cli.interactive")
+        from velaria.ai_runtime.agent import AgentEvent
+
+        stdout = _FakeTty()
+        interactive._state = interactive.VelariaInteractiveState()
+        interactive._state.turn_state = "running"
+        interactive._state.turn_activity = "agent"
+        interactive._state.turn_started_at = 0.0
+        interactive._current_session_id = "00000000-0000-4000-8000-000000000001"
+        interactive._runtime = _FakeAgentRuntime()
+        try:
+            with mock.patch("sys.stdout", stdout):
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "VELARIA_INTERACTIVE_NO_SPINNER": "",
+                        "VELARIA_INTERACTIVE_STDLIB": "",
+                        "NO_COLOR": "",
+                    },
+                ):
+                    self.assertTrue(interactive._start_turn_status())
+                    interactive._render_event(
+                        AgentEvent(
+                            "thinking",
+                            "checking available datasets",
+                            session_id=interactive._current_session_id,
+                        )
+                    )
+                    interactive._stop_turn_status()
+        finally:
+            interactive._current_session_id = None
+            interactive._runtime = None
+            interactive._state = interactive.VelariaInteractiveState()
+            interactive._stop_turn_status()
+        output = stdout.getvalue()
+        self.assertIn("thinking", output)
+        self.assertIn("checking available datasets", output)
+        self.assertIn("running", output)
+        self.assertGreaterEqual(output.count("\r"), 3)
 
     def test_interactive_turn_keyboard_interrupt_marks_cancelled(self):
         interactive = importlib.import_module("velaria.cli.interactive")

@@ -42,17 +42,18 @@ def create_runtime(config: dict[str, Any]) -> AiRuntime:
                 "Install it with: uv sync --project python"
             )
         from .claude_runtime import ClaudeAgentRuntime
-        # When Claude runtime is selected, default provider and model
+        # Resolve model: agentClaudeModel > agentModel > default
+        claude_model = str(config.get("claude_model") or "")
+        resolved_model = claude_model or model or "claude-sonnet-4-20250514"
+        # When Claude runtime is selected, default provider to anthropic
         if provider == "openai":
             provider = "anthropic"
-        if not model or model == "gpt-5.4-mini":
-            model = "claude-sonnet-4-20250514"
         return ClaudeAgentRuntime(
             provider=provider,
+            model=resolved_model,
             auth_mode=auth_mode,
             api_key=api_key,
             base_url=base_url,
-            model=model or "claude-sonnet-4-20250514",
             reasoning_effort=reasoning_effort,
             network_access=network_access,
             runtime_path=_runtime_path_for(config, "claude"),
@@ -152,6 +153,8 @@ def load_ai_config() -> dict[str, Any]:
         "api_key": config.get("agentApiKey", "") if auth_mode == "api_key" else "",
         "base_url": config.get("agentBaseUrl", "https://api.openai.com/v1"),
         "model": config.get("agentModel", ""),
+        "claude_model": config.get("agentClaudeModel", ""),
+        "codex_model": config.get("agentCodexModel", ""),
         "reasoning_effort": config.get("agentReasoningEffort", "none"),
         "runtime": config.get("agentRuntime", "codex"),
         "runtime_path": config.get("agentRuntimePath", ""),

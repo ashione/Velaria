@@ -46,8 +46,19 @@ class FakeClaudeSDKClient:
     def set_responses(self, *responses):
         self._responses = list(responses)
 
+    async def connect(self, prompt=""):
+        self.prompts.append(prompt)
+
     async def query(self, prompt=""):
         self.prompts.append(prompt)
+        for r in self._responses:
+            yield r
+
+    async def receive_response(self):
+        for r in self._responses:
+            yield r
+
+    async def receive_messages(self):
         for r in self._responses:
             yield r
 
@@ -361,7 +372,10 @@ class ClaudeRuntimeSendMessageTest(unittest.TestCase):
                 self.options = options
                 self.transport = transport
 
-            async def query(self, prompt=""):
+            async def connect(self, prompt=""):
+                pass
+
+            async def receive_response(self):
                 yield FakeAssistantMessage("hello from claude")
 
         with mock.patch("claude_agent_sdk.ClaudeSDKClient", CaptureClient):
@@ -375,7 +389,10 @@ class ClaudeRuntimeSendMessageTest(unittest.TestCase):
             def __init__(self, options=None, transport=None):
                 pass
 
-            async def query(self, prompt=""):
+            async def connect(self, prompt=""):
+                pass
+
+            async def receive_response(self):
                 yield FakeThinkingMessage("Let me analyze the data...")
 
         with mock.patch("claude_agent_sdk.ClaudeSDKClient", CaptureClient):
@@ -389,7 +406,10 @@ class ClaudeRuntimeSendMessageTest(unittest.TestCase):
             def __init__(self, options=None, transport=None):
                 pass
 
-            async def query(self, prompt=""):
+            async def connect(self, prompt=""):
+                pass
+
+            async def receive_response(self):
                 yield types.SimpleNamespace()
 
         with mock.patch("claude_agent_sdk.ClaudeSDKClient", CaptureClient):
@@ -406,7 +426,10 @@ class ClaudeRuntimeSendMessageTest(unittest.TestCase):
                 self.options = options
                 self.transport = transport
 
-            async def query(self, prompt=""):
+            async def connect(self, prompt=""):
+                pass
+
+            async def receive_response(self):
                 mcp = getattr(self.options, "mcp_servers", {})
                 if "velaria" in mcp and hasattr(mcp["velaria"], "tools"):
                     tools = mcp["velaria"].tools
@@ -429,7 +452,10 @@ class ClaudeRuntimeSendMessageTest(unittest.TestCase):
             def __init__(self, options=None, transport=None):
                 pass
 
-            async def query(self, prompt=""):
+            async def connect(self, prompt=""):
+                pass
+
+            async def receive_response(self):
                 yield FakeAssistantMessage("done")
 
         with mock.patch("claude_agent_sdk.ClaudeSDKClient", CaptureClient):

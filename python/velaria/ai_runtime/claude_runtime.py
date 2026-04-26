@@ -155,8 +155,6 @@ class ClaudeAgentRuntime:
             return
 
         dataset_context = session_data["dataset_context"]
-
-        # Build SDK MCP tools from Velaria tool definitions
         sdk_tools = _build_sdk_mcp_tools(dataset_context)
 
         with self._trace_span(f"send_message session={session_id} prompt_len={len(prompt)}"):
@@ -177,7 +175,8 @@ class ClaudeAgentRuntime:
                 ),
             )
 
-            async for msg in client.query(prompt=prompt):
+            await client.connect(prompt=prompt)
+            async for msg in client.receive_response():
                 event = _claude_sdk_event(msg, session_id)
                 self._trace(
                     f"send_message yield raw_type={type(msg).__name__} "
@@ -219,9 +218,10 @@ class ClaudeAgentRuntime:
 
         if os.environ.get("VELARIA_PREWARM_TURN"):
             with self._trace_span("prewarm.chat_once"):
-                async for _msg in client.query(
+                await client.connect(
                     prompt="Velaria runtime warmup. Reply with exactly: READY"
-                ):
+                )
+                async for _msg in client.receive_response():
                     pass
         else:
             self._trace("prewarm.chat_once skipped")

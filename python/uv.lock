@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 
 [[package]]
@@ -1781,6 +1781,7 @@ wheels = [
 name = "velaria"
 source = { editable = "." }
 dependencies = [
+    { name = "claude-agent-sdk" },
     { name = "codex-app-server-sdk" },
     { name = "jieba" },
     { name = "mcp" },
@@ -1793,9 +1794,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-ai-claude = [
-    { name = "claude-agent-sdk" },
-]
 embedding = [
     { name = "sentence-transformers" },
     { name = "socksio" },
@@ -1803,7 +1801,7 @@ embedding = [
 
 [package.metadata]
 requires-dist = [
-    { name = "claude-agent-sdk", marker = "extra == 'ai-claude'", specifier = ">=0.1.60" },
+    { name = "claude-agent-sdk", specifier = ">=0.1.60" },
     { name = "codex-app-server-sdk", specifier = ">=0.1.0" },
     { name = "jieba", specifier = ">=0.42,<1" },
     { name = "mcp", specifier = ">=1.27,<2" },
@@ -1816,7 +1814,7 @@ requires-dist = [
     { name = "socksio", marker = "extra == 'embedding'", specifier = ">=1.0.0" },
     { name = "xlrd", specifier = ">=2,<3" },
 ]
-provides-extras = ["embedding", "ai-claude"]
+provides-extras = ["embedding"]
 
 [[package]]
 name = "wcwidth"

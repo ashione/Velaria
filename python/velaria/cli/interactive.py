@@ -46,6 +46,7 @@ class VelariaInteractiveState:
     last_tool: str = ""
     last_function: str = ""
     turn_state: str = "idle"
+    turn_activity: str = "agent"
     turn_started_at: float | None = None
     runtime_warmup: str = "idle"
 
@@ -455,6 +456,7 @@ def _send_agent_message(prompt: str) -> None:
     _wait_runtime_prewarm()
 
     _state.turn_state = "running"
+    _state.turn_activity = "agent"
     _state.turn_started_at = time.time()
     if not _start_turn_status():
         _print_note("running", "streaming runtime events")
@@ -502,6 +504,7 @@ def _start_turn_status() -> bool:
             index += 1
 
     _state.turn_state = "running"
+    _state.turn_activity = "agent"
     _turn_status_thread = threading.Thread(
         target=_target,
         name="velaria-turn-status",
@@ -559,7 +562,7 @@ def _turn_status_text(frame: str) -> str:
         pass
     session = _short_id(_current_session_id) or "-"
     elapsed = _elapsed_turn()
-    activity = _state.last_tool or _state.last_function or "agent"
+    activity = _state.turn_activity or "agent"
     return f"{frame} running {elapsed} | {runtime} {model} | session {session} | {activity}"
 
 
@@ -575,13 +578,14 @@ def _clear_turn_status_line() -> None:
 
 @contextlib.contextmanager
 def _turn_status_output_paused():
-    global _turn_status_paused
+    global _turn_status_line_visible, _turn_status_paused
     with _turn_status_lock:
         old = _turn_status_paused
         _turn_status_paused = True
         if _turn_status_line_visible:
             sys.stdout.write("\r" + _clear_to_end_of_line() + "\r")
             sys.stdout.flush()
+            _turn_status_line_visible = False
         try:
             yield
         finally:
@@ -589,7 +593,7 @@ def _turn_status_output_paused():
 
 
 def _clear_to_end_of_line() -> str:
-    return "\x1b[2K" if _supports_color() else " " * _terminal_width()
+    return "\x1b[2K" if hasattr(sys.stdout, "isatty") and sys.stdout.isatty() else " " * _terminal_width()
 
 
 def _terminal_width() -> int:
@@ -942,11 +946,18 @@ def _format_result_state() -> str:
 
 
 def _update_state_from_event(event_type: str, content: str, data: dict[str, Any]) -> None:
+    if event_type == "thinking":
+        _state.turn_activity = "thinking"
+    if event_type == "assistant_text":
+        _state.turn_activity = "answering"
     if event_type in {"tool_call", "tool_result"}:
         tool_name = _extract_tool_name(data) or _extract_tool_name_from_payload(content)
+        if tool_name:
+            _state.turn_activity = tool_name
         if tool_name and (event_type == "tool_call" or not _state.last_tool):
             _state.last_tool = tool_name
     if event_type == "command" and content:
+        _state.turn_activity = "command"
         _state.last_tool = "command"
         _state.last_function = content
     if event_type == "tool_result":

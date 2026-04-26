@@ -22,6 +22,14 @@ _prewarm_thread: threading.Thread | None = None
 _session_start_thread: threading.Thread | None = None
 _session_start_error: str = ""
 _trace_start = time.perf_counter()
+_turn_status_thread: threading.Thread | None = None
+_turn_status_stop: threading.Event | None = None
+_turn_status_lock = threading.RLock()
+_turn_status_line_visible = False
+_turn_status_paused = False
+
+_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+_SPINNER_INTERVAL_SECONDS = 0.12
 
 
 @dataclass
@@ -448,7 +456,8 @@ def _send_agent_message(prompt: str) -> None:
 
     _state.turn_state = "running"
     _state.turn_started_at = time.time()
-    _print_note("running", "streaming runtime events")
+    if not _start_turn_status():
+        _print_note("running", "streaming runtime events")
 
     async def _stream() -> None:
         failed = False
@@ -464,6 +473,7 @@ def _send_agent_message(prompt: str) -> None:
                 _render_event(event)
         _state.turn_state = "failed" if failed else "done"
         if failed or not saw_done:
+            _stop_turn_status()
             _print_note(_state.turn_state, _elapsed_turn())
 
     try:
@@ -474,7 +484,119 @@ def _send_agent_message(prompt: str) -> None:
 
 def _mark_turn_interrupted() -> None:
     _state.turn_state = "cancelled"
+    _stop_turn_status()
     _print_note("cancelled", "turn interrupted")
+
+
+def _start_turn_status() -> bool:
+    global _turn_status_thread, _turn_status_stop
+    if not _should_show_turn_status():
+        return False
+    _stop_turn_status()
+    _turn_status_stop = threading.Event()
+
+    def _target() -> None:
+        index = 0
+        while _turn_status_stop is not None and not _turn_status_stop.wait(_SPINNER_INTERVAL_SECONDS):
+            _draw_turn_status(_SPINNER_FRAMES[index % len(_SPINNER_FRAMES)])
+            index += 1
+
+    _state.turn_state = "running"
+    _turn_status_thread = threading.Thread(
+        target=_target,
+        name="velaria-turn-status",
+        daemon=True,
+    )
+    _draw_turn_status(_SPINNER_FRAMES[0])
+    _turn_status_thread.start()
+    return True
+
+
+def _stop_turn_status() -> None:
+    global _turn_status_thread, _turn_status_stop
+    stop = _turn_status_stop
+    thread = _turn_status_thread
+    if stop is not None:
+        stop.set()
+    if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+        thread.join(timeout=0.4)
+    _turn_status_thread = None
+    _turn_status_stop = None
+    _clear_turn_status_line()
+
+
+def _should_show_turn_status() -> bool:
+    if os.environ.get("VELARIA_INTERACTIVE_NO_SPINNER"):
+        return False
+    return (
+        hasattr(sys.stdout, "isatty")
+        and sys.stdout.isatty()
+        and not os.environ.get("VELARIA_INTERACTIVE_STDLIB")
+    )
+
+
+def _draw_turn_status(frame: str) -> None:
+    global _turn_status_line_visible
+    if not _should_show_turn_status():
+        return
+    with _turn_status_lock:
+        if _turn_status_paused:
+            return
+        text = _compact_line(_turn_status_text(frame), limit=_terminal_width())
+        sys.stdout.write("\r" + _style(text, "event") + _clear_to_end_of_line())
+        sys.stdout.flush()
+        _turn_status_line_visible = True
+
+
+def _turn_status_text(frame: str) -> str:
+    runtime = "-"
+    model = "-"
+    try:
+        status = _runtime.status(_current_session_id or "__velaria_pending_session__") if _runtime is not None else {}
+        runtime = str(status.get("runtime") or "-")
+        model = str(status.get("model") or "-")
+    except Exception:
+        pass
+    session = _short_id(_current_session_id) or "-"
+    elapsed = _elapsed_turn()
+    activity = _state.last_tool or _state.last_function or "agent"
+    return f"{frame} running {elapsed} | {runtime} {model} | session {session} | {activity}"
+
+
+def _clear_turn_status_line() -> None:
+    global _turn_status_line_visible
+    with _turn_status_lock:
+        if not _turn_status_line_visible:
+            return
+        sys.stdout.write("\r" + _clear_to_end_of_line() + "\r")
+        sys.stdout.flush()
+        _turn_status_line_visible = False
+
+
+@contextlib.contextmanager
+def _turn_status_output_paused():
+    global _turn_status_paused
+    with _turn_status_lock:
+        old = _turn_status_paused
+        _turn_status_paused = True
+        if _turn_status_line_visible:
+            sys.stdout.write("\r" + _clear_to_end_of_line() + "\r")
+            sys.stdout.flush()
+        try:
+            yield
+        finally:
+            _turn_status_paused = old
+
+
+def _clear_to_end_of_line() -> str:
+    return "\x1b[2K" if _supports_color() else " " * _terminal_width()
+
+
+def _terminal_width() -> int:
+    try:
+        return max(40, os.get_terminal_size().columns)
+    except OSError:
+        return 100
 
 
 @contextlib.contextmanager
@@ -507,29 +629,39 @@ def _render_event(event: Any) -> None:
     content = getattr(event, "content", "")
     data = getattr(event, "data", {}) or {}
     _update_state_from_event(event_type, content, data)
+    if event_type in {"done", "error"}:
+        _stop_turn_status()
+    else:
+        _clear_turn_status_line()
     if event_type == "assistant_text":
         if content:
-            _print_assistant_text(content)
+            with _turn_status_output_paused():
+                _print_assistant_text(content)
         return
     if event_type == "thinking":
         if content:
-            _print_event("thinking", content)
+            with _turn_status_output_paused():
+                _print_event("thinking", content)
         return
     if event_type == "tool_call":
-        _print_event("tool", _format_tool_call(content, data))
+        with _turn_status_output_paused():
+            _print_event("tool", _format_tool_call(content, data))
         return
     if event_type == "tool_result":
         summary = _summarize_tool_result(content, data)
         if summary:
-            _print_event("tool result", summary)
+            with _turn_status_output_paused():
+                _print_event("tool result", summary)
         return
     if event_type == "command":
         if content:
-            _print_event("command", content)
+            with _turn_status_output_paused():
+                _print_event("command", content)
         return
     if event_type == "file":
         if content:
-            _print_event("file", content)
+            with _turn_status_output_paused():
+                _print_event("file", content)
         return
     if event_type == "done":
         _state.turn_state = "done"
@@ -541,7 +673,8 @@ def _render_event(event: Any) -> None:
     if _looks_like_runtime_payload(content):
         return
     if content:
-        _print_assistant_text(content)
+        with _turn_status_output_paused():
+            _print_assistant_text(content)
 
 
 def _extract_tool_name(data: dict[str, Any]) -> str:

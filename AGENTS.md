@@ -23,6 +23,7 @@ Velaria/
 │   │   ├── execution/serial/     # Serializer
 │   │   ├── execution/stream/     # Stream, BinaryRowBatch
 │   │   └── logical/              # SQL Parser, SQL Planner, Plan
+│   │       └── sql/frontend/      # libpg_query-based SQL frontend (RAII, validator, lowerer)
 │   ├── ai/                       # AI Plugin Runtime
 │   ├── experimental/
 │   │   ├── rpc/                  # ActorRPC Codec, RPC Codec, Serialization
@@ -62,6 +63,8 @@ Velaria/
 | nanoarrow | 0.8.0 | Arrow 列式格式与 IPC 编解码 |
 | cppjieba | 5.6.3 | 中文分词（keyword search） |
 | limonp | master | cppjieba 工具库依赖 |
+| libpg_query | 16-5.1.0 | PostgreSQL SQL 解析（`sql/frontend/` 内部，不暴露到公共头文件） |
+| nlohmann/json | 3.11.3 | JSON 解析（预留给 protobuf→JSON 迁移路径） |
 
 ## Python 依赖（uv 管理）
 
@@ -116,6 +119,9 @@ Velaria/
 ### 回归测试套件
 
 - `core_regression` — 核心回归（columnar_batch, planner, source_sink_abi, sql, simd, stream, vector, source_materialization, file_source）
+- `sql_frontend_test` — PG SQL 前端回归（diagnostic, offset map, config, session integration）
+- `sql_feature_validator_test` — SQL feature policy 矩阵测试
+- `sql_dual_frontend_test` — dual-mode + pg_query fallback 测试
 - `python_ecosystem_regression` — Python 生态回归
 - `experimental_regression` — 实验运行时回归
 

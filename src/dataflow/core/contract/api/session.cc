@@ -16,6 +16,7 @@
 #include "src/dataflow/core/execution/runtime/execution_optimizer.h"
 #include "src/dataflow/core/execution/runtime/simd_dispatch.h"
 #include "src/dataflow/ai/plugin_runtime.h"
+#include "src/dataflow/core/logical/sql/frontend/pg_query_frontend.h"
 
 namespace dataflow {
 
@@ -1070,7 +1071,39 @@ DataFrame DataflowSession::sql(const std::string& sql) {
   }
 
   std::string final_sql = payload.sql;
-  auto statement = sql::SqlParser::parse(final_sql);
+
+  auto frontend_config = sql::sqlFrontendConfigFromEnv();
+  sql::SqlStatement statement;
+
+  if (frontend_config.kind == sql::SqlFrontendKind::PgQuery) {
+    sql::PgQueryFrontend pg_frontend;
+    auto pg_result = pg_frontend.process(final_sql, sql::SqlFeaturePolicy::cliDefault());
+    if (!pg_result.diagnostics.empty()) {
+      // PG frontend failed: fall back to legacy parser
+      statement = sql::SqlParser::parse(final_sql);
+    } else {
+      statement = std::move(pg_result.statement);
+    }
+  } else if (frontend_config.kind == sql::SqlFrontendKind::Dual) {
+    // Dual mode: use legacy for execution, pg_query for comparison
+    statement = sql::SqlParser::parse(final_sql);
+    try {
+      sql::PgQueryFrontend pg_frontend;
+      auto pg_result = pg_frontend.process(final_sql, sql::SqlFeaturePolicy::cliDefault());
+      if (!pg_result.diagnostics.empty()) {
+        fprintf(stderr, "[dual] pg_query frontend diagnostics:\n");
+        for (const auto& d : pg_result.diagnostics) {
+          fprintf(stderr, "[dual]   [%s] %s\n", d.error_type.c_str(), d.message.c_str());
+        }
+      }
+    } catch (const std::exception& e) {
+      fprintf(stderr, "[dual] pg_query frontend exception: %s\n", e.what());
+    }
+  } else {
+    // Legacy: current behavior
+    statement = sql::SqlParser::parse(final_sql);
+  }
+
   setSqlPayloadAfterParse(payload, final_sql, statement);
 
   auto after_parse = ai::PluginManager::instance().runHook(ai::HookPoint::kAfterSqlParse, ctx, &payload);
@@ -1238,6 +1271,9 @@ std::string DataflowSession::explainSql(const std::string& sql_text) {
   }
 
   std::ostringstream out;
+  out << "frontend\n";
+  out << "name=" << sqlFrontendName() << "\n";
+  out << "dialect=velaria_sql_v1\n";
   out << "logical\n";
   out << planner.explainLogicalPlan(logical);
   out << "physical\n";
@@ -1316,6 +1352,16 @@ StreamingQuery DataflowSession::startStreamSql(const std::string& sql,
                    .writeStream(prepared.sink, options);
   query.start();
   return query;
+}
+
+std::string DataflowSession::sqlFrontendName() const {
+  auto config = sql::sqlFrontendConfigFromEnv();
+  switch (config.kind) {
+    case sql::SqlFrontendKind::Legacy: return "legacy";
+    case sql::SqlFrontendKind::PgQuery: return "pg_query";
+    case sql::SqlFrontendKind::Dual: return "dual";
+  }
+  return "unknown";
 }
 
 }  // namespace dataflow

@@ -920,6 +920,48 @@ class AiRuntimeAgentTest(unittest.TestCase):
             finally:
                 runtime.shutdown()
 
+    def test_create_runtime_codex_override_does_not_reuse_claude_agent_model(self):
+        from velaria.ai_runtime import create_runtime
+
+        with tempfile.TemporaryDirectory(prefix="velaria-codex-runtime-factory-model-") as tmp:
+            try:
+                runtime = create_runtime(
+                    {
+                        "runtime": "codex",
+                        "configured_runtime": "claude",
+                        "model": "claude-sonnet-4-20250514",
+                        "runtime_workspace": tmp,
+                    }
+                )
+            except ImportError as exc:
+                raise unittest.SkipTest("codex-app-server-sdk is not installed") from exc
+            try:
+                self.assertEqual(runtime.model, "gpt-5.4-mini")
+                self.assertEqual(runtime.model_source, "default")
+            finally:
+                runtime.shutdown()
+
+    def test_create_runtime_codex_uses_agent_model_when_configured_runtime_is_codex(self):
+        from velaria.ai_runtime import create_runtime
+
+        with tempfile.TemporaryDirectory(prefix="velaria-codex-runtime-factory-agent-model-") as tmp:
+            try:
+                runtime = create_runtime(
+                    {
+                        "runtime": "codex",
+                        "configured_runtime": "codex",
+                        "model": "gpt-shared",
+                        "runtime_workspace": tmp,
+                    }
+                )
+            except ImportError as exc:
+                raise unittest.SkipTest("codex-app-server-sdk is not installed") from exc
+            try:
+                self.assertEqual(runtime.model, "gpt-shared")
+                self.assertEqual(runtime.model_source, "agentModel")
+            finally:
+                runtime.shutdown()
+
     def test_codex_runtime_allows_network_to_be_disabled(self):
         from velaria.ai_runtime.codex_runtime import CodexRuntime
 

@@ -137,7 +137,7 @@ def _resolve_runtime_model(
         codex_model = str(config.get("codex_model") or "")
         if codex_model:
             return codex_model, "agentCodexModel"
-        if model:
+        if config_file_runtime == "codex" and model:
             return model, "agentModel"
         return "gpt-5.4-mini", "default"
     return model, "config"

@@ -15,6 +15,15 @@ namespace sql {
 
 namespace {
 
+// RAII guard for protobuf-c unpack result
+struct ProtobufGuard {
+  PgQuery__ParseResult* p;
+  ~ProtobufGuard() { if (p) pg_query__parse_result__free_unpacked(p, nullptr); }
+  PgQuery__ParseResult* operator->() { return p; }
+  PgQuery__ParseResult& operator*() { return *p; }
+  explicit operator bool() const { return p != nullptr; }
+};
+
 // --- diagnostic helpers ---
 
 SqlDiagnostic makeDiag(SqlDiagnostic::Phase phase, const std::string& type,
@@ -60,7 +69,7 @@ ColumnRef extractCol(const PgQuery__Node* n) {
   return r;
 }
 
-// Extract value from A_Const
+// Extract value from A_Const. Never throws — malformed floats return 0.
 Value extractVal(const PgQuery__Node* n) {
   if (!n || n->node_case != PG_QUERY__NODE__NODE_A_CONST || !n->a_const) return Value(static_cast<int64_t>(0));
   auto* ac = n->a_const;
@@ -72,11 +81,10 @@ Value extractVal(const PgQuery__Node* n) {
       if (ac->sval && ac->sval->sval) return Value(std::string(ac->sval->sval));
       break;
     case PG_QUERY__A__CONST__VAL_FVAL: {
-      if (ac->fval) {
-        // Float stores string representation
-        auto* f = ac->fval;
-        // Access fval->fval which is a string
-        if (f->fval) return Value(std::stod(f->fval));
+      if (ac->fval && ac->fval->fval) {
+        char* end = nullptr;
+        double d = std::strtod(ac->fval->fval, &end);
+        if (end != ac->fval->fval) return Value(d);
       }
       break;
     }
@@ -235,7 +243,8 @@ std::shared_ptr<PredicateExpr> lowerBoolExpr(const PgQuery__Node* n, std::vector
   if (be->boolop == PG_QUERY__BOOL_EXPR_TYPE__NOT_EXPR) {
     if (be->n_args > 0) {
       auto ie = lowerExpr(be->args[0], diags);
-      if (ie && ie->kind == PredicateExprKind::Comparison) {
+      if (!ie) return nullptr;
+      if (ie->kind == PredicateExprKind::Comparison) {
         switch (ie->predicate.op) {
           case BinaryOperatorKind::Eq: ie->predicate.op = BinaryOperatorKind::Ne; break;
           case BinaryOperatorKind::Ne: ie->predicate.op = BinaryOperatorKind::Eq; break;
@@ -244,8 +253,13 @@ std::shared_ptr<PredicateExpr> lowerBoolExpr(const PgQuery__Node* n, std::vector
           case BinaryOperatorKind::Gt: ie->predicate.op = BinaryOperatorKind::Lte; break;
           case BinaryOperatorKind::Gte: ie->predicate.op = BinaryOperatorKind::Lt; break;
         }
+        return ie;
       }
-      return ie;
+      // NOT over AND/OR — not supported in Phase 1; return nullptr to skip this predicate
+      diags.push_back(makeDiag(SqlDiagnostic::Phase::Lower, "unsupported_sql_feature",
+        "NOT over compound expressions (AND/OR) not supported via pg_query frontend.",
+        "Rewrite using De Morgan's law: NOT (a AND b) → (NOT a) OR (NOT b)."));
+      return nullptr;
     }
     return nullptr;
   }
@@ -469,46 +483,38 @@ bool PgAstLowerer::lower(const PgQueryParseResultHolder& parse_result,
     return false;
   }
 
-  // Unpack protobuf
-  auto* parsed = pg_query__parse_result__unpack(nullptr, len, reinterpret_cast<const uint8_t*>(data));
+  // Unpack protobuf (RAII-guarded against exceptions)
+  ProtobufGuard parsed{pg_query__parse_result__unpack(nullptr, len, reinterpret_cast<const uint8_t*>(data))};
   if (!parsed) {
     out_diagnostics.push_back(makeDiag(SqlDiagnostic::Phase::Lower,
       "protobuf_error", "Failed to unpack protobuf parse result."));
     return false;
   }
 
-  bool ok = false;
-
   // Check for multi-statement
   if (parsed->n_stmts > 1 && !policy.allow_multi_statement) {
     out_diagnostics.push_back(unsupported("multi_statement",
       "Multiple SQL statements detected (" + std::to_string(parsed->n_stmts) + ").",
       "Execute each statement separately."));
-    pg_query__parse_result__free_unpacked(parsed, nullptr);
     return false;
   }
 
   if (parsed->n_stmts == 0) {
     out_diagnostics.push_back(makeDiag(SqlDiagnostic::Phase::Lower,
       "empty_query", "No statements in query."));
-    pg_query__parse_result__free_unpacked(parsed, nullptr);
     return false;
   }
 
   // Get first statement
   auto* raw_stmt = parsed->stmts[0];
   auto* stmt_node = raw_stmt ? raw_stmt->stmt : nullptr;
-  if (!stmt_node) {
-    pg_query__parse_result__free_unpacked(parsed, nullptr);
-    return false;
-  }
+  if (!stmt_node) return false;
 
   // Only SELECT supported
   if (stmt_node->node_case != PG_QUERY__NODE__NODE_SELECT_STMT) {
     out_diagnostics.push_back(makeDiag(SqlDiagnostic::Phase::Lower,
       "unsupported_statement",
       "Only SELECT statements supported via pg_query frontend."));
-    pg_query__parse_result__free_unpacked(parsed, nullptr);
     return false;
   }
 
@@ -516,16 +522,13 @@ bool PgAstLowerer::lower(const PgQueryParseResultHolder& parse_result,
   std::set<std::string> seen;
   validateNode(stmt_node, policy, out_diagnostics, seen);
 
-  // Check for blocking diagnostics
+  // Check for blocking diagnostics from validation
   bool has_blocking = false;
   for (auto& d : out_diagnostics) {
     if (d.phase == SqlDiagnostic::Phase::Validate && !d.error_type.empty())
       has_blocking = true;
   }
-  if (has_blocking) {
-    pg_query__parse_result__free_unpacked(parsed, nullptr);
-    return false;
-  }
+  if (has_blocking) return false;
 
   // --- Lower SelectStmt ---
   auto* s = stmt_node->select_stmt;
@@ -535,7 +538,6 @@ bool PgAstLowerer::lower(const PgQueryParseResultHolder& parse_result,
     out_diagnostics.push_back(unsupported("cte",
       "CTE / WITH not supported in Velaria SQL v1.",
       "Materialize intermediate query as a run/artifact, then query it in a second step."));
-    pg_query__parse_result__free_unpacked(parsed, nullptr);
     return false;
   }
 
@@ -562,7 +564,7 @@ bool PgAstLowerer::lower(const PgQueryParseResultHolder& parse_result,
         "unsupported_sql_feature",
         std::string("FROM clause type not yet supported via pg_query frontend: ") + from_type,
         "Use VELARIA_SQL_FRONTEND=legacy for this query."));
-      pg_query__parse_result__free_unpacked(parsed, nullptr);
+      // (freed by ProtobufGuard RAII)
       return false;
     }
   }
@@ -604,9 +606,7 @@ bool PgAstLowerer::lower(const PgQueryParseResultHolder& parse_result,
       "Use range-based slicing on the result set."));
   }
 
-  ok = true;
-  pg_query__parse_result__free_unpacked(parsed, nullptr);
-  return ok;
+  return true;
 }
 
 }  // namespace sql

@@ -229,6 +229,7 @@ cc_library(
         "@cppjieba_src//:cppjieba",
         "@nanoarrow_src//:nanoarrow",
         "@libpg_query_src//:pg_query",
+        # Reserved for future protobuf→JSON migration path
         "@nlohmann_json_src//:json",
     ],
     visibility = ["//visibility:public"],
@@ -569,6 +570,3 @@ cc_test(
     deps = [":dataflow_core"],
 )
 
-cc_binary(
-    deps = [":dataflow_core"],
-)

@@ -1,6 +1,6 @@
 # Benchmarks
 
-This document tracks reproducible benchmark entrypoints and recent performance snapshots for the current `simd` branch.
+This document tracks reproducible benchmark entrypoints and recent performance snapshots for the current development branch.
 
 ## Repro Commands
 
@@ -18,10 +18,17 @@ The wrapper now validates both:
 Batch benchmark:
 
 ```bash
+bazel run //:batch_aggregate_benchmark
 bazel build //:tpch_q1_style_benchmark
 ./bazel-bin/tpch_q1_style_benchmark 500 4096 4 4 0 0 single string-keys q18
 ./bazel-bin/tpch_q1_style_benchmark 500 4096 4 4 0 0 single numeric-keys q1
 ./bazel-bin/tpch_q1_style_benchmark 500 4096 4 4 0 0 all string-keys q6
+```
+
+String builtin benchmark:
+
+```bash
+bazel run //:string_builtin_benchmark
 ```
 
 File-input benchmark:
@@ -46,6 +53,53 @@ Current file-source optimizer/executor layering:
 - file sources use those shapes to select lighter fast paths where semantics allow
 - current fast paths are most effective for line split, line regex, JSON selected-field pushdown, and simple CSV single-key aggregate cases
 
+## Latest Local Regression Snapshot
+
+- Snapshot date: April 26, 2026
+- Branch under test: `auto/sql-cast-column-regression`
+- Run mode: local serial Bazel benchmarks on the developer machine
+- Scope: native execution benchmarks only; Python API overhead, packaged CLI startup, and agent runtime startup are excluded
+
+String builtin snapshot, `100,000` rows, `5` rounds:
+
+| Case | Avg time | Rows/s |
+|---|---:|---:|
+| `copy-column` | `106,816 us` | `936,188` |
+| `single-arg-functions` | `257,904 us` | `387,741` |
+| `multi-arg-functions` | `351,683 us` | `284,347` |
+| `dependent-chain` | `488,326 us` | `204,781` |
+| `sql-plan-and-execute` | `520,191 us` | `192,237` |
+| `sql-reused-plan` | `170,364 us` | `586,980` |
+
+Batch aggregate snapshot, `1,048,576` rows:
+
+| Scenario | Selected impl | Elapsed | Rows/s | Output groups |
+|---|---|---:|---:|---:|
+| `single-int64-low-domain` | `dense` | `64 ms` | `16,384,000` | `1,024` |
+| `single-int64-high-domain` | `hash-fixed` | `551 ms` | `1,903,040` | `1,048,576` |
+| `double-int64` | `hash-packed` | `304 ms` | `3,449,260` | `4,096` |
+| `mixed-string-int64` | `hash-packed` | `499 ms` | `2,101,350` | `16,384` |
+| `mixed-string-int64-nullable` | `hash-packed` | `452 ms` | `2,319,860` | `17,921` |
+| `int64-two-string` | `hash-packed` | `690 ms` | `1,519,680` | `32,768` |
+| `int64-string-bool` | `hash-packed` | `584 ms` | `1,795,510` | `32,768` |
+| `ordered-string` | `sort-streaming` | `337 ms` | `3,111,500` | `32,768` |
+
+File-source SQL predicate pushdown snapshot, `200,000` rows, `3` rounds:
+
+| Case | No pushdown | Pushdown | Ratio |
+|---|---:|---:|---:|
+| `sql_csv_predicate_and_group_count` | `663,841 us` | `103,135 us` | `0.155` |
+| `sql_csv_predicate_or_group_count` | `636,964 us` | `149,105 us` | `0.234` |
+| `sql_csv_predicate_mixed_group_count` | `685,450 us` | `255,453 us` | `0.373` |
+| `sql_line_predicate_or_group_count` | `904,406 us` | `170,632 us` | `0.189` |
+| `sql_json_predicate_or_group_count` | `1,348,323 us` | `420,300 us` | `0.312` |
+
+Interpret this snapshot as a local regression guardrail. It is useful for catching order-of-magnitude regressions and preserving the expected pushdown shape, but it is not a release-grade cross-machine benchmark.
+
+The remaining sections preserve the older April 6, 2026 `simd` measurements for historical comparison.
+
+## Historical File-Source Comparison
+
 Current clean-`main` comparison snapshot for representative file-source cases:
 
 | Case | clean `main` | current | delta |
@@ -57,7 +111,7 @@ Current clean-`main` comparison snapshot for representative file-source cases:
 | `sql_line_predicate_or_group_count` | `314852 us` | `174627 us` | `-44.5%` |
 | `sql_json_predicate_or_group_count` | `604404 us` | `420423 us` | `-30.4%` |
 
-## Measurement Notes
+## Historical Measurement Notes
 
 - Snapshot date: April 6, 2026
 - Branch under test: `simd`

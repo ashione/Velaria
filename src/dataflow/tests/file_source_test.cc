@@ -371,6 +371,35 @@ int main() {
     expect(counts_a.at("A") == 300, "csv sparse filter A count mismatch");
     expect(counts_a.at("B") == 300, "csv sparse filter B count mismatch");
 
+    const auto csv_large_numeric_path = make_temp_file("velaria-source-large-numeric-aggregate");
+    {
+      std::ofstream large(csv_large_numeric_path);
+      if (!large.is_open()) {
+        throw std::runtime_error("cannot write large numeric aggregate csv");
+      }
+      large << "id,grp,val\n";
+      for (int i = 0; i < 50000; ++i) {
+        large << i << ",g" << (i % 16) << "," << ((i * 37) % 1000) << "\n";
+      }
+    }
+    const auto large_schema = dataflow::read_csv_schema(csv_large_numeric_path);
+    dataflow::SourcePushdownSpec large_pushdown;
+    large_pushdown.filters.push_back({2, dataflow::Value(int64_t(500)), ">"});
+    large_pushdown.has_aggregate = true;
+    large_pushdown.aggregate.keys = {1};
+    large_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Sum, 2, "sum_val"},
+    };
+    dataflow::Table large_result;
+    expect(dataflow::execute_csv_source_pushdown(
+               csv_large_numeric_path, large_schema, large_pushdown, ',', false, &large_result),
+           "csv large numeric aggregate pushdown failed");
+    expect(large_result.rowCount() == 16, "csv large numeric aggregate key count mismatch");
+    for (const auto& key : large_result.columnar_cache->columns[0].values) {
+      expect(key.type() == dataflow::DataType::String,
+             "csv large numeric aggregate key type mismatch");
+    }
+
     const auto line_logic_path = make_temp_file("velaria-source-predicate-line");
     write_file(line_logic_path, "1|A|10\n2|A|20\n3|B|5\n4|C|30\n");
     dataflow::LineFileOptions line_logic_options;

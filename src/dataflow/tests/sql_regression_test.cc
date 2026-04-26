@@ -351,6 +351,46 @@ void runParserRegression() {
       });
 
   expectNoThrow(
+      "parser_group_by_scalar_expression",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT ISO_YEAR(ts) AS iso_year, WEEK(ts) AS iso_week, COUNT(*) AS n "
+            "FROM input_table GROUP BY ISO_YEAR(ts), WEEK(ts)");
+        expect(st.query.group_by.size() == 2, "parser_group_by_scalar_expression_size");
+        expect(st.query.group_by[0].is_string_function,
+               "parser_group_by_scalar_expression_first_function");
+        expect(st.query.group_by[1].is_string_function,
+               "parser_group_by_scalar_expression_second_function");
+      });
+
+  expectNoThrow(
+      "parser_time_function_projection_parsed",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT NOW() AS now_value, today() AS day_value, currentTimestamp() AS current_ts, "
+            "CURRENT_TIMESTAMP() AS current_ts_2, UNIX_TIMESTAMP('2026-01-01') AS epoch_s "
+            "FROM users u");
+        expect(st.query.select_items.size() == 5, "parser_time_function_projection_size");
+        expect(st.query.select_items[0].is_string_function, "parser_now_function");
+        expect(st.query.select_items[1].is_string_function, "parser_today_function");
+        expect(st.query.select_items[2].is_string_function, "parser_current_timestamp_function");
+        expect(st.query.select_items[3].is_string_function, "parser_current_timestamp_keyword_function");
+        expect(st.query.select_items[4].is_string_function, "parser_unix_timestamp_function");
+      });
+
+  expectNoThrow(
+      "parser_nested_cast_string_function",
+      []() {
+        const auto st = dataflow::sql::SqlParser::parse(
+            "SELECT SUBSTR(CAST(open AS STRING), 1, 4) AS open_prefix FROM input_table");
+        expect(st.query.select_items.size() == 1, "parser_nested_cast_projection_size");
+        expect(st.query.select_items[0].is_string_function,
+               "parser_nested_cast_projection_function");
+        expect(st.query.select_items[0].string_function.args[0].is_function,
+               "parser_nested_cast_argument_function");
+      });
+
+  expectNoThrow(
       "parser_insert_select_with_target_columns",
       []() {
         const auto st = dataflow::sql::SqlParser::parse(
@@ -523,6 +563,31 @@ void runSemanticRegression() {
   expect(or_rows.rows.size() == 2, "planner_where_or_rows");
   expect(or_rows.rows[0][0].asInt64() == 1, "planner_where_or_first_user");
   expect(or_rows.rows[1][0].asInt64() == 2, "planner_where_or_second_user");
+
+  s.submit("CREATE TABLE t_prices_v1 (trade_date STRING, open DOUBLE, close DOUBLE, open_text STRING)");
+  s.submit("INSERT INTO t_prices_v1 VALUES "
+           "('2026-01-01', 10.25, 9.75, '10.25'), "
+           "('2026-01-02', 8.50, 8.75, '8.50'), "
+           "('2026-01-03', 7.10, 6.05, '7.10')");
+  Table down_days = s.submit(
+      "SELECT COUNT(*) AS down_days FROM t_prices_v1 WHERE open > close");
+  expect(down_days.rows.size() == 1, "planner_column_compare_count_rows");
+  expect(down_days.rows[0][0].asInt64() == 2, "planner_column_compare_count_value");
+  Table cast_substr = s.submit(
+      "SELECT trade_date, SUBSTR(CAST(open AS STRING), 1, 4) AS open_prefix, "
+      "CAST(open_text AS DOUBLE) AS open_number "
+      "FROM t_prices_v1 ORDER BY trade_date LIMIT 1");
+  expect(cast_substr.rows.size() == 1, "planner_cast_substr_rows");
+  expect(cast_substr.rows[0][1].toString() == "10.2", "planner_cast_substr_prefix");
+  expect(cast_substr.rows[0][2].asDouble() == 10.25, "planner_cast_string_to_double");
+  s.submit("CREATE TABLE t_date_expr_v1 (ts_ms INT)");
+  s.submit("INSERT INTO t_date_expr_v1 VALUES (1767225600000)");
+  Table nested_date_expr = s.submit(
+      "SELECT YEAR(CAST(ts_ms AS STRING)) AS y, YEARWEEK(CAST(ts_ms AS STRING)) AS yw "
+      "FROM t_date_expr_v1");
+  expect(nested_date_expr.rows.size() == 1, "planner_nested_date_expr_rows");
+  expect(nested_date_expr.rows[0][0].asInt64() == 2026, "planner_nested_date_expr_year");
+  expect(nested_date_expr.rows[0][1].asInt64() == 202601, "planner_nested_date_expr_yearweek");
 
   s.submit("CREATE TABLE t_users_archive_v1 (user_id INT, region STRING, score INT)");
   s.submit("INSERT INTO t_users_archive_v1 VALUES (2, 'emea', 18), (4, 'latam', 21)");
@@ -802,6 +867,41 @@ void runSemanticRegression() {
   expect(alias_and_extra_string_function_batch.rows[0][3].toString() == "capa",
          "string_function_reverse_region");
 
+  Table no_from_time_batch = s.submit(
+      "SELECT NOW() AS now_value, TODAY() AS today_value, currentTimestamp() AS current_ts, "
+      "UNIX_TIMESTAMP() AS epoch_s");
+  expect(no_from_time_batch.rows.size() == 1, "time_function_no_from_rows");
+  expect(no_from_time_batch.schema.fields.size() == 4, "time_function_no_from_columns");
+  expect(no_from_time_batch.rows[0][0].toString().size() >= 19, "time_function_now_shape");
+  expect(no_from_time_batch.rows[0][1].toString().size() == 10, "time_function_today_shape");
+  expect(no_from_time_batch.rows[0][2].toString().size() >= 19,
+         "time_function_current_timestamp_shape");
+  expect(no_from_time_batch.rows[0][3].asInt64() > 1700000000,
+         "time_function_unix_timestamp_current_value");
+
+  Table no_from_mixed_time_batch = s.submit(
+      "SELECT NOW() AS now_value, 7 AS marker, TODAY() AS today_value");
+  expect(no_from_mixed_time_batch.rows.size() == 1, "time_function_no_from_mixed_rows");
+  expect(no_from_mixed_time_batch.rows[0][1].asInt64() == 7,
+         "time_function_no_from_mixed_literal_position");
+  expect(no_from_mixed_time_batch.rows[0][2].toString().size() == 10,
+         "time_function_no_from_mixed_scalar_position");
+
+  Table stable_time_batch = s.submit(
+      "SELECT UNIX_TIMESTAMP('2026-01-01') AS epoch_s, "
+      "YEAR(TODAY()) AS current_year, LENGTH(TODAY()) AS today_len "
+      "FROM t_users_v1 LIMIT 1");
+  expect(stable_time_batch.rows.size() == 1, "time_function_stable_rows");
+  expect(stable_time_batch.rows[0][0].asInt64() == 1767225600,
+         "time_function_unix_timestamp_literal");
+  expect(stable_time_batch.rows[0][1].asInt64() >= 2020, "time_function_today_year");
+  expect(stable_time_batch.rows[0][2].asInt64() == 10, "time_function_today_length");
+
+  Table grouped_time_batch = s.submit(
+      "SELECT TODAY() AS today_value, COUNT(*) AS n FROM t_users_v1 GROUP BY TODAY()");
+  expect(grouped_time_batch.rows.size() == 1, "time_function_grouped_rows");
+  expect(grouped_time_batch.rows[0][1].asInt64() == 3, "time_function_grouped_count");
+
   Table ordered_batch = s.submit(
       "SELECT user_id, region, score FROM t_users_v1 ORDER BY score DESC, user_id ASC LIMIT 3");
   expect(ordered_batch.rows.size() == 3, "order_by_batch_rows");
@@ -821,13 +921,20 @@ void runSemanticRegression() {
   expect(substring_alias_string_function_batch.rows.size() == 1, "substring_alias_batch_rows");
   expect(substring_alias_string_function_batch.rows[0][0].toString() == "pa", "substring_alias_substr_ok");
 
-  expectThrowsType<dataflow::SQLUnsupportedError>(
-      "planner_string_function_unsupported_in_aggregate",
+  expectThrows(
+      "planner_string_function_group_expression_required",
       [&]() {
         s.submit("SELECT LOWER(region) AS region_lower, SUM(score) AS total_score FROM t_users_v1 "
                  "GROUP BY region");
       },
-      "not supported in SQL v1");
+      "non-aggregate expression must appear in GROUP BY");
+
+  Table lower_grouped_batch = s.submit(
+      "SELECT LOWER(region) AS region_lower, SUM(score) AS total_score FROM t_users_v1 "
+      "GROUP BY LOWER(region) ORDER BY region_lower");
+  expect(lower_grouped_batch.rows.size() == 3, "planner_string_function_grouped_rows");
+  expect(lower_grouped_batch.rows[0][0].toString() == "apac",
+         "planner_string_function_grouped_first_key");
 
   expectThrows(
       "planner_concat_arity_zero_rejected",
@@ -849,6 +956,20 @@ void runSemanticRegression() {
         s.submit("SELECT REVERSE(region, '-') FROM t_users_v1");
       },
       "REVERSE expects 1 argument");
+
+  expectThrows(
+      "planner_now_arity_error",
+      [&]() {
+        s.submit("SELECT NOW(1) FROM t_users_v1");
+      },
+      "current time scalar function expects 0 arguments");
+
+  expectThrows(
+      "planner_unix_timestamp_arity_error",
+      [&]() {
+        s.submit("SELECT UNIX_TIMESTAMP('2026-01-01', '2026-01-02') FROM t_users_v1");
+      },
+      "UNIX_TIMESTAMP expects 0 or 1 argument");
 
   expectThrows(
       "planner_string_function_arity_error",

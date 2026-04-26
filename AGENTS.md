@@ -69,17 +69,21 @@ Velaria/
 |------|---------|------|
 | pyarrow | >=23,<24 | Arrow 交换层 |
 | pandas | >=2.1,<3 | 数据帧操作 |
-| openpyxl | >=3.1,<4 | Excel 文件读取 |
+| openpyxl | >=3.1,<4 | Excel `.xlsx` 文件读取 |
+| xlrd | >=2,<3 | Excel `.xls` 文件读取 |
 | jieba | >=0.42,<1 | 中文分词 |
+| mcp | >=1.27,<2 | Agent runtime 的 Velaria MCP/function bridge |
+| codex-app-server-sdk | >=0.1.0 | 默认 Codex Agent runtime |
+| prompt-toolkit | >=3,<4 | 交互式 CLI 的 TTY 增强 |
+| rich | >=13,<15 | CLI Markdown/终端渲染 |
 | sentence-transformers | >=5.3.0 (optional: embedding) | 离线 embedding 生成 |
 | socksio | >=1.0.0 (optional: embedding) | SOCKS 代理支持 |
 
-## AI Runtime（可选依赖）
+## Agent Runtime（可选依赖）
 
 | 依赖 | 版本范围 | 用途 |
 |------|---------|------|
 | claude-agent-sdk | >=0.1.60 (optional: ai-claude) | Claude Agent SDK runtime |
-| codex-app-server-sdk | >=0.1.0 (optional: ai-codex) | Codex App Server runtime |
 
 ## Bazel 构建目标一览
 
@@ -119,6 +123,7 @@ Velaria/
 
 - 优先保证语义一致性、边界可诊断、最小可用先行。
 - 修改前先明确影响范围：`SQL / Planner / Executor / Session / Stream / Runtime`。
+- 涉及 SQL、Planner、Executor、Session、Stream、Runtime、Agent runtime 或 CLI 交互链路的改动，修改前必须先跑当前基线端到端验证或最小可复现 smoke，并记录基线结果；修改后再跑同一链路和必要回归，确保问题是被修复而不是被测试环境变化掩盖。
 - 小步推进，每次改动围绕一个可验证目标，不做无关重构。
 - 保持现有 C++/Bazel 风格，新增示例源码统一使用 `.cc`，头文件使用 `.h`。
 - `session` 对外入口统一使用 `DataflowSession`。
@@ -131,6 +136,10 @@ Velaria/
 - 仓库文档若展示 Python CLI 命令，必须使用仓库内真实可见入口：源码脚本 `uv run --project python python python/velaria_cli.py ...`，或已打包产物 `./dist/velaria-cli ...`；不要默认写成全局可执行的 `velaria-cli ...`，除非文档已明确提供安装该命令的步骤。
 - Agent/runtime core 必须保持领域无关和抽象纯粹；不要在 core、agent 指令或本地 function 中硬编码某个行业、数据源、指数、字段名或业务场景的特化映射/兜底逻辑。遇到编码、列名、表名等问题时，优先做通用规范化、显式 metadata / mapping 返回和可诊断错误，让 agent 或用户基于上下文决定业务语义。
 - 新功能开发禁止一开始就堆多个版本、兼容路径或“莫须有”的兜底逻辑；先实现一条语义清晰、可验证的主路径。只有在真实用例、测试或运行错误证明边界存在后，才补充最小化、可诊断、可删除的处理分支。
+- `velaria_cli.py -i` 是交互式 Velaria Agent 主入口；普通输入默认进入 active agent thread，slash 命令负责会话/状态控制，`:<command>` 才作为原 CLI escape hatch。不要把交互式主路径重新设计成 `ai ...` 前缀命令。
+- Velaria Agent 复用 Codex/Claude 等既有 agent runtime，但产品身份、工具选择与用户交互语义都属于 Velaria。默认 runtime 为 Codex，默认模型为 `gpt-5.4-mini`，默认 reasoning effort 为 `none`，Codex workspace-write 网络访问默认开启。
+- Agent 配置统一使用 `agent*` 命名，例如 `agentRuntime`、`agentModel`、`agentAuthMode`、`agentRuntimeWorkspace`、`agentCodexNetworkAccess`、`agentProxy`；不要再新增 `ai*` 配置键。旧 `ai` 子命令只作为非交互 SQL 生成/历史兼容入口，不作为新交互能力的主设计面。
+- Velaria usage skill 与 SQL catalog 都按需暴露为 MCP resource/tool，不把完整 skill 或完整 SQL 函数清单内联进默认 prompt。SQL 函数、边界和模板通过 `velaria_sql_capabilities`、`velaria_sql_function_search`、`velaria_sql_query_patterns` 或 `velaria://sql/catalog` 检索。
 
 ## 本轮协作沉淀
 
@@ -206,8 +215,8 @@ uv sync --project python --python python3.13
 # 3. 桌面 app（可选）
 cd app && npm install && cd ..
 
-# 4. AI Runtime（可选）
-uv sync --project python --extra ai-claude    # 或 --extra ai-codex
+# 4. Agent Runtime（可选；仅 Claude 需要额外依赖）
+uv sync --project python --extra ai-claude
 ```
 
 ## 常用命令
@@ -242,16 +251,14 @@ uv run --project python python python/examples/demo_vector_search.py
 uv run --project python python python/velaria_cli.py --help
 ```
 
-### AI 辅助分析
+### Agent 辅助分析
 
 ```bash
+uv run --project python python python/velaria_cli.py -i
+
 uv run --project python python python/velaria_cli.py ai generate-sql \
   --prompt "找出每个部门的平均分数" \
   --schema "name,score,region,department"
-
-uv run --project python python python/velaria_cli.py ai session start --schema "name,score"
-uv run --project python python python/velaria_cli.py ai session list
-uv run --project python python python/velaria_cli.py ai session close --session-id <id>
 ```
 
 ### 一次 build/smoke 摘要
@@ -368,7 +375,7 @@ bazel run //:stream_demo
 
 - 当前 SQL 仍是 v1 子集。
 - 当前版本已支持最小 window SQL：`WINDOW BY <time_col> EVERY <window_ms> AS <output_col>`；但不继续横向扩展 ANSI window 语法。
-- 当前版本不扩展 CTE / 子查询 / `UNION`。
+- 当前版本不扩展 CTE / 子查询；batch SQL 已有最小 `UNION` / `UNION ALL`，stream SQL 不扩展 `UNION`。
 - `JOIN` 仅保留现有最小能力，不在本轮继续做更复杂 join 扩展。
 - Python 继续只做 Arrow 交换层和前端入口，不引入 Python callback/UDF 进入热路径。
 - 错误恢复能力还需继续加强，当前优先依赖清晰日志与失败文案。

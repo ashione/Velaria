@@ -1,6 +1,6 @@
 # Benchmark
 
-本文档集中记录当前 `simd` 分支可复现的 benchmark 入口与最近一轮性能快照。
+本文档集中记录当前开发分支可复现的 benchmark 入口与最近一轮性能快照。
 
 ## 复现命令
 
@@ -18,10 +18,17 @@
 Batch benchmark：
 
 ```bash
+bazel run //:batch_aggregate_benchmark
 bazel build //:tpch_q1_style_benchmark
 ./bazel-bin/tpch_q1_style_benchmark 500 4096 4 4 0 0 single string-keys q18
 ./bazel-bin/tpch_q1_style_benchmark 500 4096 4 4 0 0 single numeric-keys q1
 ./bazel-bin/tpch_q1_style_benchmark 500 4096 4 4 0 0 all string-keys q6
+```
+
+String builtin benchmark：
+
+```bash
+bazel run //:string_builtin_benchmark
 ```
 
 File-input benchmark：
@@ -46,6 +53,53 @@ perf report
 - source 端会根据这些 `shape` 选择更轻的 fast path
 - 当前收益最明显的是 line split、line regex、JSON 按命中字段解析，以及简单 CSV 单 key aggregate
 
+## 最新本地回归快照
+
+- 快照时间：2026 年 4 月 26 日
+- 当前分支：`auto/sql-cast-column-regression`
+- 运行方式：开发机本地串行 Bazel benchmark
+- 覆盖范围：仅 native execution benchmark；不包含 Python API 开销、打包 CLI 启动时间或 agent runtime 启动时间
+
+String builtin 快照，`100,000` 行，`5` 轮：
+
+| Case | 平均耗时 | Rows/s |
+|---|---:|---:|
+| `copy-column` | `106,816 us` | `936,188` |
+| `single-arg-functions` | `257,904 us` | `387,741` |
+| `multi-arg-functions` | `351,683 us` | `284,347` |
+| `dependent-chain` | `488,326 us` | `204,781` |
+| `sql-plan-and-execute` | `520,191 us` | `192,237` |
+| `sql-reused-plan` | `170,364 us` | `586,980` |
+
+Batch aggregate 快照，`1,048,576` 行：
+
+| Scenario | Selected impl | 耗时 | Rows/s | 输出 group |
+|---|---|---:|---:|---:|
+| `single-int64-low-domain` | `dense` | `64 ms` | `16,384,000` | `1,024` |
+| `single-int64-high-domain` | `hash-fixed` | `551 ms` | `1,903,040` | `1,048,576` |
+| `double-int64` | `hash-packed` | `304 ms` | `3,449,260` | `4,096` |
+| `mixed-string-int64` | `hash-packed` | `499 ms` | `2,101,350` | `16,384` |
+| `mixed-string-int64-nullable` | `hash-packed` | `452 ms` | `2,319,860` | `17,921` |
+| `int64-two-string` | `hash-packed` | `690 ms` | `1,519,680` | `32,768` |
+| `int64-string-bool` | `hash-packed` | `584 ms` | `1,795,510` | `32,768` |
+| `ordered-string` | `sort-streaming` | `337 ms` | `3,111,500` | `32,768` |
+
+File-source SQL predicate pushdown 快照，`200,000` 行，`3` 轮：
+
+| Case | 无 pushdown | pushdown | Ratio |
+|---|---:|---:|---:|
+| `sql_csv_predicate_and_group_count` | `663,841 us` | `103,135 us` | `0.155` |
+| `sql_csv_predicate_or_group_count` | `636,964 us` | `149,105 us` | `0.234` |
+| `sql_csv_predicate_mixed_group_count` | `685,450 us` | `255,453 us` | `0.373` |
+| `sql_line_predicate_or_group_count` | `904,406 us` | `170,632 us` | `0.189` |
+| `sql_json_predicate_or_group_count` | `1,348,323 us` | `420,300 us` | `0.312` |
+
+这组快照用于本地回归守护，适合发现数量级回退并确认 pushdown 收益形态；它不是跨机器、发布级别的严格 benchmark。
+
+后续章节保留 2026 年 4 月 6 日 `simd` 分支的历史测量结果，用于对比参考。
+
+## 历史 File-Source 对比
+
 当前代表性 file-source case 相比干净 `main` 的对比快照：
 
 | Case | clean `main` | current | 变化 |
@@ -57,7 +111,7 @@ perf report
 | `sql_line_predicate_or_group_count` | `314852 us` | `174627 us` | `-44.5%` |
 | `sql_json_predicate_or_group_count` | `604404 us` | `420423 us` | `-30.4%` |
 
-## 口径说明
+## 历史口径说明
 
 - 快照时间：2026 年 4 月 6 日
 - 当前分支：`simd`

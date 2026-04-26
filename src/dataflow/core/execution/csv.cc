@@ -1249,7 +1249,7 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
     double numeric_value = 0.0;
     bool numeric_is_int = false;
     int64_t int_value = 0;
-    std::string_view current_key;
+    std::string current_key;
     std::pmr::monotonic_buffer_resource key_resource;
     std::unordered_map<std::string_view, std::size_t, std::hash<std::string_view>> key_to_index;
     std::pmr::vector<std::pmr::string> ordered_keys(&key_resource);
@@ -1270,7 +1270,7 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           numeric_value = 0.0;
           numeric_is_int = false;
           int_value = 0;
-          current_key = std::string_view();
+          current_key.clear();
         },
         [&](std::size_t column_index, std::string_view cell) {
           if (!current_row_selected) {

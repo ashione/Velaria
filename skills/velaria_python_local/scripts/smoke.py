@@ -28,7 +28,7 @@ def _run_stream_sql(session: Session) -> None:
     with tempfile.TemporaryDirectory(prefix="velaria-stream-smoke-") as temp_dir:
         sink_path = pathlib.Path(temp_dir) / "agg.csv"
         session.sql(
-            f"CREATE SINK TABLE agg_sink (team STRING, cnt BIGINT) USING csv OPTIONS(path '{sink_path}', delimiter ',')"
+            f"CREATE SINK TABLE agg_sink (team STRING, cnt BIGINT) USING csv OPTIONS(path: '{sink_path}', delimiter: ',')"
         )
 
         stream = session.create_stream_from_arrow(

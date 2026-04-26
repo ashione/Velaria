@@ -54,6 +54,7 @@ py_library(
         "velaria/ai_runtime/functions.py",
         "velaria/ai_runtime/mcp_server.py",
         "velaria/ai_runtime/session_registry.py",
+        "velaria/ai_runtime/sql_catalog.py",
         "velaria/workspace/__init__.py",
         "velaria/workspace/artifact_index.py",
         "velaria/workspace/paths.py",
@@ -269,6 +270,7 @@ py_test(
     name = "streaming_v05_test",
     srcs = ["tests/test_streaming_v05.py"],
     main = "tests/test_streaming_v05.py",
+    data = ["tests/fixtures/csi300_normalized.csv"],
     imports = ["."],
     deps = [
         ":velaria_py_pkg",

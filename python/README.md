@@ -31,7 +31,7 @@ The supported Python ecosystem includes:
 - vector search and vector explain APIs
 - offline embedding pipeline helpers for versioned vector assets
 - offline keyword-index build helpers and reusable BM25 keyword-search assets
-- agent runtime wrapper for Claude Code / Claude Agent SDK and Codex App Server integration
+- agent runtime wrapper for Codex App Server and Claude Code / Claude Agent SDK integration
 - interactive agent CLI via `velaria_cli.py -i`
 
 ### Examples
@@ -410,15 +410,19 @@ The agent runtime provides:
 
 - Codex/Claude-backed interactive agent runtime via `velaria_cli.py -i`
 - Thread persistence under `agentRuntimeWorkspace`
-- Automatic injection of `skills/velaria_python_local/SKILL.md`
+- On-demand exposure of the Velaria usage skill as an MCP resource
 - Velaria local functions exposed through the runtime bridge / MCP server:
   `velaria_read`, `velaria_schema`, `velaria_sql`, `velaria_explain`,
   `velaria_dataset_download`, `velaria_dataset_import`,
   `velaria_dataset_normalize`, `velaria_dataset_process`,
-  `velaria_cli_run`, `velaria_artifact_preview`
+  `velaria_cli_run`, `velaria_artifact_preview`,
+  `velaria_sql_capabilities`, `velaria_sql_function_search`,
+  `velaria_sql_query_patterns`
+- On-demand SQL reference resource `velaria://sql/catalog` for SQL v1
+  capabilities, scalar functions, and reusable query patterns
 - Natural language to SQL generation via `velaria_cli.py ai generate-sql`
-- Session-based compatibility commands via `velaria_cli.py ai session` and
-  `velaria_cli.py ai analyze`
+- Legacy compatibility commands under `velaria_cli.py ai ...`; new interactive
+  work should use `velaria_cli.py -i`
 
 Minimal Codex runtime config:
 
@@ -428,14 +432,15 @@ Minimal Codex runtime config:
   "agentAuthMode": "oauth",
   "agentProvider": "openai",
   "agentModel": "gpt-5.4-mini",
+  "agentReasoningEffort": "none",
   "agentRuntimeWorkspace": "~/.velaria/ai-runtime",
   "agentCodexNetworkAccess": true
 }
 ```
 
 Codex uses the local `codex app-server` command and defaults to `gpt-5.4-mini`
-when `agentModel` is omitted. `agentRuntimeWorkspace` is the runtime working directory
-used to save and resume agent threads. If omitted, Velaria creates a
+when `agentModel` is omitted. `agentReasoningEffort` defaults to `none`.
+`agentRuntimeWorkspace` is the runtime working directory used to save and resume agent threads. If omitted, Velaria creates a
 project-scoped directory under `~/.velaria/ai-runtime/`. `agentAuthMode: "oauth"`
 reuses the local Codex or Claude login. Use `agentAuthMode: "api_key"` together
 with `agentApiKey` and `agentBaseUrl` when the provider should be driven by
@@ -446,15 +451,22 @@ set `agentCodexNetworkAccess` to `false` only for offline runtime sessions.
 The runtime inherits standard proxy environment variables such as `http_proxy`,
 `https_proxy`, and `all_proxy`.
 
-AI CLI examples:
+Velaria Agent keeps the underlying runtime generic. Velaria-specific usage
+guidance and SQL function details are exposed on demand through MCP resources
+and local functions, not by embedding the full skill or SQL function catalog in
+the default prompt. Use `velaria_sql_capabilities`,
+`velaria_sql_function_search`, `velaria_sql_query_patterns`, or the
+`velaria://sql/catalog` MCP resource when an agent needs SQL details.
+
+Agent CLI examples:
 
 ```bash
 uv run --project python python python/velaria_cli.py -i
 
 # Inside interactive mode, plain text goes to the active agent thread.
-velaria> 读取 data/sales.csv，按 region 汇总 amount，并保存 run
-velaria> /status
-velaria> :run list --limit 5
+› 读取 data/sales.csv，按 region 汇总 amount，并保存 run
+› /status
+› :run list --limit 5
 
 uv run --project python python python/velaria_cli.py ai generate-sql \
   --prompt "top 5 by score" --schema "name,score,region"
@@ -466,16 +478,17 @@ Current SQL mapping carried by Python:
   - `CREATE TABLE`, `CREATE SOURCE TABLE`, `CREATE SINK TABLE`
   - `INSERT INTO ... VALUES`
   - `INSERT INTO ... SELECT`
-  - `SELECT` with projection/alias, `WHERE`, `GROUP BY`, `ORDER BY`, `LIMIT`, `UNION` / `UNION ALL`, and the current minimal `JOIN`
-  - batch `WHERE` supports single predicates plus `AND` / `OR` expressions
+  - `SELECT` with projection/alias, `WHERE`, `GROUP BY` columns/scalar expressions, `ORDER BY`, `LIMIT`, `UNION` / `UNION ALL`, and the current minimal `JOIN`
+  - batch `WHERE` supports single predicates, column-to-column predicates, plus `AND` / `OR` expressions
   - batch `KEYWORD SEARCH(title, body) QUERY '...' TOP_K ...` on single-table non-aggregate queries
   - batch `HYBRID SEARCH ... QUERY ...` on single-table non-aggregate queries
   - current Python service can combine reusable keyword-index recall with vector rerank by passing both `index_path` and `dataset_path` to `hybrid-search`
 - batch builtins currently exposed through the same core path:
   - `LOWER`, `UPPER`, `TRIM`, `LTRIM`, `RTRIM`
   - `LENGTH`, `LEN`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, `REVERSE`
-  - `CONCAT`, `CONCAT_WS`, `LEFT`, `RIGHT`, `SUBSTR` / `SUBSTRING`, `POSITION`, `REPLACE`
-  - `ABS`, `CEIL`, `FLOOR`, `ROUND`, `YEAR`, `MONTH`, `DAY`
+  - `CONCAT`, `CONCAT_WS`, `LEFT`, `RIGHT`, `SUBSTR` / `SUBSTRING`, `POSITION`, `REPLACE`, `CAST`
+  - `ABS`, `CEIL`, `FLOOR`, `ROUND`, `YEAR`, `MONTH`, `DAY`, `ISO_YEAR`, `ISO_WEEK`, `WEEK`, `YEARWEEK`, `NOW`, `TODAY`, `CURRENT_TIMESTAMP`, `currentTimestamp`, `UNIX_TIMESTAMP`
+  - supported scalar functions can be nested in projection expressions
 - `Session.stream_sql(...)`, `Session.explain_stream_sql(...)`, and `Session.start_stream_sql(...)` share the same stream SQL front-door checks:
   - source must be a source table / stream source
   - sink target must be a sink table

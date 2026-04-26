@@ -11,10 +11,36 @@ from .functions import (
     load_velaria_skill_text,
     tool_definitions,
 )
+from .sql_catalog import SQL_CATALOG_URI, sql_catalog_markdown
 
 
 PROTOCOL_VERSION = "2024-11-05"
 SKILL_URI = "velaria://skills/velaria-python-local"
+
+
+def _resources() -> list[dict[str, str]]:
+    return [
+        {
+            "uri": SKILL_URI,
+            "name": "velaria-python-local",
+            "description": "Default Velaria local Python usage skill.",
+            "mimeType": "text/markdown",
+        },
+        {
+            "uri": SQL_CATALOG_URI,
+            "name": "velaria-sql-catalog",
+            "description": "On-demand Velaria SQL capabilities, scalar functions, and query patterns.",
+            "mimeType": "text/markdown",
+        },
+    ]
+
+
+def _read_resource_text(uri: str) -> str:
+    if uri == SKILL_URI:
+        return load_velaria_skill_text()
+    if uri == SQL_CATALOG_URI:
+        return sql_catalog_markdown()
+    raise ValueError(f"unknown resource: {uri}")
 
 
 def _response(msg_id: Any, result: dict[str, Any] | None = None, error: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -79,19 +105,13 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
     if method == "resources/list":
         return _response(
             msg_id,
-            {
-                "resources": [
-                    {
-                        "uri": SKILL_URI,
-                        "name": "velaria-python-local",
-                        "description": "Default Velaria local Python usage skill.",
-                        "mimeType": "text/markdown",
-                    }
-                ]
-            },
+            {"resources": _resources()},
         )
     if method == "resources/read":
-        if params.get("uri") != SKILL_URI:
+        uri = str(params.get("uri") or "")
+        try:
+            text = _read_resource_text(uri)
+        except ValueError:
             return _response(
                 msg_id,
                 error={"code": -32602, "message": f"unknown resource: {params.get('uri')}"},
@@ -101,9 +121,9 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
             {
                 "contents": [
                     {
-                        "uri": SKILL_URI,
+                        "uri": uri,
                         "mimeType": "text/markdown",
-                        "text": load_velaria_skill_text(),
+                        "text": text,
                     }
                 ]
             },
@@ -154,18 +174,17 @@ def _create_server():
     async def list_resources() -> list[types.Resource]:
         return [
             types.Resource(
-                uri=SKILL_URI,
-                name="velaria-python-local",
-                description="Default Velaria local Python usage skill.",
-                mimeType="text/markdown",
+                uri=resource["uri"],
+                name=resource["name"],
+                description=resource["description"],
+                mimeType=resource["mimeType"],
             )
+            for resource in _resources()
         ]
 
     @server.read_resource()
     async def read_resource(uri) -> str:
-        if str(uri) != SKILL_URI:
-            raise ValueError(f"unknown resource: {uri}")
-        return load_velaria_skill_text()
+        return _read_resource_text(str(uri))
 
     return server, InitializationOptions(
         server_name="velaria",

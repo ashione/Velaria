@@ -49,7 +49,7 @@ Velaria 围绕一个 kernel 和两个非 kernel 层组织。
 - 离线 keyword index 生成 helper 与可复用 BM25 关键词检索资产管理
 - Excel / Bitable / custom stream adapter
 - 本地 workspace 与 run tracking
-- 通过 Claude Agent SDK 或 Codex App Server runtime 实现 AI 辅助数据分析
+- 通过 Codex App Server 或 Claude Agent SDK runtime 封装 Velaria Agent
 
 不负责：
 
@@ -108,11 +108,11 @@ Arrow / CSV / Python ingress
   - `CREATE TABLE`、`CREATE SOURCE TABLE`、`CREATE SINK TABLE`
   - `INSERT INTO ... VALUES`
   - `INSERT INTO ... SELECT`
-  - 支持列投影/别名、`WHERE`（含 `AND` / `OR`）、`GROUP BY`、`ORDER BY`、`LIMIT`、当前最小 `JOIN`、`UNION` / `UNION ALL` 的 `SELECT`
+  - 支持列投影/别名、`WHERE`（含 `AND` / `OR` 与列对列谓词）、按列/标量表达式 `GROUP BY`、`ORDER BY`、`LIMIT`、当前最小 `JOIN`、`UNION` / `UNION ALL` 的 `SELECT`
   - 当前已支持 batch `KEYWORD SEARCH(...) QUERY '...' TOP_K ...`，以及关键词预筛选辅助的 `HYBRID SEARCH ...`
 - 当前 batch builtins：
-  - string：`LOWER`、`UPPER`、`TRIM`、`LTRIM`、`RTRIM`、`LENGTH`、`LEN`、`CHAR_LENGTH`、`CHARACTER_LENGTH`、`REVERSE`、`CONCAT`、`CONCAT_WS`、`LEFT`、`RIGHT`、`SUBSTR` / `SUBSTRING`、`POSITION`、`REPLACE`
-  - numeric/date：`ABS`、`CEIL`、`FLOOR`、`ROUND`、`YEAR`、`MONTH`、`DAY`
+  - scalar 字符串、数值、日期/时间函数；已支持标量函数可以在投影中嵌套，并可用于已支持的 `GROUP BY` 表达式
+  - Agent 面向 SQL 函数的参考信息通过 `velaria_sql_capabilities`、`velaria_sql_function_search`、`velaria_sql_query_patterns` 与 `velaria://sql/catalog` 按需暴露
 - stream 路径：
   - `readStream(...)`、`readStreamCsvDir(...)`
   - `single-process` 和 `local-workers`
@@ -134,10 +134,11 @@ Arrow / CSV / Python ingress
 - `app/` 下的本地桌面原型，由 `velaria-service` 提供本地服务
 - 桌面端导入流可以在保存同一份数据集后，异步构建可复用的 embedding 数据集与 keyword index
 - macOS 桌面原型打包，当前可产出 `.dmg`
-- 可通过正式支持的 Python 生态层接入 AI / agent / skill，并利用 workspace 与 artifact 管理能力复用结果、管理本地数据
-- 支持通过可配置 LLM runtime 将自然语言转换为 SQL
-- CLI `ai` 子命令支持 SQL 生成、session 管理与 agent 分析
-- 桌面 app Analyze 页面内置 AI SQL 助手与 session 管理
+- 可通过正式支持的 Python 生态层接入 Velaria Agent，并利用 workspace 与 artifact 管理能力复用结果、管理本地数据
+- `velaria_cli.py -i` 提供交互式 Agent 模式，支持自然语言数据处理、Velaria local functions、runs、artifacts 与终端渲染
+- Velaria usage skill 与 SQL catalog 通过 MCP resource/tool 按需暴露，不把完整内容内联进默认 prompt
+- CLI `ai` 子命令保留为非交互 SQL 生成与历史兼容入口
+- 桌面 app Analyze 页面内置 Agent SQL 助手与 session 管理
 - 同机 actor/rpc/jobmaster smoke 路径
 
 当前约束：
@@ -147,8 +148,8 @@ Arrow / CSV / Python ingress
 - SQL v1 不扩展到 `CTE`、子查询、更复杂 join 语义，也不支持 aggregate `KEYWORD SEARCH` / `HYBRID SEARCH`
 - Python callback / Python UDF 不进入热路径
 - Electron 桌面 app 仍然只是本地原型，还不是稳定公开产品面
-- AI runtime 需要安装 `claude-agent-sdk` 或 `codex-app-server-sdk`（可选依赖）
-- Codex runtime 默认使用 `gpt-5.4-mini`，并默认开启 workspace-write 网络访问；可通过 `agentModel` / `agentCodexNetworkAccess` 覆盖
+- Agent runtime 默认使用 Codex；Claude 支持需要额外安装可选依赖 `claude-agent-sdk`
+- Codex runtime 默认使用 `gpt-5.4-mini`、reasoning effort `none`，并默认开启 workspace-write 网络访问；可通过 `agentModel` / `agentReasoningEffort` / `agentCodexNetworkAccess` 覆盖
 - Codex runtime 会继承标准代理环境变量，如 `http_proxy`、`https_proxy` 和 `all_proxy`
 - 仓库不宣称已完成 distributed runtime
 

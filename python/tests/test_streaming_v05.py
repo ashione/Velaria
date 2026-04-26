@@ -82,6 +82,28 @@ class StreamingV05Test(unittest.TestCase):
             self.assertEqual(int(day), exp[3])
             self.assertEqual(lower_name, exp[4])
 
+    def test_batch_sql_supports_time_functions(self):
+        session = velaria.Session()
+        table = pa.table({"id": [1, 2], "ts": ["2026-01-01", "2026-01-02"]})
+        df = session.create_dataframe_from_arrow(table)
+        session.create_temp_view("batch_time_input", df)
+
+        rows = self._run_batch_sql(
+            session,
+            "SELECT id, UNIX_TIMESTAMP('2026-01-01') AS epoch_s, "
+            "YEAR(TODAY()) AS current_year, LENGTH(TODAY()) AS today_len, "
+            "UNIX_TIMESTAMP(ts) AS ts_epoch "
+            "FROM batch_time_input ORDER BY id",
+        ).to_rows()
+
+        self.assertEqual(
+            rows["schema"], ["id", "epoch_s", "current_year", "today_len", "ts_epoch"]
+        )
+        self.assertEqual(int(rows["rows"][0][1]), 1767225600)
+        self.assertGreaterEqual(int(rows["rows"][0][2]), 2020)
+        self.assertEqual(int(rows["rows"][0][3]), 10)
+        self.assertEqual([int(row[4]) for row in rows["rows"]], [1767225600, 1767312000])
+
     def test_batch_sql_supports_order_by(self):
         session = velaria.Session()
         table = pa.table(
@@ -101,6 +123,99 @@ class StreamingV05Test(unittest.TestCase):
         ).to_rows()
 
         self.assertEqual([row[0] for row in rows["rows"]], [4, 2, 1, 3])
+
+    def test_batch_sql_supports_iso_week_group_by_expressions(self):
+        session = velaria.Session()
+        table = pa.table(
+            {
+                "ts": [
+                    "2025-12-29",
+                    "2025-12-31",
+                    "2026-01-01",
+                    "2026-01-05",
+                ],
+                "value": [10, 20, 30, 40],
+            }
+        )
+        df = session.create_dataframe_from_arrow(table)
+        session.create_temp_view("batch_week_input", df)
+
+        rows = self._run_batch_sql(
+            session,
+            "SELECT ISO_YEAR(ts) AS iso_year, WEEK(ts) AS iso_week, YEARWEEK(ts) AS year_week, "
+            "COUNT(*) AS n, MIN(value) AS min_value, MAX(value) AS max_value, AVG(value) AS avg_value "
+            "FROM batch_week_input "
+            "GROUP BY ISO_YEAR(ts), WEEK(ts), YEARWEEK(ts) "
+            "ORDER BY iso_year, iso_week",
+        ).to_rows()
+
+        self.assertEqual(
+            rows["schema"],
+            ["iso_year", "iso_week", "year_week", "n", "min_value", "max_value", "avg_value"],
+        )
+        self.assertEqual(len(rows["rows"]), 2)
+        self.assertEqual(rows["rows"][0][:6], [2026, 1, 202601, 3, 10, 30])
+        self.assertAlmostEqual(float(rows["rows"][0][6]), 20.0, places=6)
+        self.assertEqual(rows["rows"][1][:6], [2026, 2, 202602, 1, 40, 40])
+        self.assertAlmostEqual(float(rows["rows"][1][6]), 40.0, places=6)
+
+    def test_batch_sql_supports_cast_nested_substr_and_column_comparison(self):
+        session = velaria.Session()
+        table = pa.table(
+            {
+                "trade_date": ["2026-01-01", "2026-01-02", "2026-01-03"],
+                "open": [10.25, 8.50, 7.10],
+                "close": [9.75, 8.75, 6.05],
+                "open_text": ["10.25", "8.50", "7.10"],
+            }
+        )
+        df = session.create_dataframe_from_arrow(table)
+        session.create_temp_view("batch_price_input", df)
+
+        rows = self._run_batch_sql(
+            session,
+            "SELECT COUNT(*) AS down_days FROM batch_price_input WHERE open > close",
+        ).to_rows()
+        self.assertEqual(rows["schema"], ["down_days"])
+        self.assertEqual(rows["rows"], [[2]])
+
+        rows = self._run_batch_sql(
+            session,
+            "SELECT trade_date, SUBSTR(CAST(open AS STRING), 1, 4) AS open_prefix, "
+            "CAST(open_text AS DOUBLE) AS open_number "
+            "FROM batch_price_input ORDER BY trade_date LIMIT 1",
+        ).to_rows()
+        self.assertEqual(rows["schema"], ["trade_date", "open_prefix", "open_number"])
+        self.assertEqual(rows["rows"][0][1], "10.2")
+        self.assertAlmostEqual(float(rows["rows"][0][2]), 10.25, places=6)
+
+    def test_batch_sql_csi300_fixture_cast_and_column_comparison(self):
+        fixture = pathlib.Path(__file__).resolve().parent / "fixtures" / "csi300_normalized.csv"
+        session = velaria.Session()
+        df = session.read_csv(str(fixture))
+        session.create_temp_view("csi300_fixture", df)
+
+        rows = self._run_batch_sql(
+            session,
+            "SELECT COUNT(*) AS down_days FROM csi300_fixture WHERE open > close",
+        ).to_rows()
+        self.assertEqual(rows["schema"], ["down_days"])
+        self.assertEqual(rows["rows"], [[2248]])
+
+        rows = self._run_batch_sql(
+            session,
+            "SELECT trade_date, SUBSTR(CAST(open AS STRING), 1, 6) AS open_prefix "
+            "FROM csi300_fixture ORDER BY trade_date DESC LIMIT 3",
+        ).to_rows()
+        self.assertEqual(rows["schema"], ["trade_date", "open_prefix"])
+        self.assertEqual(
+            rows["rows"],
+            [
+                ["2024-10-11", "3969.7"],
+                ["2024-10-10", "3979.6"],
+                ["2024-10-09", "4168.8"],
+            ],
+        )
 
     def test_stream_progress_contract_with_start_stream_sql(self):
         session = velaria.Session()

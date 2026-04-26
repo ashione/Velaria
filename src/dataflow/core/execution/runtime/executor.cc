@@ -688,6 +688,7 @@ using SourceRequirementMap = std::unordered_map<const SourcePlan*, std::vector<s
 
 void collectPredicateColumns(const std::shared_ptr<PlanPredicateExpr>& expr,
                              std::vector<std::size_t>* columns);
+bool predicateHasColumnComparison(const std::shared_ptr<PlanPredicateExpr>& expr);
 
 std::vector<std::size_t> normalizeRequiredColumns(std::vector<std::size_t> indices) {
   std::sort(indices.begin(), indices.end());
@@ -708,6 +709,20 @@ void appendRequiredColumns(std::vector<std::size_t>* target,
     throw std::invalid_argument("required column target is null");
   }
   target->insert(target->end(), columns.begin(), columns.end());
+}
+
+void collectComputedArgColumns(const ComputedColumnArg& arg,
+                               std::vector<std::size_t>* columns) {
+  if (columns == nullptr || arg.is_literal) {
+    return;
+  }
+  if (arg.is_function) {
+    for (const auto& nested : arg.args) {
+      collectComputedArgColumns(nested, columns);
+    }
+    return;
+  }
+  columns->push_back(arg.source_column_index);
 }
 
 std::size_t planOutputWidth(const PlanNodePtr& plan) {
@@ -805,9 +820,7 @@ void collectSourceRequirements(const PlanNodePtr& plan, const std::vector<std::s
           appendRequiredColumn(&child_required, node->source_column_index);
         } else {
           for (const auto& arg : node->args) {
-            if (!arg.is_literal) {
-              appendRequiredColumn(&child_required, arg.source_column_index);
-            }
+            collectComputedArgColumns(arg, &child_required);
           }
         }
       }
@@ -991,6 +1004,9 @@ bool collectConjunctivePredicateFilters(const std::shared_ptr<PlanPredicateExpr>
                                         std::vector<SourceFilterPushdownSpec>* out) {
   if (!expr || out == nullptr) return false;
   if (expr->kind == PlanPredicateExprKind::Comparison) {
+    if (expr->comparison.rhs_is_column) {
+      return false;
+    }
     out->push_back(expr->comparison);
     return true;
   }
@@ -1029,10 +1045,24 @@ void collectPredicateColumns(const std::shared_ptr<PlanPredicateExpr>& expr,
   }
   if (expr->kind == PlanPredicateExprKind::Comparison) {
     columns->push_back(expr->comparison.column_index);
+    if (expr->comparison.rhs_is_column) {
+      columns->push_back(expr->comparison.rhs_column_index);
+    }
     return;
   }
   collectPredicateColumns(expr->left, columns);
   collectPredicateColumns(expr->right, columns);
+}
+
+bool predicateHasColumnComparison(const std::shared_ptr<PlanPredicateExpr>& expr) {
+  if (!expr) {
+    return false;
+  }
+  if (expr->kind == PlanPredicateExprKind::Comparison) {
+    return expr->comparison.rhs_is_column;
+  }
+  return predicateHasColumnComparison(expr->left) ||
+         predicateHasColumnComparison(expr->right);
 }
 
 RowSelection intersectSelections(const RowSelection& lhs, const RowSelection& rhs) {
@@ -1085,6 +1115,12 @@ RowSelection evaluatePlanPredicateExpr(const Table& input,
     return out;
   }
   if (expr->kind == PlanPredicateExprKind::Comparison) {
+    if (expr->comparison.rhs_is_column) {
+      return vectorizedColumnCompareSelection(
+          viewValueColumn(input, expr->comparison.column_index),
+          viewValueColumn(input, expr->comparison.rhs_column_index),
+          expr->comparison.op);
+    }
     return vectorizedFilterSelection(viewValueColumn(input, expr->comparison.column_index),
                                      expr->comparison.value, expr->comparison.op);
   }
@@ -1116,6 +1152,9 @@ bool buildSourcePushdownSpec(const PlanNodePtr& plan, const SourceRequirementMap
     }
     case PlanKind::Filter: {
       const auto* node = static_cast<const FilterPlan*>(plan.get());
+      if (predicateHasColumnComparison(node->predicate)) {
+        return false;
+      }
       SourcePushdownSpec spec;
       const SourcePlan* source = nullptr;
       if (!buildSourcePushdownSpec(node->child, requirements, &source, &spec)) {

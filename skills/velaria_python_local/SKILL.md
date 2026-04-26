@@ -13,6 +13,7 @@ description: How to use a locally installed Velaria Python package for local ana
 - HTTP(S) 数据集 URL：先用 `velaria_dataset_download` 本地化，或直接把 URL 传给 `velaria_dataset_import` / `velaria_read` / `velaria_sql` / `velaria_dataset_process`。
 - 本地文件：用 `velaria_dataset_import` 注册、`velaria_read` / `velaria_schema` 检查、`velaria_sql` 查询、`velaria_dataset_process` 保存 run/artifact。
 - 编码、中文列名、`invalid token byte` 或 SQL 标识符问题：先用 `velaria_dataset_normalize` 转成 UTF-8 CSV 和 SQL-safe 字段名，再按返回的 `schema` / `column_mapping` 写 SQL。
+- SQL 函数、能力边界和常见模板：按需用 `velaria_sql_capabilities`、`velaria_sql_function_search`、`velaria_sql_query_patterns` 或资源 `velaria://sql/catalog` 检索，不要凭记忆猜函数。
 - 不要在 Velaria 工具失败前先写 `curl`、`wget` 或自定义 Python 下载脚本；只有 Velaria 工具无法覆盖时再回退到通用方式。
 
 本 Skill 默认只使用 `uv` 执行。仓库内可直接使用的入口只有两类：
@@ -96,8 +97,9 @@ uv run --project python python python/velaria_cli.py artifacts list --run-id <ru
 - `CREATE TABLE`、`CREATE SOURCE TABLE`、`CREATE SINK TABLE`
 - `INSERT INTO ... VALUES`
 - `INSERT INTO ... SELECT`
-- `SELECT` 的列投影 / 别名、`WHERE`、`GROUP BY`、`ORDER BY`、`LIMIT`、当前最小 `JOIN`
-- 当前内建函数：`LOWER`、`UPPER`、`TRIM`、`LTRIM`、`RTRIM`、`LENGTH`、`LEN`、`CHAR_LENGTH`、`CHARACTER_LENGTH`、`REVERSE`、`CONCAT`、`CONCAT_WS`、`LEFT`、`RIGHT`、`SUBSTR` / `SUBSTRING`、`POSITION`、`REPLACE`、`ABS`、`CEIL`、`FLOOR`、`ROUND`、`YEAR`、`MONTH`、`DAY`
+- `SELECT` 的列投影 / 别名、`WHERE`（含列对列谓词）、`GROUP BY`、`ORDER BY`、`LIMIT`、当前最小 `JOIN`
+- 当前内建函数：`LOWER`、`UPPER`、`TRIM`、`LTRIM`、`RTRIM`、`LENGTH`、`LEN`、`CHAR_LENGTH`、`CHARACTER_LENGTH`、`REVERSE`、`CONCAT`、`CONCAT_WS`、`LEFT`、`RIGHT`、`SUBSTR` / `SUBSTRING`、`POSITION`、`REPLACE`、`CAST`、`ABS`、`CEIL`、`FLOOR`、`ROUND`、`YEAR`、`MONTH`、`DAY`、`ISO_YEAR`、`ISO_WEEK`、`WEEK`、`YEARWEEK`、`NOW`、`TODAY`、`CURRENT_TIMESTAMP`、`currentTimestamp`、`UNIX_TIMESTAMP`
+- 投影中的已支持标量函数可以嵌套，例如 `SUBSTR(CAST(open AS STRING), 1, 6)`
 
 约束：
 
@@ -362,8 +364,8 @@ uv run --project python python python/velaria_cli.py run list \
 ### 5.1 CSV 到 SQL
 
 ```bash
-uv run --with velaria --with "pyarrow==23.0.1" \\
-  python /Users/bytedance/Velaria/skills/velaria_python_local/scripts/query_csv_to_sql.py \\
+uv run --project python python \\
+  skills/velaria_python_local/scripts/query_csv_to_sql.py \\
   "path/to/file.csv" \\
   --query "SELECT region, COUNT(*) AS cnt FROM csv_data GROUP BY region"
 ```
@@ -371,9 +373,9 @@ uv run --with velaria --with "pyarrow==23.0.1" \\
 ### 5.2 Excel 到 SQL
 
 ```bash
-uv run --with velaria --with pandas --with openpyxl \\
-  python /Users/bytedance/Velaria/skills/velaria_python_local/scripts/query_excel_to_sql.py \\
-  "/Users/bytedance/Velaria/python/tests/fixtures/employee_import_mock.xlsx" \\
+uv run --project python python \\
+  skills/velaria_python_local/scripts/query_excel_to_sql.py \\
+  "python/tests/fixtures/employee_import_mock.xlsx" \\
   --sheet "员工" \\
   --query "SELECT name, dept, COUNT(*) AS cnt FROM excel_data GROUP BY name, dept"
 ```
@@ -384,21 +386,21 @@ uv run --with velaria --with pandas --with openpyxl \\
 FEISHU_BITABLE_APP_ID=... \\
 FEISHU_BITABLE_APP_SECRET=... \\
 FEISHU_BITABLE_BASE_URL="https://my.feishu.cn/base/...?...&view=..." \\
-uv run --with velaria --with pandas --with openpyxl \\
-  python /Users/bytedance/Velaria/skills/velaria_python_local/scripts/query_bitable_to_sql.py \\
+uv run --project python python \\
+  skills/velaria_python_local/scripts/query_bitable_to_sql.py \\
   --query "SELECT owner, COUNT(*) AS cnt FROM bitable_data GROUP BY owner"
 ```
 
 ### 5.4 读取本地 Excel 示例
 
 ```bash
-uv run --with velaria --with pandas --with openpyxl \\
-  python /Users/bytedance/Velaria/skills/velaria_python_local/scripts/read_xlsx.py \\
-  "/Users/bytedance/Velaria/python/tests/fixtures/employee_import_mock.xlsx" --sheet "员工" \\
+uv run --project python python \\
+  skills/velaria_python_local/scripts/read_xlsx.py \\
+  "python/tests/fixtures/employee_import_mock.xlsx" --sheet "员工" \\
   --query "SELECT name, COUNT(*) AS cnt FROM sheet_data GROUP BY name"
 ```
 
-## 6. AI 辅助分析
+## 6. Agent 辅助分析
 
 Codex runtime 依赖随默认 Python 包安装。只有使用 Claude Code runtime 时才需要额外安装：
 
@@ -406,7 +408,7 @@ Codex runtime 依赖随默认 Python 包安装。只有使用 Claude Code runtim
 uv sync --project python --extra ai-claude
 ```
 
-配置 AI runtime。Codex 默认使用本地 `codex app-server`，最小配置如下：
+配置 Agent runtime。Codex 默认使用本地 `codex app-server`，最小配置如下：
 
 ```json
 {
@@ -414,60 +416,52 @@ uv sync --project python --extra ai-claude
   "agentAuthMode": "oauth",
   "agentProvider": "openai",
   "agentModel": "gpt-5.4-mini",
+  "agentReasoningEffort": "none",
   "agentRuntimeWorkspace": "~/.velaria/ai-runtime",
   "agentCodexNetworkAccess": true
 }
 ```
 
 未显式设置 `agentModel` 时，Codex runtime 默认使用 `gpt-5.4-mini`。
-`agentRuntimeWorkspace` 是 runtime 工作目录，用于保存和恢复 agent thread。
+`agentReasoningEffort` 默认是 `none`。`agentRuntimeWorkspace` 是 runtime 工作目录，用于保存 agent thread、runtime config 与 MCP/function 日志。
 `agentAuthMode: "oauth"` 复用本地 Codex 或 Claude 登录；需要显式凭证时改为
 `agentAuthMode: "api_key"`，并设置 `agentApiKey` / `agentBaseUrl`。
 Codex workspace-write 网络访问默认开启；只有需要离线运行时才把 `agentCodexNetworkAccess` 设为 `false`。
 只有需要覆盖本地 Codex 可执行文件时才设置 `agentRuntimePath` / `agentCodexRuntimePath`。
 Claude Code runtime 可通过 `agentClaudeRuntimePath` 指定。代理直接使用标准环境变量，如 `http_proxy`、`https_proxy`、`all_proxy`。
+Velaria usage skill 与 SQL catalog 都是按需资源：需要 SQL 函数、能力边界或常见模板时，优先调用 `velaria_sql_capabilities`、`velaria_sql_function_search`、`velaria_sql_query_patterns`，或读取 `velaria://sql/catalog`。
 
 ### CLI 模式
 
 ```bash
-# 自然语言生成 SQL
+# 交互式 Agent：普通输入会直接发给 active agent thread
+uv run --project python python python/velaria_cli.py -i
+
+# 历史兼容的非交互 SQL 生成
 uv run --project python python python/velaria_cli.py ai generate-sql \
   --prompt "按地区统计平均分数" \
   --schema "name,score,region,department"
-
-# Session 管理
-uv run --project python python python/velaria_cli.py ai session start --schema "name,score"
-uv run --project python python python/velaria_cli.py ai session list
-uv run --project python python python/velaria_cli.py ai session close --session-id <id>
 ```
 
 ### 交互模式
 
 ```bash
 uv run --project python python python/velaria_cli.py -i
-velaria> ai 找出每个部门分数最高的人
-[ai] 按 department 分组，选出每组中 score 最高的记录
-SELECT department, name, score FROM input_table ...
-Run this SQL? [y/N]
-
-velaria> ai session start
-[ai] session started: ai_session_xxxxx
-
-velaria> ai analyze 分析整体数据分布
-[AssistantMessage] ...
+› 找出每个部门分数最高的人
+› /status
+› :run list --limit 5
 ```
 
 ### App 模式
 
-在 Settings 页面配置 AI Provider（支持 OpenAI 兼容接口或 Claude）。
-在 Analyze 页面使用 AI SQL Assistant 输入框生成 SQL。
+在 Settings 页面配置 Agent Provider（支持 OpenAI 兼容接口或 Claude）。
+在 Analyze 页面使用 Agent SQL Assistant 输入框生成 SQL。
 支持 Session 管理（开启/关闭会话）以保持上下文。
 
 ## 7. Skill 自检
 
 ```bash
-uv run --with velaria --with "pyarrow==23.0.1" \\
-  python /Users/bytedance/Velaria/skills/velaria_python_local/scripts/smoke.py
+uv run --project python python skills/velaria_python_local/scripts/smoke.py
 ```
 
 输出 `ok` 代表最小场景（CSV batch + streaming sink）通过。

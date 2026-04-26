@@ -29,6 +29,9 @@ bool collectConjunctiveComparisons(const std::shared_ptr<PlanPredicateExpr>& exp
                                    std::vector<SourceFilterPushdownSpec>* out) {
   if (!expr || out == nullptr) return false;
   if (expr->kind == PlanPredicateExprKind::Comparison) {
+    if (expr->comparison.rhs_is_column) {
+      return false;
+    }
     out->push_back(expr->comparison);
     return true;
   }

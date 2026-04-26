@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -22,8 +23,60 @@ constexpr char kGroupDelim = '\x1f';
 
 enum class CompareOp { Eq, Ne, Lt, Gt, Le, Ge };
 
+struct IsoWeekFields {
+  int year = 0;
+  int week = 0;
+};
+
 int64_t parseEpochMillis(const std::string& raw);
 std::tm toUtcTm(std::time_t seconds);
+
+int64_t currentEpochMillis() {
+  const auto now = std::chrono::system_clock::now();
+  return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+}
+
+int daysFromCivil(int year, unsigned month, unsigned day) {
+  year -= month <= 2;
+  const int era = (year >= 0 ? year : year - 399) / 400;
+  const unsigned yoe = static_cast<unsigned>(year - era * 400);
+  const unsigned doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + static_cast<int>(doe) - 719468;
+}
+
+int isoWeekdayForDate(int year, unsigned month, unsigned day) {
+  const int days = daysFromCivil(year, month, day);
+  const int sunday_zero = ((days + 4) % 7 + 7) % 7;
+  return sunday_zero == 0 ? 7 : sunday_zero;
+}
+
+bool isLeapYear(int year) {
+  return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+}
+
+int isoWeeksInYear(int year) {
+  const int jan1 = isoWeekdayForDate(year, 1, 1);
+  return (jan1 == 4 || (jan1 == 3 && isLeapYear(year))) ? 53 : 52;
+}
+
+IsoWeekFields isoWeekFields(const std::tm& tm_utc) {
+  int year = tm_utc.tm_year + 1900;
+  const int yday = tm_utc.tm_yday + 1;
+  const int iso_weekday = tm_utc.tm_wday == 0 ? 7 : tm_utc.tm_wday;
+  int week = (yday - iso_weekday + 10) / 7;
+  if (week < 1) {
+    --year;
+    week = isoWeeksInYear(year);
+  } else {
+    const int weeks_this_year = isoWeeksInYear(year);
+    if (week > weeks_this_year) {
+      ++year;
+      week = 1;
+    }
+  }
+  return {year, week};
+}
 
 std::string formatTimestampMillis(int64_t millis) {
   const auto seconds = static_cast<std::time_t>(millis / 1000);
@@ -34,6 +87,14 @@ std::string formatTimestampMillis(int64_t millis) {
   if (remainder != 0) {
     out << "." << std::setfill('0') << std::setw(3) << std::llabs(remainder);
   }
+  return out.str();
+}
+
+std::string formatDateMillis(int64_t millis) {
+  const auto seconds = static_cast<std::time_t>(millis / 1000);
+  auto tm = toUtcTm(seconds);
+  std::ostringstream out;
+  out << std::put_time(&tm, "%Y-%m-%d");
   return out.str();
 }
 
@@ -532,6 +593,11 @@ int64_t parseEpochMillis(const std::string& raw) {
     in.clear();
     in.str(raw);
     in >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
+  }
+  if (in.fail()) {
+    in.clear();
+    in.str(raw);
+    in >> std::get_time(&tm, "%Y-%m-%d");
   }
   if (in.fail()) {
     throw std::runtime_error("unsupported timestamp format: " + raw);
@@ -1234,6 +1300,34 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
 RowSelection vectorizedFilterSelection(const ValueColumnView& input, const Value& rhs,
                                        const std::string& op, std::size_t max_selected) {
   return vectorizedFilterSelection(*input.buffer, rhs, op, max_selected);
+}
+
+RowSelection vectorizedColumnCompareSelection(const ValueColumnView& lhs,
+                                             const ValueColumnView& rhs,
+                                             const std::string& op) {
+  const auto parsed_op = parseCompareOp(op);
+  const auto row_count = valueColumnViewRowCount(lhs);
+  if (valueColumnViewRowCount(rhs) != row_count) {
+    throw std::runtime_error("column comparison row count mismatch");
+  }
+  RowSelection out;
+  out.input_row_count = row_count;
+  out.selected.assign(row_count, 0);
+  out.indices.reserve(row_count);
+  for (std::size_t i = 0; i < row_count; ++i) {
+    if (valueColumnIsNullAt(*lhs.buffer, i) || valueColumnIsNullAt(*rhs.buffer, i)) {
+      continue;
+    }
+    const auto left_value = valueColumnValueAt(*lhs.buffer, i);
+    const auto right_value = valueColumnValueAt(*rhs.buffer, i);
+    if (!matchesTypedValueCompare(left_value, right_value, parsed_op)) {
+      continue;
+    }
+    out.selected[i] = 1;
+    out.indices.push_back(i);
+    ++out.selected_count;
+  }
+  return out;
 }
 
 Table projectTable(const Table& table, const std::vector<std::size_t>& indices,
@@ -1992,6 +2086,30 @@ std::vector<Value> vectorizedDateDay(const ValueColumnView& input) {
   return out;
 }
 
+std::vector<Value> vectorizedDateIsoField(const ValueColumnView& input,
+                                          ComputedColumnKind date_function) {
+  const auto row_count = valueColumnViewRowCount(input);
+  std::vector<Value> out(row_count);
+  for (std::size_t i = 0; i < row_count; ++i) {
+    if (valueColumnIsNullAt(*input.buffer, i)) {
+      continue;
+    }
+    const int64_t millis = valueColumnEpochMillisAt(*input.buffer, i);
+    std::time_t sec = static_cast<std::time_t>(millis / 1000);
+    const auto tm_utc = toUtcTm(sec);
+    const auto iso = isoWeekFields(tm_utc);
+    if (date_function == ComputedColumnKind::DateIsoYear) {
+      out[i] = Value(static_cast<int64_t>(iso.year));
+    } else if (date_function == ComputedColumnKind::DateIsoWeek ||
+               date_function == ComputedColumnKind::DateWeek) {
+      out[i] = Value(static_cast<int64_t>(iso.week));
+    } else {
+      out[i] = Value(static_cast<int64_t>(iso.year * 100 + iso.week));
+    }
+  }
+  return out;
+}
+
 std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind function,
                                               const std::vector<ComputedColumnArg>& args) {
   if (table == nullptr) {
@@ -1999,13 +2117,17 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
   }
   struct BoundComputedArg {
     bool is_literal = false;
+    bool is_function = false;
     size_t source_column_index = 0;
     bool literal_is_null = false;
     bool literal_is_numeric = false;
     int64_t literal_int64 = 0;
     double literal_double = 0.0;
     std::string literal_string;
+    Value literal;
     std::string source_column_name;
+    ComputedColumnKind function = ComputedColumnKind::Copy;
+    std::vector<ComputedColumnArg> args;
   };
 
   std::vector<BoundComputedArg> bound;
@@ -2013,9 +2135,13 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
   for (const auto& arg : args) {
     BoundComputedArg item;
     item.is_literal = arg.is_literal;
+    item.is_function = arg.is_function;
     item.source_column_index = arg.source_column_index;
     item.source_column_name = arg.source_column_name;
+    item.function = arg.function;
+    item.args = arg.args;
     if (arg.is_literal) {
+      item.literal = arg.literal;
       item.literal_is_null = arg.literal.isNull();
       if (!item.literal_is_null) {
         item.literal_string = arg.literal.type() == DataType::String ? arg.literal.asString()
@@ -2042,10 +2168,77 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
     return table->schema.indexOf(arg.source_column_name);
   };
 
+  auto materialize_value_arg = [&](const BoundComputedArg& arg) -> std::vector<Value> {
+    if (arg.is_function) {
+      return computeComputedColumnValues(table, arg.function, arg.args);
+    }
+    if (arg.is_literal) {
+      return std::vector<Value>(row_count, arg.literal);
+    }
+    const auto input = viewValueColumn(*table, resolve_source_index(arg));
+    std::vector<Value> values(row_count);
+    for (std::size_t i = 0; i < row_count; ++i) {
+      values[i] = valueColumnValueAt(*input.buffer, i);
+    }
+    return values;
+  };
+
+  auto string_buffer_from_values = [&](const std::vector<Value>& values) {
+    StringColumnBuffer out;
+    out.values.resize(values.size());
+    out.is_null.assign(values.size(), 0);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+      if (values[i].isNull()) {
+        out.is_null[i] = 1;
+        continue;
+      }
+      out.values[i] = values[i].toString();
+    }
+    return out;
+  };
+
+  auto int64_buffer_from_values = [&](const std::vector<Value>& values) {
+    Int64ColumnBuffer out;
+    out.values.resize(values.size());
+    out.is_null.assign(values.size(), 0);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+      if (values[i].isNull()) {
+        out.is_null[i] = 1;
+        continue;
+      }
+      out.values[i] = values[i].isNumber() ? values[i].asInt64()
+                                           : static_cast<int64_t>(std::stoll(values[i].toString()));
+    }
+    return out;
+  };
+
+  auto double_buffer_from_values = [&](const std::vector<Value>& values) {
+    DoubleColumnBuffer out;
+    out.values.resize(values.size());
+    out.is_null.assign(values.size(), 0);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+      if (values[i].isNull()) {
+        out.is_null[i] = 1;
+        continue;
+      }
+      out.values[i] = values[i].isNumber() ? values[i].asDouble()
+                                           : std::stod(values[i].toString());
+    }
+    return out;
+  };
+
+  auto constant_values = [&](Value value) {
+    return std::vector<Value>(row_count, std::move(value));
+  };
+
   auto materialize_string_args = [&]() {
     std::vector<StringColumnBuffer> columns;
     columns.reserve(bound.size());
     for (const auto& arg : bound) {
+      if (arg.is_function) {
+        columns.push_back(string_buffer_from_values(materialize_value_arg(arg)));
+        continue;
+      }
       if (arg.is_literal) {
         if (arg.literal_is_null) {
           columns.push_back(makeNullStringColumn(row_count));
@@ -2060,6 +2253,9 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
   };
 
   auto materialize_int64_arg = [&](const BoundComputedArg& arg) -> Int64ColumnBuffer {
+    if (arg.is_function) {
+      return int64_buffer_from_values(materialize_value_arg(arg));
+    }
     if (arg.is_literal) {
       if (arg.literal_is_null) {
         return makeNullInt64Column(row_count);
@@ -2073,6 +2269,9 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
   };
 
   auto materialize_double_arg = [&](const BoundComputedArg& arg) -> DoubleColumnBuffer {
+    if (arg.is_function) {
+      return double_buffer_from_values(materialize_value_arg(arg));
+    }
     if (arg.is_literal) {
       if (arg.literal_is_null) {
         return makeNullDoubleColumn(row_count);
@@ -2088,15 +2287,21 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
     return materializeDoubleColumn(*table, resolve_source_index(arg));
   };
 
-  auto materialize_date_field = [&](const BoundComputedArg& arg, int which) {
+  auto materialize_date_field = [&](const BoundComputedArg& arg,
+                                    ComputedColumnKind date_function) {
     std::vector<Value> output(row_count);
+    std::vector<Value> materialized_arg;
+    const bool use_materialized_arg = arg.is_literal || arg.is_function;
+    if (use_materialized_arg) {
+      materialized_arg = materialize_value_arg(arg);
+      if (materialized_arg.size() != row_count) {
+        throw std::runtime_error("computed function argument row count mismatch");
+      }
+    }
     for (std::size_t i = 0; i < row_count; ++i) {
       Value value;
-      if (arg.is_literal) {
-        if (arg.literal_is_null) {
-          continue;
-        }
-        value = arg.literal_is_numeric ? Value(arg.literal_double) : Value(arg.literal_string);
+      if (use_materialized_arg) {
+        value = materialized_arg[i];
       } else {
         const auto input = viewValueColumn(*table, resolve_source_index(arg));
         if (i >= valueColumnViewRowCount(input)) {
@@ -2111,12 +2316,22 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
       std::time_t sec = static_cast<std::time_t>(millis / 1000);
       const auto tm_utc = toUtcTm(sec);
       int64_t field = 0;
-      if (which == 0) {
+      if (date_function == ComputedColumnKind::DateYear) {
         field = static_cast<int64_t>(tm_utc.tm_year + 1900);
-      } else if (which == 1) {
+      } else if (date_function == ComputedColumnKind::DateMonth) {
         field = static_cast<int64_t>(tm_utc.tm_mon + 1);
-      } else {
+      } else if (date_function == ComputedColumnKind::DateDay) {
         field = static_cast<int64_t>(tm_utc.tm_mday);
+      } else {
+        const auto iso = isoWeekFields(tm_utc);
+        if (date_function == ComputedColumnKind::DateIsoYear) {
+          field = static_cast<int64_t>(iso.year);
+        } else if (date_function == ComputedColumnKind::DateIsoWeek ||
+                   date_function == ComputedColumnKind::DateWeek) {
+          field = static_cast<int64_t>(iso.week);
+        } else {
+          field = static_cast<int64_t>(iso.year * 100 + iso.week);
+        }
       }
       output[i] = Value(field);
     }
@@ -2126,6 +2341,44 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
   switch (function) {
     case ComputedColumnKind::Copy:
       throw std::runtime_error("computed function must not be COPY");
+    case ComputedColumnKind::Cast: {
+      if (bound.size() != 2 || !bound[1].is_literal || bound[1].literal_is_null) {
+        throw std::runtime_error("CAST expects value and target type");
+      }
+      const auto values = materialize_value_arg(bound[0]);
+      const auto& target = bound[1].literal_string;
+      std::vector<Value> out(values.size());
+      for (std::size_t i = 0; i < values.size(); ++i) {
+        const auto& value = values[i];
+        if (value.isNull()) {
+          continue;
+        }
+        if (target == "STRING" || target == "TEXT") {
+          out[i] = Value(value.toString());
+        } else if (target == "INT" || target == "INTEGER" || target == "INT64" ||
+                   target == "BIGINT") {
+          out[i] = Value(value.isNumber() ? value.asInt64()
+                                          : static_cast<int64_t>(std::stoll(value.toString())));
+        } else if (target == "DOUBLE" || target == "FLOAT" || target == "REAL") {
+          out[i] = Value(value.isNumber() ? value.asDouble() : std::stod(value.toString()));
+        } else if (target == "BOOL" || target == "BOOLEAN") {
+          if (value.isBool()) {
+            out[i] = Value(value.asBool());
+          } else if (value.isNumber()) {
+            out[i] = Value(value.asDouble() != 0.0);
+          } else {
+            auto text = value.toString();
+            std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+              return static_cast<char>(std::tolower(ch));
+            });
+            out[i] = Value(text == "true" || text == "1");
+          }
+        } else {
+          throw std::runtime_error("unsupported CAST target type: " + target);
+        }
+      }
+      return out;
+    }
     case ComputedColumnKind::StringLength:
       if (bound.size() != 1) throw std::runtime_error("LENGTH expects 1 argument");
       return vectorizedStringLength(materialize_string_args()[0]);
@@ -2194,22 +2447,73 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
       return vectorizedRound(materialize_double_arg(bound[0]));
     case ComputedColumnKind::DateYear:
       if (bound.size() != 1) throw std::runtime_error("YEAR expects 1 argument");
-      if (!bound[0].is_literal) {
+      if (!bound[0].is_literal && !bound[0].is_function) {
         return vectorizedDateYear(viewValueColumn(*table, resolve_source_index(bound[0])));
       }
-      return materialize_date_field(bound[0], 0);
+      return materialize_date_field(bound[0], function);
     case ComputedColumnKind::DateMonth:
       if (bound.size() != 1) throw std::runtime_error("MONTH expects 1 argument");
-      if (!bound[0].is_literal) {
+      if (!bound[0].is_literal && !bound[0].is_function) {
         return vectorizedDateMonth(viewValueColumn(*table, resolve_source_index(bound[0])));
       }
-      return materialize_date_field(bound[0], 1);
+      return materialize_date_field(bound[0], function);
     case ComputedColumnKind::DateDay:
       if (bound.size() != 1) throw std::runtime_error("DAY expects 1 argument");
-      if (!bound[0].is_literal) {
+      if (!bound[0].is_literal && !bound[0].is_function) {
         return vectorizedDateDay(viewValueColumn(*table, resolve_source_index(bound[0])));
       }
-      return materialize_date_field(bound[0], 2);
+      return materialize_date_field(bound[0], function);
+    case ComputedColumnKind::DateIsoYear:
+      if (bound.size() != 1) throw std::runtime_error("ISO_YEAR expects 1 argument");
+      if (!bound[0].is_literal && !bound[0].is_function) {
+        return vectorizedDateIsoField(
+            viewValueColumn(*table, resolve_source_index(bound[0])), function);
+      }
+      return materialize_date_field(bound[0], function);
+    case ComputedColumnKind::DateIsoWeek:
+    case ComputedColumnKind::DateWeek:
+      if (bound.size() != 1) throw std::runtime_error("WEEK expects 1 argument");
+      if (!bound[0].is_literal && !bound[0].is_function) {
+        return vectorizedDateIsoField(
+            viewValueColumn(*table, resolve_source_index(bound[0])), function);
+      }
+      return materialize_date_field(bound[0], function);
+    case ComputedColumnKind::DateYearWeek:
+      if (bound.size() != 1) throw std::runtime_error("YEARWEEK expects 1 argument");
+      if (!bound[0].is_literal && !bound[0].is_function) {
+        return vectorizedDateIsoField(
+            viewValueColumn(*table, resolve_source_index(bound[0])), function);
+      }
+      return materialize_date_field(bound[0], function);
+    case ComputedColumnKind::TimeNow:
+    case ComputedColumnKind::TimeCurrentTimestamp:
+      if (!bound.empty()) {
+        throw std::runtime_error("current time scalar function expects 0 arguments");
+      }
+      return constant_values(Value(formatTimestampMillis(currentEpochMillis())));
+    case ComputedColumnKind::TimeToday:
+      if (!bound.empty()) {
+        throw std::runtime_error("TODAY expects 0 arguments");
+      }
+      return constant_values(Value(formatDateMillis(currentEpochMillis())));
+    case ComputedColumnKind::TimeUnixTimestamp:
+      if (bound.empty()) {
+        return constant_values(Value(currentEpochMillis() / 1000));
+      }
+      if (bound.size() != 1) {
+        throw std::runtime_error("UNIX_TIMESTAMP expects 0 or 1 argument");
+      }
+      {
+        const auto values = materialize_value_arg(bound[0]);
+        std::vector<Value> out(values.size());
+        for (std::size_t i = 0; i < values.size(); ++i) {
+          if (values[i].isNull()) {
+            continue;
+          }
+          out[i] = Value(valueAsEpochMillis(values[i]) / 1000);
+        }
+        return out;
+      }
   }
   throw std::runtime_error("unsupported computed function");
 }

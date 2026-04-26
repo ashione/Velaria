@@ -415,7 +415,7 @@ uv sync --project python --extra ai-claude
 ```json
 {
   "agentRuntime": "codex",
-  "agentAuthMode": "oauth",
+  "agentAuthMode": "local",
   "agentProvider": "openai",
   "agentModel": "gpt-5.4-mini",
   "agentReasoningEffort": "none",
@@ -429,7 +429,7 @@ uv sync --project python --extra ai-claude
 ```json
 {
   "agentRuntime": "claude",
-  "agentAuthMode": "oauth",
+  "agentAuthMode": "local",
   "agentProvider": "anthropic",
   "agentModel": "claude-sonnet-4-20250514",
   "agentReasoningEffort": "none",
@@ -441,7 +441,7 @@ uv sync --project python --extra ai-claude
 未显式设置 `agentModel` 时，Codex 默认 `gpt-5.4-mini`，Claude 默认 `claude-sonnet-4-20250514`。
 `agentReasoningEffort` 默认是 `none`，两个 runtime 均支持。
 `agentRuntimeWorkspace` 是 runtime 工作目录，用于保存 agent thread、session 与工具日志。
-`agentAuthMode: "oauth"` 复用本地 Codex 或 Claude 登录；需要显式凭证时改为
+`agentAuthMode: "local"` 复用本地 Codex 或 Claude 登录；需要显式凭证时改为
 `agentAuthMode: "api_key"`，并设置 `agentApiKey` / `agentBaseUrl`。
 Codex 的 `agentCodexNetworkAccess` 和 Claude 的 `agentNetworkAccess` 分别控制各自 runtime 的网络访问，默认开启。
 只有需要覆盖本地可执行文件时才设置 `agentRuntimePath` / `agentCodexRuntimePath` / `agentClaudeRuntimePath`。

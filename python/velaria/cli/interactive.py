@@ -17,6 +17,7 @@ from velaria.cli._common import _json_dumps
 
 _current_session_id: str | None = None
 _runtime: Any | None = None
+_runtime_override: str | None = None
 _prewarm_thread: threading.Thread | None = None
 _session_start_thread: threading.Thread | None = None
 _session_start_error: str = ""
@@ -64,12 +65,13 @@ def _wants_interactive(argv: list[str]) -> bool:
 
 
 def _run_interactive_loop(argv: list[str] | None = None) -> int:
-    global _state, _current_session_id, _session_start_thread, _session_start_error
+    global _state, _current_session_id, _session_start_thread, _session_start_error, _runtime_override
     _state = VelariaInteractiveState()
     _current_session_id = None
     _session_start_thread = None
     _session_start_error = ""
     args = _parse_interactive_args(argv or [])
+    _runtime_override = getattr(args, "runtime", None)
     from velaria.cli import main
 
     _print_banner()
@@ -130,6 +132,8 @@ def _parse_interactive_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("-i", "--interactive", action="store_true")
     parser.add_argument("--new", action="store_true")
     parser.add_argument("--session")
+    parser.add_argument("--runtime", choices=["codex", "claude"],
+                        help="Select AI runtime (overrides agentRuntime in config.json).")
     parsed, _unknown = parser.parse_known_args(argv)
     return parsed
 
@@ -171,7 +175,10 @@ def _get_runtime():
         from velaria.ai_runtime import create_runtime, load_ai_config
 
         with _trace_span("interactive.load_config_create_runtime"):
-            _runtime = create_runtime(load_ai_config())
+            config = load_ai_config()
+            if _runtime_override:
+                config["runtime"] = _runtime_override
+            _runtime = create_runtime(config)
     return _runtime
 
 

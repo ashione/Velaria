@@ -33,7 +33,7 @@ def create_runtime(config: dict[str, Any]) -> AiRuntime:
     model = str(config.get("model", ""))
     reasoning_effort = str(config.get("reasoning_effort") or "none")
     network_access = _bool_config(config, "network_access", True)
-    reuse_local_config = auth_mode == "oauth"
+    reuse_local_config = auth_mode == "local"
 
     if runtime_type == "claude" or (runtime_type == "auto" and _has_claude_sdk()):
         from .claude_runtime import ClaudeAgentRuntime
@@ -114,10 +114,13 @@ def _bool_config(config: dict[str, Any], key: str, default: bool) -> bool:
     return bool(value)
 
 def _normalize_auth_mode(value: Any) -> str:
-    normalized = str(value or "oauth").strip().lower()
+    normalized = str(value or "local").strip().lower()
     if normalized == "api_key":
         return "api_key"
-    return "oauth"
+    # "oauth" is a legacy alias for "local" (reuse local CLI config)
+    if normalized in ("oauth", "local"):
+        return "local"
+    return "local"
 
 def load_ai_config() -> dict[str, Any]:
     config_path = Path.home() / ".velaria" / "config.json"
@@ -127,7 +130,7 @@ def load_ai_config() -> dict[str, Any]:
         config = json.loads(config_path.read_text(encoding="utf-8"))
     except Exception:
         return {}
-    auth_mode = _normalize_auth_mode(config.get("agentAuthMode", "oauth"))
+    auth_mode = _normalize_auth_mode(config.get("agentAuthMode", "local"))
     return {
         "provider": config.get("agentProvider", "openai"),
         "auth_mode": auth_mode,
@@ -140,7 +143,7 @@ def load_ai_config() -> dict[str, Any]:
         "claude_runtime_path": config.get("agentClaudeRuntimePath", ""),
         "codex_runtime_path": config.get("agentCodexRuntimePath", ""),
         "runtime_workspace": config.get("agentRuntimeWorkspace", ""),
-        "reuse_local_config": auth_mode == "oauth",
+        "reuse_local_config": auth_mode == "local",
         "runtime_config_path": config.get("agentRuntimeConfigPath", ""),
         "network_access": config.get("agentCodexNetworkAccess", config.get("agentNetworkAccess", True)),
         "proxy_env": _proxy_env_from_config(config),

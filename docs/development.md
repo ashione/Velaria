@@ -105,7 +105,7 @@ mkdir -p ~/.velaria
 cat > ~/.velaria/config.json << 'EOF'
 {
   "agentProvider": "openai",
-  "agentAuthMode": "oauth",
+  "agentAuthMode": "local",
   "agentRuntime": "codex",
   "agentModel": "gpt-5.4-mini",
   "agentReasoningEffort": "none",

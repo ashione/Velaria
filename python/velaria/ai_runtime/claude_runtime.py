@@ -24,7 +24,7 @@ class ClaudeAgentRuntime:
         self,
         api_key: str,
         provider: str = "anthropic",
-        auth_mode: str = "oauth",
+        auth_mode: str = "local",
         base_url: str = "",
         model: str = "claude-sonnet-4-20250514",
         runtime_path: str = "",

@@ -431,7 +431,7 @@ Both runtimes use the same `~/.velaria/config.json` and `agent*` config keys.
 ```json
 {
   "agentRuntime": "codex",
-  "agentAuthMode": "oauth",
+  "agentAuthMode": "local",
   "agentProvider": "openai",
   "agentModel": "gpt-5.4-mini",
   "agentReasoningEffort": "none",
@@ -445,7 +445,7 @@ Both runtimes use the same `~/.velaria/config.json` and `agent*` config keys.
 ```json
 {
   "agentRuntime": "claude",
-  "agentAuthMode": "oauth",
+  "agentAuthMode": "local",
   "agentProvider": "anthropic",
   "agentModel": "claude-sonnet-4-20250514",
   "agentReasoningEffort": "none",
@@ -458,7 +458,7 @@ Defaults: Codex uses `gpt-5.4-mini`, Claude uses `claude-sonnet-4-20250514`.
 Both default `agentReasoningEffort` to `none`. `agentRuntimeWorkspace` is the
 runtime working directory used to save and resume agent threads; if omitted,
 Velaria creates a project-scoped directory under `~/.velaria/ai-runtime/`.
-`agentAuthMode: "oauth"` reuses the local login; use `agentAuthMode: "api_key"`
+`agentAuthMode: "local"` reuses the local login; use `agentAuthMode: "api_key"`
 with `agentApiKey` and `agentBaseUrl` for explicit credentials.
 Use `agentRuntimePath` / `agentCodexRuntimePath` only when overriding the local
 Codex executable. Use `agentClaudeRuntimePath` for Claude.

@@ -41,7 +41,7 @@ class CodexRuntime:
         network_access: bool = True,
         api_key: str = "",
         base_url: str = "",
-        auth_mode: str = "oauth",
+        auth_mode: str = "local",
         runtime_path: str = "",
         runtime_workspace: str = "",
         reuse_local_config: bool = True,

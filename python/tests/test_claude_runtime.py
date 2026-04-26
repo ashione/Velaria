@@ -110,7 +110,7 @@ class ClaudeRuntimeInitTest(unittest.TestCase):
         rt = ClaudeAgentRuntime(api_key="")
         self.assertEqual(rt.model, "claude-sonnet-4-20250514")
         self.assertEqual(rt.provider, "anthropic")
-        self.assertEqual(rt.auth_mode, "oauth")
+        self.assertEqual(rt.auth_mode, "local")
         self.assertTrue(rt.reuse_local_config)
         self.assertEqual(rt.api_key, "")
         self.assertEqual(rt.base_url, "")
@@ -148,7 +148,7 @@ class ClaudeRuntimeInitTest(unittest.TestCase):
             self.assertTrue((ws / "workspace").exists())
 
     def test_runtime_env_oauth_reuse_config(self):
-        rt = ClaudeAgentRuntime(api_key="", auth_mode="oauth")
+        rt = ClaudeAgentRuntime(api_key="", auth_mode="local")
         env = rt._runtime_env()
         self.assertIsInstance(env, dict)
         self.assertIn("VELARIA_WORKSPACE", env)
@@ -487,7 +487,7 @@ class ClaudeRuntimeConfigIntegrationTest(unittest.TestCase):
     def test_create_runtime_selects_claude_when_explicit(self):
         with tempfile.TemporaryDirectory(prefix="velaria-factory-") as tmp:
             rt = create_runtime({
-                "runtime": "claude", "auth_mode": "oauth",
+                "runtime": "claude", "auth_mode": "local",
                 "runtime_workspace": tmp, "cwd": tmp,
             })
             self.assertIsInstance(rt, ClaudeAgentRuntime)
@@ -560,7 +560,7 @@ class ClaudeRuntimeProxyEnvTest(unittest.TestCase):
 
     def test_runtime_env_injects_proxy_when_configured(self):
         rt = ClaudeAgentRuntime(
-            api_key="", auth_mode="oauth",
+            api_key="", auth_mode="local",
             proxy_env={"http_proxy": "http://127.0.0.1:7897"},
         )
         env = rt._runtime_env()
@@ -569,7 +569,7 @@ class ClaudeRuntimeProxyEnvTest(unittest.TestCase):
 
     def test_runtime_env_no_proxy_when_not_configured(self):
         with mock.patch.dict(os.environ, {}, clear=True):
-            rt = ClaudeAgentRuntime(api_key="", auth_mode="oauth")
+            rt = ClaudeAgentRuntime(api_key="", auth_mode="local")
             env = rt._runtime_env()
             self.assertNotIn("http_proxy", env)
 

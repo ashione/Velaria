@@ -9,6 +9,7 @@ import os
 import pathlib
 import sys
 import time
+import uuid
 from typing import Any, AsyncIterator
 
 from . import AiRuntime, generate_session_id
@@ -27,6 +28,7 @@ class ClaudeAgentRuntime:
         auth_mode: str = "local",
         base_url: str = "",
         model: str = "claude-sonnet-4-20250514",
+        model_source: str = "default",
         runtime_path: str = "",
         runtime_workspace: str = "",
         reuse_local_config: bool = True,
@@ -53,6 +55,7 @@ class ClaudeAgentRuntime:
         from claude_agent_sdk import ClaudeSDKClient  # noqa: F401 -- validated at init
 
         self.model = model
+        self.model_source = model_source
         self.provider = provider
         self.auth_mode = auth_mode
         self.api_key = api_key
@@ -74,7 +77,7 @@ class ClaudeAgentRuntime:
         session_id = generate_session_id()
         with self._trace_span(f"start_thread session={session_id}"):
             self.registry.register(session_id, "claude", session_id, dataset_context or {})
-        self._sessions[session_id] = {"dataset_context": dataset_context or {}, "session": None}
+        self._sessions[session_id] = {"dataset_context": dataset_context or {}, "session": None, "claude_started": False}
         return session_id
 
     async def resume_session(self, session_id: str) -> bool:
@@ -82,11 +85,14 @@ class ClaudeAgentRuntime:
 
     async def resume_thread(self, session_id: str) -> bool:
         with self._trace_span(f"resume_thread session={session_id}"):
-            entry = self.registry.lookup(session_id)
+            entry = self.registry.lookup(session_id, "claude")
             if not entry or entry["status"] != "active":
                 self._trace("resume_thread not_found_or_inactive")
                 return False
-            self._sessions[session_id] = {"dataset_context": entry["dataset_context"], "session": None}
+            if not _is_uuid_text(session_id) or not _is_uuid_text(str(entry.get("runtime_session_ref") or "")):
+                self._trace("resume_thread skipped legacy_non_uuid_session")
+                return False
+            self._sessions[session_id] = {"dataset_context": entry["dataset_context"], "session": None, "claude_started": True}
             self.registry.update_activity(session_id)
             return True
 
@@ -156,6 +162,7 @@ class ClaudeAgentRuntime:
 
         dataset_context = session_data["dataset_context"]
         sdk_tools = _build_sdk_mcp_tools(dataset_context)
+        has_started = bool(session_data.get("claude_started"))
 
         with self._trace_span(f"send_message session={session_id} prompt_len={len(prompt)}"):
             velaria_mcp = create_sdk_mcp_server(name="velaria", version="1.0.0", tools=sdk_tools)
@@ -168,7 +175,8 @@ class ClaudeAgentRuntime:
                     env=self._runtime_env(),
                     cwd=str(self.cwd),
                     settings=self.runtime_config_path or None,
-                    session_id=session_id,
+                    resume=session_id if has_started else None,
+                    session_id=None if has_started else session_id,
                     skills=["velaria-python-local"],
                     setting_sources=["project", "user"],
                     mcp_servers={"velaria": velaria_mcp},
@@ -176,6 +184,7 @@ class ClaudeAgentRuntime:
             )
 
             await client.connect(prompt=prompt)
+            session_data["claude_started"] = True
             async for msg in client.receive_response():
                 event = _claude_sdk_event(msg, session_id)
                 self._trace(
@@ -229,7 +238,12 @@ class ClaudeAgentRuntime:
         self._prewarm_complete = True
 
     async def list_sessions(self) -> list[dict[str, Any]]:
-        return self.registry.list_active()
+        return [
+            entry
+            for entry in self.registry.list_active("claude")
+            if _is_uuid_text(str(entry.get("session_id") or ""))
+            and _is_uuid_text(str(entry.get("runtime_session_ref") or ""))
+        ]
 
     async def list_threads(self) -> list[dict[str, Any]]:
         return await self.list_sessions()
@@ -242,11 +256,12 @@ class ClaudeAgentRuntime:
         self._sessions.pop(session_id, None)
 
     def status(self, session_id: str | None = None) -> dict[str, Any]:
-        entry = self.registry.lookup(session_id) if session_id else self.registry.most_recent_active()
+        entry = self._session_status_entry(session_id)
         return {
             "runtime": "claude",
             "provider": self.provider,
             "model": self.model,
+            "model_source": self.model_source,
             "reasoning_effort": self.reasoning_effort,
             "auth_mode": self.auth_mode,
             "network_access": self.network_access,
@@ -306,6 +321,24 @@ class ClaudeAgentRuntime:
         elapsed = time.perf_counter() - self._trace_start
         print(f"[velaria-trace {elapsed:8.3f}s] claude.{message}", file=sys.stderr, flush=True)
 
+    def _session_status_entry(self, session_id: str | None) -> dict[str, Any] | None:
+        if session_id:
+            entry = self.registry.lookup(session_id, "claude")
+            if (
+                entry
+                and _is_uuid_text(session_id)
+                and _is_uuid_text(str(entry.get("runtime_session_ref") or ""))
+            ):
+                return entry
+            return None
+        for entry in self.registry.list_active("claude"):
+            if (
+                _is_uuid_text(str(entry.get("session_id") or ""))
+                and _is_uuid_text(str(entry.get("runtime_session_ref") or ""))
+            ):
+                return entry
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Event normalization
@@ -333,6 +366,9 @@ def _claude_sdk_event(msg: Any, session_id: str = "") -> AgentEvent:
     event_type = msg_type
     if msg_type == "AssistantMessage":
         event_type = "assistant_text"
+    elif msg_type == "ResultMessage":
+        event_type = "done"
+        content = ""
     elif "thinking" in msg_type.lower():
         event_type = "thinking"
     elif msg_type in ("ToolUseBlock",):
@@ -363,7 +399,7 @@ def _build_sdk_mcp_tools(dataset_context: dict[str, Any] | None = None) -> list:
                 for key in ("source_path", "table_name", "schema"):
                     if key in ctx and key not in merged:
                         merged[key] = ctx[key]
-                return execute_local_function(n, merged)
+                return _sdk_tool_result(execute_local_function(n, merged))
             return handler
 
         sdk_tools.append(SdkMcpTool(
@@ -373,6 +409,18 @@ def _build_sdk_mcp_tools(dataset_context: dict[str, Any] | None = None) -> list:
             handler=make_handler(name),
         ))
     return sdk_tools
+
+
+def _sdk_tool_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(result, ensure_ascii=False),
+            }
+        ],
+        "is_error": not bool(result.get("ok", True)),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +543,14 @@ def _coerce_bool(value: Any, default: bool) -> bool:
         if normalized in {"0", "false", "no", "off"}:
             return False
     return bool(value)
+
+
+def _is_uuid_text(value: str) -> bool:
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 def _trace_enabled() -> bool:

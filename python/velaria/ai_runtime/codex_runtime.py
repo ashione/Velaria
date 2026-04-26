@@ -12,12 +12,13 @@ import sys
 import threading
 import time
 import contextlib
+import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 from . import AiRuntime, generate_session_id
 from .agent import AgentEvent, normalize_runtime_event
-from .functions import tool_definitions, velaria_agent_instructions
+from .functions import tool_definitions, velaria_agent_instructions, velaria_turn_instructions
 from .session_registry import SessionRegistry
 
 
@@ -103,8 +104,11 @@ class CodexRuntime:
         return await self.resume_thread(session_id)
 
     async def resume_thread(self, session_id: str) -> bool:
-        entry = self.registry.lookup(session_id)
+        entry = self.registry.lookup(session_id, "codex")
         if not entry or entry["status"] != "active":
+            return False
+        if not _is_uuid_text(session_id):
+            self._trace("resume_thread skipped legacy_non_uuid_session")
             return False
         with self._trace_span(f"resume_thread session={session_id}"):
             thread = await self._submit(self._resume_thread(entry["runtime_session_ref"]))
@@ -152,7 +156,7 @@ class CodexRuntime:
             return
 
         with self._trace_span(f"send_message stream session={session_id} prompt_len={len(prompt)}"):
-            stream = self._stream_chat_events(thread, prompt)
+            stream = self._stream_chat_events(thread, velaria_turn_instructions(prompt))
             try:
                 while True:
                     event = await asyncio.to_thread(stream.events.get)
@@ -203,7 +207,11 @@ class CodexRuntime:
             await self._submit(self._prewarm_runtime())
 
     async def list_sessions(self) -> list[dict[str, Any]]:
-        return self.registry.list_active()
+        return [
+            entry
+            for entry in self.registry.list_active("codex")
+            if _is_uuid_text(str(entry.get("session_id") or ""))
+        ]
 
     async def list_threads(self) -> list[dict[str, Any]]:
         return await self.list_sessions()
@@ -216,7 +224,7 @@ class CodexRuntime:
         self._threads.pop(session_id, None)
 
     def status(self, session_id: str | None = None) -> dict[str, Any]:
-        entry = self.registry.lookup(session_id) if session_id else self.registry.most_recent_active()
+        entry = self._session_status_entry(session_id)
         return {
             "runtime": "codex",
             "provider": self._provider,
@@ -330,8 +338,11 @@ class CodexRuntime:
         thread = self._threads.get(session_id)
         if thread is not None:
             return thread
-        entry = self.registry.lookup(session_id)
+        entry = self.registry.lookup(session_id, "codex")
         if not entry or entry["status"] != "active":
+            return None
+        if not _is_uuid_text(session_id):
+            self._trace("_get_thread skipped legacy_non_uuid_session")
             return None
         with self._trace_span(f"_get_thread.resume session={session_id}"):
             thread = await self._submit(self._resume_thread(entry["runtime_session_ref"]))
@@ -359,6 +370,16 @@ class CodexRuntime:
             with self._trace_span("client.close"):
                 await self._client.close()
             self._client = None
+
+    def _session_status_entry(self, session_id: str | None) -> dict[str, Any] | None:
+        if session_id:
+            if not _is_uuid_text(session_id):
+                return None
+            return self.registry.lookup(session_id, "codex")
+        for entry in self.registry.list_active("codex"):
+            if _is_uuid_text(str(entry.get("session_id") or "")):
+                return entry
+        return None
 
     @contextlib.contextmanager
     def _trace_span(self, name: str):
@@ -837,6 +858,14 @@ def _resolve_velaria_skill_path(skill_path: str, skill_dir: pathlib.Path | None)
         return None
     candidate = skill_dir / "velaria_python_local" / "SKILL.md"
     return candidate if candidate.exists() else None
+
+
+def _is_uuid_text(value: str) -> bool:
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 def _trace_enabled() -> bool:

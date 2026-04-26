@@ -145,6 +145,73 @@ class PythonCliContractTest(unittest.TestCase):
                 self.assertEqual(len(list_payload["sources"]), 1)
                 self.assertEqual(list_payload["sources"][0]["source_id"], "ticks")
 
+    def test_datasets_list_cli_returns_sources_and_result_artifacts(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-cli-datasets-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                from velaria.agentic_store import AgenticStore
+                from velaria.workspace import ArtifactIndex
+
+                with AgenticStore() as store:
+                    store.upsert_source(
+                        {
+                            "source_id": "sales",
+                            "kind": "local_file",
+                            "name": "sales.csv",
+                            "spec": {"path": "/tmp/sales.csv"},
+                            "metadata": {"schema": ["region", "amount"]},
+                        }
+                    )
+                    store.upsert_source(
+                        {
+                            "source_id": "events",
+                            "kind": "external_event",
+                            "name": "events",
+                            "spec": {},
+                        }
+                    )
+                index = ArtifactIndex()
+                try:
+                    index.upsert_run(
+                        {
+                            "run_id": "run_sales",
+                            "created_at": "2026-04-25T00:00:00Z",
+                            "finished_at": "2026-04-25T00:00:01Z",
+                            "status": "succeeded",
+                            "action": "file-sql",
+                            "run_dir": str(pathlib.Path(tmp) / "runs" / "run_sales"),
+                        }
+                    )
+                    index.insert_artifact(
+                        {
+                            "artifact_id": "artifact_sales",
+                            "run_id": "run_sales",
+                            "created_at": "2026-04-25T00:00:01Z",
+                            "type": "table",
+                            "uri": "/tmp/result.parquet",
+                            "format": "parquet",
+                            "row_count": 2,
+                            "schema_json": ["region", "amount"],
+                            "preview_json": None,
+                            "tags_json": ["result"],
+                        }
+                    )
+                finally:
+                    index.close()
+
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    exit_code = velaria_cli.main(["datasets", "list"])
+                self.assertEqual(exit_code, 0)
+                self.assertEqual(stderr.getvalue(), "")
+                payload = json.loads(stdout.getvalue())
+                self.assertTrue(payload["ok"])
+                self.assertEqual(payload["sources_count"], 1)
+                self.assertEqual(payload["artifacts_count"], 1)
+                ids = {item["dataset_id"] for item in payload["datasets"]}
+                self.assertIn("source:sales", ids)
+                self.assertIn("artifact:artifact_sales", ids)
+
     def test_interactive_mode_accepts_commands_and_exits_cleanly(self):
         with tempfile.TemporaryDirectory(prefix="velaria-cli-interactive-") as tmp:
             fake = _FakeAgentRuntime()

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import types
 import unittest
+import uuid
 from unittest import mock
 
 
@@ -124,6 +125,10 @@ from velaria.ai_runtime.claude_runtime import (  # noqa: E402
 )
 from velaria.ai_runtime.agent import normalize_runtime_event  # noqa: E402
 from velaria.ai_runtime.functions import tool_definitions  # noqa: E402
+
+
+def _assert_uuid(testcase, value):
+    testcase.assertEqual(str(uuid.UUID(value)), value)
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +256,7 @@ class ClaudeRuntimeSessionTest(unittest.TestCase):
 
     def test_start_thread_creates_session(self):
         session_id = asyncio.run(self.rt.start_thread({"schema": ["a", "b"], "table_name": "test"}))
-        self.assertTrue(session_id.startswith("ai_session_"))
+        _assert_uuid(self, session_id)
         self.assertIn(session_id, self.rt._sessions)
 
     def test_resume_thread_active_session(self):
@@ -281,7 +286,15 @@ class ClaudeRuntimeSessionTest(unittest.TestCase):
 
     def test_create_session_alias_for_start_thread(self):
         session_id = asyncio.run(self.rt.create_session({"a": 1}))
-        self.assertTrue(session_id.startswith("ai_session_"))
+        _assert_uuid(self, session_id)
+
+    def test_resume_thread_skips_non_claude_session(self):
+        self.rt.registry.register("00000000-0000-0000-0000-000000000001", "codex", "codex-thread", {})
+        self.assertFalse(asyncio.run(self.rt.resume_thread("00000000-0000-0000-0000-000000000001")))
+
+    def test_resume_thread_skips_legacy_non_uuid_session(self):
+        self.rt.registry.register("ai_session_legacy", "claude", "ai_session_legacy", {})
+        self.assertFalse(asyncio.run(self.rt.resume_thread("ai_session_legacy")))
 
 
 class ClaudeRuntimeGenerateSqlTest(unittest.TestCase):
@@ -446,6 +459,8 @@ class ClaudeRuntimeSendMessageTest(unittest.TestCase):
         self.assertIn("name", captured_input)
         self.assertIn("result", captured_input)
         self.assertIsInstance(captured_input["result"], dict)
+        self.assertIn("content", captured_input["result"])
+        self.assertEqual(captured_input["result"]["content"][0]["type"], "text")
 
     def test_send_message_updates_activity_on_completion(self):
         class CaptureClient:
@@ -464,6 +479,31 @@ class ClaudeRuntimeSendMessageTest(unittest.TestCase):
             asyncio.run(collect())
         entry = self.rt.registry.lookup(self.session_id)
         self.assertIsNotNone(entry["last_active_at"])
+
+    def test_send_message_resumes_after_first_turn(self):
+        captured_options = []
+
+        class CaptureClient:
+            def __init__(self, options=None, transport=None):
+                captured_options.append(options)
+
+            async def connect(self, prompt=""):
+                pass
+
+            async def receive_response(self):
+                yield FakeAssistantMessage("done")
+
+        with mock.patch("claude_agent_sdk.ClaudeSDKClient", CaptureClient):
+            async def collect(prompt):
+                return [e async for e in self.rt.send_message(self.session_id, prompt)]
+
+            asyncio.run(collect("first"))
+            asyncio.run(collect("second"))
+
+        self.assertEqual(captured_options[0].session_id, self.session_id)
+        self.assertIsNone(getattr(captured_options[0], "resume", None))
+        self.assertIsNone(captured_options[1].session_id)
+        self.assertEqual(captured_options[1].resume, self.session_id)
 
 
 class ClaudeRuntimeHelpersTest(unittest.TestCase):
@@ -569,6 +609,46 @@ class ClaudeRuntimeConfigIntegrationTest(unittest.TestCase):
             })
             self.assertEqual(rt.reasoning_effort, "none")
             self.assertTrue(rt.network_access)
+            rt.shutdown()
+
+    def test_create_runtime_claude_override_does_not_reuse_codex_agent_model(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-factory-model-") as tmp:
+            rt = create_runtime({
+                "runtime": "claude",
+                "configured_runtime": "codex",
+                "model": "gpt-5.4-mini",
+                "runtime_workspace": tmp,
+                "cwd": tmp,
+            })
+            self.assertEqual(rt.model, "claude-sonnet-4-20250514")
+            self.assertEqual(rt.model_source, "default")
+            rt.shutdown()
+
+    def test_create_runtime_claude_uses_agent_model_when_configured_runtime_is_claude(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-factory-claude-model-") as tmp:
+            rt = create_runtime({
+                "runtime": "claude",
+                "configured_runtime": "claude",
+                "model": "claude-custom",
+                "runtime_workspace": tmp,
+                "cwd": tmp,
+            })
+            self.assertEqual(rt.model, "claude-custom")
+            self.assertEqual(rt.model_source, "agentModel")
+            rt.shutdown()
+
+    def test_create_runtime_claude_model_overrides_agent_model(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-factory-claude-model-specific-") as tmp:
+            rt = create_runtime({
+                "runtime": "claude",
+                "configured_runtime": "claude",
+                "model": "claude-shared",
+                "claude_model": "claude-specific",
+                "runtime_workspace": tmp,
+                "cwd": tmp,
+            })
+            self.assertEqual(rt.model, "claude-specific")
+            self.assertEqual(rt.model_source, "agentClaudeModel")
             rt.shutdown()
 
     def test_prewarm_creates_client(self):
@@ -731,6 +811,13 @@ class ClaudeRuntimeEventNormTest(unittest.TestCase):
         )
         event = _claude_sdk_event(msg)
         self.assertEqual(event.type, "thinking")
+
+    def test_claude_sdk_event_treats_result_as_done(self):
+        msg = types.SimpleNamespace(result="final answer")
+        event = _claude_sdk_event(msg, session_id="s1")
+        self.assertEqual(event.type, "done")
+        self.assertEqual(event.content, "")
+        self.assertEqual(event.session_id, "s1")
 
 
 class ClaudeRuntimeCoerceBoolTest(unittest.TestCase):

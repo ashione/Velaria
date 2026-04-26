@@ -78,6 +78,9 @@ def _run_interactive_loop(argv: list[str] | None = None) -> int:
     if args.session:
         with _trace_span("interactive.ensure_session"):
             _ensure_agent_session(new_session=True, session_id=args.session)
+    elif args.new:
+        with _trace_span("interactive.ensure_new_session"):
+            _ensure_agent_session(new_session=True)
     else:
         with _trace_span("interactive.start_session_background"):
             _start_agent_session_async()
@@ -348,7 +351,10 @@ def _handle_control_command(command: str) -> None:
         runtime = _safe_runtime()
         if runtime is None:
             return
-        _print_status(runtime.status(_current_session_id))
+        status = runtime.status(_current_session_id or "__velaria_pending_session__")
+        if not _current_session_id:
+            status["session"] = None
+        _print_status(status)
         _print_velaria_state()
         return
     if cmd == "/dataset":
@@ -665,7 +671,7 @@ def _statusline() -> str:
     model = "-"
     tool_count = 0
     try:
-        status = _runtime.status(_current_session_id) if _runtime is not None else {}
+        status = _runtime.status(_current_session_id or "__velaria_pending_session__") if _runtime is not None else {}
         runtime = str(status.get("runtime") or "-")
         model = str(status.get("model") or "-")
         tool_count = len(status.get("tools") or [])

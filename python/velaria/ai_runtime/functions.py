@@ -605,10 +605,27 @@ def _velaria_cli_run(args: JsonDict) -> JsonDict:
         return {"ok": False, "error": "argv must be a list of strings or command must be a string"}
     if not argv:
         return {"ok": False, "error": "argv is required"}
+    if _looks_like_full_cli_command(argv):
+        return {
+            "ok": False,
+            "error": (
+                "velaria_cli_run expects Velaria CLI subcommands only, for example "
+                "`datasets list` or `run list --limit 5`; do not include `uv run`, "
+                "`python`, or `python/velaria_cli.py`."
+            ),
+            "argv": argv,
+        }
     if argv[0] in {"-i", "--interactive", "ai"}:
         return {"ok": False, "error": f"interactive/ai command is not allowed through velaria_cli_run: {argv[0]}"}
 
     return _execute_cli_argv(list(argv))
+
+
+def _looks_like_full_cli_command(argv: list[str]) -> bool:
+    first = pathlib.Path(argv[0]).name
+    if first in {"uv", "python", "python3"}:
+        return True
+    return any(part.endswith("velaria_cli.py") or pathlib.Path(part).name in {"velaria-cli", "velaria_cli"} for part in argv)
 
 
 def _execute_cli_argv(argv: list[str]) -> JsonDict:
@@ -769,7 +786,17 @@ def velaria_agent_instructions() -> str:
         "download code, or generic shell download steps before trying the "
         "Velaria function. Do not probe `velaria_cli.py --help` or inspect the "
         "generic CLI before using the registered Velaria tools for ordinary "
-        "dataset work. Do not use web search to discover Velaria tools. If "
+        "dataset work. If the user asks what datasets or data sources are "
+        "available, this is a hard tool-use rule: call the registered Velaria "
+        "local function/MCP tool `velaria_cli_run` with command `datasets list` "
+        "first. In Codex this tool appears directly as `velaria_cli_run`; in "
+        "Claude it may appear as `mcp__velaria__velaria_cli_run`. Pass exactly "
+        "`command=\"datasets list\"` or equivalent argv `['datasets', 'list']`. "
+        "`velaria_cli_run` is an agent tool, not a shell executable; never run "
+        "`velaria_cli_run ...` through shell/exec. Do not use shell/exec to run "
+        "`uv`, `python`, or `velaria_cli.py` for this inventory request, and "
+        "do not try nonexistent dataset inventory commands. Do not use web "
+        "search to discover Velaria tools. If "
         "direct `mcp__velaria__.*` tools are not visible because the runtime "
         "deferred them, use `tool_search` with a Velaria-specific query and then "
         "call the returned `mcp__velaria__` tool. Use web search only when the "
@@ -787,9 +814,11 @@ def velaria_agent_instructions() -> str:
         "stored procedures, or broad ANSI window SQL unless the SQL catalog "
         "explicitly says the construct is supported. SOURCE TABLE is read-only; "
         "SINK TABLE can be written but must not be used as a query input.\n\n"
-        "Python and CLI commands in this repository must be run through uv. The "
-        "repository-visible CLI entry is `uv run --project python python "
-        "python/velaria_cli.py ...`.\n\n"
+        "When a Velaria CLI command is needed inside the agent runtime, prefer "
+        "the registered `velaria_cli_run` local function and pass only the "
+        "Velaria subcommand. For direct user-facing CLI examples outside the "
+        "agent runtime, the repository-visible CLI entry is `uv run --project "
+        "python python python/velaria_cli.py ...`.\n\n"
         "Available Velaria local functions:\n"
         f"{tool_catalog}\n\n"
         "The full Velaria usage skill is available as an MCP resource at "
@@ -797,6 +826,18 @@ def velaria_agent_instructions() -> str:
         "you need detailed workflow guidance, examples, parameters, or boundary "
         "rules for a Velaria task. The SQL catalog is available as an MCP "
         f"resource at `{SQL_CATALOG_URI}`."
+    )
+
+
+def velaria_turn_instructions(prompt: str) -> str:
+    return (
+        "Velaria turn tool policy: use registered Velaria agent tools for "
+        "Velaria data operations before shell commands. For dataset inventory, "
+        "call the agent tool `velaria_cli_run` with `command=\"datasets list\"`; "
+        "`velaria_cli_run` is not a shell executable. Do not run `datasets list`, "
+        "`velaria_cli_run ...`, `uv`, `python`, or `velaria_cli.py` through shell "
+        "for dataset inventory.\n\n"
+        f"User request:\n{prompt}"
     )
 
 
@@ -974,7 +1015,7 @@ def local_function_registry() -> dict[str, LocalFunction]:
         ),
         "velaria_cli_run": LocalFunction(
             "velaria_cli_run",
-            "Run a non-interactive Velaria CLI command and capture stdout/stderr.",
+            "Run a non-interactive Velaria CLI subcommand such as `datasets list`, `run list --limit 5`, or `artifacts list`; do not include uv/python wrappers.",
             _tool_schema(
                 {
                     "argv": {"type": "array", "items": {"type": "string"}},

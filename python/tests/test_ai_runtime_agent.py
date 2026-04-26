@@ -6,6 +6,7 @@ import sys
 import types
 import tempfile
 import unittest
+import uuid
 from unittest import mock
 
 from velaria.agentic_store import AgenticStore
@@ -315,6 +316,14 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertEqual(result["run_id"], "run_test")
         self.assertEqual(result["artifacts"][0]["artifact_id"], "artifact_test")
 
+    def test_cli_function_rejects_full_uv_command(self):
+        result = execute_local_function(
+            "velaria_cli_run",
+            {"command": "uv run --project python python python/velaria_cli.py datasets list"},
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("subcommands only", result["error"])
+
     def test_sql_catalog_tools_support_on_demand_function_and_pattern_lookup(self):
         caps = execute_local_function("velaria_sql_capabilities", {})
         self.assertTrue(caps["ok"])
@@ -407,6 +416,23 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertTrue(search_payload["ok"])
         self.assertEqual(search_payload["matches"][0]["name"], "UNIX_TIMESTAMP")
         self.assertIn("UNIX_TIMESTAMP([timestamp_or_date])", search_payload["matches"][0]["signature"])
+
+        with mock.patch(
+            "velaria.ai_runtime.mcp_server.execute_local_function",
+            side_effect=RuntimeError("boom"),
+        ):
+            failed = _handle_request(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 23,
+                    "method": "tools/call",
+                    "params": {"name": "velaria_read", "arguments": {}},
+                }
+            )
+        failed_payload = json.loads(failed["result"]["content"][0]["text"])
+        self.assertFalse(failed_payload["ok"])
+        self.assertEqual(failed_payload["function"], "velaria_read")
+        self.assertIn("boom", failed_payload["error"])
 
         resources = _handle_request({"jsonrpc": "2.0", "id": 22, "method": "resources/list"})
         resource_uris = {resource["uri"] for resource in resources["result"]["resources"]}
@@ -505,6 +531,7 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertIn("Do not probe `velaria_cli.py --help`", instructions)
         self.assertIn("Do not use web search to discover Velaria tools", instructions)
         self.assertIn("tool_search", instructions)
+        self.assertIn("datasets list", instructions)
         self.assertIn("velaria_dataset_download", instructions)
         self.assertIn("velaria_dataset_import", instructions)
         self.assertIn("velaria_dataset_process", instructions)
@@ -569,7 +596,7 @@ class AiRuntimeAgentTest(unittest.TestCase):
             try:
                 with mock.patch.dict(os.environ, {"CODEX_HOME": str(local_codex_home)}):
                     session_id = asyncio.run(runtime.start_thread({}))
-                self.assertTrue(session_id.startswith("ai_session_"))
+                self.assertEqual(str(uuid.UUID(session_id)), session_id)
                 fake = FakeClient.instances[0]
                 runtime_cwd = str(pathlib.Path(tmp) / "workspace")
                 self.assertEqual(fake.connect_kwargs["cwd"], runtime_cwd)
@@ -640,12 +667,29 @@ class AiRuntimeAgentTest(unittest.TestCase):
                 self.assertNotIn(str(pathlib.Path.cwd()), json.dumps(mcp["env"]))
                 status = runtime.status(session_id)
                 self.assertEqual(status["provider"], "openai")
-                self.assertEqual(status["auth_mode"], "oauth")
+                self.assertEqual(status["auth_mode"], "local")
                 self.assertTrue(status["reuse_local_config"])
                 self.assertEqual(status["cwd"], runtime_cwd)
                 self.assertEqual(status["reasoning_effort"], "none")
                 self.assertTrue(status["network_access"])
                 self.assertNotIn("project_cwd", status)
+            finally:
+                runtime.shutdown()
+
+    def test_codex_runtime_ignores_non_codex_sessions(self):
+        from velaria.ai_runtime.codex_runtime import CodexRuntime
+
+        with tempfile.TemporaryDirectory(prefix="velaria-codex-runtime-filter-") as tmp:
+            try:
+                runtime = CodexRuntime(runtime_workspace=tmp)
+            except ImportError as exc:
+                raise unittest.SkipTest("codex-app-server-sdk is not installed") from exc
+            try:
+                session_id = "00000000-0000-0000-0000-000000000002"
+                runtime.registry.register(session_id, "claude", session_id, {})
+                self.assertFalse(asyncio.run(runtime.resume_thread(session_id)))
+                self.assertEqual(asyncio.run(runtime.list_threads()), [])
+                self.assertIsNone(runtime.status()["session"])
             finally:
                 runtime.shutdown()
 
@@ -799,6 +843,26 @@ class AiRuntimeAgentTest(unittest.TestCase):
                 asyncio.run(runtime.start_thread({}))
                 self.assertEqual(fake.started_config.model, "gpt-5.4-mini")
                 self.assertEqual(fake.started_config.config["model_reasoning_effort"], "low")
+            finally:
+                runtime.shutdown()
+
+    def test_create_runtime_codex_model_overrides_agent_model(self):
+        from velaria.ai_runtime import create_runtime
+
+        with tempfile.TemporaryDirectory(prefix="velaria-codex-runtime-factory-model-") as tmp:
+            try:
+                runtime = create_runtime(
+                    {
+                        "runtime": "codex",
+                        "model": "gpt-shared",
+                        "codex_model": "gpt-codex-specific",
+                        "runtime_workspace": tmp,
+                    }
+                )
+            except ImportError as exc:
+                raise unittest.SkipTest("codex-app-server-sdk is not installed") from exc
+            try:
+                self.assertEqual(runtime.model, "gpt-codex-specific")
             finally:
                 runtime.shutdown()
 

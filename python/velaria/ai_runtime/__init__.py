@@ -1,6 +1,6 @@
 from __future__ import annotations
 import json
-import secrets
+import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator, Protocol
 
@@ -22,15 +22,18 @@ class AiRuntime(Protocol):
     def status(self, session_id: str | None = None) -> dict[str, Any]: ...
 
 def generate_session_id() -> str:
-    return f"ai_session_{secrets.token_hex(8)}"
+    return str(uuid.uuid4())
 
 def create_runtime(config: dict[str, Any]) -> AiRuntime:
     runtime_type = str(config.get("runtime", "codex")).strip().lower()
+    configured_runtime = str(config.get("configured_runtime") or runtime_type).strip().lower()
     provider = str(config.get("provider", "openai") or "openai").strip().lower()
     auth_mode = _normalize_auth_mode(config.get("auth_mode", "oauth"))
     api_key = str(config.get("api_key", "")) if auth_mode == "api_key" else ""
     base_url = str(config.get("base_url", "")) if auth_mode == "api_key" else ""
     model = str(config.get("model", ""))
+    codex_model = str(config.get("codex_model") or "")
+    claude_model = str(config.get("claude_model") or "")
     reasoning_effort = str(config.get("reasoning_effort") or "none")
     network_access = _bool_config(config, "network_access", True)
     reuse_local_config = auth_mode == "local"
@@ -42,15 +45,17 @@ def create_runtime(config: dict[str, Any]) -> AiRuntime:
                 "Install it with: uv sync --project python"
             )
         from .claude_runtime import ClaudeAgentRuntime
-        # Resolve model: agentClaudeModel > agentModel > default
-        claude_model = str(config.get("claude_model") or "")
-        resolved_model = claude_model or model or "claude-sonnet-4-20250514"
+        resolved_model = claude_model or (model if configured_runtime == "claude" else "") or "claude-sonnet-4-20250514"
+        model_source = "agentClaudeModel" if claude_model else (
+            "agentModel" if configured_runtime == "claude" and model else "default"
+        )
         # When Claude runtime is selected, default provider to anthropic
         if provider == "openai":
             provider = "anthropic"
         return ClaudeAgentRuntime(
             provider=provider,
             model=resolved_model,
+            model_source=model_source,
             auth_mode=auth_mode,
             api_key=api_key,
             base_url=base_url,
@@ -75,7 +80,7 @@ def create_runtime(config: dict[str, Any]) -> AiRuntime:
         from .codex_runtime import CodexRuntime
         return CodexRuntime(
             provider=provider,
-            model=model or "gpt-5.4-mini",
+            model=codex_model or model or "gpt-5.4-mini",
             reasoning_effort=reasoning_effort,
             network_access=network_access,
             api_key=api_key,
@@ -157,6 +162,7 @@ def load_ai_config() -> dict[str, Any]:
         "codex_model": config.get("agentCodexModel", ""),
         "reasoning_effort": config.get("agentReasoningEffort", "none"),
         "runtime": config.get("agentRuntime", "codex"),
+        "configured_runtime": config.get("agentRuntime", "codex"),
         "runtime_path": config.get("agentRuntimePath", ""),
         "claude_runtime_path": config.get("agentClaudeRuntimePath", ""),
         "codex_runtime_path": config.get("agentCodexRuntimePath", ""),

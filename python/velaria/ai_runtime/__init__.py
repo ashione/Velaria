@@ -28,7 +28,7 @@ def create_runtime(config: dict[str, Any]) -> AiRuntime:
     runtime_type = str(config.get("runtime", "codex")).strip().lower()
     configured_runtime = str(config.get("configured_runtime") or runtime_type).strip().lower()
     provider = str(config.get("provider", "openai") or "openai").strip().lower()
-    auth_mode = _normalize_auth_mode(config.get("auth_mode", "oauth"))
+    auth_mode = _normalize_auth_mode(config.get("auth_mode", "local"))
     api_key = str(config.get("api_key", "")) if auth_mode == "api_key" else ""
     base_url = str(config.get("base_url", "")) if auth_mode == "api_key" else ""
     model = str(config.get("model", ""))

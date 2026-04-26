@@ -140,6 +140,8 @@ Velaria/
 - Velaria Agent 复用 Codex/Claude 等既有 agent runtime，但产品身份、工具选择与用户交互语义都属于 Velaria。默认 runtime 为 Codex（默认模型 `gpt-5.4-mini`），Claude runtime（默认模型 `claude-sonnet-4-20250514`）需额外安装可选依赖。默认 reasoning effort 均为 `none`，网络访问默认开启。
 - Agent 配置统一使用 `agent*` 命名，例如 `agentRuntime`、`agentModel`、`agentAuthMode`、`agentRuntimeWorkspace`、`agentCodexNetworkAccess`（Codex）、`agentNetworkAccess`（Claude）、`agentProxy`；不要再新增 `ai*` 配置键。旧 `ai` 子命令只作为非交互 SQL 生成/历史兼容入口，不作为新交互能力的主设计面。
 - Velaria usage skill 与 SQL catalog 都按需暴露为 MCP resource/tool，不把完整 skill 或完整 SQL 函数清单内联进默认 prompt。SQL 函数、边界和模板通过 `velaria_sql_capabilities`、`velaria_sql_function_search`、`velaria_sql_query_patterns` 或 `velaria://sql/catalog` 检索。
+- 多 runtime 实现（Codex/Claude）之间禁止复制粘贴工具函数；共用逻辑（代理环境变量、bool 转换、trace 开关等）必须提取到一个共享模块或统一放在 `__init__.py` 的 module-level helper 中，不要让同一段代码出现在两个 runtime 文件里。
+- 配置解析禁止出现三级以上的优先级链（如 `agentClaudeModel > agentModel > default` 已到上限）；如果需要更复杂的 fallback，先提取为命名良好的 `_resolve_*` 函数并写清 docstring，再考虑是否真的需要那么多层。多模型配置场景优先使用 `agentClaudeModel` / `agentCodexModel` 分别指定，而非依赖 `agentModel` 兜底。
 
 ## 本轮协作沉淀
 

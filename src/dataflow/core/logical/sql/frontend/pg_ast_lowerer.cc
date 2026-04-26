@@ -287,8 +287,13 @@ std::shared_ptr<PredicateExpr> lowerAExpr(const PgQuery__Node* n, std::vector<Sq
   if (!n || n->node_case != PG_QUERY__NODE__NODE_A_EXPR || !n->a_expr) return nullptr;
   auto* ae = n->a_expr;
 
-  // Only support AEXPR_OP for Phase 1
-  if (ae->kind != PG_QUERY__A__EXPR__KIND__AEXPR_OP) return nullptr;
+  // Only support AEXPR_OP for Phase 1 — emit diagnostic for LIKE/IN/etc.
+  if (ae->kind != PG_QUERY__A__EXPR__KIND__AEXPR_OP) {
+    diags.push_back(makeDiag(SqlDiagnostic::Phase::Lower, "unsupported_sql_feature",
+      "Unsupported WHERE operator (LIKE/IN/BETWEEN/IS NULL etc.) not supported via pg_query frontend.",
+      "Use VELARIA_SQL_FRONTEND=legacy for this query."));
+    return nullptr;
+  }
 
   // Extract operator name from name[] list
   std::string op;
@@ -327,7 +332,12 @@ std::shared_ptr<PredicateExpr> lowerExpr(const PgQuery__Node* n, std::vector<Sql
   switch (n->node_case) {
     case PG_QUERY__NODE__NODE_BOOL_EXPR: return lowerBoolExpr(n, diags);
     case PG_QUERY__NODE__NODE_A_EXPR: return lowerAExpr(n, diags);
-    default: return nullptr;
+    default:
+      // Unsupported predicate type — emit diagnostic for fallback
+      diags.push_back(makeDiag(SqlDiagnostic::Phase::Lower, "unsupported_sql_feature",
+        "Unsupported WHERE expression type via pg_query frontend.",
+        "Use VELARIA_SQL_FRONTEND=legacy for this query."));
+      return nullptr;
   }
 }
 
@@ -547,6 +557,14 @@ bool PgAstLowerer::lower(const PgQueryParseResultHolder& parse_result,
 
   // fromClause
   if (s->n_from_clause > 0) {
+    // Reject implicit cross-join / multi-table FROM lists (FROM a, b, ...)
+    if (s->n_from_clause > 1) {
+      out_diagnostics.push_back(makeDiag(SqlDiagnostic::Phase::Lower,
+        "unsupported_sql_feature",
+        "Multi-table FROM clauses (implicit joins) not supported via pg_query frontend.",
+        "Use VELARIA_SQL_FRONTEND=legacy for this query, or rewrite as explicit JOIN."));
+      return false;
+    }
     auto* f0 = s->from_clause[0];
     if (f0->node_case == PG_QUERY__NODE__NODE_RANGE_VAR && f0->range_var) {
       out_query.has_from = true;
@@ -572,6 +590,16 @@ bool PgAstLowerer::lower(const PgQueryParseResultHolder& parse_result,
   // whereClause
   if (s->where_clause)
     out_query.where = lowerExpr(s->where_clause, out_diagnostics);
+
+  // havingClause — emit diagnostic and fall back to legacy
+  // (aggregates in HAVING predicates require special handling not yet implemented)
+  if (s->having_clause) {
+    out_diagnostics.push_back(makeDiag(SqlDiagnostic::Phase::Lower,
+      "unsupported_sql_feature",
+      "HAVING clause not yet supported via pg_query frontend.",
+      "Use VELARIA_SQL_FRONTEND=legacy for queries with HAVING."));
+    return false;
+  }
 
   // groupClause
   for (size_t i = 0; i < s->n_group_clause; i++) {

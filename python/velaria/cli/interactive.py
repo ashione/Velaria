@@ -246,7 +246,11 @@ def _wait_runtime_prewarm(timeout: float = 5.0) -> None:
     thread = _prewarm_thread
     if thread is None or not thread.is_alive():
         return
-    _print_note("warming", "waiting for runtime prewarm")
+    if _state.turn_state == "running" and _turn_status_stop is not None:
+        _state.turn_activity = "runtime warmup"
+        _restore_turn_status_line()
+    else:
+        _print_note("warming", "waiting for runtime prewarm")
     with _trace_span(f"interactive.wait_prewarm timeout={timeout}"):
         thread.join(timeout=timeout)
     if thread.is_alive():
@@ -454,13 +458,14 @@ def _send_agent_message(prompt: str) -> None:
     runtime = _safe_runtime()
     if runtime is None:
         return
-    _wait_runtime_prewarm()
 
     _state.turn_state = "running"
     _state.turn_activity = "agent"
     _state.turn_started_at = time.time()
-    if not _start_turn_status():
+    status_started = _start_turn_status()
+    if not status_started:
         _print_note("running", "streaming runtime events")
+    _wait_runtime_prewarm()
 
     async def _stream() -> None:
         failed = False

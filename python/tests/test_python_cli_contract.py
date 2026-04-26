@@ -707,6 +707,36 @@ class PythonCliContractTest(unittest.TestCase):
         self.assertIn("running", output)
         self.assertGreaterEqual(output.count("\r"), 3)
 
+    def test_interactive_turn_status_starts_before_prewarm_wait(self):
+        interactive = importlib.import_module("velaria.cli.interactive")
+
+        observed = {}
+
+        def fake_start_status():
+            observed["start_state"] = interactive._state.turn_state
+            return True
+
+        def fake_wait_prewarm():
+            observed["wait_state"] = interactive._state.turn_state
+            observed["wait_activity"] = interactive._state.turn_activity
+
+        interactive._state = interactive.VelariaInteractiveState()
+        interactive._current_session_id = "agent-session-1"
+        interactive._runtime = _FakeAgentRuntime()
+        stdout = io.StringIO()
+        try:
+            with mock.patch.object(interactive, "_start_turn_status", side_effect=fake_start_status):
+                with mock.patch.object(interactive, "_wait_runtime_prewarm", side_effect=fake_wait_prewarm):
+                    with redirect_stdout(stdout):
+                        interactive._send_agent_message("explain these data")
+            self.assertEqual(observed["start_state"], "running")
+            self.assertEqual(observed["wait_state"], "running")
+            self.assertEqual(observed["wait_activity"], "agent")
+        finally:
+            interactive._current_session_id = None
+            interactive._runtime = None
+            interactive._state = interactive.VelariaInteractiveState()
+
     def test_interactive_turn_keyboard_interrupt_marks_cancelled(self):
         interactive = importlib.import_module("velaria.cli.interactive")
 

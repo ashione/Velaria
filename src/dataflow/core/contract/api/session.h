@@ -5,6 +5,7 @@
 #include "src/dataflow/core/execution/file_source.h"
 #include "src/dataflow/core/execution/source_materialization.h"
 #include "src/dataflow/core/execution/stream/stream.h"
+#include "src/dataflow/core/logical/sql/frontend/sql_frontend.h"
 #include "src/dataflow/core/logical/sql/sql_parser.h"
 #include "src/dataflow/core/logical/sql/sql_planner.h"
 #include <unordered_map>
@@ -57,6 +58,9 @@ class DataflowSession {
                                const StreamingQueryOptions& options = {});
   StreamingQuery startStreamSql(const std::string& sql,
                                 const StreamingQueryOptions& options = {});
+
+  // Returns the active SQL frontend name (e.g. "legacy", "pg_query", "dual")
+  std::string sqlFrontendName() const;
 
  private:
   ViewCatalog catalog_;

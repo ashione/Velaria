@@ -23,6 +23,7 @@ Velaria/
 │   │   ├── execution/serial/     # Serializer
 │   │   ├── execution/stream/     # Stream, BinaryRowBatch
 │   │   └── logical/              # SQL Parser, SQL Planner, Plan
+│   │       └── sql/frontend/      # libpg_query-based SQL frontend (RAII, validator, lowerer)
 │   ├── ai/                       # AI Plugin Runtime
 │   ├── experimental/
 │   │   ├── rpc/                  # ActorRPC Codec, RPC Codec, Serialization
@@ -62,6 +63,8 @@ Velaria/
 | nanoarrow | 0.8.0 | Arrow 列式格式与 IPC 编解码 |
 | cppjieba | 5.6.3 | 中文分词（keyword search） |
 | limonp | master | cppjieba 工具库依赖 |
+| libpg_query | 16-5.1.0 | PostgreSQL SQL 解析（`sql/frontend/` 内部，不暴露到公共头文件） |
+| nlohmann/json | 3.11.3 | JSON 解析（预留给 protobuf→JSON 迁移路径） |
 
 ## Python 依赖（uv 管理）
 
@@ -116,6 +119,9 @@ Velaria/
 ### 回归测试套件
 
 - `core_regression` — 核心回归（columnar_batch, planner, source_sink_abi, sql, simd, stream, vector, source_materialization, file_source）
+- `sql_frontend_test` — PG SQL 前端回归（diagnostic, offset map, config, session integration）
+- `sql_feature_validator_test` — SQL feature policy 矩阵测试
+- `sql_dual_frontend_test` — dual-mode + pg_query fallback 测试
 - `python_ecosystem_regression` — Python 生态回归
 - `experimental_regression` — 实验运行时回归
 
@@ -135,6 +141,7 @@ Velaria/
 - `skills/*.md` 面向最终用户使用说明，不写仓库内部编译、Bazel 构建、源码同步或其他实现侧操作；只保留用户可直接执行的使用方式、参数说明与输入输出约束。
 - 仓库文档若展示 Python CLI 命令，必须使用仓库内真实可见入口：源码脚本 `uv run --project python python python/velaria_cli.py ...`，或已打包产物 `./dist/velaria-cli ...`；不要默认写成全局可执行的 `velaria-cli ...`，除非文档已明确提供安装该命令的步骤。
 - Agent/runtime core 必须保持领域无关和抽象纯粹；不要在 core、agent 指令或本地 function 中硬编码某个行业、数据源、指数、字段名或业务场景的特化映射/兜底逻辑。遇到编码、列名、表名等问题时，优先做通用规范化、显式 metadata / mapping 返回和可诊断错误，让 agent 或用户基于上下文决定业务语义。
+- 所有与 agent 交互相关的错误必须保持 agentic-friendly：错误信息必须包含 `error_type`（机器可分类）、`message`（人类可读）、`hint`（修复建议/workaround），必要时附带 `candidates`（候选值列表）和 `byte_offset`（精确定位）。不要返回裸 exception message 或 traceback 到 agent 上下文；parse_error / unsupported_sql_feature / bind_error / execution_error 必须严格区分，让 agent 能够根据 error_type 选择合适的 react/retry 策略。
 - 新功能开发禁止一开始就堆多个版本、兼容路径或“莫须有”的兜底逻辑；先实现一条语义清晰、可验证的主路径。只有在真实用例、测试或运行错误证明边界存在后，才补充最小化、可诊断、可删除的处理分支。
 - `velaria_cli.py -i` 是交互式 Velaria Agent 主入口；普通输入默认进入 active agent thread，slash 命令负责会话/状态控制，`:<command>` 才作为原 CLI escape hatch。不要把交互式主路径重新设计成 `ai ...` 前缀命令。
 - Velaria Agent 复用 Codex/Claude 等既有 agent runtime，但产品身份、工具选择与用户交互语义都属于 Velaria。默认 runtime 为 Codex（默认模型 `gpt-5.4-mini`），Claude runtime（默认模型 `claude-sonnet-4-20250514`）需额外安装可选依赖。默认 reasoning effort 均为 `none`，网络访问默认开启。

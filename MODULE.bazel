@@ -120,6 +120,81 @@ cc_library(
     ],
 )
 
+# libpg_query — PostgreSQL-compatible SQL parser (pinned 16-5.1.0)
+# Used ONLY within src/dataflow/core/logical/sql/frontend/ for SQL parsing.
+# pg_query.h MUST NOT appear in Velaria public headers.
+# TODO(spike): Verify SHA256 with a second download source.
+http_archive(
+    name = "libpg_query_src",
+    build_file_content = """load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "pg_query",
+    srcs = glob(
+        [
+            "src/*.c",
+            "src/postgres/*.c",
+        ]) + [
+            "vendor/protobuf-c/protobuf-c.c",
+            "vendor/xxhash/xxhash.c",
+            "protobuf/pg_query.pb-c.c",
+        ],
+    hdrs = glob([
+        "pg_query.h",
+        "src/*.h",
+        "src/include/*.c",
+        "protobuf/*.h",
+        "vendor/protobuf-c/*.h",
+        "vendor/xxhash/*.h",
+        "scripts/*.h",
+        "src/postgres/include/**/*.h",
+        "src/postgres/include/*.c",
+        "src/postgres/include/*.switch.c",
+    ]),
+    includes = [
+        ".",
+        "src",
+        "src/include",
+        "src/postgres/include",
+        "vendor",
+        "vendor/protobuf-c",
+        "vendor/xxhash",
+        "protobuf",
+    ],
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "31f25b573da1c966bc762b0313b0a50cdd03aabdbaf666d90469eddcb1656df7",
+    strip_prefix = "libpg_query-16-5.1.0",
+    type = "tar.gz",
+    urls = [
+        "https://codeload.github.com/pganalyze/libpg_query/tar.gz/refs/tags/16-5.1.0",
+    ],
+)
+
+# nlohmann/json — header-only JSON library for parse tree processing
+# Used ONLY within src/dataflow/core/logical/sql/frontend/.
+http_archive(
+    name = "nlohmann_json_src",
+    build_file_content = """load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "json",
+    hdrs = glob(["include/nlohmann/**/*.hpp"]),
+    includes = ["include"],
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "0d8ef5af7f9794e3263480193c491549b2ba6cc74bb018906202ada498a79406",
+    strip_prefix = "json-3.11.3",
+    type = "tar.gz",
+    urls = [
+        "https://codeload.github.com/nlohmann/json/tar.gz/refs/tags/v3.11.3",
+    ],
+)
+
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(python_version = "3.12")
 use_repo(python, "python_3_12")

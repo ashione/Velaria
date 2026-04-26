@@ -11,6 +11,20 @@ filegroup(
         "src/dataflow/core/logical/sql/sql_parser.h",
         "src/dataflow/core/logical/sql/sql_planner.cc",
         "src/dataflow/core/logical/sql/sql_planner.h",
+        "src/dataflow/core/logical/sql/frontend/sql_diagnostic.h",
+        "src/dataflow/core/logical/sql/frontend/source_offset_map.h",
+        "src/dataflow/core/logical/sql/frontend/source_offset_map.cc",
+        "src/dataflow/core/logical/sql/frontend/sql_frontend.h",
+        "src/dataflow/core/logical/sql/frontend/sql_frontend.cc",
+        "src/dataflow/core/logical/sql/frontend/pg_query_raii.h",
+        "src/dataflow/core/logical/sql/frontend/pg_query_raii.cc",
+        "src/dataflow/core/logical/sql/frontend/pg_query_frontend.h",
+        "src/dataflow/core/logical/sql/frontend/pg_query_frontend.cc",
+        "src/dataflow/core/logical/sql/frontend/sql_feature_validator.h",
+        "src/dataflow/core/logical/sql/frontend/sql_feature_validator.cc",
+        "src/dataflow/core/logical/sql/frontend/pg_ast_lowerer.h",
+        "src/dataflow/core/logical/sql/frontend/pg_ast_lowerer.cc",
+        "src/dataflow/core/logical/sql/frontend/unbound_plan.h",
     ],
     visibility = ["//visibility:public"],
 )
@@ -153,6 +167,12 @@ cc_library(
         "src/dataflow/ai/plugin_runtime.cc",
         "src/dataflow/core/logical/sql/sql_parser.cc",
         "src/dataflow/core/logical/sql/sql_planner.cc",
+        "src/dataflow/core/logical/sql/frontend/source_offset_map.cc",
+        "src/dataflow/core/logical/sql/frontend/sql_frontend.cc",
+        "src/dataflow/core/logical/sql/frontend/pg_query_raii.cc",
+        "src/dataflow/core/logical/sql/frontend/pg_query_frontend.cc",
+        "src/dataflow/core/logical/sql/frontend/sql_feature_validator.cc",
+        "src/dataflow/core/logical/sql/frontend/pg_ast_lowerer.cc",
         "src/dataflow/core/execution/stream/binary_row_batch.cc",
         "src/dataflow/experimental/stream/actor_execution_optimizer.cc",
         "src/dataflow/experimental/stream/actor_stream_runtime.cc",
@@ -175,6 +195,14 @@ cc_library(
         "src/dataflow/core/logical/sql/sql_errors.h",
         "src/dataflow/core/logical/sql/sql_parser.h",
         "src/dataflow/core/logical/sql/sql_planner.h",
+        "src/dataflow/core/logical/sql/frontend/sql_diagnostic.h",
+        "src/dataflow/core/logical/sql/frontend/source_offset_map.h",
+        "src/dataflow/core/logical/sql/frontend/sql_frontend.h",
+        "src/dataflow/core/logical/sql/frontend/pg_query_raii.h",
+        "src/dataflow/core/logical/sql/frontend/pg_query_frontend.h",
+        "src/dataflow/core/logical/sql/frontend/sql_feature_validator.h",
+        "src/dataflow/core/logical/sql/frontend/pg_ast_lowerer.h",
+        "src/dataflow/core/logical/sql/frontend/unbound_plan.h",
         "src/dataflow/core/logical/planner/plan.h",
         "src/dataflow/core/execution/runtime/executor.h",
         "src/dataflow/core/execution/runtime/aggregate_layout.h",
@@ -200,6 +228,9 @@ cc_library(
     deps = [
         "@cppjieba_src//:cppjieba",
         "@nanoarrow_src//:nanoarrow",
+        "@libpg_query_src//:pg_query",
+        # Reserved for future protobuf→JSON migration path
+        "@nlohmann_json_src//:json",
     ],
     visibility = ["//visibility:public"],
 )
@@ -520,3 +551,22 @@ cc_test(
     srcs = ["src/dataflow/tests/file_source_probe_test.cc"],
     deps = [":dataflow_core"],
 )
+
+cc_test(
+    name = "sql_frontend_test",
+    srcs = ["src/dataflow/tests/sql_frontend_test.cc"],
+    deps = [":dataflow_core"],
+)
+
+cc_test(
+    name = "sql_feature_validator_test",
+    srcs = ["src/dataflow/tests/sql_feature_validator_test.cc"],
+    deps = [":dataflow_core"],
+)
+
+cc_test(
+    name = "sql_dual_frontend_test",
+    srcs = ["src/dataflow/tests/sql_dual_frontend_test.cc"],
+    deps = [":dataflow_core"],
+)
+

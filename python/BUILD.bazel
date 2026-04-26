@@ -30,6 +30,7 @@ py_library(
         "velaria/cli/agentic.py",
         "velaria/cli/ai_cmd.py",
         "velaria/cli/artifacts.py",
+        "velaria/cli/datasets.py",
         "velaria/cli/embedding.py",
         "velaria/cli/file_sql.py",
         "velaria/cli/interactive.py",

@@ -463,7 +463,10 @@ def _send_agent_message(prompt: str) -> None:
     _state.turn_state = "running"
     _state.turn_activity = "agent"
     _state.turn_started_at = time.time()
-    _start_turn_status()
+    if _start_turn_status():
+        pass  # spinner handles visual feedback
+    else:
+        print(_style("⏳ running…", "event"), flush=True)
     _wait_runtime_prewarm()
 
     async def _stream() -> None:
@@ -549,9 +552,11 @@ def _stop_turn_status() -> None:
 def _should_show_turn_status() -> bool:
     if os.environ.get("VELARIA_INTERACTIVE_NO_SPINNER"):
         return False
-    if os.environ.get("VELARIA_INTERACTIVE_STDLIB"):
-        return False
-    return hasattr(sys.stdout, "isatty")
+    return (
+        hasattr(sys.stdout, "isatty")
+        and sys.stdout.isatty()
+        and not os.environ.get("VELARIA_INTERACTIVE_STDLIB")
+    )
 
 
 def _draw_turn_status(frame: str) -> None:
@@ -661,44 +666,45 @@ def _render_event(event: Any) -> None:
     data = getattr(event, "data", {}) or {}
     _update_state_from_event(event_type, content, data)
 
-    if event_type == "done":
+    if event_type in {"done", "error"}:
         _stop_turn_status()
+
+    if event_type == "done":
         _state.turn_state = "done"
         _print_note("done", _elapsed_turn())
         return
     if event_type == "error":
-        _stop_turn_status()
         _print_note("error", content or _json_dumps(data), level="error")
         return
+
+    # Only pause/restore spinner when it's actually running (TTY mode)
+    active_spinner = _turn_status_stop is not None and not _turn_status_stop.is_set()
+    if active_spinner:
+        _clear_turn_status_line()
 
     if event_type == "assistant_text":
         if content:
             _print_assistant_text(content)
-        return
-    if event_type == "thinking":
+    elif event_type == "thinking":
         if content:
             _print_event("thinking", content)
-        return
-    if event_type == "tool_call":
+    elif event_type == "tool_call":
         _print_event("tool", _format_tool_call(content, data))
-        return
-    if event_type == "tool_result":
+    elif event_type == "tool_result":
         summary = _summarize_tool_result(content, data)
         if summary:
             _print_event("tool result", summary)
-        return
-    if event_type == "command":
+    elif event_type == "command":
         if content:
             _print_event("command", content)
-        return
-    if event_type == "file":
+    elif event_type == "file":
         if content:
             _print_event("file", content)
-        return
-    if _looks_like_runtime_payload(content):
-        return
-    if content:
+    elif not _looks_like_runtime_payload(content) and content:
         _print_assistant_text(content)
+
+    if active_spinner:
+        _restore_turn_status_line()
 
 
 def _extract_tool_name(data: dict[str, Any]) -> str:

@@ -14,7 +14,7 @@ from typing import Any, AsyncIterator
 
 from . import AiRuntime, generate_session_id
 from .agent import AgentEvent, normalize_runtime_event
-from .functions import execute_local_function, tool_definitions, velaria_agent_instructions
+from .functions import execute_local_function, tool_definitions, tool_result_json, velaria_agent_instructions
 from .session_registry import SessionRegistry
 
 
@@ -416,7 +416,7 @@ def _sdk_tool_result(result: dict[str, Any]) -> dict[str, Any]:
         "content": [
             {
                 "type": "text",
-                "text": json.dumps(result, ensure_ascii=False),
+                "text": tool_result_json(result),
             }
         ],
         "is_error": not bool(result.get("ok", True)),

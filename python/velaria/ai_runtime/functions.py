@@ -25,6 +25,13 @@ from .sql_catalog import (
 
 JsonDict = dict[str, Any]
 
+_TOOL_RESULT_JSON_LIMIT = 320_000
+_TOOL_RESULT_STRING_LIMIT = 80_000
+_TOOL_RESULT_STDIO_LIMIT = 20_000
+_TOOL_RESULT_PREVIEW_STRING_LIMIT = 1_000
+_TOOL_RESULT_LIST_LIMIT = 25
+_TOOL_RESULT_ROW_LIMIT = 5
+
 
 @dataclass(frozen=True)
 class LocalFunction:
@@ -643,7 +650,7 @@ def _execute_cli_argv(argv: list[str]) -> JsonDict:
         "stderr": stderr.getvalue(),
     }
     _merge_cli_metadata(result)
-    return result
+    return compact_tool_result(result)
 
 
 def _merge_cli_metadata(result: JsonDict) -> None:
@@ -666,6 +673,167 @@ def _merge_cli_metadata(result: JsonDict) -> None:
     for key in ("run_id", "artifact_id", "artifacts", "artifact"):
         if key in payload:
             result[key] = payload[key]
+
+
+def compact_tool_result(result: JsonDict, *, max_json_chars: int | None = None) -> JsonDict:
+    limit = _tool_result_json_limit(max_json_chars)
+    if _json_size(result) <= limit:
+        return result
+    compacted = _compact_value(
+        result,
+        string_limit=_TOOL_RESULT_STRING_LIMIT,
+        list_limit=_TOOL_RESULT_LIST_LIMIT,
+        row_limit=_TOOL_RESULT_ROW_LIMIT,
+    )
+    if isinstance(compacted, dict):
+        compacted.setdefault("_tool_result_truncated", True)
+        compacted.setdefault(
+            "_tool_result_truncation",
+            {
+                "reason": "tool result exceeded transport JSON budget",
+                "max_json_chars": limit,
+            },
+        )
+    if _json_size(compacted) <= limit:
+        return compacted
+    compacted = _compact_value(compacted, string_limit=8_000, list_limit=8, row_limit=3)
+    if isinstance(compacted, dict):
+        compacted["_tool_result_truncated"] = True
+        compacted["_tool_result_truncation"] = {
+            "reason": "tool result exceeded transport JSON budget",
+            "max_json_chars": limit,
+        }
+    if _json_size(compacted) <= limit:
+        return compacted
+    minimal: JsonDict = {
+        "ok": bool(result.get("ok", False)),
+        "function": result.get("function"),
+        "error": result.get("error"),
+        "_tool_result_truncated": True,
+        "_tool_result_truncation": {
+            "reason": "tool result exceeded transport JSON budget",
+            "max_json_chars": limit,
+            "original_json_chars": _json_size(result),
+        },
+    }
+    for key in ("exit_code", "argv", "run_id", "artifact_id"):
+        if key in result:
+            minimal[key] = result[key]
+    return minimal
+
+
+def tool_result_json(result: JsonDict, *, max_json_chars: int | None = None) -> str:
+    return json.dumps(compact_tool_result(result, max_json_chars=max_json_chars), ensure_ascii=False)
+
+
+def _tool_result_json_limit(value: int | None) -> int:
+    if value is None:
+        raw = os.environ.get("VELARIA_TOOL_RESULT_MAX_JSON_CHARS")
+        if raw:
+            try:
+                value = int(raw)
+            except ValueError:
+                value = None
+    if value is None:
+        value = _TOOL_RESULT_JSON_LIMIT
+    return max(16_000, min(int(value), 900_000))
+
+
+def _json_size(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False))
+
+
+def _compact_value(value: Any, *, string_limit: int, list_limit: int, row_limit: int) -> Any:
+    if isinstance(value, dict):
+        compacted: JsonDict = {}
+        for key, item in value.items():
+            if key in {"stdout", "stderr"} and isinstance(item, str):
+                limit = min(string_limit, _TOOL_RESULT_STDIO_LIMIT)
+                compacted[key] = _truncate_text(item, limit)
+                if len(item) > limit:
+                    compacted[f"{key}_truncated"] = True
+                    compacted[f"{key}_original_chars"] = len(item)
+                continue
+            if key == "preview_json" and isinstance(item, dict):
+                compacted[key] = _compact_preview_payload(
+                    item,
+                    string_limit=string_limit,
+                    list_limit=list_limit,
+                    row_limit=row_limit,
+                )
+                continue
+            if key == "rows" and isinstance(item, list):
+                compacted[key] = [
+                    _compact_value(
+                        v,
+                        string_limit=string_limit,
+                        list_limit=list_limit,
+                        row_limit=row_limit,
+                    )
+                    for v in item[:row_limit]
+                ]
+                if len(item) > row_limit:
+                    compacted["rows_truncated"] = True
+                    compacted["rows_original_count"] = len(item)
+                continue
+            compacted[key] = _compact_value(
+                item,
+                string_limit=string_limit,
+                list_limit=list_limit,
+                row_limit=row_limit,
+            )
+        return compacted
+    if isinstance(value, list):
+        items = [
+            _compact_value(
+                item,
+                string_limit=string_limit,
+                list_limit=list_limit,
+                row_limit=row_limit,
+            )
+            for item in value[:list_limit]
+        ]
+        if len(value) > list_limit:
+            items.append({"_truncated_items": len(value) - list_limit, "_original_count": len(value)})
+        return items
+    if isinstance(value, str):
+        return _truncate_text(value, string_limit)
+    return value
+
+
+def _compact_preview_payload(
+    preview: JsonDict,
+    *,
+    string_limit: int,
+    list_limit: int,
+    row_limit: int,
+) -> JsonDict:
+    compacted: JsonDict = {}
+    for key in ("schema", "row_count", "truncated"):
+        if key in preview:
+            compacted[key] = preview[key]
+    rows = preview.get("rows")
+    if isinstance(rows, list):
+        compacted["rows"] = [
+            _compact_value(
+                row,
+                string_limit=min(string_limit, _TOOL_RESULT_PREVIEW_STRING_LIMIT),
+                list_limit=list_limit,
+                row_limit=row_limit,
+            )
+            for row in rows[:row_limit]
+        ]
+        if len(rows) > row_limit:
+            compacted["rows_truncated"] = True
+            compacted["rows_original_count"] = len(rows)
+    return compacted
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    suffix = f"\n...[truncated {len(text) - limit} chars; use narrower CLI filters or lower --limit for full output]..."
+    return text[: max(0, limit - len(suffix))] + suffix
 
 
 @contextlib.contextmanager

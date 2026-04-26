@@ -729,6 +729,28 @@ class PythonCliContractTest(unittest.TestCase):
             interactive._current_session_id = None
             interactive._runtime = None
 
+    def test_interactive_turn_stream_exception_returns_to_prompt(self):
+        interactive = importlib.import_module("velaria.cli.interactive")
+
+        class FailingRuntime(_FakeAgentRuntime):
+            async def send_message(self, session_id, prompt):
+                self.messages.append((session_id, prompt))
+                raise RuntimeError("transport message too large")
+                yield
+
+        interactive._state = interactive.VelariaInteractiveState()
+        interactive._current_session_id = "agent-session-1"
+        interactive._runtime = FailingRuntime()
+        stdout = io.StringIO()
+        try:
+            with redirect_stdout(stdout):
+                interactive._send_agent_message("list artifacts")
+            self.assertEqual(interactive._state.turn_state, "failed")
+            self.assertIn("error    transport message too large", stdout.getvalue())
+        finally:
+            interactive._current_session_id = None
+            interactive._runtime = None
+
     def test_interactive_state_updates_from_function_payloads(self):
         interactive = importlib.import_module("velaria.cli.interactive")
         interactive._state = interactive.VelariaInteractiveState()

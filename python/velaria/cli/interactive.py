@@ -483,6 +483,10 @@ def _send_agent_message(prompt: str) -> None:
         asyncio.run(_stream())
     except KeyboardInterrupt:
         _mark_turn_interrupted()
+    except Exception as exc:
+        _state.turn_state = "failed"
+        _stop_turn_status()
+        _print_note("error", str(exc), level="error")
 
 
 def _mark_turn_interrupted() -> None:

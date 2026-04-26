@@ -11,9 +11,11 @@ from unittest import mock
 
 from velaria.agentic_store import AgenticStore
 from velaria.ai_runtime.functions import (
+    compact_tool_result,
     execute_local_function,
     load_velaria_skill_text,
     tool_definitions,
+    tool_result_json,
     velaria_agent_instructions,
 )
 from velaria.ai_runtime.mcp_server import SKILL_URI, _handle_request
@@ -323,6 +325,56 @@ class AiRuntimeAgentTest(unittest.TestCase):
         )
         self.assertFalse(result["ok"])
         self.assertIn("subcommands only", result["error"])
+
+    def test_cli_function_compacts_large_artifact_output(self):
+        large_rows = [{"name": "alice", "notes": "x" * 5000} for _ in range(20)]
+        artifacts = [
+            {
+                "artifact_id": f"artifact-{idx}",
+                "run_id": f"run-{idx}",
+                "created_at": "2026-04-26T00:00:00Z",
+                "type": "table",
+                "uri": f"/tmp/artifact-{idx}.parquet",
+                "format": "parquet",
+                "row_count": len(large_rows),
+                "schema_json": ["name", "notes"],
+                "preview_json": {
+                    "schema": ["name", "notes"],
+                    "rows": large_rows,
+                    "row_count": len(large_rows),
+                    "truncated": False,
+                },
+            }
+            for idx in range(40)
+        ]
+
+        def fake_main(argv):
+            print(json.dumps({"ok": True, "artifacts": artifacts}))
+            return 0
+
+        with mock.patch("velaria.cli.main", side_effect=fake_main):
+            result = execute_local_function("velaria_cli_run", {"argv": ["artifacts", "list"]})
+        encoded = tool_result_json(result)
+        self.assertLess(len(encoded), 320_000)
+        self.assertTrue(result["_tool_result_truncated"])
+        self.assertTrue(result["stdout_truncated"])
+        self.assertLessEqual(len(result["artifacts"]), 26)
+        self.assertLessEqual(len(result["artifacts"][0]["preview_json"]["rows"]), 5)
+
+    def test_tool_result_compaction_preserves_error_shape(self):
+        result = compact_tool_result(
+            {
+                "ok": False,
+                "function": "velaria_cli_run",
+                "error": "large failure",
+                "stdout": "x" * 500_000,
+            }
+        )
+        payload = json.loads(tool_result_json(result))
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["function"], "velaria_cli_run")
+        self.assertTrue(payload["stdout_truncated"])
+        self.assertLess(len(json.dumps(payload, ensure_ascii=False)), 320_000)
 
     def test_sql_catalog_tools_support_on_demand_function_and_pattern_lookup(self):
         caps = execute_local_function("velaria_sql_capabilities", {})

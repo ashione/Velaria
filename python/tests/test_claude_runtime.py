@@ -121,6 +121,7 @@ from velaria.ai_runtime.claude_runtime import (  # noqa: E402
     _resolve_velaria_skill_path,
     _runtime_cwd,
     _runtime_workspace,
+    _sdk_tool_result,
     _workspace_key,
 )
 from velaria.ai_runtime.agent import normalize_runtime_event  # noqa: E402
@@ -850,6 +851,14 @@ class NormalizeRuntimeEventTest(unittest.TestCase):
     def test_tool_result_block_normalized(self):
         e = normalize_runtime_event("ToolResultBlock", '{"ok": true}')
         self.assertEqual(e.type, "tool_result")
+
+    def test_sdk_tool_result_compacts_large_payload(self):
+        result = _sdk_tool_result({"ok": True, "stdout": "x" * 500_000})
+        text = result["content"][0]["text"]
+        payload = json.loads(text)
+        self.assertLess(len(text), 320_000)
+        self.assertTrue(payload["stdout_truncated"])
+        self.assertTrue(payload["_tool_result_truncated"])
 
     def test_thinking_normalized(self):
         e = normalize_runtime_event("thinking", "Hmm...")

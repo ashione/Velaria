@@ -719,6 +719,7 @@ class AiRuntimeAgentTest(unittest.TestCase):
                 self.assertNotIn(str(pathlib.Path.cwd()), json.dumps(mcp["env"]))
                 status = runtime.status(session_id)
                 self.assertEqual(status["provider"], "openai")
+                self.assertEqual(status["model_source"], "default")
                 self.assertEqual(status["auth_mode"], "local")
                 self.assertTrue(status["reuse_local_config"])
                 self.assertEqual(status["cwd"], runtime_cwd)
@@ -915,6 +916,7 @@ class AiRuntimeAgentTest(unittest.TestCase):
                 raise unittest.SkipTest("codex-app-server-sdk is not installed") from exc
             try:
                 self.assertEqual(runtime.model, "gpt-codex-specific")
+                self.assertEqual(runtime.model_source, "agentCodexModel")
             finally:
                 runtime.shutdown()
 

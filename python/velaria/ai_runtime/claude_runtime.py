@@ -9,12 +9,18 @@ import os
 import pathlib
 import sys
 import time
-import uuid
 from typing import Any, AsyncIterator
 
 from . import AiRuntime, generate_session_id
 from .agent import AgentEvent, normalize_runtime_event
 from .functions import execute_local_function, tool_definitions, tool_result_json, velaria_agent_instructions
+from ._runtime_common import (
+    apply_proxy_env,
+    coerce_bool,
+    is_uuid_text,
+    normalize_proxy_env,
+    proxy_env_from_process,
+)
 from .session_registry import SessionRegistry
 
 
@@ -48,9 +54,9 @@ class ClaudeAgentRuntime:
         self.skill_path = _resolve_velaria_skill_path(skill_path, self.skill_dir)
         self.reuse_local_config = reuse_local_config
         self.runtime_config_path = runtime_config_path
-        self._proxy_env = _normalize_proxy_env(proxy_env or {})
+        self._proxy_env = normalize_proxy_env(proxy_env or {})
         self.reasoning_effort = reasoning_effort or "none"
-        self.network_access = _coerce_bool(network_access, True)
+        self.network_access = coerce_bool(network_access, True)
         self._trace_start = time.perf_counter()
         from claude_agent_sdk import ClaudeSDKClient  # noqa: F401 -- validated at init
 
@@ -89,7 +95,7 @@ class ClaudeAgentRuntime:
             if not entry or entry["status"] != "active":
                 self._trace("resume_thread not_found_or_inactive")
                 return False
-            if not _is_uuid_text(session_id) or not _is_uuid_text(str(entry.get("runtime_session_ref") or "")):
+            if not is_uuid_text(session_id) or not is_uuid_text(str(entry.get("runtime_session_ref") or "")):
                 self._trace("resume_thread skipped legacy_non_uuid_session")
                 return False
             self._sessions[session_id] = {"dataset_context": entry["dataset_context"], "session": None, "claude_started": True}
@@ -162,7 +168,7 @@ class ClaudeAgentRuntime:
 
         dataset_context = session_data["dataset_context"]
         sdk_tools = _build_sdk_mcp_tools(dataset_context)
-        has_started = bool(session_data.get("claude_started"))
+        session_options = _claude_session_options(session_id, session_data)
 
         with self._trace_span(f"send_message session={session_id} prompt_len={len(prompt)}"):
             velaria_mcp = create_sdk_mcp_server(name="velaria", version="1.0.0", tools=sdk_tools)
@@ -175,8 +181,7 @@ class ClaudeAgentRuntime:
                     env=self._runtime_env(),
                     cwd=str(self.cwd),
                     settings=self.runtime_config_path or None,
-                    resume=session_id if has_started else None,
-                    session_id=None if has_started else session_id,
+                    **session_options,
                     skills=["velaria-python-local"],
                     setting_sources=["project", "user"],
                     mcp_servers={"velaria": velaria_mcp},
@@ -241,8 +246,8 @@ class ClaudeAgentRuntime:
         return [
             entry
             for entry in self.registry.list_active("claude")
-            if _is_uuid_text(str(entry.get("session_id") or ""))
-            and _is_uuid_text(str(entry.get("runtime_session_ref") or ""))
+            if is_uuid_text(str(entry.get("session_id") or ""))
+            and is_uuid_text(str(entry.get("runtime_session_ref") or ""))
         ]
 
     async def list_threads(self) -> list[dict[str, Any]]:
@@ -266,7 +271,7 @@ class ClaudeAgentRuntime:
             "auth_mode": self.auth_mode,
             "network_access": self.network_access,
             "reuse_local_config": self.reuse_local_config,
-            "proxy": bool(_proxy_env_from_process(self._proxy_env)),
+            "proxy": bool(proxy_env_from_process(self._proxy_env)),
             "workspace": self.runtime_workspace,
             "cwd": str(self.cwd),
             "session": entry,
@@ -299,7 +304,7 @@ class ClaudeAgentRuntime:
             env["ANTHROPIC_API_KEY"] = self.api_key
         if self.base_url:
             env["ANTHROPIC_BASE_URL"] = self.base_url
-        _apply_proxy_env(env, self._proxy_env)
+        apply_proxy_env(env, self._proxy_env)
         return env
 
     @contextlib.contextmanager
@@ -326,15 +331,15 @@ class ClaudeAgentRuntime:
             entry = self.registry.lookup(session_id, "claude")
             if (
                 entry
-                and _is_uuid_text(session_id)
-                and _is_uuid_text(str(entry.get("runtime_session_ref") or ""))
+                and is_uuid_text(session_id)
+                and is_uuid_text(str(entry.get("runtime_session_ref") or ""))
             ):
                 return entry
             return None
         for entry in self.registry.list_active("claude"):
             if (
-                _is_uuid_text(str(entry.get("session_id") or ""))
-                and _is_uuid_text(str(entry.get("runtime_session_ref") or ""))
+                is_uuid_text(str(entry.get("session_id") or ""))
+                and is_uuid_text(str(entry.get("runtime_session_ref") or ""))
             ):
                 return entry
         return None
@@ -394,6 +399,7 @@ def _build_sdk_mcp_tools(dataset_context: dict[str, Any] | None = None) -> list:
         name = tool_def["name"]
 
         def make_handler(n=name):
+            # Bind the current tool name at definition time; SDK invokes handlers later.
             async def handler(input_data: dict) -> dict:
                 merged = dict(input_data or {})
                 for key in ("source_path", "table_name", "schema"):
@@ -409,6 +415,13 @@ def _build_sdk_mcp_tools(dataset_context: dict[str, Any] | None = None) -> list:
             handler=make_handler(name),
         ))
     return sdk_tools
+
+
+def _claude_session_options(session_id: str, session_data: dict[str, Any]) -> dict[str, str | None]:
+    """Claude SDK accepts either a new session_id or a resume id, never both."""
+    if bool(session_data.get("claude_started")):
+        return {"resume": session_id, "session_id": None}
+    return {"resume": None, "session_id": session_id}
 
 
 def _sdk_tool_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -496,61 +509,6 @@ def _parse_sql_json(text: str) -> dict[str, Any]:
         }
     except (json.JSONDecodeError, ValueError):
         return {"sql": text, "explanation": ""}
-
-
-def _normalize_proxy_env(proxy_env: dict[str, str]) -> dict[str, str]:
-    normalized: dict[str, str] = {}
-    for key, value in proxy_env.items():
-        key_text = str(key).strip()
-        value_text = str(value).strip()
-        if not key_text or not value_text:
-            continue
-        key_lower = key_text.lower()
-        if key_lower in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}:
-            normalized[key_lower] = value_text
-    return normalized
-
-
-def _proxy_env_from_process(configured: dict[str, str]) -> dict[str, str]:
-    merged = dict(configured)
-    for key in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
-        if key not in merged:
-            value = os.environ.get(key) or os.environ.get(key.upper())
-            if value:
-                merged[key] = value
-    return merged
-
-
-def _apply_proxy_env(env: dict[str, str], configured: dict[str, str]) -> None:
-    proxies = _proxy_env_from_process(configured)
-    if not proxies:
-        return
-    proxies.setdefault("no_proxy", "127.0.0.1,localhost,::1")
-    for key, value in proxies.items():
-        env[key] = value
-        env[key.upper()] = value
-
-
-def _coerce_bool(value: Any, default: bool) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off"}:
-            return False
-    return bool(value)
-
-
-def _is_uuid_text(value: str) -> bool:
-    try:
-        uuid.UUID(str(value))
-        return True
-    except (TypeError, ValueError):
-        return False
 
 
 def _trace_enabled() -> bool:

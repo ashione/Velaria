@@ -109,15 +109,11 @@ sys.modules["claude_agent_sdk.types"] = _mock_types
 from velaria.ai_runtime import create_runtime  # noqa: E402
 from velaria.ai_runtime.claude_runtime import (  # noqa: E402
     ClaudeAgentRuntime,
-    _apply_proxy_env,
     _build_sql_user_message,
     _claude_sdk_event,
     _claude_sdk_event_text,
     _claude_runtime_path,
-    _coerce_bool,
-    _normalize_proxy_env,
     _parse_sql_json,
-    _proxy_env_from_process,
     _resolve_velaria_skill_path,
     _runtime_cwd,
     _runtime_workspace,
@@ -126,6 +122,12 @@ from velaria.ai_runtime.claude_runtime import (  # noqa: E402
 )
 from velaria.ai_runtime.agent import normalize_runtime_event  # noqa: E402
 from velaria.ai_runtime.functions import tool_definitions  # noqa: E402
+from velaria.ai_runtime._runtime_common import (  # noqa: E402
+    apply_proxy_env as _apply_proxy_env,
+    coerce_bool as _coerce_bool,
+    normalize_proxy_env as _normalize_proxy_env,
+    proxy_env_from_process as _proxy_env_from_process,
+)
 
 
 def _assert_uuid(testcase, value):

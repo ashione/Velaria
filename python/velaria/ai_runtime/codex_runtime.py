@@ -12,13 +12,19 @@ import sys
 import threading
 import time
 import contextlib
-import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 from . import AiRuntime, generate_session_id
 from .agent import AgentEvent, normalize_runtime_event
 from .functions import tool_definitions, velaria_agent_instructions, velaria_turn_instructions
+from ._runtime_common import (
+    apply_proxy_env,
+    coerce_bool,
+    is_uuid_text,
+    normalize_proxy_env,
+    proxy_env_from_process,
+)
 from .session_registry import SessionRegistry
 
 
@@ -38,6 +44,7 @@ class CodexRuntime:
         self,
         provider: str = "openai",
         model: str = "gpt-5.4-mini",
+        model_source: str = "default",
         reasoning_effort: str = "none",
         network_access: bool = True,
         api_key: str = "",
@@ -61,7 +68,7 @@ class CodexRuntime:
         self._skill_path = _resolve_velaria_skill_path(skill_path, self._skill_dir)
         self._reuse_local_config = reuse_local_config
         self._runtime_config_path = runtime_config_path
-        self._proxy_env = _normalize_proxy_env(proxy_env or {})
+        self._proxy_env = normalize_proxy_env(proxy_env or {})
         self._provider = provider
         self._api_key = api_key
         self._base_url = base_url
@@ -69,8 +76,9 @@ class CodexRuntime:
         from codex_app_server_sdk import CodexClient, ThreadConfig  # noqa: F401 -- validated at init
 
         self.model = model
+        self.model_source = model_source
         self.reasoning_effort = reasoning_effort or "none"
-        self.network_access = _coerce_bool(network_access, True)
+        self.network_access = coerce_bool(network_access, True)
         self.registry = SessionRegistry(self._workspace / "sessions.sqlite")
         self._threads: dict[str, Any] = {}
         self._client: Any | None = None
@@ -107,7 +115,7 @@ class CodexRuntime:
         entry = self.registry.lookup(session_id, "codex")
         if not entry or entry["status"] != "active":
             return False
-        if not _is_uuid_text(session_id):
+        if not is_uuid_text(session_id):
             self._trace("resume_thread skipped legacy_non_uuid_session")
             return False
         with self._trace_span(f"resume_thread session={session_id}"):
@@ -210,7 +218,7 @@ class CodexRuntime:
         return [
             entry
             for entry in self.registry.list_active("codex")
-            if _is_uuid_text(str(entry.get("session_id") or ""))
+            if is_uuid_text(str(entry.get("session_id") or ""))
         ]
 
     async def list_threads(self) -> list[dict[str, Any]]:
@@ -229,11 +237,12 @@ class CodexRuntime:
             "runtime": "codex",
             "provider": self._provider,
             "model": self.model,
+            "model_source": self.model_source,
             "reasoning_effort": self.reasoning_effort,
             "auth_mode": self._auth_mode,
             "network_access": self.network_access,
             "reuse_local_config": self._reuse_local_config,
-            "proxy": bool(_proxy_env_from_process(self._proxy_env)),
+            "proxy": bool(proxy_env_from_process(self._proxy_env)),
             "codex_home": str(self._codex_home),
             "workspace": str(self._workspace),
             "cwd": str(self._cwd),
@@ -341,7 +350,7 @@ class CodexRuntime:
         entry = self.registry.lookup(session_id, "codex")
         if not entry or entry["status"] != "active":
             return None
-        if not _is_uuid_text(session_id):
+        if not is_uuid_text(session_id):
             self._trace("_get_thread skipped legacy_non_uuid_session")
             return None
         with self._trace_span(f"_get_thread.resume session={session_id}"):
@@ -373,11 +382,11 @@ class CodexRuntime:
 
     def _session_status_entry(self, session_id: str | None) -> dict[str, Any] | None:
         if session_id:
-            if not _is_uuid_text(session_id):
+            if not is_uuid_text(session_id):
                 return None
             return self.registry.lookup(session_id, "codex")
         for entry in self.registry.list_active("codex"):
-            if _is_uuid_text(str(entry.get("session_id") or "")):
+            if is_uuid_text(str(entry.get("session_id") or "")):
                 return entry
         return None
 
@@ -438,7 +447,7 @@ class CodexRuntime:
             env["OPENAI_API_KEY"] = self._api_key
         if self._base_url:
             env["OPENAI_BASE_URL"] = self._base_url
-        _apply_proxy_env(env, self._proxy_env)
+        apply_proxy_env(env, self._proxy_env)
         return env
 
     def _mcp_config(self) -> dict[str, Any]:
@@ -453,7 +462,7 @@ class CodexRuntime:
             env["OPENAI_API_KEY"] = self._api_key
         if self._base_url:
             env["OPENAI_BASE_URL"] = self._base_url
-        _apply_proxy_env(env, self._proxy_env)
+        apply_proxy_env(env, self._proxy_env)
         if self._skill_dir is not None:
             env["VELARIA_SKILL_DIR"] = str(self._skill_dir)
         if self._skill_path is not None:
@@ -803,53 +812,6 @@ def _toml_bool(value: bool) -> str:
     return "true" if value else "false"
 
 
-def _coerce_bool(value: Any, default: bool) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off"}:
-            return False
-    return bool(value)
-
-
-def _normalize_proxy_env(proxy_env: dict[str, str]) -> dict[str, str]:
-    normalized: dict[str, str] = {}
-    for key, value in proxy_env.items():
-        key_text = str(key).strip()
-        value_text = str(value).strip()
-        if not key_text or not value_text:
-            continue
-        key_lower = key_text.lower()
-        if key_lower in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}:
-            normalized[key_lower] = value_text
-    return normalized
-
-
-def _proxy_env_from_process(configured: dict[str, str]) -> dict[str, str]:
-    merged = dict(configured)
-    for key in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
-        if key not in merged:
-            value = os.environ.get(key) or os.environ.get(key.upper())
-            if value:
-                merged[key] = value
-    return merged
-
-
-def _apply_proxy_env(env: dict[str, str], configured: dict[str, str]) -> None:
-    proxies = _proxy_env_from_process(configured)
-    if not proxies:
-        return
-    proxies.setdefault("no_proxy", "127.0.0.1,localhost,::1")
-    for key, value in proxies.items():
-        env[key] = value
-        env[key.upper()] = value
-
-
 def _resolve_velaria_skill_path(skill_path: str, skill_dir: pathlib.Path | None) -> pathlib.Path | None:
     if skill_path:
         path = pathlib.Path(skill_path).expanduser().resolve()
@@ -858,14 +820,6 @@ def _resolve_velaria_skill_path(skill_path: str, skill_dir: pathlib.Path | None)
         return None
     candidate = skill_dir / "velaria_python_local" / "SKILL.md"
     return candidate if candidate.exists() else None
-
-
-def _is_uuid_text(value: str) -> bool:
-    try:
-        uuid.UUID(str(value))
-        return True
-    except (TypeError, ValueError):
-        return False
 
 
 def _trace_enabled() -> bool:

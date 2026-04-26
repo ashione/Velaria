@@ -48,6 +48,7 @@ py_library(
         "velaria/embedding.py",
         "velaria/keyword_index.py",
         "velaria/ai_runtime/__init__.py",
+        "velaria/ai_runtime/_runtime_common.py",
         "velaria/ai_runtime/_tools.py",
         "velaria/ai_runtime/agent.py",
         "velaria/ai_runtime/claude_runtime.py",

@@ -26,14 +26,13 @@ def generate_session_id() -> str:
 
 def create_runtime(config: dict[str, Any]) -> AiRuntime:
     runtime_type = str(config.get("runtime", "codex")).strip().lower()
-    configured_runtime = str(config.get("configured_runtime") or runtime_type).strip().lower()
+    config_file_runtime = str(
+        config.get("configured_runtime") or config.get("config_file_runtime") or runtime_type
+    ).strip().lower()
     provider = str(config.get("provider", "openai") or "openai").strip().lower()
     auth_mode = _normalize_auth_mode(config.get("auth_mode", "local"))
     api_key = str(config.get("api_key", "")) if auth_mode == "api_key" else ""
     base_url = str(config.get("base_url", "")) if auth_mode == "api_key" else ""
-    model = str(config.get("model", ""))
-    codex_model = str(config.get("codex_model") or "")
-    claude_model = str(config.get("claude_model") or "")
     reasoning_effort = str(config.get("reasoning_effort") or "none")
     network_access = _bool_config(config, "network_access", True)
     reuse_local_config = auth_mode == "local"
@@ -43,12 +42,9 @@ def create_runtime(config: dict[str, Any]) -> AiRuntime:
             raise RuntimeError(
                 "Claude runtime requested (agentRuntime: 'claude') but claude-agent-sdk is not installed. "
                 "Install it with: uv sync --project python"
-            )
-        from .claude_runtime import ClaudeAgentRuntime
-        resolved_model = claude_model or (model if configured_runtime == "claude" else "") or "claude-sonnet-4-20250514"
-        model_source = "agentClaudeModel" if claude_model else (
-            "agentModel" if configured_runtime == "claude" and model else "default"
         )
+        from .claude_runtime import ClaudeAgentRuntime
+        resolved_model, model_source = _resolve_runtime_model(config, "claude", config_file_runtime)
         # When Claude runtime is selected, default provider to anthropic
         if provider == "openai":
             provider = "anthropic"
@@ -76,11 +72,13 @@ def create_runtime(config: dict[str, Any]) -> AiRuntime:
             raise RuntimeError(
                 "Codex runtime requested (agentRuntime: 'codex') but codex-app-server-sdk is not installed. "
                 "Install it with: uv sync --project python"
-            )
+        )
         from .codex_runtime import CodexRuntime
+        resolved_model, model_source = _resolve_runtime_model(config, "codex", config_file_runtime)
         return CodexRuntime(
             provider=provider,
-            model=codex_model or model or "gpt-5.4-mini",
+            model=resolved_model,
+            model_source=model_source,
             reasoning_effort=reasoning_effort,
             network_access=network_access,
             api_key=api_key,
@@ -121,6 +119,28 @@ def _runtime_path_for(config: dict[str, Any], runtime_type: str) -> str:
     if runtime_type == "codex":
         return str(config.get("codex_runtime_path") or config.get("runtime_path") or "")
     return str(config.get("runtime_path") or "")
+
+def _resolve_runtime_model(
+    config: dict[str, Any],
+    runtime_type: str,
+    config_file_runtime: str,
+) -> tuple[str, str]:
+    model = str(config.get("model") or "")
+    if runtime_type == "claude":
+        claude_model = str(config.get("claude_model") or "")
+        if claude_model:
+            return claude_model, "agentClaudeModel"
+        if config_file_runtime == "claude" and model:
+            return model, "agentModel"
+        return "claude-sonnet-4-20250514", "default"
+    if runtime_type == "codex":
+        codex_model = str(config.get("codex_model") or "")
+        if codex_model:
+            return codex_model, "agentCodexModel"
+        if model:
+            return model, "agentModel"
+        return "gpt-5.4-mini", "default"
+    return model, "config"
 
 def _bool_config(config: dict[str, Any], key: str, default: bool) -> bool:
     value = config.get(key, default)

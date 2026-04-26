@@ -5,11 +5,12 @@ usage() {
   cat <<'EOF' >&2
 usage: scripts/prepare_velaria_release.sh <version> [tag]
 
-Prepare a release commit and local tag for Velaria's Python package.
+Prepare a release commit when needed and a local tag for Velaria's Python package.
 
 Examples:
   scripts/prepare_velaria_release.sh 0.1.3
   scripts/prepare_velaria_release.sh 0.1.3 release-v0.1.3
+  scripts/prepare_velaria_release.sh 0.1.3  # tag-only if the version was already merged
 EOF
   exit 1
 }
@@ -48,9 +49,9 @@ if [[ -z "${BRANCH}" ]]; then
 fi
 
 CURRENT_VERSION="$(./scripts/get_velaria_version.sh)"
+VERSION_ALREADY_SET=0
 if [[ "${CURRENT_VERSION}" == "${VERSION}" ]]; then
-  echo "package version is already ${VERSION}" >&2
-  exit 1
+  VERSION_ALREADY_SET=1
 fi
 
 if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
@@ -63,21 +64,27 @@ if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; t
   exit 1
 fi
 
-"${ROOT_DIR}/scripts/bump_velaria_version.sh" "${VERSION}"
+if [[ "${VERSION_ALREADY_SET}" -eq 0 ]]; then
+  "${ROOT_DIR}/scripts/bump_velaria_version.sh" "${VERSION}"
 
-git add "${VERSION_BZL}" "${VERSION_PY}"
-if [[ -f "${UV_LOCK}" ]]; then
-  git add "${UV_LOCK}"
+  git add "${VERSION_BZL}" "${VERSION_PY}"
+  if [[ -f "${UV_LOCK}" ]]; then
+    git add "${UV_LOCK}"
+  fi
+
+  if git diff --cached --quiet; then
+    echo "no staged changes after bumping version; aborting" >&2
+    exit 1
+  fi
+
+  git commit -m "release: bump Velaria Python version to ${VERSION}"
+else
+  echo "package version is already ${VERSION}; preparing tag only"
 fi
 
-if git diff --cached --quiet; then
-  echo "no staged changes after bumping version; aborting" >&2
-  exit 1
-fi
-
-git commit -m "release: bump Velaria Python version to ${VERSION}"
 git tag -a "${TAG}" -m "Release ${TAG}"
 
+if [[ "${VERSION_ALREADY_SET}" -eq 0 ]]; then
 cat <<EOF
 Prepared release commit and local tag.
 
@@ -89,3 +96,15 @@ Next steps:
   git push origin ${BRANCH}
   git push origin ${TAG}
 EOF
+else
+cat <<EOF
+Prepared local tag for existing release version.
+
+  branch: ${BRANCH}
+  version: ${VERSION}
+  tag: ${TAG}
+
+Next step:
+  git push origin ${TAG}
+EOF
+fi

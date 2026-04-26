@@ -776,7 +776,35 @@ class PythonCliContractTest(unittest.TestCase):
             with redirect_stdout(stdout):
                 interactive._send_agent_message("list artifacts")
             self.assertEqual(interactive._state.turn_state, "failed")
+            self.assertIsNone(interactive._current_session_id)
             self.assertIn("error    transport message too large", stdout.getvalue())
+        finally:
+            interactive._current_session_id = None
+            interactive._runtime = None
+
+    def test_interactive_turn_runtime_error_event_starts_fresh_next_turn(self):
+        interactive = importlib.import_module("velaria.cli.interactive")
+        from velaria.ai_runtime.agent import AgentEvent
+
+        interactive._state = interactive.VelariaInteractiveState()
+        interactive._current_session_id = "agent-session-1"
+        interactive._runtime = _FakeAgentRuntime(
+            events=[
+                AgentEvent(
+                    "error",
+                    "failed reading from stdio transport",
+                    data={"runtime_failure": True},
+                    session_id="agent-session-1",
+                )
+            ]
+        )
+        stdout = io.StringIO()
+        try:
+            with redirect_stdout(stdout):
+                interactive._send_agent_message("list artifacts")
+            self.assertEqual(interactive._state.turn_state, "failed")
+            self.assertIsNone(interactive._current_session_id)
+            self.assertIn("failed reading from stdio transport", stdout.getvalue())
         finally:
             interactive._current_session_id = None
             interactive._runtime = None

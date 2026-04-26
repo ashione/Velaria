@@ -188,15 +188,26 @@ class ClaudeAgentRuntime:
                 ),
             )
 
-            await client.connect(prompt=prompt)
-            session_data["claude_started"] = True
-            async for msg in client.receive_response():
-                event = _claude_sdk_event(msg, session_id)
-                self._trace(
-                    f"send_message yield raw_type={type(msg).__name__} "
-                    f"normalized={event.type} content_len={len(event.content)}"
+            try:
+                await client.connect(prompt=prompt)
+                session_data["claude_started"] = True
+                async for msg in client.receive_response():
+                    event = _claude_sdk_event(msg, session_id)
+                    self._trace(
+                        f"send_message yield raw_type={type(msg).__name__} "
+                        f"normalized={event.type} content_len={len(event.content)}"
+                    )
+                    yield event
+            except Exception as exc:
+                self.registry.close_session(session_id)
+                self._sessions.pop(session_id, None)
+                yield AgentEvent(
+                    "error",
+                    str(exc),
+                    session_id=session_id,
+                    data={"runtime_failure": True},
                 )
-                yield event
+                return
 
         self.registry.update_activity(session_id)
 

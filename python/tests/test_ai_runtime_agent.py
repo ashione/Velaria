@@ -957,6 +957,56 @@ class AiRuntimeAgentTest(unittest.TestCase):
             finally:
                 runtime.shutdown()
 
+    def test_codex_runtime_abandons_thread_after_stream_failure(self):
+        from velaria.ai_runtime.codex_runtime import CodexRuntime
+
+        class FakeThread:
+            thread_id = "codex-thread-1"
+
+            async def chat(self, prompt):
+                raise RuntimeError("failed reading from stdio transport")
+                yield
+
+        class FakeClient:
+            instances = []
+
+            @classmethod
+            def connect_stdio(cls, **kwargs):
+                inst = cls()
+                inst.closed = False
+                cls.instances.append(inst)
+                return inst
+
+            async def start(self):
+                return None
+
+            async def start_thread(self, config):
+                return FakeThread()
+
+            async def close(self):
+                self.closed = True
+
+        with tempfile.TemporaryDirectory(prefix="velaria-codex-runtime-stream-failure-") as tmp:
+            try:
+                runtime = CodexRuntime(runtime_workspace=tmp)
+            except ImportError as exc:
+                raise unittest.SkipTest("codex-app-server-sdk is not installed") from exc
+            runtime._client_cls = FakeClient
+            try:
+                session_id = asyncio.run(runtime.start_thread({}))
+                async def collect_events():
+                    return [e async for e in runtime.send_message(session_id, "list artifacts")]
+
+                events = asyncio.run(collect_events())
+                self.assertEqual(events[0].type, "error")
+                self.assertTrue(events[0].data["runtime_failure"])
+                self.assertEqual(runtime.registry.lookup(session_id, "codex")["status"], "closed")
+                self.assertNotIn(session_id, runtime._threads)
+                self.assertIsNone(runtime._client)
+                self.assertTrue(FakeClient.instances[0].closed)
+            finally:
+                runtime.shutdown()
+
     def test_codex_runtime_prewarms_ephemeral_thread(self):
         from velaria.ai_runtime.codex_runtime import CodexRuntime
 

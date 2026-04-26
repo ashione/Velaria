@@ -29,6 +29,7 @@ from .session_registry import SessionRegistry
 
 
 _STREAM_DONE = object()
+_RESUME_TIMEOUT_SECONDS = 8.0
 
 
 @dataclass
@@ -119,7 +120,15 @@ class CodexRuntime:
             self._trace("resume_thread skipped legacy_non_uuid_session")
             return False
         with self._trace_span(f"resume_thread session={session_id}"):
-            thread = await self._submit(self._resume_thread(entry["runtime_session_ref"]))
+            try:
+                thread = await asyncio.wait_for(
+                    self._submit(self._resume_thread(entry["runtime_session_ref"])),
+                    timeout=_RESUME_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                self._trace(f"resume_thread failed {type(exc).__name__}: {exc}")
+                await self._abandon_thread_session(session_id)
+                return False
         self._threads[session_id] = thread
         self.registry.update_activity(session_id)
         return True
@@ -165,6 +174,7 @@ class CodexRuntime:
 
         with self._trace_span(f"send_message stream session={session_id} prompt_len={len(prompt)}"):
             stream = self._stream_chat_events(thread, velaria_turn_instructions(prompt))
+            runtime_failed = False
             try:
                 while True:
                     event = await asyncio.to_thread(stream.events.get)
@@ -172,6 +182,8 @@ class CodexRuntime:
                         break
                     if not isinstance(event, dict):
                         continue
+                    if event.get("type") == "error" and (event.get("data") or {}).get("runtime_failure"):
+                        runtime_failed = True
                     self._trace(f"send_message yield type={event.get('type')}")
                     yield normalize_runtime_event(
                         event.get("type", "assistant_text"),
@@ -183,6 +195,9 @@ class CodexRuntime:
                 if not stream.future.done():
                     stream.future.cancel()
 
+        if runtime_failed:
+            await self._abandon_thread_session(session_id)
+            return
         self.registry.update_activity(session_id)
 
     def _stream_chat_events(self, thread, prompt: str) -> _ChatEventStream:
@@ -200,7 +215,7 @@ class CodexRuntime:
                     for normalized in normalized_events:
                         events.put(normalized)
             except Exception as exc:
-                events.put({"type": "error", "content": str(exc), "data": {}})
+                events.put({"type": "error", "content": str(exc), "data": {"runtime_failure": True}})
             finally:
                 events.put(_STREAM_DONE)
 
@@ -354,10 +369,26 @@ class CodexRuntime:
             self._trace("_get_thread skipped legacy_non_uuid_session")
             return None
         with self._trace_span(f"_get_thread.resume session={session_id}"):
-            thread = await self._submit(self._resume_thread(entry["runtime_session_ref"]))
+            try:
+                thread = await asyncio.wait_for(
+                    self._submit(self._resume_thread(entry["runtime_session_ref"])),
+                    timeout=_RESUME_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                self._trace(f"_get_thread.resume failed {type(exc).__name__}: {exc}")
+                await self._abandon_thread_session(session_id)
+                return None
         self._threads[session_id] = thread
         self.registry.update_activity(session_id)
         return thread
+
+    async def _abandon_thread_session(self, session_id: str) -> None:
+        self.registry.close_session(session_id)
+        self._threads.pop(session_id, None)
+        try:
+            await self._close_client()
+        except Exception as exc:
+            self._trace(f"abandon close_client failed {type(exc).__name__}: {exc}")
 
     async def _collect_chat_events(self, thread, prompt: str) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []

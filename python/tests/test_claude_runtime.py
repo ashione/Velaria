@@ -434,6 +434,27 @@ class ClaudeRuntimeSendMessageTest(unittest.TestCase):
             events = asyncio.run(collect())
         self.assertTrue(len(events) > 0)
 
+    def test_send_message_runtime_exception_closes_session(self):
+        class FailingClient:
+            def __init__(self, options=None, transport=None):
+                pass
+
+            async def connect(self, prompt=""):
+                pass
+
+            async def receive_response(self):
+                raise RuntimeError("Failed to decode JSON")
+                yield
+
+        with mock.patch("claude_agent_sdk.ClaudeSDKClient", FailingClient):
+            async def collect():
+                return [e async for e in self.rt.send_message(self.session_id, "boom")]
+            events = asyncio.run(collect())
+        self.assertEqual(events[0].type, "error")
+        self.assertTrue(events[0].data["runtime_failure"])
+        self.assertEqual(self.rt.registry.lookup(self.session_id, "claude")["status"], "closed")
+        self.assertNotIn(self.session_id, self.rt._sessions)
+
     def test_send_message_tool_handler_injects_dataset_context(self):
         captured_input = {}
 

@@ -550,12 +550,15 @@ def _stop_turn_status() -> None:
 
 
 def _should_show_turn_status() -> bool:
+    """TTY spinner is only used in stdlib mode (no prompt_toolkit statusline)."""
     if os.environ.get("VELARIA_INTERACTIVE_NO_SPINNER"):
+        return False
+    # In prompt_toolkit mode the statusline handles the spinner
+    if _should_use_prompt_toolkit():
         return False
     return (
         hasattr(sys.stdout, "isatty")
         and sys.stdout.isatty()
-        and not os.environ.get("VELARIA_INTERACTIVE_STDLIB")
     )
 
 

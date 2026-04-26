@@ -12,6 +12,7 @@ from velaria.cli._common import CliStructuredError, _emit_json, _emit_error_json
 
 _DEFAULT_SERVICE_URL = "http://127.0.0.1:37491"
 _runtime_instance = None
+_runtime_override: str | None = None
 
 
 def _service_url() -> str:
@@ -77,7 +78,10 @@ def _get_runtime():
     if _runtime_instance is None:
         from velaria.ai_runtime import create_runtime, load_ai_config
 
-        _runtime_instance = create_runtime(load_ai_config())
+        config = load_ai_config()
+        if _runtime_override:
+            config["runtime"] = _runtime_override
+        _runtime_instance = create_runtime(config)
     return _runtime_instance
 
 
@@ -223,6 +227,8 @@ def _ai_analyze(args: argparse.Namespace) -> int:
 
 
 def _dispatch_ai(args: argparse.Namespace) -> int:
+    global _runtime_override
+    _runtime_override = getattr(args, "runtime", None)
     if args.ai_command == "generate-sql":
         return _ai_generate_sql(args)
     if args.ai_command == "session":
@@ -243,6 +249,8 @@ def _dispatch_ai(args: argparse.Namespace) -> int:
 
 def register(subparsers: argparse._SubParsersAction) -> None:
     ai_parser = subparsers.add_parser("ai", help="AI-assisted analysis commands.")
+    ai_parser.add_argument("--runtime", choices=["codex", "claude"],
+                           help="Select AI runtime (overrides agentRuntime in config.json).")
     ai_subparsers = ai_parser.add_subparsers(dest="ai_command", required=True)
 
     gen = ai_subparsers.add_parser("generate-sql", help="Generate SQL from natural language.")

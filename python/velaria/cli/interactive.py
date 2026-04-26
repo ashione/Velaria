@@ -17,10 +17,20 @@ from velaria.cli._common import _json_dumps
 
 _current_session_id: str | None = None
 _runtime: Any | None = None
+_runtime_override: str | None = None
 _prewarm_thread: threading.Thread | None = None
 _session_start_thread: threading.Thread | None = None
 _session_start_error: str = ""
 _trace_start = time.perf_counter()
+_turn_status_thread: threading.Thread | None = None
+_turn_status_stop: threading.Event | None = None
+_turn_status_lock = threading.RLock()
+_turn_status_line_visible = False
+_turn_status_paused = False
+
+_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+_SPINNER_INTERVAL_SECONDS = 0.12
+_turn_status_frame = _SPINNER_FRAMES[0]
 
 
 @dataclass
@@ -37,6 +47,7 @@ class VelariaInteractiveState:
     last_tool: str = ""
     last_function: str = ""
     turn_state: str = "idle"
+    turn_activity: str = "agent"
     turn_started_at: float | None = None
     runtime_warmup: str = "idle"
 
@@ -64,18 +75,22 @@ def _wants_interactive(argv: list[str]) -> bool:
 
 
 def _run_interactive_loop(argv: list[str] | None = None) -> int:
-    global _state, _current_session_id, _session_start_thread, _session_start_error
+    global _state, _current_session_id, _session_start_thread, _session_start_error, _runtime_override
     _state = VelariaInteractiveState()
     _current_session_id = None
     _session_start_thread = None
     _session_start_error = ""
     args = _parse_interactive_args(argv or [])
+    _runtime_override = getattr(args, "runtime", None)
     from velaria.cli import main
 
     _print_banner()
     if args.session:
         with _trace_span("interactive.ensure_session"):
             _ensure_agent_session(new_session=True, session_id=args.session)
+    elif args.new:
+        with _trace_span("interactive.ensure_new_session"):
+            _ensure_agent_session(new_session=True)
     else:
         with _trace_span("interactive.start_session_background"):
             _start_agent_session_async()
@@ -130,6 +145,8 @@ def _parse_interactive_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("-i", "--interactive", action="store_true")
     parser.add_argument("--new", action="store_true")
     parser.add_argument("--session")
+    parser.add_argument("--runtime", choices=["codex", "claude"],
+                        help="Select AI runtime (overrides agentRuntime in config.json).")
     parsed, _unknown = parser.parse_known_args(argv)
     return parsed
 
@@ -171,7 +188,10 @@ def _get_runtime():
         from velaria.ai_runtime import create_runtime, load_ai_config
 
         with _trace_span("interactive.load_config_create_runtime"):
-            _runtime = create_runtime(load_ai_config())
+            config = load_ai_config()
+            if _runtime_override:
+                config["runtime"] = _runtime_override
+            _runtime = create_runtime(config)
     return _runtime
 
 
@@ -226,7 +246,11 @@ def _wait_runtime_prewarm(timeout: float = 5.0) -> None:
     thread = _prewarm_thread
     if thread is None or not thread.is_alive():
         return
-    _print_note("warming", "waiting for runtime prewarm")
+    if _state.turn_state == "running" and _turn_status_stop is not None:
+        _state.turn_activity = "runtime warmup"
+        _restore_turn_status_line()
+    else:
+        _print_note("warming", "waiting for runtime prewarm")
     with _trace_span(f"interactive.wait_prewarm timeout={timeout}"):
         thread.join(timeout=timeout)
     if thread.is_alive():
@@ -341,7 +365,10 @@ def _handle_control_command(command: str) -> None:
         runtime = _safe_runtime()
         if runtime is None:
             return
-        _print_status(runtime.status(_current_session_id))
+        status = runtime.status(_current_session_id or "__velaria_pending_session__")
+        if not _current_session_id:
+            status["session"] = None
+        _print_status(status)
         _print_velaria_state()
         return
     if cmd == "/dataset":
@@ -422,6 +449,7 @@ def _safe_runtime():
 
 
 def _send_agent_message(prompt: str) -> None:
+    global _current_session_id
     if not _current_session_id:
         _start_agent_session_async()
         _wait_agent_session_start(timeout=None)
@@ -431,37 +459,189 @@ def _send_agent_message(prompt: str) -> None:
     runtime = _safe_runtime()
     if runtime is None:
         return
-    _wait_runtime_prewarm()
 
     _state.turn_state = "running"
+    _state.turn_activity = "agent"
     _state.turn_started_at = time.time()
-    _print_note("running", "streaming runtime events")
+    if not _start_turn_status() and _should_print_turn_fallback():
+        print(_style("⏳ running…", "event"), flush=True)
+    _wait_runtime_prewarm()
 
     async def _stream() -> None:
+        global _current_session_id
         failed = False
         saw_done = False
+        runtime_failed = False
         with _trace_span("interactive.send_message_stream"):
             async for event in runtime.send_message(_current_session_id, prompt):
                 event_type = getattr(event, "type", "")
+                data = getattr(event, "data", {}) or {}
                 if event_type == "error":
                     failed = True
+                    if data.get("runtime_failure"):
+                        runtime_failed = True
                 if event_type == "done":
                     saw_done = True
                 _trace(f"interactive.event type={event_type}")
                 _render_event(event)
         _state.turn_state = "failed" if failed else "done"
         if failed or not saw_done:
+            _stop_turn_status()
             _print_note(_state.turn_state, _elapsed_turn())
+        if runtime_failed:
+            _current_session_id = None
 
     try:
         asyncio.run(_stream())
     except KeyboardInterrupt:
         _mark_turn_interrupted()
+    except Exception as exc:
+        _state.turn_state = "failed"
+        _current_session_id = None
+        _stop_turn_status()
+        _print_note("error", str(exc), level="error")
 
 
 def _mark_turn_interrupted() -> None:
     _state.turn_state = "cancelled"
+    _stop_turn_status()
     _print_note("cancelled", "turn interrupted")
+
+
+def _start_turn_status() -> bool:
+    global _turn_status_thread, _turn_status_stop, _turn_status_frame
+    if not _should_show_turn_status():
+        return False
+    _stop_turn_status()
+    _turn_status_stop = threading.Event()
+    _turn_status_frame = _SPINNER_FRAMES[0]
+
+    def _target() -> None:
+        index = 0
+        while _turn_status_stop is not None and not _turn_status_stop.wait(_SPINNER_INTERVAL_SECONDS):
+            _draw_turn_status(_SPINNER_FRAMES[index % len(_SPINNER_FRAMES)])
+            index += 1
+
+    _state.turn_state = "running"
+    _state.turn_activity = "agent"
+    _turn_status_thread = threading.Thread(
+        target=_target,
+        name="velaria-turn-status",
+        daemon=True,
+    )
+    _draw_turn_status(_SPINNER_FRAMES[0])
+    _turn_status_thread.start()
+    return True
+
+
+def _stop_turn_status() -> None:
+    global _turn_status_thread, _turn_status_stop
+    stop = _turn_status_stop
+    thread = _turn_status_thread
+    if stop is not None:
+        stop.set()
+    if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+        thread.join(timeout=0.4)
+    _turn_status_thread = None
+    _turn_status_stop = None
+    _clear_turn_status_line()
+
+
+def _should_show_turn_status() -> bool:
+    """Show a live execution line once prompt input has been submitted."""
+    if os.environ.get("VELARIA_INTERACTIVE_NO_SPINNER"):
+        return False
+    return (
+        hasattr(sys.stdout, "isatty")
+        and sys.stdout.isatty()
+    )
+
+
+def _should_print_turn_fallback() -> bool:
+    if os.environ.get("VELARIA_INTERACTIVE_NO_SPINNER"):
+        return False
+    if _should_use_prompt_toolkit():
+        return False
+    return not (
+        hasattr(sys.stdout, "isatty")
+        and sys.stdout.isatty()
+    )
+
+
+def _draw_turn_status(frame: str) -> None:
+    global _turn_status_frame, _turn_status_line_visible
+    if not _should_show_turn_status():
+        return
+    with _turn_status_lock:
+        if _turn_status_paused:
+            return
+        _turn_status_frame = frame
+        text = _compact_line(_turn_status_text(frame), limit=_terminal_width())
+        clear = _clear_to_end_of_line()
+        sys.stdout.write("\r" + _style(text, "event") + clear)
+        sys.stdout.flush()
+        _turn_status_line_visible = True
+
+
+def _turn_status_text(frame: str) -> str:
+    runtime = "-"
+    model = "-"
+    try:
+        status = _runtime.status(_current_session_id or "__velaria_pending_session__") if _runtime is not None else {}
+        runtime = str(status.get("runtime") or "-")
+        model = str(status.get("model") or "-")
+    except Exception:
+        pass
+    session = _short_id(_current_session_id) or "-"
+    elapsed = _elapsed_turn()
+    activity = _state.turn_activity or "agent"
+    return f"{frame} running {elapsed} | {runtime} {model} | session {session} | {activity}"
+
+
+def _clear_turn_status_line() -> None:
+    global _turn_status_line_visible
+    with _turn_status_lock:
+        if not _turn_status_line_visible:
+            return
+        sys.stdout.write("\r" + _clear_to_end_of_line() + "\r")
+        sys.stdout.flush()
+        _turn_status_line_visible = False
+
+
+@contextlib.contextmanager
+def _turn_status_output_paused():
+    global _turn_status_line_visible, _turn_status_paused
+    with _turn_status_lock:
+        old = _turn_status_paused
+        _turn_status_paused = True
+        if _turn_status_line_visible:
+            sys.stdout.write("\r" + _clear_to_end_of_line() + "\r")
+            sys.stdout.flush()
+            _turn_status_line_visible = False
+    try:
+        yield
+    finally:
+        with _turn_status_lock:
+            _turn_status_paused = old
+
+
+def _restore_turn_status_line() -> None:
+    if _turn_status_stop is None or _turn_status_stop.is_set():
+        return
+    if _state.turn_state != "running":
+        return
+    _draw_turn_status(_turn_status_frame)
+
+
+def _clear_to_end_of_line() -> str:
+    return "\x1b[2K" if _should_show_turn_status() else " " * 80
+
+
+def _terminal_width() -> int:
+    try:
+        return max(40, os.get_terminal_size().columns)
+    except OSError:
+        return 100
 
 
 @contextlib.contextmanager
@@ -494,30 +674,10 @@ def _render_event(event: Any) -> None:
     content = getattr(event, "content", "")
     data = getattr(event, "data", {}) or {}
     _update_state_from_event(event_type, content, data)
-    if event_type == "assistant_text":
-        if content:
-            _print_assistant_text(content)
-        return
-    if event_type == "thinking":
-        if content:
-            _print_event("thinking", content)
-        return
-    if event_type == "tool_call":
-        _print_event("tool", _format_tool_call(content, data))
-        return
-    if event_type == "tool_result":
-        summary = _summarize_tool_result(content, data)
-        if summary:
-            _print_event("tool result", summary)
-        return
-    if event_type == "command":
-        if content:
-            _print_event("command", content)
-        return
-    if event_type == "file":
-        if content:
-            _print_event("file", content)
-        return
+
+    if event_type in {"done", "error"}:
+        _stop_turn_status()
+
     if event_type == "done":
         _state.turn_state = "done"
         _print_note("done", _elapsed_turn())
@@ -525,10 +685,33 @@ def _render_event(event: Any) -> None:
     if event_type == "error":
         _print_note("error", content or _json_dumps(data), level="error")
         return
-    if _looks_like_runtime_payload(content):
-        return
-    if content:
-        _print_assistant_text(content)
+
+    active_spinner = _turn_status_stop is not None and not _turn_status_stop.is_set()
+    output_context = _turn_status_output_paused() if active_spinner else contextlib.nullcontext()
+    with output_context:
+        if event_type == "assistant_text":
+            if content:
+                _print_assistant_text(content)
+        elif event_type == "thinking":
+            if content:
+                _print_event("thinking", content)
+        elif event_type == "tool_call":
+            _print_event("tool", _format_tool_call(content, data))
+        elif event_type == "tool_result":
+            summary = _summarize_tool_result(content, data)
+            if summary:
+                _print_event("tool result", summary)
+        elif event_type == "command":
+            if content:
+                _print_event("command", content)
+        elif event_type == "file":
+            if content:
+                _print_event("file", content)
+        elif not _looks_like_runtime_payload(content) and content:
+            _print_assistant_text(content)
+
+    if active_spinner:
+        _restore_turn_status_line()
 
 
 def _extract_tool_name(data: dict[str, Any]) -> str:
@@ -632,7 +815,7 @@ def _build_prompt_session():
         key_bindings=bindings,
         bottom_toolbar=_statusline,
         complete_while_typing=False,
-        reserve_space_for_menu=3,
+        reserve_space_for_menu=0,
         multiline=False,
     )
 
@@ -658,7 +841,7 @@ def _statusline() -> str:
     model = "-"
     tool_count = 0
     try:
-        status = _runtime.status(_current_session_id) if _runtime is not None else {}
+        status = _runtime.status(_current_session_id or "__velaria_pending_session__") if _runtime is not None else {}
         runtime = str(status.get("runtime") or "-")
         model = str(status.get("model") or "-")
         tool_count = len(status.get("tools") or [])
@@ -667,8 +850,9 @@ def _statusline() -> str:
     session = _short_id(_current_session_id)
     dataset = _state.dataset_name or pathlib_basename(_state.source_path) or "no dataset"
     run = _short_id(_state.last_run_id) if _state.last_run_id else "no run"
+    spinner = _turn_status_frame if _state.turn_state == "running" else ""
     return (
-        f" {runtime} {model} | session {session or '-'} | "
+        f"{spinner} {runtime} {model} | session {session or '-'} | "
         f"dataset {dataset} | run {run} | tools {tool_count} | "
         f"{_state.runtime_warmup}/{_state.turn_state} "
     )
@@ -796,11 +980,18 @@ def _format_result_state() -> str:
 
 
 def _update_state_from_event(event_type: str, content: str, data: dict[str, Any]) -> None:
+    if event_type == "thinking":
+        _state.turn_activity = "thinking"
+    if event_type == "assistant_text":
+        _state.turn_activity = "answering"
     if event_type in {"tool_call", "tool_result"}:
         tool_name = _extract_tool_name(data) or _extract_tool_name_from_payload(content)
+        if tool_name:
+            _state.turn_activity = tool_name
         if tool_name and (event_type == "tool_call" or not _state.last_tool):
             _state.last_tool = tool_name
     if event_type == "command" and content:
+        _state.turn_activity = "command"
         _state.last_tool = "command"
         _state.last_function = content
     if event_type == "tool_result":

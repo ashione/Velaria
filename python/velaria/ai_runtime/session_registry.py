@@ -53,10 +53,16 @@ class SessionRegistry:
         )
         self._conn.commit()
 
-    def lookup(self, session_id: str) -> dict[str, Any] | None:
-        row = self._conn.execute(
-            "SELECT * FROM ai_sessions WHERE session_id=?", (session_id,)
-        ).fetchone()
+    def lookup(self, session_id: str, runtime_type: str | None = None) -> dict[str, Any] | None:
+        if runtime_type:
+            row = self._conn.execute(
+                "SELECT * FROM ai_sessions WHERE session_id=? AND runtime_type=?",
+                (session_id, runtime_type),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT * FROM ai_sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
         if not row:
             return None
         return {**dict(row), "dataset_context": json.loads(row["dataset_context_json"])}
@@ -75,19 +81,31 @@ class SessionRegistry:
         )
         self._conn.commit()
 
-    def list_active(self) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT * FROM ai_sessions WHERE status='active' ORDER BY last_active_at DESC"
-        ).fetchall()
+    def list_active(self, runtime_type: str | None = None) -> list[dict[str, Any]]:
+        if runtime_type:
+            rows = self._conn.execute(
+                "SELECT * FROM ai_sessions WHERE status='active' AND runtime_type=? ORDER BY last_active_at DESC",
+                (runtime_type,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM ai_sessions WHERE status='active' ORDER BY last_active_at DESC"
+            ).fetchall()
         return [
             {**dict(r), "dataset_context": json.loads(r["dataset_context_json"])}
             for r in rows
         ]
 
-    def most_recent_active(self) -> dict[str, Any] | None:
-        row = self._conn.execute(
-            "SELECT * FROM ai_sessions WHERE status='active' ORDER BY last_active_at DESC LIMIT 1"
-        ).fetchone()
+    def most_recent_active(self, runtime_type: str | None = None) -> dict[str, Any] | None:
+        if runtime_type:
+            row = self._conn.execute(
+                "SELECT * FROM ai_sessions WHERE status='active' AND runtime_type=? ORDER BY last_active_at DESC LIMIT 1",
+                (runtime_type,),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT * FROM ai_sessions WHERE status='active' ORDER BY last_active_at DESC LIMIT 1"
+            ).fetchone()
         if not row:
             return None
         return {**dict(row), "dataset_context": json.loads(row["dataset_context_json"])}

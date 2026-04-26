@@ -2,15 +2,25 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
 import pathlib
+import sys
+import time
 from typing import Any, AsyncIterator
 
 from . import AiRuntime, generate_session_id
 from .agent import AgentEvent, normalize_runtime_event
-from .functions import execute_local_function, tool_definitions, velaria_agent_instructions
+from .functions import execute_local_function, tool_definitions, tool_result_json, velaria_agent_instructions
+from ._runtime_common import (
+    apply_proxy_env,
+    coerce_bool,
+    is_uuid_text,
+    normalize_proxy_env,
+    proxy_env_from_process,
+)
 from .session_registry import SessionRegistry
 
 
@@ -21,9 +31,10 @@ class ClaudeAgentRuntime:
         self,
         api_key: str,
         provider: str = "anthropic",
-        auth_mode: str = "oauth",
+        auth_mode: str = "local",
         base_url: str = "",
         model: str = "claude-sonnet-4-20250514",
+        model_source: str = "default",
         runtime_path: str = "",
         runtime_workspace: str = "",
         reuse_local_config: bool = True,
@@ -31,6 +42,9 @@ class ClaudeAgentRuntime:
         skill_dir: str = "",
         skill_path: str = "",
         cwd: str = "",
+        proxy_env: dict[str, str] | None = None,
+        reasoning_effort: str = "none",
+        network_access: bool = True,
     ):
         self.runtime_path = _claude_runtime_path(runtime_path)
         self.launch_cwd = pathlib.Path(cwd).expanduser().resolve() if cwd else pathlib.Path.cwd().resolve()
@@ -40,15 +54,22 @@ class ClaudeAgentRuntime:
         self.skill_path = _resolve_velaria_skill_path(skill_path, self.skill_dir)
         self.reuse_local_config = reuse_local_config
         self.runtime_config_path = runtime_config_path
+        self._proxy_env = normalize_proxy_env(proxy_env or {})
+        self.reasoning_effort = reasoning_effort or "none"
+        self.network_access = coerce_bool(network_access, True)
+        self._trace_start = time.perf_counter()
         from claude_agent_sdk import ClaudeSDKClient  # noqa: F401 -- validated at init
 
         self.model = model
+        self.model_source = model_source
         self.provider = provider
         self.auth_mode = auth_mode
         self.api_key = api_key
         self.base_url = base_url
         self.registry = SessionRegistry(pathlib.Path(self.runtime_workspace) / "sessions.sqlite")
         self._sessions: dict[str, dict[str, Any]] = {}  # in-memory session state
+        self._prewarm_complete = False
+        self._prewarm_lock: asyncio.Lock | None = None
 
         # Build tool name -> definition lookup
         self._tool_functions: dict[str, dict[str, Any]] = {}
@@ -60,20 +81,26 @@ class ClaudeAgentRuntime:
 
     async def start_thread(self, dataset_context: dict[str, Any] | None = None) -> str:
         session_id = generate_session_id()
-        self.registry.register(session_id, "claude", session_id, dataset_context or {})
-        self._sessions[session_id] = {"dataset_context": dataset_context or {}, "session": None}
+        with self._trace_span(f"start_thread session={session_id}"):
+            self.registry.register(session_id, "claude", session_id, dataset_context or {})
+        self._sessions[session_id] = {"dataset_context": dataset_context or {}, "session": None, "claude_started": False}
         return session_id
 
     async def resume_session(self, session_id: str) -> bool:
         return await self.resume_thread(session_id)
 
     async def resume_thread(self, session_id: str) -> bool:
-        entry = self.registry.lookup(session_id)
-        if not entry or entry["status"] != "active":
-            return False
-        self._sessions[session_id] = {"dataset_context": entry["dataset_context"], "session": None}
-        self.registry.update_activity(session_id)
-        return True
+        with self._trace_span(f"resume_thread session={session_id}"):
+            entry = self.registry.lookup(session_id, "claude")
+            if not entry or entry["status"] != "active":
+                self._trace("resume_thread not_found_or_inactive")
+                return False
+            if not is_uuid_text(session_id) or not is_uuid_text(str(entry.get("runtime_session_ref") or "")):
+                self._trace("resume_thread skipped legacy_non_uuid_session")
+                return False
+            self._sessions[session_id] = {"dataset_context": entry["dataset_context"], "session": None, "claude_started": True}
+            self.registry.update_activity(session_id)
+            return True
 
     async def generate_sql(
         self,
@@ -96,31 +123,27 @@ class ClaudeAgentRuntime:
         )
 
         result_text = ""
-        async for msg in claude_query(
-            prompt=user_msg,
-            options=ClaudeAgentOptions(
-                system_prompt=sql_system,
-                model=self.model,
-                max_turns=1,
-                permission_mode="bypassPermissions",
-                cli_path=self.runtime_path or None,
-                env=self._runtime_env(),
-                cwd=str(self.cwd),
-                settings=self.runtime_config_path or None,
-                session_id=session_id,
-                skills=["velaria-python-local"],
-                setting_sources=["project", "user"],
-            ),
-        ):
-            # AssistantMessage.content is a list of TextBlock/ThinkingBlock
-            if hasattr(msg, "content") and isinstance(msg.content, list):
-                text_parts = [block.text for block in msg.content if hasattr(block, "text")]
-                if text_parts:
-                    # Take only this message's text (overwrite, not accumulate)
-                    result_text = "".join(text_parts)
-            # ResultMessage.result may contain the final text
-            elif hasattr(msg, "result") and isinstance(msg.result, str) and msg.result.strip():
-                result_text = msg.result
+        with self._trace_span(f"generate_sql session={session_id} prompt_len={len(prompt)}"):
+            async for msg in claude_query(
+                prompt=user_msg,
+                options=ClaudeAgentOptions(
+                    system_prompt=sql_system,
+                    model=self.model,
+                    max_turns=1,
+                    permission_mode="bypassPermissions",
+                    cli_path=self.runtime_path or None,
+                    env=self._runtime_env(),
+                    cwd=str(self.cwd),
+                    settings=self.runtime_config_path or None,
+                    session_id=session_id,
+                    skills=["velaria-python-local"],
+                    setting_sources=["project", "user"],
+                ),
+            ):
+                content, _ = _claude_sdk_event_text(msg)
+                if content:
+                    result_text = content
+                self._trace(f"generate_sql msg type={type(msg).__name__} content_len={len(content)}")
 
         self.registry.update_activity(session_id)
         return _parse_sql_json(result_text)
@@ -135,7 +158,7 @@ class ClaudeAgentRuntime:
             }
 
     async def send_message(self, session_id: str, prompt: str) -> AsyncIterator[AgentEvent]:
-        from claude_agent_sdk import ClaudeSDKClient
+        from claude_agent_sdk import ClaudeSDKClient, create_sdk_mcp_server
         from claude_agent_sdk.types import ClaudeAgentOptions
 
         session_data = self._sessions.get(session_id)
@@ -144,62 +167,99 @@ class ClaudeAgentRuntime:
             return
 
         dataset_context = session_data["dataset_context"]
+        sdk_tools = _build_sdk_mcp_tools(dataset_context)
+        session_options = _claude_session_options(session_id, session_data)
 
-        # Build custom tool handlers
-        def handle_tool(tool_name: str, tool_input: dict) -> str:
-            merged = dict(tool_input or {})
-            for key in ("source_path", "table_name", "schema"):
-                if key in dataset_context and key not in merged:
-                    merged[key] = dataset_context[key]
-            return json.dumps(execute_local_function(tool_name, merged), ensure_ascii=False)
-
-        # Create custom tools for ClaudeSDKClient
-        custom_tools = []
-        for tool_def in tool_definitions():
-            name = tool_def["name"]
-            custom_tools.append(
-                {
-                    "name": name,
-                    "description": tool_def["description"],
-                    "input_schema": tool_def["input_schema"],
-                    "handler": lambda inp, n=name: handle_tool(n, inp),
-                }
+        with self._trace_span(f"send_message session={session_id} prompt_len={len(prompt)}"):
+            velaria_mcp = create_sdk_mcp_server(name="velaria", version="1.0.0", tools=sdk_tools)
+            client = ClaudeSDKClient(
+                options=ClaudeAgentOptions(
+                    model=self.model,
+                    system_prompt=velaria_agent_instructions(),
+                    permission_mode="bypassPermissions",
+                    cli_path=self.runtime_path or None,
+                    env=self._runtime_env(),
+                    cwd=str(self.cwd),
+                    settings=self.runtime_config_path or None,
+                    **session_options,
+                    skills=["velaria-python-local"],
+                    setting_sources=["project", "user"],
+                    mcp_servers={"velaria": velaria_mcp},
+                ),
             )
 
-        client = ClaudeSDKClient(
-            options=ClaudeAgentOptions(
-                model=self.model,
-                system_prompt=velaria_agent_instructions(),
-                permission_mode="bypassPermissions",
-                cli_path=self.runtime_path or None,
-                env=self._runtime_env(),
-                cwd=str(self.cwd),
-                settings=self.runtime_config_path or None,
-                session_id=session_id,
-                skills=["velaria-python-local"],
-                setting_sources=["project", "user"],
-            ),
-            custom_tools=custom_tools,
-        )
-
-        async for msg in client.query(prompt=prompt):
-            msg_type = type(msg).__name__
-            content = ""
-            if hasattr(msg, "content") and isinstance(msg.content, list):
-                for block in msg.content:
-                    if hasattr(block, "text"):
-                        content += block.text
-            elif hasattr(msg, "result") and isinstance(msg.result, str):
-                content = msg.result
-            yield normalize_runtime_event(msg_type, content, session_id=session_id)
+            try:
+                await client.connect(prompt=prompt)
+                session_data["claude_started"] = True
+                async for msg in client.receive_response():
+                    event = _claude_sdk_event(msg, session_id)
+                    self._trace(
+                        f"send_message yield raw_type={type(msg).__name__} "
+                        f"normalized={event.type} content_len={len(event.content)}"
+                    )
+                    yield event
+            except Exception as exc:
+                self.registry.close_session(session_id)
+                self._sessions.pop(session_id, None)
+                yield AgentEvent(
+                    "error",
+                    str(exc),
+                    session_id=session_id,
+                    data={"runtime_failure": True},
+                )
+                return
 
         self.registry.update_activity(session_id)
 
     async def prewarm(self) -> None:
-        return None
+        if self._prewarm_complete:
+            self._trace("prewarm skipped already_complete")
+            return
+        if self._prewarm_lock is None:
+            self._prewarm_lock = asyncio.Lock()
+        async with self._prewarm_lock:
+            if self._prewarm_complete:
+                return
+            with self._trace_span("prewarm"):
+                await self._prewarm_runtime()
+
+    async def _prewarm_runtime(self) -> None:
+        from claude_agent_sdk import ClaudeSDKClient
+        from claude_agent_sdk.types import ClaudeAgentOptions
+
+        with self._trace_span("prewarm.create_client"):
+            client = ClaudeSDKClient(
+                options=ClaudeAgentOptions(
+                    model=self.model,
+                    system_prompt=velaria_agent_instructions(),
+                    permission_mode="bypassPermissions",
+                    cli_path=self.runtime_path or None,
+                    env=self._runtime_env(),
+                    cwd=str(self.cwd),
+                    skills=["velaria-python-local"],
+                    setting_sources=["project", "user"],
+                ),
+            )
+
+        if os.environ.get("VELARIA_PREWARM_TURN"):
+            with self._trace_span("prewarm.chat_once"):
+                await client.connect(
+                    prompt="Velaria runtime warmup. Reply with exactly: READY"
+                )
+                async for _msg in client.receive_response():
+                    pass
+        else:
+            self._trace("prewarm.chat_once skipped")
+
+        self._prewarm_complete = True
 
     async def list_sessions(self) -> list[dict[str, Any]]:
-        return self.registry.list_active()
+        return [
+            entry
+            for entry in self.registry.list_active("claude")
+            if is_uuid_text(str(entry.get("session_id") or ""))
+            and is_uuid_text(str(entry.get("runtime_session_ref") or ""))
+        ]
 
     async def list_threads(self) -> list[dict[str, Any]]:
         return await self.list_sessions()
@@ -212,13 +272,17 @@ class ClaudeAgentRuntime:
         self._sessions.pop(session_id, None)
 
     def status(self, session_id: str | None = None) -> dict[str, Any]:
-        entry = self.registry.lookup(session_id) if session_id else self.registry.most_recent_active()
+        entry = self._session_status_entry(session_id)
         return {
             "runtime": "claude",
             "provider": self.provider,
             "model": self.model,
+            "model_source": self.model_source,
+            "reasoning_effort": self.reasoning_effort,
             "auth_mode": self.auth_mode,
+            "network_access": self.network_access,
             "reuse_local_config": self.reuse_local_config,
+            "proxy": bool(proxy_env_from_process(self._proxy_env)),
             "workspace": self.runtime_workspace,
             "cwd": str(self.cwd),
             "session": entry,
@@ -230,12 +294,17 @@ class ClaudeAgentRuntime:
 
     def shutdown(self) -> None:
         self.registry.close()
+        self._sessions.clear()
 
     def _runtime_env(self) -> dict[str, str]:
         env = {} if self.reuse_local_config else dict(os.environ)
         if not self.reuse_local_config:
             env["HOME"] = str(self.runtime_workspace)
             env["CLAUDE_CONFIG_DIR"] = str(pathlib.Path(self.runtime_workspace) / ".claude")
+        uv_cache_dir = self.cwd / ".cache" / "uv"
+        uv_cache_dir.mkdir(parents=True, exist_ok=True)
+        env["UV_CACHE_DIR"] = str(uv_cache_dir)
+        env["VELARIA_HOME"] = str(self.runtime_workspace)
         env["VELARIA_WORKSPACE"] = str(self.runtime_workspace)
         env["VELARIA_RUNTIME_WORKSPACE"] = str(self.runtime_workspace)
         if self.skill_dir is not None:
@@ -246,15 +315,143 @@ class ClaudeAgentRuntime:
             env["ANTHROPIC_API_KEY"] = self.api_key
         if self.base_url:
             env["ANTHROPIC_BASE_URL"] = self.base_url
+        apply_proxy_env(env, self._proxy_env)
         return env
 
+    @contextlib.contextmanager
+    def _trace_span(self, name: str):
+        if not _trace_enabled():
+            yield
+            return
+        start = time.perf_counter()
+        self._trace(f"{name} start")
+        try:
+            yield
+        finally:
+            elapsed = (time.perf_counter() - start) * 1000.0
+            self._trace(f"{name} end {elapsed:.1f}ms")
 
-def _build_sql_user_message(
-    prompt: str,
-    schema: list[str],
-    table_name: str,
-    sample_rows: list[dict[str, Any]] | None = None,
-) -> str:
+    def _trace(self, message: str) -> None:
+        if not _trace_enabled():
+            return
+        elapsed = time.perf_counter() - self._trace_start
+        print(f"[velaria-trace {elapsed:8.3f}s] claude.{message}", file=sys.stderr, flush=True)
+
+    def _session_status_entry(self, session_id: str | None) -> dict[str, Any] | None:
+        if session_id:
+            entry = self.registry.lookup(session_id, "claude")
+            if (
+                entry
+                and is_uuid_text(session_id)
+                and is_uuid_text(str(entry.get("runtime_session_ref") or ""))
+            ):
+                return entry
+            return None
+        for entry in self.registry.list_active("claude"):
+            if (
+                is_uuid_text(str(entry.get("session_id") or ""))
+                and is_uuid_text(str(entry.get("runtime_session_ref") or ""))
+            ):
+                return entry
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Event normalization
+# ---------------------------------------------------------------------------
+
+def _claude_sdk_event_text(msg: Any) -> tuple[str, str]:
+    msg_type = type(msg).__name__
+    if hasattr(msg, "content") and isinstance(msg.content, list):
+        text_parts = [block.text for block in msg.content if hasattr(block, "text") and isinstance(block.text, str)]
+        if text_parts:
+            return "".join(text_parts), msg_type
+        thinking_parts = [block.thinking for block in msg.content if hasattr(block, "thinking") and isinstance(block.thinking, str)]
+        if thinking_parts:
+            return "".join(thinking_parts), "thinking"
+        tool_blocks = [block for block in msg.content if hasattr(block, "name") and hasattr(block, "input")]
+        if tool_blocks:
+            return getattr(tool_blocks[0], "name", ""), "ToolUseBlock"
+    if hasattr(msg, "result") and isinstance(msg.result, str) and msg.result.strip():
+        return msg.result, "ResultMessage"
+    return "", msg_type
+
+
+def _claude_sdk_event(msg: Any, session_id: str = "") -> AgentEvent:
+    content, msg_type = _claude_sdk_event_text(msg)
+    event_type = msg_type
+    if msg_type == "AssistantMessage":
+        event_type = "assistant_text"
+    elif msg_type == "ResultMessage":
+        event_type = "done"
+        content = ""
+    elif "thinking" in msg_type.lower():
+        event_type = "thinking"
+    elif msg_type in ("ToolUseBlock",):
+        event_type = "tool_call"
+    elif msg_type in ("ToolResultBlock",):
+        event_type = "tool_result"
+    elif content and msg_type not in ("ResultMessage",):
+        event_type = "assistant_text"
+    return normalize_runtime_event(event_type, content, session_id=session_id)
+
+
+# ---------------------------------------------------------------------------
+# SDK MCP tool builders
+# ---------------------------------------------------------------------------
+
+def _build_sdk_mcp_tools(dataset_context: dict[str, Any] | None = None) -> list:
+    """Build claude_agent_sdk SdkMcpTool instances from Velaria tool definitions."""
+    from claude_agent_sdk import SdkMcpTool
+
+    ctx = dataset_context or {}
+    sdk_tools = []
+    for tool_def in tool_definitions():
+        name = tool_def["name"]
+
+        def make_handler(n=name):
+            # Bind the current tool name at definition time; SDK invokes handlers later.
+            async def handler(input_data: dict) -> dict:
+                merged = dict(input_data or {})
+                for key in ("source_path", "table_name", "schema"):
+                    if key in ctx and key not in merged:
+                        merged[key] = ctx[key]
+                return _sdk_tool_result(execute_local_function(n, merged))
+            return handler
+
+        sdk_tools.append(SdkMcpTool(
+            name=name,
+            description=tool_def["description"],
+            input_schema=tool_def["input_schema"],
+            handler=make_handler(name),
+        ))
+    return sdk_tools
+
+
+def _claude_session_options(session_id: str, session_data: dict[str, Any]) -> dict[str, str | None]:
+    """Claude SDK accepts either a new session_id or a resume id, never both."""
+    if bool(session_data.get("claude_started")):
+        return {"resume": session_id, "session_id": None}
+    return {"resume": None, "session_id": session_id}
+
+
+def _sdk_tool_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": tool_result_json(result),
+            }
+        ],
+        "is_error": not bool(result.get("ok", True)),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _build_sql_user_message(prompt, schema, table_name, sample_rows=None):
     parts = [f"Table: {table_name}", f"Columns: {', '.join(schema)}"]
     if sample_rows:
         parts.append(f"Sample rows (first {len(sample_rows)}):")
@@ -297,7 +494,7 @@ def _resolve_velaria_skill_path(skill_path: str, skill_dir: pathlib.Path | None)
         return path if path.exists() else None
     if skill_dir is None:
         return None
-    candidate = skill_dir / "velaria_python_local" / "SKILL.md"
+    candidate = (skill_dir / "velaria_python_local" / "SKILL.md").resolve()
     return candidate if candidate.exists() else None
 
 
@@ -322,5 +519,8 @@ def _parse_sql_json(text: str) -> dict[str, Any]:
             "explanation": str(parsed.get("explanation", "")),
         }
     except (json.JSONDecodeError, ValueError):
-        # If it's not JSON, treat the whole text as SQL
         return {"sql": text, "explanation": ""}
+
+
+def _trace_enabled() -> bool:
+    return bool(os.environ.get("VELARIA_TRACE"))

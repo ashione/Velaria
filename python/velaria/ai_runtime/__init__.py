@@ -1,6 +1,6 @@
 from __future__ import annotations
 import json
-import secrets
+import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator, Protocol
 
@@ -22,27 +22,41 @@ class AiRuntime(Protocol):
     def status(self, session_id: str | None = None) -> dict[str, Any]: ...
 
 def generate_session_id() -> str:
-    return f"ai_session_{secrets.token_hex(8)}"
+    return str(uuid.uuid4())
 
 def create_runtime(config: dict[str, Any]) -> AiRuntime:
     runtime_type = str(config.get("runtime", "codex")).strip().lower()
+    config_file_runtime = str(
+        config.get("configured_runtime") or config.get("config_file_runtime") or runtime_type
+    ).strip().lower()
     provider = str(config.get("provider", "openai") or "openai").strip().lower()
-    auth_mode = _normalize_auth_mode(config.get("auth_mode", "oauth"))
+    auth_mode = _normalize_auth_mode(config.get("auth_mode", "local"))
     api_key = str(config.get("api_key", "")) if auth_mode == "api_key" else ""
     base_url = str(config.get("base_url", "")) if auth_mode == "api_key" else ""
-    model = str(config.get("model", ""))
     reasoning_effort = str(config.get("reasoning_effort") or "none")
     network_access = _bool_config(config, "network_access", True)
-    reuse_local_config = auth_mode == "oauth"
+    reuse_local_config = auth_mode == "local"
 
     if runtime_type == "claude" or (runtime_type == "auto" and _has_claude_sdk()):
+        if not _has_claude_sdk():
+            raise RuntimeError(
+                "Claude runtime requested (agentRuntime: 'claude') but claude-agent-sdk is not installed. "
+                "Install it with: uv sync --project python"
+        )
         from .claude_runtime import ClaudeAgentRuntime
+        resolved_model, model_source = _resolve_runtime_model(config, "claude", config_file_runtime)
+        # When Claude runtime is selected, default provider to anthropic
+        if provider == "openai":
+            provider = "anthropic"
         return ClaudeAgentRuntime(
             provider=provider,
+            model=resolved_model,
+            model_source=model_source,
             auth_mode=auth_mode,
             api_key=api_key,
             base_url=base_url,
-            model=model or "claude-sonnet-4-20250514",
+            reasoning_effort=reasoning_effort,
+            network_access=network_access,
             runtime_path=_runtime_path_for(config, "claude"),
             runtime_workspace=str(config.get("runtime_workspace") or ""),
             reuse_local_config=reuse_local_config,
@@ -50,13 +64,21 @@ def create_runtime(config: dict[str, Any]) -> AiRuntime:
             skill_dir=str(config.get("skill_dir") or ""),
             skill_path=str(config.get("skill_path") or ""),
             cwd=str(config.get("cwd") or ""),
+            proxy_env=dict(config.get("proxy_env") or {}),
         )
 
     if runtime_type == "codex" or (runtime_type == "auto" and _has_codex_sdk()):
+        if not _has_codex_sdk():
+            raise RuntimeError(
+                "Codex runtime requested (agentRuntime: 'codex') but codex-app-server-sdk is not installed. "
+                "Install it with: uv sync --project python"
+        )
         from .codex_runtime import CodexRuntime
+        resolved_model, model_source = _resolve_runtime_model(config, "codex", config_file_runtime)
         return CodexRuntime(
             provider=provider,
-            model=model or "gpt-5.4-mini",
+            model=resolved_model,
+            model_source=model_source,
             reasoning_effort=reasoning_effort,
             network_access=network_access,
             api_key=api_key,
@@ -98,6 +120,28 @@ def _runtime_path_for(config: dict[str, Any], runtime_type: str) -> str:
         return str(config.get("codex_runtime_path") or config.get("runtime_path") or "")
     return str(config.get("runtime_path") or "")
 
+def _resolve_runtime_model(
+    config: dict[str, Any],
+    runtime_type: str,
+    config_file_runtime: str,
+) -> tuple[str, str]:
+    model = str(config.get("model") or "")
+    if runtime_type == "claude":
+        claude_model = str(config.get("claude_model") or "")
+        if claude_model:
+            return claude_model, "agentClaudeModel"
+        if config_file_runtime == "claude" and model:
+            return model, "agentModel"
+        return "claude-sonnet-4-20250514", "default"
+    if runtime_type == "codex":
+        codex_model = str(config.get("codex_model") or "")
+        if codex_model:
+            return codex_model, "agentCodexModel"
+        if config_file_runtime == "codex" and model:
+            return model, "agentModel"
+        return "gpt-5.4-mini", "default"
+    return model, "config"
+
 def _bool_config(config: dict[str, Any], key: str, default: bool) -> bool:
     value = config.get(key, default)
     if isinstance(value, bool):
@@ -111,10 +155,13 @@ def _bool_config(config: dict[str, Any], key: str, default: bool) -> bool:
     return bool(value)
 
 def _normalize_auth_mode(value: Any) -> str:
-    normalized = str(value or "oauth").strip().lower()
+    normalized = str(value or "local").strip().lower()
     if normalized == "api_key":
         return "api_key"
-    return "oauth"
+    # "oauth" is a legacy alias for "local" (reuse local CLI config)
+    if normalized in ("oauth", "local"):
+        return "local"
+    return "local"
 
 def load_ai_config() -> dict[str, Any]:
     config_path = Path.home() / ".velaria" / "config.json"
@@ -124,20 +171,23 @@ def load_ai_config() -> dict[str, Any]:
         config = json.loads(config_path.read_text(encoding="utf-8"))
     except Exception:
         return {}
-    auth_mode = _normalize_auth_mode(config.get("agentAuthMode", "oauth"))
+    auth_mode = _normalize_auth_mode(config.get("agentAuthMode", "local"))
     return {
         "provider": config.get("agentProvider", "openai"),
         "auth_mode": auth_mode,
         "api_key": config.get("agentApiKey", "") if auth_mode == "api_key" else "",
         "base_url": config.get("agentBaseUrl", "https://api.openai.com/v1"),
         "model": config.get("agentModel", ""),
+        "claude_model": config.get("agentClaudeModel", ""),
+        "codex_model": config.get("agentCodexModel", ""),
         "reasoning_effort": config.get("agentReasoningEffort", "none"),
         "runtime": config.get("agentRuntime", "codex"),
+        "configured_runtime": config.get("agentRuntime", "codex"),
         "runtime_path": config.get("agentRuntimePath", ""),
         "claude_runtime_path": config.get("agentClaudeRuntimePath", ""),
         "codex_runtime_path": config.get("agentCodexRuntimePath", ""),
         "runtime_workspace": config.get("agentRuntimeWorkspace", ""),
-        "reuse_local_config": auth_mode == "oauth",
+        "reuse_local_config": auth_mode == "local",
         "runtime_config_path": config.get("agentRuntimeConfigPath", ""),
         "network_access": config.get("agentCodexNetworkAccess", config.get("agentNetworkAccess", True)),
         "proxy_env": _proxy_env_from_config(config),

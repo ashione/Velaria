@@ -148,9 +148,10 @@ Current constraints:
 - SQL v1 does not expand to `CTE`, subquery, richer join semantics, or aggregate `KEYWORD SEARCH` / `HYBRID SEARCH`
 - Python callbacks / Python UDFs are not part of the hot path
 - the Electron desktop app is still a local prototype, not a stable product surface
-- Agent runtime uses Codex by default; Claude support requires the optional `claude-agent-sdk`
-- Codex runtime defaults to `gpt-5.4-mini`, reasoning effort `none`, and workspace-write network access unless `agentModel` / `agentReasoningEffort` / `agentCodexNetworkAccess` is set
-- Codex runtime inherits standard proxy environment variables such as `http_proxy`, `https_proxy`, and `all_proxy`
+- Agent runtime supports both Codex (default) and Claude via optional `claude-agent-sdk`
+- Codex runtime defaults to `gpt-5.4-mini`; Claude runtime defaults to `claude-sonnet-4-20250514`
+- Both runtimes support reasoning effort `none` by default and inherit standard proxy environment variables
+- Network access is controlled via `agentCodexNetworkAccess` (Codex) or `agentNetworkAccess` (Claude)
 - the repository does not claim a completed distributed runtime
 
 Stable public surfaces:

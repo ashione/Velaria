@@ -6,13 +6,16 @@ import sys
 import types
 import tempfile
 import unittest
+import uuid
 from unittest import mock
 
 from velaria.agentic_store import AgenticStore
 from velaria.ai_runtime.functions import (
+    compact_tool_result,
     execute_local_function,
     load_velaria_skill_text,
     tool_definitions,
+    tool_result_json,
     velaria_agent_instructions,
 )
 from velaria.ai_runtime.mcp_server import SKILL_URI, _handle_request
@@ -315,6 +318,64 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertEqual(result["run_id"], "run_test")
         self.assertEqual(result["artifacts"][0]["artifact_id"], "artifact_test")
 
+    def test_cli_function_rejects_full_uv_command(self):
+        result = execute_local_function(
+            "velaria_cli_run",
+            {"command": "uv run --project python python python/velaria_cli.py datasets list"},
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("subcommands only", result["error"])
+
+    def test_cli_function_compacts_large_artifact_output(self):
+        large_rows = [{"name": "alice", "notes": "x" * 5000} for _ in range(20)]
+        artifacts = [
+            {
+                "artifact_id": f"artifact-{idx}",
+                "run_id": f"run-{idx}",
+                "created_at": "2026-04-26T00:00:00Z",
+                "type": "table",
+                "uri": f"/tmp/artifact-{idx}.parquet",
+                "format": "parquet",
+                "row_count": len(large_rows),
+                "schema_json": ["name", "notes"],
+                "preview_json": {
+                    "schema": ["name", "notes"],
+                    "rows": large_rows,
+                    "row_count": len(large_rows),
+                    "truncated": False,
+                },
+            }
+            for idx in range(40)
+        ]
+
+        def fake_main(argv):
+            print(json.dumps({"ok": True, "artifacts": artifacts}))
+            return 0
+
+        with mock.patch("velaria.cli.main", side_effect=fake_main):
+            result = execute_local_function("velaria_cli_run", {"argv": ["artifacts", "list"]})
+        encoded = tool_result_json(result)
+        self.assertLess(len(encoded), 320_000)
+        self.assertTrue(result["_tool_result_truncated"])
+        self.assertTrue(result["stdout_truncated"])
+        self.assertLessEqual(len(result["artifacts"]), 26)
+        self.assertLessEqual(len(result["artifacts"][0]["preview_json"]["rows"]), 5)
+
+    def test_tool_result_compaction_preserves_error_shape(self):
+        result = compact_tool_result(
+            {
+                "ok": False,
+                "function": "velaria_cli_run",
+                "error": "large failure",
+                "stdout": "x" * 500_000,
+            }
+        )
+        payload = json.loads(tool_result_json(result))
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["function"], "velaria_cli_run")
+        self.assertTrue(payload["stdout_truncated"])
+        self.assertLess(len(json.dumps(payload, ensure_ascii=False)), 320_000)
+
     def test_sql_catalog_tools_support_on_demand_function_and_pattern_lookup(self):
         caps = execute_local_function("velaria_sql_capabilities", {})
         self.assertTrue(caps["ok"])
@@ -407,6 +468,23 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertTrue(search_payload["ok"])
         self.assertEqual(search_payload["matches"][0]["name"], "UNIX_TIMESTAMP")
         self.assertIn("UNIX_TIMESTAMP([timestamp_or_date])", search_payload["matches"][0]["signature"])
+
+        with mock.patch(
+            "velaria.ai_runtime.mcp_server.execute_local_function",
+            side_effect=RuntimeError("boom"),
+        ):
+            failed = _handle_request(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 23,
+                    "method": "tools/call",
+                    "params": {"name": "velaria_read", "arguments": {}},
+                }
+            )
+        failed_payload = json.loads(failed["result"]["content"][0]["text"])
+        self.assertFalse(failed_payload["ok"])
+        self.assertEqual(failed_payload["function"], "velaria_read")
+        self.assertIn("boom", failed_payload["error"])
 
         resources = _handle_request({"jsonrpc": "2.0", "id": 22, "method": "resources/list"})
         resource_uris = {resource["uri"] for resource in resources["result"]["resources"]}
@@ -505,6 +583,7 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertIn("Do not probe `velaria_cli.py --help`", instructions)
         self.assertIn("Do not use web search to discover Velaria tools", instructions)
         self.assertIn("tool_search", instructions)
+        self.assertIn("datasets list", instructions)
         self.assertIn("velaria_dataset_download", instructions)
         self.assertIn("velaria_dataset_import", instructions)
         self.assertIn("velaria_dataset_process", instructions)
@@ -569,7 +648,7 @@ class AiRuntimeAgentTest(unittest.TestCase):
             try:
                 with mock.patch.dict(os.environ, {"CODEX_HOME": str(local_codex_home)}):
                     session_id = asyncio.run(runtime.start_thread({}))
-                self.assertTrue(session_id.startswith("ai_session_"))
+                self.assertEqual(str(uuid.UUID(session_id)), session_id)
                 fake = FakeClient.instances[0]
                 runtime_cwd = str(pathlib.Path(tmp) / "workspace")
                 self.assertEqual(fake.connect_kwargs["cwd"], runtime_cwd)
@@ -640,12 +719,30 @@ class AiRuntimeAgentTest(unittest.TestCase):
                 self.assertNotIn(str(pathlib.Path.cwd()), json.dumps(mcp["env"]))
                 status = runtime.status(session_id)
                 self.assertEqual(status["provider"], "openai")
-                self.assertEqual(status["auth_mode"], "oauth")
+                self.assertEqual(status["model_source"], "default")
+                self.assertEqual(status["auth_mode"], "local")
                 self.assertTrue(status["reuse_local_config"])
                 self.assertEqual(status["cwd"], runtime_cwd)
                 self.assertEqual(status["reasoning_effort"], "none")
                 self.assertTrue(status["network_access"])
                 self.assertNotIn("project_cwd", status)
+            finally:
+                runtime.shutdown()
+
+    def test_codex_runtime_ignores_non_codex_sessions(self):
+        from velaria.ai_runtime.codex_runtime import CodexRuntime
+
+        with tempfile.TemporaryDirectory(prefix="velaria-codex-runtime-filter-") as tmp:
+            try:
+                runtime = CodexRuntime(runtime_workspace=tmp)
+            except ImportError as exc:
+                raise unittest.SkipTest("codex-app-server-sdk is not installed") from exc
+            try:
+                session_id = "00000000-0000-0000-0000-000000000002"
+                runtime.registry.register(session_id, "claude", session_id, {})
+                self.assertFalse(asyncio.run(runtime.resume_thread(session_id)))
+                self.assertEqual(asyncio.run(runtime.list_threads()), [])
+                self.assertIsNone(runtime.status()["session"])
             finally:
                 runtime.shutdown()
 
@@ -802,6 +899,69 @@ class AiRuntimeAgentTest(unittest.TestCase):
             finally:
                 runtime.shutdown()
 
+    def test_create_runtime_codex_model_overrides_agent_model(self):
+        from velaria.ai_runtime import create_runtime
+
+        with tempfile.TemporaryDirectory(prefix="velaria-codex-runtime-factory-model-") as tmp:
+            try:
+                runtime = create_runtime(
+                    {
+                        "runtime": "codex",
+                        "model": "gpt-shared",
+                        "codex_model": "gpt-codex-specific",
+                        "runtime_workspace": tmp,
+                    }
+                )
+            except ImportError as exc:
+                raise unittest.SkipTest("codex-app-server-sdk is not installed") from exc
+            try:
+                self.assertEqual(runtime.model, "gpt-codex-specific")
+                self.assertEqual(runtime.model_source, "agentCodexModel")
+            finally:
+                runtime.shutdown()
+
+    def test_create_runtime_codex_override_does_not_reuse_claude_agent_model(self):
+        from velaria.ai_runtime import create_runtime
+
+        with tempfile.TemporaryDirectory(prefix="velaria-codex-runtime-factory-model-") as tmp:
+            try:
+                runtime = create_runtime(
+                    {
+                        "runtime": "codex",
+                        "configured_runtime": "claude",
+                        "model": "claude-sonnet-4-20250514",
+                        "runtime_workspace": tmp,
+                    }
+                )
+            except ImportError as exc:
+                raise unittest.SkipTest("codex-app-server-sdk is not installed") from exc
+            try:
+                self.assertEqual(runtime.model, "gpt-5.4-mini")
+                self.assertEqual(runtime.model_source, "default")
+            finally:
+                runtime.shutdown()
+
+    def test_create_runtime_codex_uses_agent_model_when_configured_runtime_is_codex(self):
+        from velaria.ai_runtime import create_runtime
+
+        with tempfile.TemporaryDirectory(prefix="velaria-codex-runtime-factory-agent-model-") as tmp:
+            try:
+                runtime = create_runtime(
+                    {
+                        "runtime": "codex",
+                        "configured_runtime": "codex",
+                        "model": "gpt-shared",
+                        "runtime_workspace": tmp,
+                    }
+                )
+            except ImportError as exc:
+                raise unittest.SkipTest("codex-app-server-sdk is not installed") from exc
+            try:
+                self.assertEqual(runtime.model, "gpt-shared")
+                self.assertEqual(runtime.model_source, "agentModel")
+            finally:
+                runtime.shutdown()
+
     def test_codex_runtime_allows_network_to_be_disabled(self):
         from velaria.ai_runtime.codex_runtime import CodexRuntime
 
@@ -836,6 +996,56 @@ class AiRuntimeAgentTest(unittest.TestCase):
                 isolated_config = pathlib.Path(fake.connect_kwargs["env"]["CODEX_HOME"]) / "config.toml"
                 self.assertIn("network_access = false", isolated_config.read_text(encoding="utf-8"))
                 self.assertFalse(runtime.status()["network_access"])
+            finally:
+                runtime.shutdown()
+
+    def test_codex_runtime_abandons_thread_after_stream_failure(self):
+        from velaria.ai_runtime.codex_runtime import CodexRuntime
+
+        class FakeThread:
+            thread_id = "codex-thread-1"
+
+            async def chat(self, prompt):
+                raise RuntimeError("failed reading from stdio transport")
+                yield
+
+        class FakeClient:
+            instances = []
+
+            @classmethod
+            def connect_stdio(cls, **kwargs):
+                inst = cls()
+                inst.closed = False
+                cls.instances.append(inst)
+                return inst
+
+            async def start(self):
+                return None
+
+            async def start_thread(self, config):
+                return FakeThread()
+
+            async def close(self):
+                self.closed = True
+
+        with tempfile.TemporaryDirectory(prefix="velaria-codex-runtime-stream-failure-") as tmp:
+            try:
+                runtime = CodexRuntime(runtime_workspace=tmp)
+            except ImportError as exc:
+                raise unittest.SkipTest("codex-app-server-sdk is not installed") from exc
+            runtime._client_cls = FakeClient
+            try:
+                session_id = asyncio.run(runtime.start_thread({}))
+                async def collect_events():
+                    return [e async for e in runtime.send_message(session_id, "list artifacts")]
+
+                events = asyncio.run(collect_events())
+                self.assertEqual(events[0].type, "error")
+                self.assertTrue(events[0].data["runtime_failure"])
+                self.assertEqual(runtime.registry.lookup(session_id, "codex")["status"], "closed")
+                self.assertNotIn(session_id, runtime._threads)
+                self.assertIsNone(runtime._client)
+                self.assertTrue(FakeClient.instances[0].closed)
             finally:
                 runtime.shutdown()
 

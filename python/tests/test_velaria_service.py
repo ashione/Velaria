@@ -131,7 +131,7 @@ class VelariaServiceTest(unittest.TestCase):
             )
             with mock.patch.dict(os.environ, {"HOME": str(home)}):
                 config = velaria_service.get_ai_config()
-        self.assertEqual(config["auth_mode"], "oauth")
+        self.assertEqual(config["auth_mode"], "local")
         self.assertEqual(config["provider"], "openai")
         self.assertEqual(config["api_key"], "")
         self.assertTrue(config["reuse_local_config"])

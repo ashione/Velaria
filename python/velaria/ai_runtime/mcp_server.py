@@ -7,9 +7,11 @@ import sys
 from typing import Any
 
 from .functions import (
+    compact_tool_result,
     execute_local_function,
     load_velaria_skill_text,
     tool_definitions,
+    tool_result_json,
 )
 from .sql_catalog import SQL_CATALOG_URI, sql_catalog_markdown
 
@@ -53,15 +55,28 @@ def _response(msg_id: Any, result: dict[str, Any] | None = None, error: dict[str
 
 
 def _tool_result(result: dict[str, Any]) -> dict[str, Any]:
+    compacted = compact_tool_result(result)
     return {
         "content": [
             {
                 "type": "text",
-                "text": json.dumps(result, ensure_ascii=False),
+                "text": tool_result_json(compacted),
             }
         ],
-        "isError": not bool(result.get("ok", False)),
+        "isError": not bool(compacted.get("ok", False)),
     }
+
+
+def _call_local_function(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
+    try:
+        return execute_local_function(name, arguments)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "function": name,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }
 
 
 def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
@@ -101,7 +116,7 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
     if method == "tools/call":
         name = str(params.get("name") or "")
         arguments = params.get("arguments") or {}
-        return _response(msg_id, _tool_result(execute_local_function(name, arguments)))
+        return _response(msg_id, _tool_result(_call_local_function(name, arguments)))
     if method == "resources/list":
         return _response(
             msg_id,
@@ -162,8 +177,8 @@ def _create_server():
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any] | None) -> types.CallToolResult:
-        result = execute_local_function(name, arguments)
-        text = json.dumps(result, ensure_ascii=False)
+        result = compact_tool_result(_call_local_function(name, arguments))
+        text = tool_result_json(result)
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=text)],
             structuredContent=result,

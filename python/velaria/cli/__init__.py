@@ -69,6 +69,7 @@ from velaria.cli import run_cmd as _run_cmd
 from velaria.cli import artifacts as _artifacts
 from velaria.cli import agentic as _agentic
 from velaria.cli import ai_cmd as _ai_cmd
+from velaria.cli import datasets as _datasets
 
 
 def _sync_compat_bindings() -> None:
@@ -110,6 +111,7 @@ def _build_parser():
     _embedding.register(subparsers)
     _run_cmd.register(subparsers)
     _artifacts.register(subparsers)
+    _datasets.register(subparsers)
     _agentic.register(subparsers)
     _ai_cmd.register(subparsers)
 
@@ -207,6 +209,9 @@ def main(argv: list[str] | None = None) -> int:
                 return _artifacts._artifacts_list(args)
             if args.artifacts_command == "preview":
                 return _artifacts._artifacts_preview(args)
+        if args.command == "datasets":
+            if args.datasets_command == "list":
+                return _datasets._datasets_list(args)
         if args.command == "source":
             if args.source_command == "create":
                 return _agentic._source_create_cli(args)

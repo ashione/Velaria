@@ -36,7 +36,17 @@ def create_runtime(config: dict[str, Any]) -> AiRuntime:
     reuse_local_config = auth_mode == "local"
 
     if runtime_type == "claude" or (runtime_type == "auto" and _has_claude_sdk()):
+        if not _has_claude_sdk():
+            raise RuntimeError(
+                "Claude runtime requested (agentRuntime: 'claude') but claude-agent-sdk is not installed. "
+                "Install it with: uv sync --project python"
+            )
         from .claude_runtime import ClaudeAgentRuntime
+        # When Claude runtime is selected, default provider and model
+        if provider == "openai":
+            provider = "anthropic"
+        if not model or model == "gpt-5.4-mini":
+            model = "claude-sonnet-4-20250514"
         return ClaudeAgentRuntime(
             provider=provider,
             auth_mode=auth_mode,
@@ -56,6 +66,11 @@ def create_runtime(config: dict[str, Any]) -> AiRuntime:
         )
 
     if runtime_type == "codex" or (runtime_type == "auto" and _has_codex_sdk()):
+        if not _has_codex_sdk():
+            raise RuntimeError(
+                "Codex runtime requested (agentRuntime: 'codex') but codex-app-server-sdk is not installed. "
+                "Install it with: uv sync --project python"
+            )
         from .codex_runtime import CodexRuntime
         return CodexRuntime(
             provider=provider,

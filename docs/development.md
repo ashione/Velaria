@@ -92,7 +92,6 @@ Codex runtime dependencies are part of the default Python package. Install
 Claude runtime support only when using Claude Code:
 
 ```bash
-uv sync --project python --extra ai-claude
 ```
 
 Configure the Agent provider. Both runtimes share the same `agent*` config keys
@@ -118,7 +117,6 @@ cat > ~/.velaria/config.json << 'EOF'
 EOF
 ```
 
-**Claude runtime** (requires `--extra ai-claude`):
 
 ```bash
 cat > ~/.velaria/config.json << 'EOF'

@@ -37,9 +37,9 @@ class FakeThinkingMessage:
 
 
 class FakeClaudeSDKClient:
-    def __init__(self, options=None, custom_tools=None):
+    def __init__(self, options=None, transport=None):
         self.options = options
-        self.custom_tools = custom_tools or []
+        self.transport = transport
         self.prompts: list[str] = []
         self._responses: list = []
 
@@ -50,6 +50,19 @@ class FakeClaudeSDKClient:
         self.prompts.append(prompt)
         for r in self._responses:
             yield r
+
+
+class FakeSdkMcpTool:
+    def __init__(self, name="", description="", input_schema=None, handler=None, annotations=None):
+        self.name = name
+        self.description = description
+        self.input_schema = input_schema or {}
+        self.handler = handler
+        self.annotations = annotations
+
+
+def fake_create_sdk_mcp_server(name="velaria", version="1.0.0", tools=None):
+    return types.SimpleNamespace(name=name, version=version, tools=tools or [])
 
 
 # Standalone query function (used by generate_sql)
@@ -70,6 +83,8 @@ async def fake_claude_query(prompt="", options=None):
 _mock_sdk = types.ModuleType("claude_agent_sdk")
 _mock_sdk.ClaudeSDKClient = FakeClaudeSDKClient
 _mock_sdk.query = fake_claude_query
+_mock_sdk.SdkMcpTool = FakeSdkMcpTool
+_mock_sdk.create_sdk_mcp_server = fake_create_sdk_mcp_server
 _mock_types = types.ModuleType("claude_agent_sdk.types")
 _mock_types.ClaudeAgentOptions = FakeClaudeAgentOptions
 _mock_sdk.types = _mock_types
@@ -340,11 +355,11 @@ class ClaudeRuntimeSendMessageTest(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].type, "error")
 
-    def test_send_message_creates_client_with_custom_tools(self):
+    def test_send_message_creates_client_with_mcp_tools(self):
         class CaptureClient:
-            def __init__(self, options=None, custom_tools=None):
+            def __init__(self, options=None, transport=None):
                 self.options = options
-                self.custom_tools = custom_tools or []
+                self.transport = transport
 
             async def query(self, prompt=""):
                 yield FakeAssistantMessage("hello from claude")
@@ -357,7 +372,7 @@ class ClaudeRuntimeSendMessageTest(unittest.TestCase):
 
     def test_send_message_normalizes_thinking_event(self):
         class CaptureClient:
-            def __init__(self, options=None, custom_tools=None):
+            def __init__(self, options=None, transport=None):
                 pass
 
             async def query(self, prompt=""):
@@ -371,7 +386,7 @@ class ClaudeRuntimeSendMessageTest(unittest.TestCase):
 
     def test_send_message_normalizes_error_event(self):
         class CaptureClient:
-            def __init__(self, options=None, custom_tools=None):
+            def __init__(self, options=None, transport=None):
                 pass
 
             async def query(self, prompt=""):
@@ -387,31 +402,31 @@ class ClaudeRuntimeSendMessageTest(unittest.TestCase):
         captured_input = {}
 
         class CaptureClient:
-            def __init__(self, options=None, custom_tools=None):
+            def __init__(self, options=None, transport=None):
                 self.options = options
-                self.custom_tools = custom_tools or []
+                self.transport = transport
 
             async def query(self, prompt=""):
-                if self.custom_tools:
-                    tool = self.custom_tools[0]
-                    handler = tool["handler"]
-                    captured_input["name"] = tool["name"]
-                    captured_input["result"] = handler({"limit": 5})
+                mcp = getattr(self.options, "mcp_servers", {})
+                if "velaria" in mcp and hasattr(mcp["velaria"], "tools"):
+                    tools = mcp["velaria"].tools
+                    if tools:
+                        tool = tools[0]
+                        captured_input["name"] = tool.name
+                        captured_input["result"] = await tool.handler({"limit": 5})
                 yield FakeAssistantMessage("ok")
 
         with mock.patch("claude_agent_sdk.ClaudeSDKClient", CaptureClient):
             async def collect():
                 return [e async for e in self.rt.send_message(self.session_id, "read some data")]
             asyncio.run(collect())
-        # Verify tool was called and result is a valid JSON string
         self.assertIn("name", captured_input)
         self.assertIn("result", captured_input)
-        result = json.loads(captured_input["result"])
-        self.assertIsInstance(result, dict)
+        self.assertIsInstance(captured_input["result"], dict)
 
     def test_send_message_updates_activity_on_completion(self):
         class CaptureClient:
-            def __init__(self, options=None, custom_tools=None):
+            def __init__(self, options=None, transport=None):
                 pass
 
             async def query(self, prompt=""):

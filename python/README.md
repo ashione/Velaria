@@ -403,7 +403,6 @@ Codex runtime dependencies are installed with the default Python package. Instal
 Claude runtime support only when using Claude Code:
 
 ```bash
-uv sync --project python --extra ai-claude    # Claude Agent SDK
 ```
 
 The agent runtime provides:
@@ -440,7 +439,6 @@ Both runtimes use the same `~/.velaria/config.json` and `agent*` config keys.
 }
 ```
 
-**Claude runtime** (requires `--extra ai-claude`):
 
 ```json
 {

@@ -88,10 +88,9 @@ client -> scheduler(jobmaster) -> worker -> in-proc operator chain -> result
 
 ## Agent Runtime
 
-Codex runtime 依赖随默认 Python 包安装。只有使用 Claude Code runtime 时才需要额外安装：
+
 
 ```bash
-uv sync --project python --extra ai-claude
 ```
 
 配置 Agent provider。两个 runtime 共用相同的 `agent*` 配置键和
@@ -117,7 +116,6 @@ cat > ~/.velaria/config.json << 'EOF'
 EOF
 ```
 
-**Claude runtime**（需要先 `--extra ai-claude`）：
 
 ```bash
 cat > ~/.velaria/config.json << 'EOF'

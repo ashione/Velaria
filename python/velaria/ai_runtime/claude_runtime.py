@@ -146,7 +146,7 @@ class ClaudeAgentRuntime:
             }
 
     async def send_message(self, session_id: str, prompt: str) -> AsyncIterator[AgentEvent]:
-        from claude_agent_sdk import ClaudeSDKClient
+        from claude_agent_sdk import ClaudeSDKClient, create_sdk_mcp_server
         from claude_agent_sdk.types import ClaudeAgentOptions
 
         session_data = self._sessions.get(session_id)
@@ -156,25 +156,11 @@ class ClaudeAgentRuntime:
 
         dataset_context = session_data["dataset_context"]
 
-        # Build custom tool handlers
-        def handle_tool(tool_name: str, tool_input: dict) -> str:
-            merged = dict(tool_input or {})
-            for key in ("source_path", "table_name", "schema"):
-                if key in dataset_context and key not in merged:
-                    merged[key] = dataset_context[key]
-            return json.dumps(execute_local_function(tool_name, merged), ensure_ascii=False)
-
-        custom_tools = []
-        for tool_def in tool_definitions():
-            name = tool_def["name"]
-            custom_tools.append({
-                "name": name,
-                "description": tool_def["description"],
-                "input_schema": tool_def["input_schema"],
-                "handler": lambda inp, n=name: handle_tool(n, inp),
-            })
+        # Build SDK MCP tools from Velaria tool definitions
+        sdk_tools = _build_sdk_mcp_tools(dataset_context)
 
         with self._trace_span(f"send_message session={session_id} prompt_len={len(prompt)}"):
+            velaria_mcp = create_sdk_mcp_server(name="velaria", version="1.0.0", tools=sdk_tools)
             client = ClaudeSDKClient(
                 options=ClaudeAgentOptions(
                     model=self.model,
@@ -187,8 +173,8 @@ class ClaudeAgentRuntime:
                     session_id=session_id,
                     skills=["velaria-python-local"],
                     setting_sources=["project", "user"],
+                    mcp_servers={"velaria": velaria_mcp},
                 ),
-                custom_tools=custom_tools,
             )
 
             async for msg in client.query(prompt=prompt):
@@ -356,6 +342,37 @@ def _claude_sdk_event(msg: Any, session_id: str = "") -> AgentEvent:
     elif content and msg_type not in ("ResultMessage",):
         event_type = "assistant_text"
     return normalize_runtime_event(event_type, content, session_id=session_id)
+
+
+# ---------------------------------------------------------------------------
+# SDK MCP tool builders
+# ---------------------------------------------------------------------------
+
+def _build_sdk_mcp_tools(dataset_context: dict[str, Any] | None = None) -> list:
+    """Build claude_agent_sdk SdkMcpTool instances from Velaria tool definitions."""
+    from claude_agent_sdk import SdkMcpTool
+
+    ctx = dataset_context or {}
+    sdk_tools = []
+    for tool_def in tool_definitions():
+        name = tool_def["name"]
+
+        def make_handler(n=name):
+            async def handler(input_data: dict) -> dict:
+                merged = dict(input_data or {})
+                for key in ("source_path", "table_name", "schema"):
+                    if key in ctx and key not in merged:
+                        merged[key] = ctx[key]
+                return execute_local_function(n, merged)
+            return handler
+
+        sdk_tools.append(SdkMcpTool(
+            name=name,
+            description=tool_def["description"],
+            input_schema=tool_def["input_schema"],
+            handler=make_handler(name),
+        ))
+    return sdk_tools
 
 
 # ---------------------------------------------------------------------------

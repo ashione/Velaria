@@ -402,10 +402,9 @@ uv run --project python python \\
 
 ## 6. Agent 辅助分析
 
-Codex runtime 依赖随默认 Python 包安装。只有使用 Claude Code runtime 时才需要额外安装：
+
 
 ```bash
-uv sync --project python --extra ai-claude
 ```
 
 配置 Agent runtime。两个 runtime（Codex / Claude）共用相同的配置文件和配置键前缀 `agent*`。
@@ -424,7 +423,6 @@ uv sync --project python --extra ai-claude
 }
 ```
 
-**Claude runtime** 使用 Claude Agent SDK（需要先安装 `uv sync --project python --extra ai-claude`）：
 
 ```json
 {

@@ -83,7 +83,7 @@ Velaria/
 
 | 依赖 | 版本范围 | 用途 |
 |------|---------|------|
-| claude-agent-sdk | >=0.1.60 (optional: ai-claude) | Claude Agent SDK runtime |
+| claude-agent-sdk | >=0.1.60 | Claude Agent SDK runtime |
 
 ## Bazel 构建目标一览
 

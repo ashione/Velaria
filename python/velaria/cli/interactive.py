@@ -449,6 +449,7 @@ def _safe_runtime():
 
 
 def _send_agent_message(prompt: str) -> None:
+    global _current_session_id
     if not _current_session_id:
         _start_agent_session_async()
         _wait_agent_session_start(timeout=None)
@@ -462,19 +463,22 @@ def _send_agent_message(prompt: str) -> None:
     _state.turn_state = "running"
     _state.turn_activity = "agent"
     _state.turn_started_at = time.time()
-    status_started = _start_turn_status()
-    if not status_started:
-        _print_note("running", "streaming runtime events")
+    _start_turn_status()
     _wait_runtime_prewarm()
 
     async def _stream() -> None:
+        global _current_session_id
         failed = False
         saw_done = False
+        runtime_failed = False
         with _trace_span("interactive.send_message_stream"):
             async for event in runtime.send_message(_current_session_id, prompt):
                 event_type = getattr(event, "type", "")
+                data = getattr(event, "data", {}) or {}
                 if event_type == "error":
                     failed = True
+                    if data.get("runtime_failure"):
+                        runtime_failed = True
                 if event_type == "done":
                     saw_done = True
                 _trace(f"interactive.event type={event_type}")
@@ -483,6 +487,8 @@ def _send_agent_message(prompt: str) -> None:
         if failed or not saw_done:
             _stop_turn_status()
             _print_note(_state.turn_state, _elapsed_turn())
+        if runtime_failed:
+            _current_session_id = None
 
     try:
         asyncio.run(_stream())
@@ -490,6 +496,7 @@ def _send_agent_message(prompt: str) -> None:
         _mark_turn_interrupted()
     except Exception as exc:
         _state.turn_state = "failed"
+        _current_session_id = None
         _stop_turn_status()
         _print_note("error", str(exc), level="error")
 
@@ -542,11 +549,9 @@ def _stop_turn_status() -> None:
 def _should_show_turn_status() -> bool:
     if os.environ.get("VELARIA_INTERACTIVE_NO_SPINNER"):
         return False
-    return (
-        hasattr(sys.stdout, "isatty")
-        and sys.stdout.isatty()
-        and not os.environ.get("VELARIA_INTERACTIVE_STDLIB")
-    )
+    if os.environ.get("VELARIA_INTERACTIVE_STDLIB"):
+        return False
+    return hasattr(sys.stdout, "isatty")
 
 
 def _draw_turn_status(frame: str) -> None:
@@ -558,7 +563,8 @@ def _draw_turn_status(frame: str) -> None:
             return
         _turn_status_frame = frame
         text = _compact_line(_turn_status_text(frame), limit=_terminal_width())
-        sys.stdout.write("\r" + _style(text, "event") + _clear_to_end_of_line())
+        clear = _clear_to_end_of_line()
+        sys.stdout.write("\r" + _style(text, "event") + clear)
         sys.stdout.flush()
         _turn_status_line_visible = True
 
@@ -614,7 +620,7 @@ def _restore_turn_status_line() -> None:
 
 
 def _clear_to_end_of_line() -> str:
-    return "\x1b[2K" if hasattr(sys.stdout, "isatty") and sys.stdout.isatty() else " " * _terminal_width()
+    return "\x1b[2K" if _should_show_turn_status() else " " * 80
 
 
 def _terminal_width() -> int:
@@ -654,56 +660,45 @@ def _render_event(event: Any) -> None:
     content = getattr(event, "content", "")
     data = getattr(event, "data", {}) or {}
     _update_state_from_event(event_type, content, data)
-    if event_type in {"done", "error"}:
+
+    if event_type == "done":
         _stop_turn_status()
-    else:
-        _clear_turn_status_line()
-    try:
-        if event_type == "assistant_text":
-            if content:
-                with _turn_status_output_paused():
-                    _print_assistant_text(content)
-            return
-        if event_type == "thinking":
-            if content:
-                with _turn_status_output_paused():
-                    _print_event("thinking", content)
-            return
-        if event_type == "tool_call":
-            with _turn_status_output_paused():
-                _print_event("tool", _format_tool_call(content, data))
-            return
-        if event_type == "tool_result":
-            summary = _summarize_tool_result(content, data)
-            if summary:
-                with _turn_status_output_paused():
-                    _print_event("tool result", summary)
-            return
-        if event_type == "command":
-            if content:
-                with _turn_status_output_paused():
-                    _print_event("command", content)
-            return
-        if event_type == "file":
-            if content:
-                with _turn_status_output_paused():
-                    _print_event("file", content)
-            return
-        if event_type == "done":
-            _state.turn_state = "done"
-            _print_note("done", _elapsed_turn())
-            return
-        if event_type == "error":
-            _print_note("error", content or _json_dumps(data), level="error")
-            return
-        if _looks_like_runtime_payload(content):
-            return
+        _state.turn_state = "done"
+        _print_note("done", _elapsed_turn())
+        return
+    if event_type == "error":
+        _stop_turn_status()
+        _print_note("error", content or _json_dumps(data), level="error")
+        return
+
+    if event_type == "assistant_text":
         if content:
-            with _turn_status_output_paused():
-                _print_assistant_text(content)
-    finally:
-        if event_type not in {"done", "error"}:
-            _restore_turn_status_line()
+            _print_assistant_text(content)
+        return
+    if event_type == "thinking":
+        if content:
+            _print_event("thinking", content)
+        return
+    if event_type == "tool_call":
+        _print_event("tool", _format_tool_call(content, data))
+        return
+    if event_type == "tool_result":
+        summary = _summarize_tool_result(content, data)
+        if summary:
+            _print_event("tool result", summary)
+        return
+    if event_type == "command":
+        if content:
+            _print_event("command", content)
+        return
+    if event_type == "file":
+        if content:
+            _print_event("file", content)
+        return
+    if _looks_like_runtime_payload(content):
+        return
+    if content:
+        _print_assistant_text(content)
 
 
 def _extract_tool_name(data: dict[str, Any]) -> str:
@@ -842,8 +837,9 @@ def _statusline() -> str:
     session = _short_id(_current_session_id)
     dataset = _state.dataset_name or pathlib_basename(_state.source_path) or "no dataset"
     run = _short_id(_state.last_run_id) if _state.last_run_id else "no run"
+    spinner = _turn_status_frame if _state.turn_state == "running" else ""
     return (
-        f" {runtime} {model} | session {session or '-'} | "
+        f"{spinner} {runtime} {model} | session {session or '-'} | "
         f"dataset {dataset} | run {run} | tools {tool_count} | "
         f"{_state.runtime_warmup}/{_state.turn_state} "
     )

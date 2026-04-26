@@ -408,7 +408,9 @@ Codex runtime 依赖随默认 Python 包安装。只有使用 Claude Code runtim
 uv sync --project python --extra ai-claude
 ```
 
-配置 Agent runtime。Codex 默认使用本地 `codex app-server`，最小配置如下：
+配置 Agent runtime。两个 runtime（Codex / Claude）共用相同的配置文件和配置键前缀 `agent*`。
+
+**Codex runtime** 默认使用本地 `codex app-server`：
 
 ```json
 {
@@ -422,13 +424,28 @@ uv sync --project python --extra ai-claude
 }
 ```
 
-未显式设置 `agentModel` 时，Codex runtime 默认使用 `gpt-5.4-mini`。
-`agentReasoningEffort` 默认是 `none`。`agentRuntimeWorkspace` 是 runtime 工作目录，用于保存 agent thread、runtime config 与 MCP/function 日志。
+**Claude runtime** 使用 Claude Agent SDK（需要先安装 `uv sync --project python --extra ai-claude`）：
+
+```json
+{
+  "agentRuntime": "claude",
+  "agentAuthMode": "oauth",
+  "agentProvider": "anthropic",
+  "agentModel": "claude-sonnet-4-20250514",
+  "agentReasoningEffort": "none",
+  "agentRuntimeWorkspace": "~/.velaria/ai-runtime",
+  "agentNetworkAccess": true
+}
+```
+
+未显式设置 `agentModel` 时，Codex 默认 `gpt-5.4-mini`，Claude 默认 `claude-sonnet-4-20250514`。
+`agentReasoningEffort` 默认是 `none`，两个 runtime 均支持。
+`agentRuntimeWorkspace` 是 runtime 工作目录，用于保存 agent thread、session 与工具日志。
 `agentAuthMode: "oauth"` 复用本地 Codex 或 Claude 登录；需要显式凭证时改为
 `agentAuthMode: "api_key"`，并设置 `agentApiKey` / `agentBaseUrl`。
-Codex workspace-write 网络访问默认开启；只有需要离线运行时才把 `agentCodexNetworkAccess` 设为 `false`。
-只有需要覆盖本地 Codex 可执行文件时才设置 `agentRuntimePath` / `agentCodexRuntimePath`。
-Claude Code runtime 可通过 `agentClaudeRuntimePath` 指定。代理直接使用标准环境变量，如 `http_proxy`、`https_proxy`、`all_proxy`。
+Codex 的 `agentCodexNetworkAccess` 和 Claude 的 `agentNetworkAccess` 分别控制各自 runtime 的网络访问，默认开启。
+只有需要覆盖本地可执行文件时才设置 `agentRuntimePath` / `agentCodexRuntimePath` / `agentClaudeRuntimePath`。
+代理直接使用标准环境变量，如 `http_proxy`、`https_proxy`、`all_proxy`。
 Velaria usage skill 与 SQL catalog 都是按需资源：需要 SQL 函数、能力边界或常见模板时，优先调用 `velaria_sql_capabilities`、`velaria_sql_function_search`、`velaria_sql_query_patterns`，或读取 `velaria://sql/catalog`。
 
 ### CLI 模式

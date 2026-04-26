@@ -424,7 +424,9 @@ The agent runtime provides:
 - Legacy compatibility commands under `velaria_cli.py ai ...`; new interactive
   work should use `velaria_cli.py -i`
 
-Minimal Codex runtime config:
+Both runtimes use the same `~/.velaria/config.json` and `agent*` config keys.
+
+**Codex runtime** (default):
 
 ```json
 {
@@ -438,16 +440,30 @@ Minimal Codex runtime config:
 }
 ```
 
-Codex uses the local `codex app-server` command and defaults to `gpt-5.4-mini`
-when `agentModel` is omitted. `agentReasoningEffort` defaults to `none`.
-`agentRuntimeWorkspace` is the runtime working directory used to save and resume agent threads. If omitted, Velaria creates a
-project-scoped directory under `~/.velaria/ai-runtime/`. `agentAuthMode: "oauth"`
-reuses the local Codex or Claude login. Use `agentAuthMode: "api_key"` together
-with `agentApiKey` and `agentBaseUrl` when the provider should be driven by
-explicit API credentials. Use `agentRuntimePath` / `agentCodexRuntimePath` only
-when overriding the local Codex executable. Use `agentClaudeRuntimePath` for
-Claude Code runtime. Codex workspace-write network access is enabled by default;
-set `agentCodexNetworkAccess` to `false` only for offline runtime sessions.
+**Claude runtime** (requires `--extra ai-claude`):
+
+```json
+{
+  "agentRuntime": "claude",
+  "agentAuthMode": "oauth",
+  "agentProvider": "anthropic",
+  "agentModel": "claude-sonnet-4-20250514",
+  "agentReasoningEffort": "none",
+  "agentRuntimeWorkspace": "~/.velaria/ai-runtime",
+  "agentNetworkAccess": true
+}
+```
+
+Defaults: Codex uses `gpt-5.4-mini`, Claude uses `claude-sonnet-4-20250514`.
+Both default `agentReasoningEffort` to `none`. `agentRuntimeWorkspace` is the
+runtime working directory used to save and resume agent threads; if omitted,
+Velaria creates a project-scoped directory under `~/.velaria/ai-runtime/`.
+`agentAuthMode: "oauth"` reuses the local login; use `agentAuthMode: "api_key"`
+with `agentApiKey` and `agentBaseUrl` for explicit credentials.
+Use `agentRuntimePath` / `agentCodexRuntimePath` only when overriding the local
+Codex executable. Use `agentClaudeRuntimePath` for Claude.
+Network access via `agentCodexNetworkAccess` (Codex) or `agentNetworkAccess`
+(Claude), both default `true`.
 The runtime inherits standard proxy environment variables such as `http_proxy`,
 `https_proxy`, and `all_proxy`.
 

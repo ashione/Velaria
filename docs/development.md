@@ -95,7 +95,10 @@ Claude runtime support only when using Claude Code:
 uv sync --project python --extra ai-claude
 ```
 
-Configure the Agent provider:
+Configure the Agent provider. Both runtimes share the same `agent*` config keys
+and the same `~/.velaria/config.json` file.
+
+**Codex runtime** (default):
 
 ```bash
 mkdir -p ~/.velaria
@@ -115,6 +118,25 @@ cat > ~/.velaria/config.json << 'EOF'
 EOF
 ```
 
+**Claude runtime** (requires `--extra ai-claude`):
+
+```bash
+cat > ~/.velaria/config.json << 'EOF'
+{
+  "agentProvider": "anthropic",
+  "agentAuthMode": "api_key",
+  "agentRuntime": "claude",
+  "agentModel": "claude-sonnet-4-20250514",
+  "agentReasoningEffort": "none",
+  "agentApiKey": "<your-api-key>",
+  "agentBaseUrl": "<your-api-base-url>",
+  "agentRuntimeWorkspace": "~/.velaria/ai-runtime",
+  "agentNetworkAccess": true,
+  "agentProxy": "http://127.0.0.1:7897"
+}
+EOF
+```
+
 `agentRuntimePath` is optional. Codex can omit it and use the local
 `codex app-server` command; set `agentRuntimePath` / `agentCodexRuntimePath` only when
 overriding that executable. Claude Code runtime can use `agentClaudeRuntimePath`.
@@ -122,12 +144,16 @@ overriding that executable. Claude Code runtime can use `agentClaudeRuntimePath`
 agent threads, generated config, and MCP/function logs. If omitted, Velaria uses
 a project-scoped directory under `~/.velaria/ai-runtime/`. `agentReuseLocalConfig`
 controls whether the runtime process can reuse the current user config; set it
-to `false` when the runtime should use an isolated HOME. Codex workspace-write
-network access is enabled by default; set `agentCodexNetworkAccess` to `false` only
-when the agent runtime must be offline. `agentProxy` sets both `http_proxy` and
+to `false` when the runtime should use an isolated HOME. Network access is
+controlled by `agentCodexNetworkAccess` (Codex) or `agentNetworkAccess` (Claude),
+both defaulting to `true`. `agentProxy` sets both `http_proxy` and
 `https_proxy` for the runtime process; use `agentHttpProxy`, `agentHttpsProxy`,
 `agentAllProxy`, and `agentNoProxy` for separate values. Shell proxy variables are
 also inherited, and Velaria keeps localhost bypassed for local MCP/data URLs.
+
+Model defaults: Codex = `gpt-5.4-mini`, Claude = `claude-sonnet-4-20250514`.
+Both runtimes support `agentReasoningEffort` (default `none`) and API key auth
+mode (`agentAuthMode: "api_key"` with `agentApiKey`/`agentBaseUrl`).
 
 Use non-interactive SQL generation from the legacy compatibility command:
 

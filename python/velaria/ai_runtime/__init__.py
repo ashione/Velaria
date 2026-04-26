@@ -43,6 +43,8 @@ def create_runtime(config: dict[str, Any]) -> AiRuntime:
             api_key=api_key,
             base_url=base_url,
             model=model or "claude-sonnet-4-20250514",
+            reasoning_effort=reasoning_effort,
+            network_access=network_access,
             runtime_path=_runtime_path_for(config, "claude"),
             runtime_workspace=str(config.get("runtime_workspace") or ""),
             reuse_local_config=reuse_local_config,
@@ -50,6 +52,7 @@ def create_runtime(config: dict[str, Any]) -> AiRuntime:
             skill_dir=str(config.get("skill_dir") or ""),
             skill_path=str(config.get("skill_path") or ""),
             cwd=str(config.get("cwd") or ""),
+            proxy_env=dict(config.get("proxy_env") or {}),
         )
 
     if runtime_type == "codex" or (runtime_type == "auto" and _has_codex_sdk()):

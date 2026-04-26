@@ -94,7 +94,10 @@ Codex runtime 依赖随默认 Python 包安装。只有使用 Claude Code runtim
 uv sync --project python --extra ai-claude
 ```
 
-配置 Agent provider：
+配置 Agent provider。两个 runtime 共用相同的 `agent*` 配置键和
+`~/.velaria/config.json` 文件。
+
+**Codex runtime**（默认）：
 
 ```bash
 mkdir -p ~/.velaria
@@ -114,6 +117,25 @@ cat > ~/.velaria/config.json << 'EOF'
 EOF
 ```
 
+**Claude runtime**（需要先 `--extra ai-claude`）：
+
+```bash
+cat > ~/.velaria/config.json << 'EOF'
+{
+  "agentProvider": "anthropic",
+  "agentAuthMode": "api_key",
+  "agentRuntime": "claude",
+  "agentModel": "claude-sonnet-4-20250514",
+  "agentReasoningEffort": "none",
+  "agentApiKey": "<your-api-key>",
+  "agentBaseUrl": "<your-api-base-url>",
+  "agentRuntimeWorkspace": "~/.velaria/ai-runtime",
+  "agentNetworkAccess": true,
+  "agentProxy": "http://127.0.0.1:7897"
+}
+EOF
+```
+
 `agentRuntimePath` 是可选项。Codex 可以省略它并使用本地 `codex app-server`
 命令；只有需要覆盖该可执行文件时才设置 `agentRuntimePath` /
 `agentCodexRuntimePath`。Claude Code runtime 可以使用 `agentClaudeRuntimePath`。
@@ -121,11 +143,15 @@ EOF
 thread、生成配置以及 MCP/function 日志；如果省略，Velaria 会使用
 `~/.velaria/ai-runtime/` 下的项目级目录。`agentReuseLocalConfig` 控制 runtime
 进程是否复用当前用户配置；设为 `false` 时 runtime 会使用隔离 HOME。
-Codex workspace-write 网络访问默认开启；只有需要离线运行 agent runtime
-时才把 `agentCodexNetworkAccess` 设为 `false`。`agentProxy` 会同时设置 runtime
+网络访问分别由 `agentCodexNetworkAccess`（Codex）和 `agentNetworkAccess`
+（Claude）控制，均默认开启。`agentProxy` 会同时设置 runtime
 进程的 `http_proxy` 和 `https_proxy`；需要分别配置时使用 `agentHttpProxy`、
 `agentHttpsProxy`、`agentAllProxy` 和 `agentNoProxy`。Shell 里的代理变量也会被继承，
 Velaria 会默认保留 localhost 绕过，以免影响本地 MCP/data URL。
+
+模型默认值：Codex = `gpt-5.4-mini`，Claude = `claude-sonnet-4-20250514`。
+两个 runtime 均支持 `agentReasoningEffort`（默认 `none`）和 API Key 认证模式
+（`agentAuthMode: "api_key"` 配合 `agentApiKey`/`agentBaseUrl`）。
 
 通过历史兼容命令做非交互 SQL 生成：
 

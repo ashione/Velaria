@@ -148,9 +148,10 @@ Arrow / CSV / Python ingress
 - SQL v1 不扩展到 `CTE`、子查询、更复杂 join 语义，也不支持 aggregate `KEYWORD SEARCH` / `HYBRID SEARCH`
 - Python callback / Python UDF 不进入热路径
 - Electron 桌面 app 仍然只是本地原型，还不是稳定公开产品面
-- Agent runtime 默认使用 Codex；Claude 支持需要额外安装可选依赖 `claude-agent-sdk`
-- Codex runtime 默认使用 `gpt-5.4-mini`、reasoning effort `none`，并默认开启 workspace-write 网络访问；可通过 `agentModel` / `agentReasoningEffort` / `agentCodexNetworkAccess` 覆盖
-- Codex runtime 会继承标准代理环境变量，如 `http_proxy`、`https_proxy` 和 `all_proxy`
+- Agent runtime 支持 Codex（默认）和 Claude（需可选依赖 `claude-agent-sdk`）
+- Codex runtime 默认使用 `gpt-5.4-mini`；Claude runtime 默认使用 `claude-sonnet-4-20250514`
+- 两个 runtime 均默认 reasoning effort 为 `none`，并继承标准代理环境变量
+- 网络访问分别由 `agentCodexNetworkAccess`（Codex）和 `agentNetworkAccess`（Claude）控制
 - 仓库不宣称已完成 distributed runtime
 
 稳定公开 surface：

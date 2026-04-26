@@ -463,9 +463,7 @@ def _send_agent_message(prompt: str) -> None:
     _state.turn_state = "running"
     _state.turn_activity = "agent"
     _state.turn_started_at = time.time()
-    if _start_turn_status():
-        pass  # spinner handles visual feedback
-    else:
+    if not _start_turn_status() and _should_print_turn_fallback():
         print(_style("⏳ running…", "event"), flush=True)
     _wait_runtime_prewarm()
 
@@ -550,13 +548,21 @@ def _stop_turn_status() -> None:
 
 
 def _should_show_turn_status() -> bool:
-    """TTY spinner is only used in stdlib mode (no prompt_toolkit statusline)."""
+    """Show a live execution line once prompt input has been submitted."""
     if os.environ.get("VELARIA_INTERACTIVE_NO_SPINNER"):
         return False
-    # In prompt_toolkit mode the statusline handles the spinner
+    return (
+        hasattr(sys.stdout, "isatty")
+        and sys.stdout.isatty()
+    )
+
+
+def _should_print_turn_fallback() -> bool:
+    if os.environ.get("VELARIA_INTERACTIVE_NO_SPINNER"):
+        return False
     if _should_use_prompt_toolkit():
         return False
-    return (
+    return not (
         hasattr(sys.stdout, "isatty")
         and sys.stdout.isatty()
     )
@@ -680,31 +686,29 @@ def _render_event(event: Any) -> None:
         _print_note("error", content or _json_dumps(data), level="error")
         return
 
-    # Only pause/restore spinner when it's actually running (TTY mode)
     active_spinner = _turn_status_stop is not None and not _turn_status_stop.is_set()
-    if active_spinner:
-        _clear_turn_status_line()
-
-    if event_type == "assistant_text":
-        if content:
+    output_context = _turn_status_output_paused() if active_spinner else contextlib.nullcontext()
+    with output_context:
+        if event_type == "assistant_text":
+            if content:
+                _print_assistant_text(content)
+        elif event_type == "thinking":
+            if content:
+                _print_event("thinking", content)
+        elif event_type == "tool_call":
+            _print_event("tool", _format_tool_call(content, data))
+        elif event_type == "tool_result":
+            summary = _summarize_tool_result(content, data)
+            if summary:
+                _print_event("tool result", summary)
+        elif event_type == "command":
+            if content:
+                _print_event("command", content)
+        elif event_type == "file":
+            if content:
+                _print_event("file", content)
+        elif not _looks_like_runtime_payload(content) and content:
             _print_assistant_text(content)
-    elif event_type == "thinking":
-        if content:
-            _print_event("thinking", content)
-    elif event_type == "tool_call":
-        _print_event("tool", _format_tool_call(content, data))
-    elif event_type == "tool_result":
-        summary = _summarize_tool_result(content, data)
-        if summary:
-            _print_event("tool result", summary)
-    elif event_type == "command":
-        if content:
-            _print_event("command", content)
-    elif event_type == "file":
-        if content:
-            _print_event("file", content)
-    elif not _looks_like_runtime_payload(content) and content:
-        _print_assistant_text(content)
 
     if active_spinner:
         _restore_turn_status_line()
@@ -811,7 +815,7 @@ def _build_prompt_session():
         key_bindings=bindings,
         bottom_toolbar=_statusline,
         complete_while_typing=False,
-        reserve_space_for_menu=3,
+        reserve_space_for_menu=0,
         multiline=False,
     )
 

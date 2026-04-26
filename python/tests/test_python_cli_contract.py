@@ -576,7 +576,7 @@ class PythonCliContractTest(unittest.TestCase):
         self.assertIn("key_bindings", session.kwargs)
         self.assertFalse(session.kwargs["multiline"])
         self.assertFalse(session.kwargs["complete_while_typing"])
-        self.assertEqual(session.kwargs["reserve_space_for_menu"], 3)
+        self.assertEqual(session.kwargs["reserve_space_for_menu"], 0)
         bindings = session.kwargs["key_bindings"]
         self.assertIn(("c-c",), bindings.bindings)
         self.assertIn(("c-d",), bindings.bindings)
@@ -630,6 +630,25 @@ class PythonCliContractTest(unittest.TestCase):
 
         with mock.patch.object(interactive, "_should_use_prompt_toolkit", return_value=False):
             self.assertIsNone(interactive._build_prompt_session())
+
+    def test_prompt_toolkit_mode_still_uses_execution_spinner_after_submit(self):
+        interactive = importlib.import_module("velaria.cli.interactive")
+
+        stdout = _FakeTty()
+        try:
+            with mock.patch("sys.stdout", stdout):
+                with mock.patch.object(interactive, "_should_use_prompt_toolkit", return_value=True):
+                    with mock.patch.dict(
+                        os.environ,
+                        {
+                            "VELARIA_INTERACTIVE_NO_SPINNER": "",
+                            "NO_COLOR": "",
+                        },
+                    ):
+                        self.assertTrue(interactive._should_show_turn_status())
+                        self.assertFalse(interactive._should_print_turn_fallback())
+        finally:
+            interactive._stop_turn_status()
 
     def test_prompt_toolkit_prompt_uses_plain_text_prompt(self):
         interactive = importlib.import_module("velaria.cli.interactive")
@@ -706,6 +725,43 @@ class PythonCliContractTest(unittest.TestCase):
         self.assertIn("checking available datasets", output)
         self.assertIn("running", output)
         self.assertGreaterEqual(output.count("\r"), 3)
+
+    def test_stream_event_output_pauses_active_spinner(self):
+        interactive = importlib.import_module("velaria.cli.interactive")
+        from velaria.ai_runtime.agent import AgentEvent
+
+        observed = {}
+
+        def fake_print_event(label, text):
+            observed["paused"] = interactive._turn_status_paused
+            print(f"{label} {text}")
+
+        interactive._state = interactive.VelariaInteractiveState()
+        interactive._state.turn_state = "running"
+        interactive._turn_status_stop = interactive.threading.Event()
+        interactive._turn_status_thread = None
+        interactive._turn_status_paused = False
+        stdout = io.StringIO()
+        try:
+            with redirect_stdout(stdout):
+                with mock.patch.object(interactive, "_print_event", side_effect=fake_print_event):
+                    with mock.patch.object(interactive, "_restore_turn_status_line") as restore:
+                        interactive._render_event(
+                            AgentEvent(
+                                "thinking",
+                                "checking available datasets",
+                                session_id="agent-session-1",
+                            )
+                        )
+            self.assertTrue(observed["paused"])
+            self.assertFalse(interactive._turn_status_paused)
+            restore.assert_called_once()
+            self.assertIn("thinking checking available datasets", stdout.getvalue())
+        finally:
+            interactive._turn_status_stop = None
+            interactive._turn_status_thread = None
+            interactive._turn_status_paused = False
+            interactive._state = interactive.VelariaInteractiveState()
 
     def test_interactive_turn_status_starts_before_prewarm_wait(self):
         interactive = importlib.import_module("velaria.cli.interactive")

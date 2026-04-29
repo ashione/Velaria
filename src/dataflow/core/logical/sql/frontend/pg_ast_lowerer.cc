@@ -104,43 +104,68 @@ bool isTableStar(const PgQuery__Node* n, std::string* table_name) {
   return false;
 }
 
-Value extractVal(const PgQuery__Node* n) {
-  if (!n) return Value();
+bool extractLiteralValue(const PgQuery__Node* n, Value* out) {
+  if (!n || !out) return false;
   if (n->node_case == PG_QUERY__NODE__NODE_A_CONST && n->a_const) {
     auto* ac = n->a_const;
-    if (ac->isnull) return Value();
+    if (ac->isnull) {
+      *out = Value();
+      return true;
+    }
     switch (ac->val_case) {
       case PG_QUERY__A__CONST__VAL_IVAL:
-        return ac->ival ? Value(static_cast<int64_t>(ac->ival->ival)) : Value();
+        if (!ac->ival) return false;
+        *out = Value(static_cast<int64_t>(ac->ival->ival));
+        return true;
       case PG_QUERY__A__CONST__VAL_SVAL:
-        return ac->sval && ac->sval->sval ? Value(std::string(ac->sval->sval)) : Value();
+        if (!ac->sval || !ac->sval->sval) return false;
+        *out = Value(std::string(ac->sval->sval));
+        return true;
       case PG_QUERY__A__CONST__VAL_FVAL: {
-        if (!ac->fval || !ac->fval->fval) return Value();
+        if (!ac->fval || !ac->fval->fval) return false;
         char* end = nullptr;
         const double d = std::strtod(ac->fval->fval, &end);
-        return end != ac->fval->fval ? Value(d) : Value();
+        if (end == ac->fval->fval) return false;
+        *out = Value(d);
+        return true;
       }
       case PG_QUERY__A__CONST__VAL_BOOLVAL:
-        return ac->boolval ? Value(ac->boolval->boolval != 0) : Value();
+        if (!ac->boolval) return false;
+        *out = Value(ac->boolval->boolval != 0);
+        return true;
       default:
-        return Value();
+        return false;
     }
   }
   if (n->node_case == PG_QUERY__NODE__NODE_INTEGER && n->integer) {
-    return Value(static_cast<int64_t>(n->integer->ival));
+    *out = Value(static_cast<int64_t>(n->integer->ival));
+    return true;
   }
   if (n->node_case == PG_QUERY__NODE__NODE_FLOAT && n->float_) {
     char* end = nullptr;
     const double d = std::strtod(n->float_->fval, &end);
-    return end != n->float_->fval ? Value(d) : Value();
+    if (end == n->float_->fval) return false;
+    *out = Value(d);
+    return true;
   }
   if (n->node_case == PG_QUERY__NODE__NODE_BOOLEAN && n->boolean) {
-    return Value(n->boolean->boolval != 0);
+    *out = Value(n->boolean->boolval != 0);
+    return true;
   }
   if (n->node_case == PG_QUERY__NODE__NODE_STRING && n->string) {
-    return Value(std::string(n->string->sval ? n->string->sval : ""));
+    *out = Value(std::string(n->string->sval ? n->string->sval : ""));
+    return true;
   }
-  return Value();
+  return false;
+}
+
+bool lowerLiteralValue(const PgQuery__Node* n, Value* out, std::vector<SqlDiagnostic>& diags,
+                       const std::string& context) {
+  if (extractLiteralValue(n, out)) return true;
+  diags.push_back(makeDiag(SqlDiagnostic::Phase::Lower, "unsupported_sql_feature",
+                           "Unsupported " + context + " expression.",
+                           "Use a literal value in this SQL v1 position."));
+  return false;
 }
 
 BinaryOperatorKind mapOp(const std::string& op) {
@@ -308,22 +333,31 @@ StringFunctionArg lowerFunctionArg(const PgQuery__Node* n, std::vector<SqlDiagno
       return out;
     }
   }
-  out.literal = extractVal(n);
+  lowerLiteralValue(n, &out.literal, diags, "function argument");
   return out;
 }
 
-AggregateExpr lowerAggregate(const PgQuery__FuncCall* fc) {
+AggregateExpr lowerAggregate(const PgQuery__FuncCall* fc, std::vector<SqlDiagnostic>& diags) {
   AggregateExpr agg;
   const auto name = funcName(fc);
   agg.function = aggregateKind(name);
+  if (fc && fc->agg_distinct) {
+    diags.push_back(makeDiag(SqlDiagnostic::Phase::Lower, "unsupported_sql_feature",
+                             "Aggregate DISTINCT is not supported.",
+                             "Use the Velaria SQL v1 aggregate subset without DISTINCT."));
+  }
   if (!fc || fc->agg_star || fc->n_args == 0) {
     agg.count_all = true;
     return agg;
   }
   if (fc->args[0] && fc->args[0]->node_case == PG_QUERY__NODE__NODE_A_STAR) {
     agg.count_all = true;
-  } else {
+  } else if (fc->args[0] && fc->args[0]->node_case == PG_QUERY__NODE__NODE_COLUMN_REF) {
     agg.argument = extractCol(fc->args[0]);
+  } else {
+    diags.push_back(makeDiag(SqlDiagnostic::Phase::Lower, "unsupported_sql_feature",
+                             "Aggregate argument must be a column or '*'.",
+                             "Project scalar expressions first, then aggregate the result column."));
   }
   return agg;
 }
@@ -343,12 +377,11 @@ bool lowerPredicateOperand(const PgQuery__Node* n, Predicate* pred, bool lhs,
   if (lhs && n->node_case == PG_QUERY__NODE__NODE_FUNC_CALL &&
       isAggregateName(funcName(n->func_call))) {
     pred->lhs_is_aggregate = true;
-    pred->lhs_aggregate = lowerAggregate(n->func_call);
+    pred->lhs_aggregate = lowerAggregate(n->func_call, diags);
     return true;
   }
   if (!lhs) {
-    pred->rhs = extractVal(n);
-    return true;
+    return lowerLiteralValue(n, &pred->rhs, diags, "predicate right-hand");
   }
   diags.push_back(makeDiag(SqlDiagnostic::Phase::Lower, "unsupported_sql_feature",
                            "Unsupported predicate left-hand expression.",
@@ -467,7 +500,7 @@ SelectItem lowerTarget(const PgQuery__Node* n, std::vector<SqlDiagnostic>& diags
       const auto name = funcName(val->func_call);
       if (isAggregateName(name)) {
         item.is_aggregate = true;
-        item.aggregate = lowerAggregate(val->func_call);
+        item.aggregate = lowerAggregate(val->func_call, diags);
         item.aggregate.alias = item.alias;
       } else {
         item.is_string_function = true;
@@ -497,7 +530,7 @@ SelectItem lowerTarget(const PgQuery__Node* n, std::vector<SqlDiagnostic>& diags
     case PG_QUERY__NODE__NODE_BOOLEAN:
     case PG_QUERY__NODE__NODE_STRING:
       item.is_literal = true;
-      item.literal = extractVal(val);
+      lowerLiteralValue(val, &item.literal, diags, "SELECT literal");
       break;
     default:
       diags.push_back(makeDiag(SqlDiagnostic::Phase::Lower, "unsupported_sql_feature",
@@ -578,10 +611,17 @@ bool lowerJoin(const PgQuery__Node* n, SqlQuery* query, std::vector<SqlDiagnosti
   return true;
 }
 
-void lowerLimit(const PgQuery__Node* n, SqlQuery* query) {
+void lowerLimit(const PgQuery__Node* n, SqlQuery* query, std::vector<SqlDiagnostic>& diags) {
   if (!n || !query) return;
-  const auto value = extractVal(n);
-  if (value.isNumber()) query->limit = static_cast<std::size_t>(value.asInt64());
+  Value value;
+  if (!lowerLiteralValue(n, &value, diags, "LIMIT")) return;
+  if (!value.isNumber()) {
+    diags.push_back(makeDiag(SqlDiagnostic::Phase::Lower, "unsupported_sql_feature",
+                             "LIMIT expects a numeric literal.",
+                             "Use LIMIT with an integer literal."));
+    return;
+  }
+  query->limit = static_cast<std::size_t>(value.asInt64());
 }
 
 SqlQuery lowerSelect(const PgQuery__SelectStmt* s, const VelariaSqlExtensions& extensions,
@@ -599,7 +639,7 @@ SqlQuery lowerSelect(const PgQuery__SelectStmt* s, const VelariaSqlExtensions& e
     for (size_t i = 0; i < s->n_sort_clause; ++i) {
       q.order_by.push_back(lowerOrderBy(s->sort_clause[i]));
     }
-    lowerLimit(s->limit_count, &q);
+    lowerLimit(s->limit_count, &q, diags);
     return q;
   }
   if (s->op == PG_QUERY__SET_OPERATION__SETOP_INTERSECT ||
@@ -608,6 +648,11 @@ SqlQuery lowerSelect(const PgQuery__SelectStmt* s, const VelariaSqlExtensions& e
                              "INTERSECT and EXCEPT are not supported.",
                              "Use UNION or run the queries separately."));
     return q;
+  }
+  if (s->n_distinct_clause > 0) {
+    diags.push_back(makeDiag(SqlDiagnostic::Phase::Lower, "unsupported_sql_feature",
+                             "SELECT DISTINCT is not supported.",
+                             "Use GROUP BY or de-duplicate the result outside SQL v1."));
   }
   for (size_t i = 0; i < s->n_target_list; ++i) {
     q.select_items.push_back(lowerTarget(s->target_list[i], diags));
@@ -631,10 +676,14 @@ SqlQuery lowerSelect(const PgQuery__SelectStmt* s, const VelariaSqlExtensions& e
   for (size_t i = 0; i < s->n_sort_clause; ++i) {
     q.order_by.push_back(lowerOrderBy(s->sort_clause[i]));
   }
-  lowerLimit(s->limit_count, &q);
+  lowerLimit(s->limit_count, &q, diags);
   if (s->limit_offset) {
-    const auto offset = extractVal(s->limit_offset);
-    if (offset.isNumber() && offset.asInt64() != 0) {
+    Value offset;
+    if (lowerLiteralValue(s->limit_offset, &offset, diags, "OFFSET") && !offset.isNumber()) {
+      diags.push_back(makeDiag(SqlDiagnostic::Phase::Lower, "unsupported_sql_feature",
+                               "OFFSET expects a numeric literal.",
+                               "Use OFFSET with an integer literal, or omit OFFSET."));
+    } else if (offset.isNumber() && offset.asInt64() != 0) {
       diags.push_back(unsupported("offset", "OFFSET not supported in Velaria SQL v1.",
                                   "Use range-based slicing on the result set."));
     }
@@ -645,11 +694,13 @@ SqlQuery lowerSelect(const PgQuery__SelectStmt* s, const VelariaSqlExtensions& e
   return q;
 }
 
-Row lowerValuesRow(const PgQuery__Node* n) {
+Row lowerValuesRow(const PgQuery__Node* n, std::vector<SqlDiagnostic>& diags) {
   Row row;
   if (!n || n->node_case != PG_QUERY__NODE__NODE_LIST || !n->list) return row;
   for (size_t i = 0; i < n->list->n_items; ++i) {
-    row.push_back(extractVal(n->list->items[i]));
+    Value value;
+    lowerLiteralValue(n->list->items[i], &value, diags, "VALUES");
+    row.push_back(std::move(value));
   }
   return row;
 }
@@ -705,7 +756,7 @@ InsertStmt lowerInsert(const PgQuery__InsertStmt* insert,
   if (select && select->n_values_lists > 0) {
     if (kind) *kind = SqlStatementKind::InsertValues;
     for (size_t i = 0; i < select->n_values_lists; ++i) {
-      out.values.push_back(lowerValuesRow(select->values_lists[i]));
+      out.values.push_back(lowerValuesRow(select->values_lists[i], diags));
     }
     return out;
   }

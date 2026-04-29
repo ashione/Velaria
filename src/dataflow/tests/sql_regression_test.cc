@@ -344,6 +344,41 @@ void runParserRegression() {
       },
       "EXCEPT");
 
+  expectThrowsType<dataflow::SQLUnsupportedError>(
+      "parser_select_distinct_rejected",
+      []() {
+        parseSqlForRegression("SELECT DISTINCT region FROM users");
+      },
+      "SELECT DISTINCT");
+
+  expectThrowsType<dataflow::SQLUnsupportedError>(
+      "parser_aggregate_distinct_rejected",
+      []() {
+        parseSqlForRegression("SELECT COUNT(DISTINCT region) AS n FROM users");
+      },
+      "Aggregate DISTINCT");
+
+  expectThrowsType<dataflow::SQLUnsupportedError>(
+      "parser_predicate_rhs_expression_rejected",
+      []() {
+        parseSqlForRegression("SELECT user_id FROM users WHERE score > 1 + 1");
+      },
+      "predicate right-hand");
+
+  expectThrowsType<dataflow::SQLUnsupportedError>(
+      "parser_limit_expression_rejected",
+      []() {
+        parseSqlForRegression("SELECT user_id FROM users LIMIT 1 + 1");
+      },
+      "LIMIT");
+
+  expectThrowsType<dataflow::SQLUnsupportedError>(
+      "parser_insert_values_expression_rejected",
+      []() {
+        parseSqlForRegression("INSERT INTO users VALUES (1 + 1, 'apac', 25)");
+      },
+      "VALUES");
+
   expectNoThrow(
       "parser_keyword_search_clause_parsed",
       []() {

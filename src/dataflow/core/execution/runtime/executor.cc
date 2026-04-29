@@ -411,16 +411,62 @@ Table executeSingleSumNoKeyTable(const Table& input, const AggregateSpec& agg) {
 }
 
 Table executeSingleSumSingleInt64KeyTable(const Table& input, std::size_t key_index,
-                                          const AggregateSpec& agg) {
+                                          const AggregateSpec& agg, bool nullable_key) {
   const auto key_column = viewValueColumn(input, key_index);
   const auto value_column = viewValueColumn(input, agg.value_index);
+  const auto row_count = input.rowCount();
+  Table out = makeAggregateOutputSchema(input, {key_index}, std::vector<AggregateSpec>{agg});
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = out.schema;
+  cache->columns.resize(2);
+  cache->arrow_formats.resize(2);
+  if (row_count == 0) {
+    out.columnar_cache = std::move(cache);
+    return out;
+  }
+
+  if (!nullable_key) {
+    std::unordered_map<int64_t, std::size_t> key_to_index;
+    std::vector<double> ordered_sums;
+    std::vector<int64_t> ordered_keys;
+    key_to_index.reserve(row_count);
+    ordered_keys.reserve(row_count);
+    ordered_sums.reserve(row_count);
+    for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+      const int64_t key = valueColumnInt64At(*key_column.buffer, row_index);
+      auto it = key_to_index.find(key);
+      if (it == key_to_index.end()) {
+        ordered_keys.push_back(key);
+        ordered_sums.push_back(0.0);
+        const auto index = ordered_sums.size() - 1;
+        it = key_to_index.emplace(key, index).first;
+      }
+      if (!valueColumnIsNullAt(*value_column.buffer, row_index)) {
+        ordered_sums[it->second] += valueColumnDoubleAt(*value_column.buffer, row_index);
+      }
+    }
+
+    cache->row_count = ordered_keys.size();
+    cache->columns[0].values.reserve(ordered_keys.size());
+    cache->columns[1].values.reserve(ordered_keys.size());
+    for (std::size_t index = 0; index < ordered_keys.size(); ++index) {
+      cache->columns[0].values.push_back(Value(ordered_keys[index]));
+      cache->columns[1].values.push_back(Value(ordered_sums[index]));
+    }
+    if (!ordered_keys.empty()) {
+      cache->batch_row_counts.push_back(ordered_keys.size());
+    }
+    out.columnar_cache = std::move(cache);
+    return out;
+  }
+
   std::unordered_map<Int64AggregateKey, std::size_t, Int64AggregateKeyHash> key_to_index;
   std::vector<double> ordered_sums;
   std::vector<Int64AggregateKey> ordered_keys;
-  key_to_index.reserve(input.rowCount());
-  ordered_keys.reserve(input.rowCount());
-  ordered_sums.reserve(input.rowCount());
-  for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
+  key_to_index.reserve(row_count);
+  ordered_keys.reserve(row_count);
+  ordered_sums.reserve(row_count);
+  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
     const Int64AggregateKey key{valueColumnIsNullAt(*key_column.buffer, row_index),
                                 valueColumnIsNullAt(*key_column.buffer, row_index)
                                     ? 0
@@ -437,11 +483,6 @@ Table executeSingleSumSingleInt64KeyTable(const Table& input, std::size_t key_in
     }
   }
 
-  Table out = makeAggregateOutputSchema(input, {key_index}, std::vector<AggregateSpec>{agg});
-  auto cache = std::make_shared<ColumnarTable>();
-  cache->schema = out.schema;
-  cache->columns.resize(2);
-  cache->arrow_formats.resize(2);
   cache->row_count = ordered_keys.size();
   cache->columns[0].values.reserve(ordered_keys.size());
   cache->columns[1].values.reserve(ordered_keys.size());
@@ -514,10 +555,9 @@ Table executeSingleSumDoubleInt64KeyTable(const Table& input, std::size_t first_
   return out;
 }
 
-bool aggregateKeysEqualAt(const Table& input, const std::vector<size_t>& key_indices,
+bool aggregateKeysEqualAt(const std::vector<ValueColumnView>& key_columns,
                           std::size_t lhs_row, std::size_t rhs_row) {
-  for (const auto key_index : key_indices) {
-    const auto key_column = viewValueColumn(input, key_index);
+  for (const auto& key_column : key_columns) {
     const auto lhs = valueColumnValueAt(*key_column.buffer, lhs_row);
     const auto rhs = valueColumnValueAt(*key_column.buffer, rhs_row);
     if (!(lhs == rhs)) {
@@ -527,40 +567,50 @@ bool aggregateKeysEqualAt(const Table& input, const std::vector<size_t>& key_ind
   return true;
 }
 
-Row buildAggregateOutputRow(const Table& input, const std::vector<size_t>& key_indices,
-                            std::size_t row_index, const AggregateAccumulator& acc,
-                            const std::vector<AggregateSpec>& aggs) {
-  Row row;
-  row.reserve(key_indices.size() + aggs.size());
-  for (const auto key_index : key_indices) {
-    const auto key_column = viewValueColumn(input, key_index);
-    row.push_back(valueColumnValueAt(*key_column.buffer, row_index));
-  }
-  for (std::size_t i = 0; i < aggs.size(); ++i) {
-    row.push_back(finalizeAggregateValue(acc, aggs[i], i));
-  }
-  return row;
-}
-
 Table executeOrderedAggregateTable(const Table& input, const std::vector<size_t>& key_indices,
                                    const std::vector<AggregateSpec>& aggs,
                                    const std::vector<const ValueColumnView*>& aggregate_columns) {
   Table out = makeAggregateOutputSchema(input, key_indices, aggs);
-  if (input.rowCount() == 0) {
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = out.schema;
+  cache->columns.resize(out.schema.fields.size());
+  cache->arrow_formats.resize(out.schema.fields.size());
+  const auto row_count = input.rowCount();
+  if (row_count == 0) {
+    out.columnar_cache = std::move(cache);
     return out;
   }
 
+  const auto reserve_groups = std::min<std::size_t>(row_count, 4096);
+  for (auto& column : cache->columns) {
+    column.values.reserve(reserve_groups);
+  }
+  const auto key_columns = viewValueColumns(input, key_indices);
+  auto append_group = [&](std::size_t key_row, const AggregateAccumulator& acc) {
+    std::size_t out_column_index = 0;
+    for (const auto& key_column : key_columns) {
+      cache->columns[out_column_index++].values.push_back(
+          valueColumnValueAt(*key_column.buffer, key_row));
+    }
+    appendAggregateValues(cache.get(), &out_column_index, acc, aggs);
+    ++cache->row_count;
+  };
+
   AggregateAccumulator accumulator = initAccumulator(aggs);
   std::size_t group_start = 0;
-  for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
-    if (row_index > group_start && !aggregateKeysEqualAt(input, key_indices, group_start, row_index)) {
-      out.rows.push_back(buildAggregateOutputRow(input, key_indices, group_start, accumulator, aggs));
+  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+    if (row_index > group_start && !aggregateKeysEqualAt(key_columns, group_start, row_index)) {
+      append_group(group_start, accumulator);
       accumulator = initAccumulator(aggs);
       group_start = row_index;
     }
     updateAccumulator(&accumulator, aggs, aggregate_columns, row_index);
   }
-  out.rows.push_back(buildAggregateOutputRow(input, key_indices, group_start, accumulator, aggs));
+  append_group(group_start, accumulator);
+  if (cache->row_count > 0) {
+    cache->batch_row_counts.push_back(cache->row_count);
+  }
+  out.columnar_cache = std::move(cache);
   return out;
 }
 
@@ -568,7 +618,12 @@ Table executeDenseSingleInt64KeyAggregateTable(
     const Table& input, std::size_t key_index, const std::vector<AggregateSpec>& aggs,
     const std::vector<const ValueColumnView*>& aggregate_columns) {
   Table out = makeAggregateOutputSchema(input, {key_index}, aggs);
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = out.schema;
+  cache->columns.resize(out.schema.fields.size());
+  cache->arrow_formats.resize(out.schema.fields.size());
   if (input.rowCount() == 0) {
+    out.columnar_cache = std::move(cache);
     return out;
   }
 
@@ -586,6 +641,7 @@ Table executeDenseSingleInt64KeyAggregateTable(
     saw_value = true;
   }
   if (!saw_value) {
+    out.columnar_cache = std::move(cache);
     return out;
   }
 
@@ -603,17 +659,26 @@ Table executeDenseSingleInt64KeyAggregateTable(
     updateAccumulator(&slots[slot], aggs, aggregate_columns, row_index);
   }
 
-  out.rows.reserve(input.rowCount());
+  const auto reserve_groups =
+      std::min<std::size_t>(static_cast<std::size_t>(domain_size), input.rowCount());
+  for (auto& column : cache->columns) {
+    column.values.reserve(reserve_groups);
+  }
   for (std::size_t slot = 0; slot < seen.size(); ++slot) {
     if (!seen[slot]) continue;
-    Row row;
-    row.reserve(1 + aggs.size());
-    row.emplace_back(static_cast<int64_t>(min_value + static_cast<int64_t>(slot)));
+    std::size_t out_column_index = 0;
+    cache->columns[out_column_index++].values.push_back(
+        Value(static_cast<int64_t>(min_value + static_cast<int64_t>(slot))));
     for (std::size_t i = 0; i < aggs.size(); ++i) {
-      row.push_back(finalizeAggregateValue(slots[slot], aggs[i], i));
+      cache->columns[out_column_index++].values.push_back(
+          finalizeAggregateValue(slots[slot], aggs[i], i));
     }
-    out.rows.push_back(std::move(row));
+    ++cache->row_count;
   }
+  if (cache->row_count > 0) {
+    cache->batch_row_counts.push_back(cache->row_count);
+  }
+  out.columnar_cache = std::move(cache);
   return out;
 }
 
@@ -1362,7 +1427,9 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
     case AggregateExecutionShape::SumNoKey:
       return executeSingleSumNoKeyTable(input, aggs.front());
     case AggregateExecutionShape::SumSingleInt64Key:
-      return executeSingleSumSingleInt64KeyTable(input, key_indices[0], aggs.front());
+      return executeSingleSumSingleInt64KeyTable(
+          input, key_indices[0], aggs.front(),
+          aggregate_pattern.exec_spec.properties.has_nullable_keys);
     case AggregateExecutionShape::SumDoubleInt64Key:
       return executeSingleSumDoubleInt64KeyTable(input, key_indices[0], key_indices[1],
                                                  aggs.front());
@@ -1570,10 +1637,11 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
 
   struct PackedAggregateKey {
     // Up to 3 components; only first (arity) elements are meaningful.
+    // String views borrow from the input table/cache and are consumed before input lifetime ends.
     uint8_t arity = 0;
     std::array<uint8_t, 3> tag{};  // 0=null, 1=int64, 2=string
     std::array<int64_t, 3> i64{};
-    std::array<std::string, 3> sv{};
+    std::array<std::string_view, 3> sv{};
 
     bool operator==(const PackedAggregateKey& other) const {
       if (arity != other.arity) return false;
@@ -1613,8 +1681,7 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
             mix(static_cast<uint64_t>(key.i64[i]));
             break;
           case 2: {
-            const auto& sv = key.sv[i];
-            mix(std::hash<std::string>{}(sv));
+            mix(std::hash<std::string_view>{}(key.sv[i]));
             break;
           }
           default:
@@ -1653,7 +1720,7 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
 
       const auto& buffer = *col.buffer;
       if (!buffer.values.empty()) {
-        const Value value = valueColumnValueAt(buffer, row);
+        const Value& value = buffer.values[row];
         if (value.isNull()) {
           out_key->tag[idx] = 0;
           return true;
@@ -1670,7 +1737,7 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
         }
         if (value.type() == DataType::String) {
           out_key->tag[idx] = 2;
-          out_key->sv[idx] = value.asString();
+          out_key->sv[idx] = std::string_view(value.asString());
           return true;
         }
         return false;
@@ -1680,7 +1747,7 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
         const auto& format = buffer.arrow_backing->format;
         if (isArrowUtf8Format(format)) {
           out_key->tag[idx] = 2;
-          out_key->sv[idx] = std::string(valueColumnStringViewAt(buffer, row));
+          out_key->sv[idx] = valueColumnStringViewAt(buffer, row);
           return true;
         }
         if (isArrowIntegerLikeFormat(format)) {
@@ -1706,9 +1773,9 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
         return true;
       }
       if (value.type() == DataType::String) {
-        out_key->tag[idx] = 2;
-        out_key->sv[idx] = value.asString();
-        return true;
+        // valueColumnValueAt() would create a temporary string here; reject packed keys
+        // and let the generic aggregate path keep ownership explicit.
+        return false;
       }
       return false;
     };
@@ -1755,7 +1822,8 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
             cache->columns[out_column_index++].values.push_back(Value(key.i64[i]));
             break;
           case 2:
-            cache->columns[out_column_index++].values.push_back(Value(key.sv[i]));
+            cache->columns[out_column_index++].values.push_back(
+                Value(std::string(key.sv[i])));
             break;
           default:
             cache->columns[out_column_index++].values.push_back(Value());

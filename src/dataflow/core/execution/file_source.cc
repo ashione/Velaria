@@ -521,6 +521,41 @@ void appendCapturedValues(Table* table, const std::vector<std::size_t>& schema_i
   table->columnar_cache->row_count += 1;
 }
 
+void assignNullBackingsForMissingColumns(ColumnarTable* cache, const std::string& context) {
+  if (cache == nullptr) {
+    throw std::invalid_argument("columnar cache cannot be null");
+  }
+  const auto prefix = context.empty() ? std::string("columnar cache")
+                                      : (context + " columnar cache");
+  if (cache->schema.fields.size() != cache->columns.size()) {
+    throw std::runtime_error(prefix + " schema/column count mismatch");
+  }
+  if (cache->arrow_formats.size() < cache->columns.size()) {
+    cache->arrow_formats.resize(cache->columns.size());
+  } else if (cache->arrow_formats.size() != cache->columns.size()) {
+    throw std::runtime_error(prefix + " arrow format count mismatch");
+  }
+  for (std::size_t column_index = 0; column_index < cache->columns.size(); ++column_index) {
+    auto& column = cache->columns[column_index];
+    const auto column_row_count = valueColumnRowCount(column);
+    if (column_row_count == cache->row_count) {
+      if (column.arrow_backing != nullptr) {
+        cache->arrow_formats[column_index] = column.arrow_backing->format;
+      }
+      continue;
+    }
+    if (column_row_count != 0) {
+      throw std::runtime_error(prefix + " partial column row count mismatch");
+    }
+    auto backing = std::make_shared<ArrowColumnBacking>();
+    backing->format = "n";
+    backing->length = cache->row_count;
+    backing->null_count = static_cast<int64_t>(cache->row_count);
+    column.arrow_backing = std::move(backing);
+    cache->arrow_formats[column_index] = "n";
+  }
+}
+
 std::vector<std::string_view> splitByDelimiter(std::string_view line, char delimiter) {
   std::vector<std::string_view> tokens;
   std::size_t start = 0;
@@ -1829,6 +1864,7 @@ Table loadLineFileSelected(const std::string& path, const Schema& schema,
   if (table.columnar_cache->row_count > 0) {
     table.columnar_cache->batch_row_counts.push_back(table.columnar_cache->row_count);
   }
+  assignNullBackingsForMissingColumns(table.columnar_cache.get(), "loadLineFileSelected");
   return table;
 }
 
@@ -1893,6 +1929,7 @@ Table loadJsonFileSelected(const std::string& path, const Schema& schema,
   if (table.columnar_cache->row_count > 0) {
     table.columnar_cache->batch_row_counts.push_back(table.columnar_cache->row_count);
   }
+  assignNullBackingsForMissingColumns(table.columnar_cache.get(), "loadJsonFileSelected");
   return table;
 }
 
@@ -2022,6 +2059,7 @@ bool executeLineSourcePushdown(const std::string& path, const Schema& schema,
   if (table.columnar_cache->row_count > 0) {
     table.columnar_cache->batch_row_counts.push_back(table.columnar_cache->row_count);
   }
+  assignNullBackingsForMissingColumns(table.columnar_cache.get(), "executeLineSourcePushdown");
   *out = std::move(table);
   return true;
 }
@@ -2173,6 +2211,7 @@ bool executeJsonSourcePushdown(const std::string& path, const Schema& schema,
   if (table.columnar_cache->row_count > 0) {
     table.columnar_cache->batch_row_counts.push_back(table.columnar_cache->row_count);
   }
+  assignNullBackingsForMissingColumns(table.columnar_cache.get(), "executeJsonSourcePushdown");
   *out = std::move(table);
   return true;
 }
@@ -2192,17 +2231,13 @@ bool try_execute_line_aggregate(const std::string& path, const Schema& schema,
     throw std::runtime_error("cannot open line file: " + path);
   }
   const bool single_key_count_shape =
-      pushdown.shape == SourcePushdownShape::SingleKeyCount &&
       pushdown.aggregate.keys.size() == 1 &&
       pushdown.aggregate.aggregates.size() == 1 &&
-      pushdown.aggregate.aggregates.front().function == AggregateFunction::Count &&
-      !pushdown.predicate_expr;
+      pushdown.aggregate.aggregates.front().function == AggregateFunction::Count;
   const bool single_key_numeric_shape =
-      pushdown.shape == SourcePushdownShape::SingleKeyNumericAggregate &&
       pushdown.aggregate.keys.size() == 1 &&
       pushdown.aggregate.aggregates.size() == 1 &&
-      pushdown.aggregate.aggregates.front().function != AggregateFunction::Count &&
-      !pushdown.predicate_expr;
+      pushdown.aggregate.aggregates.front().function != AggregateFunction::Count;
 
   std::regex line_regex;
   SimpleLineRegexPlan simple_plan;
@@ -2423,17 +2458,13 @@ bool try_execute_json_aggregate(const std::string& path, const Schema& schema,
   }
   const auto captured_fields = buildJsonCapturedFieldIndex(options, access_plan.schema_indices);
   const bool single_key_count_shape =
-      pushdown.shape == SourcePushdownShape::SingleKeyCount &&
       pushdown.aggregate.keys.size() == 1 &&
       pushdown.aggregate.aggregates.size() == 1 &&
-      pushdown.aggregate.aggregates.front().function == AggregateFunction::Count &&
-      !pushdown.predicate_expr;
+      pushdown.aggregate.aggregates.front().function == AggregateFunction::Count;
   const bool single_key_numeric_shape =
-      pushdown.shape == SourcePushdownShape::SingleKeyNumericAggregate &&
       pushdown.aggregate.keys.size() == 1 &&
       pushdown.aggregate.aggregates.size() == 1 &&
-      pushdown.aggregate.aggregates.front().function != AggregateFunction::Count &&
-      !pushdown.predicate_expr;
+      pushdown.aggregate.aggregates.front().function != AggregateFunction::Count;
 
   const bool single_key_aggregate = pushdown.aggregate.keys.size() == 1;
   AggregateGroupMap groups;
@@ -2750,7 +2781,11 @@ Table projectTable(const Table& input, const std::vector<std::size_t>& projected
   for (std::size_t i = 0; i < keep.size(); ++i) {
     if (keep[i] == 0) continue;
     if (input.columnar_cache) {
-      projected.columnar_cache->columns[i].values = input.columnar_cache->columns[i].values;
+      projected.columnar_cache->columns[i] = input.columnar_cache->columns[i];
+      if (projected.columnar_cache->columns[i].arrow_backing != nullptr) {
+        projected.columnar_cache->arrow_formats[i] =
+            projected.columnar_cache->columns[i].arrow_backing->format;
+      }
     } else {
       projected.columnar_cache->columns[i].values.reserve(row_count);
       for (const auto& row : input.rows) {
@@ -2762,13 +2797,15 @@ Table projectTable(const Table& input, const std::vector<std::size_t>& projected
   if (row_count > 0) {
     projected.columnar_cache->batch_row_counts.push_back(row_count);
   }
+  assignNullBackingsForMissingColumns(projected.columnar_cache.get(), "projectTable");
   if (materialize_rows) {
     projected.rows.reserve(row_count);
     for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
       Row row;
       row.reserve(projected_columns.size());
       for (const auto column_index : projected_columns) {
-        row.push_back(projected.columnar_cache->columns[column_index].values[row_index]);
+        row.push_back(valueColumnValueAt(projected.columnar_cache->columns[column_index],
+                                         row_index));
       }
       projected.rows.push_back(std::move(row));
     }
@@ -3061,7 +3098,7 @@ Table applyFilterAndLimit(const Table& input, const SourcePushdownSpec& pushdown
   std::vector<uint8_t> predicate_scratch(predicate_steps.size());
   std::vector<uint8_t> materialized_columns(filtered.schema.fields.size(), static_cast<uint8_t>(0));
   for (std::size_t col = 0; col < filtered.schema.fields.size(); ++col) {
-    if (input.columnar_cache->columns[col].values.size() == row_count) {
+    if (valueColumnRowCount(input.columnar_cache->columns[col]) == row_count) {
       materialized_columns[col] = 1;
       filtered.columnar_cache->columns[col].values.reserve(reserve_rows);
     }
@@ -3073,7 +3110,8 @@ Table applyFilterAndLimit(const Table& input, const SourcePushdownSpec& pushdown
       if (filter.column_index >= input.schema.fields.size()) {
         throw std::runtime_error("source pushdown filter column out of range");
       }
-      const auto& cell = input.columnar_cache->columns[filter.column_index].values[row_index];
+      const auto cell = valueColumnValueAt(input.columnar_cache->columns[filter.column_index],
+                                           row_index);
       if (!compareValueSafe(cell, filter.value, filter.op)) {
         matches_filters = false;
         break;
@@ -3089,7 +3127,7 @@ Table applyFilterAndLimit(const Table& input, const SourcePushdownSpec& pushdown
     for (std::size_t col = 0; col < filtered.schema.fields.size(); ++col) {
       if (materialized_columns[col] != 0) {
         filtered.columnar_cache->columns[col].values.push_back(
-            input.columnar_cache->columns[col].values[row_index]);
+            valueColumnValueAt(input.columnar_cache->columns[col], row_index));
       }
     }
     filtered.columnar_cache->row_count += 1;
@@ -3101,6 +3139,7 @@ Table applyFilterAndLimit(const Table& input, const SourcePushdownSpec& pushdown
   if (filtered.columnar_cache->row_count > 0) {
     filtered.columnar_cache->batch_row_counts.push_back(filtered.columnar_cache->row_count);
   }
+  assignNullBackingsForMissingColumns(filtered.columnar_cache.get(), "applyFilterAndLimit");
   return filtered;
 }
 

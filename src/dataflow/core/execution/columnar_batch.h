@@ -68,6 +68,8 @@ struct RowSelection {
 
 std::shared_ptr<ColumnarTable> makeColumnarCache(const Table& table);
 std::shared_ptr<const ColumnarTable> ensureColumnarCache(const Table* table);
+void validateColumnarCache(const ColumnarTable& cache, const std::string& context);
+void validateTableColumnarCache(const Table& table, const std::string& context);
 std::size_t valueColumnRowCount(const ValueColumnBuffer& buffer);
 bool valueColumnIsNullAt(const ValueColumnBuffer& buffer, std::size_t row_index);
 std::string_view valueColumnStringViewAt(const ValueColumnBuffer& buffer, std::size_t row_index);

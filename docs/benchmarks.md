@@ -55,46 +55,135 @@ Current file-source optimizer/executor layering:
 
 ## Latest Local Regression Snapshot
 
-- Snapshot date: April 26, 2026
-- Branch under test: `auto/sql-cast-column-regression`
+- Snapshot date: April 29, 2026
+- Branch under test: `auto/sql-optimization-a`
 - Run mode: local serial Bazel benchmarks on the developer machine
+- Measurement shape: average of `3` outer serial benchmark runs unless a table states a different rerun count; each benchmark keeps its own internal `rounds`
 - Scope: native execution benchmarks only; Python API overhead, packaged CLI startup, and agent runtime startup are excluded
+- This snapshot includes the columnar hot-path tuning that keeps full cache validation out of repeated execution loops and avoids per-row string copies in packed aggregate keys.
+- The batch aggregate table was rerun with `5` outer serial runs after removing benchmark-specific sorted-key probing; it uses only optimizer-selected dense, packed-hash, fixed-hash, and sort-streaming execution paths.
+- Repeated legacy SQL text now reuses a bounded parse cache after `kBeforeSqlParse`; plugin hooks after parse and plan build still run for each call.
 
-String builtin snapshot, `100,000` rows, `5` rounds:
+String builtin snapshot, `100,000` rows, `5` internal rounds:
 
 | Case | Avg time | Rows/s |
 |---|---:|---:|
-| `copy-column` | `106,816 us` | `936,188` |
-| `single-arg-functions` | `257,904 us` | `387,741` |
-| `multi-arg-functions` | `351,683 us` | `284,347` |
-| `dependent-chain` | `488,326 us` | `204,781` |
-| `sql-plan-and-execute` | `520,191 us` | `192,237` |
-| `sql-reused-plan` | `170,364 us` | `586,980` |
+| `copy-column` | `99,416 us` | `1,005,872` |
+| `single-arg-functions` | `226,192 us` | `442,103` |
+| `multi-arg-functions` | `329,301 us` | `303,674` |
+| `dependent-chain` | `489,359 us` | `204,349` |
+| `sql-plan-and-execute` | `549,990 us` | `181,821` |
+| `sql-reused-plan` | `171,188 us` | `584,153` |
 
-Batch aggregate snapshot, `1,048,576` rows:
+Batch aggregate snapshot, `1,048,576` rows, `5` outer runs:
 
 | Scenario | Selected impl | Elapsed | Rows/s | Output groups |
 |---|---|---:|---:|---:|
-| `single-int64-low-domain` | `dense` | `64 ms` | `16,384,000` | `1,024` |
-| `single-int64-high-domain` | `hash-fixed` | `551 ms` | `1,903,040` | `1,048,576` |
-| `double-int64` | `hash-packed` | `304 ms` | `3,449,260` | `4,096` |
-| `mixed-string-int64` | `hash-packed` | `499 ms` | `2,101,350` | `16,384` |
-| `mixed-string-int64-nullable` | `hash-packed` | `452 ms` | `2,319,860` | `17,921` |
-| `int64-two-string` | `hash-packed` | `690 ms` | `1,519,680` | `32,768` |
-| `int64-string-bool` | `hash-packed` | `584 ms` | `1,795,510` | `32,768` |
-| `ordered-string` | `sort-streaming` | `337 ms` | `3,111,500` | `32,768` |
+| `single-int64-low-domain` | `dense` | `57.4 ms` | `18,267,875` | `1,024` |
+| `single-int64-high-domain` | `hash-fixed` | `561.6 ms` | `1,867,123` | `1,048,576` |
+| `double-int64` | `hash-packed` | `201.4 ms` | `5,206,435` | `4,096` |
+| `mixed-string-int64` | `hash-packed` | `335.0 ms` | `3,130,078` | `16,384` |
+| `mixed-string-int64-nullable` | `hash-packed` | `324.0 ms` | `3,236,346` | `17,921` |
+| `int64-two-string` | `hash-packed` | `500.4 ms` | `2,095,476` | `32,768` |
+| `int64-string-bool` | `hash-packed` | `427.4 ms` | `2,453,383` | `32,768` |
+| `ordered-string` | `sort-streaming` | `311.4 ms` | `3,367,296` | `32,768` |
 
-File-source SQL predicate pushdown snapshot, `200,000` rows, `3` rounds:
+Stream runtime snapshot:
+
+| Case | Elapsed | Rows/s | Last batch latency |
+|---|---:|---:|---:|
+| `stateless-single` | `1.5 s` | `170,694` | `45.0 ms` |
+| `stateless-local-workers` | `1.9 s` | `138,088` | `55.3 ms` |
+| `stateful-single` | `2.9 s` | `91,697` | `91.7 ms` |
+| `stateful-local-workers` | `5.4 s` | `48,460` | `167.7 ms` |
+| `stateful-single-sliding` | `5.5 s` | `47,496` | `170.3 ms` |
+| `stateful-local-workers-sliding` | `9.9 s` | `26,394` | `317.0 ms` |
+
+Stream actor runtime snapshot:
+
+| Case | Elapsed | Rows/s | Result rows |
+|---|---:|---:|---:|
+| `single-process` | `157.7 ms` | `835,750` | `1,280` |
+| `actor-credit` | `247.3 ms` | `530,352` | `1,280` |
+| `auto-selected` | `110.7 ms` | `1,186,292` | `1,280` |
+
+File-source benchmark snapshot, `200,000` rows, `3` internal rounds:
+
+| Case | Best time | Result rows |
+|---|---:|---:|
+| `probe_csv` | `95 us` | `3` |
+| `probe_line` | `96 us` | `3` |
+| `probe_json_lines` | `97 us` | `3` |
+| `read_csv_hardcode_group_sum` | `57,103 us` | `16` |
+| `read_csv_explicit_group_sum` | `149,302 us` | `16` |
+| `read_csv_auto_group_sum` | `151,156 us` | `16` |
+| `read_csv_scan_only` | `63,231 us` | `200,000` |
+| `read_csv_full_columnar_only` | `184,786 us` | `200,000` |
+| `read_csv_full_materialize_rows` | `336,807 us` | `200,000` |
+| `read_csv_projected_group_sum` | `148,139 us` | `16` |
+| `read_csv_filter_only` | `260,682 us` | `99,800` |
+| `read_csv_aggregate_pushdown` | `179,868 us` | `16` |
+| `read_line_hardcode_group_sum` | `54,728 us` | `16` |
+| `read_line_explicit_group_sum` | `286,047 us` | `16` |
+| `read_line_auto_group_sum` | `285,538 us` | `16` |
+| `read_line_filter_only` | `292,154 us` | `99,800` |
+| `read_line_aggregate_pushdown` | `293,716 us` | `16` |
+| `read_line_regex_parse` | `111 us` | `1` |
+| `read_line_regex_hardcode_group_sum` | `244,894 us` | `16` |
+| `read_line_regex_explicit_group_sum` | `783,038 us` | `16` |
+| `read_json_hardcode_group_sum` | `165,309 us` | `16` |
+| `read_json_explicit_group_sum` | `641,127 us` | `16` |
+| `read_json_auto_group_sum` | `635,095 us` | `16` |
+| `read_json_filter_only` | `635,698 us` | `99,800` |
+| `read_json_aggregate_pushdown` | `638,904 us` | `16` |
+| `sql_create_table_probe_only_json` | `1,808,254 us` | `1` |
+| `sql_create_table_explicit_json` | `1,766,208 us` | `1` |
+| `sql_csv_predicate_and_group_count` | `131,533 us` | `1` |
+| `sql_csv_predicate_or_group_count` | `180,255 us` | `2` |
+| `sql_csv_predicate_mixed_group_count` | `294,823 us` | `2` |
+| `sql_line_predicate_or_group_count` | `208,696 us` | `2` |
+| `sql_json_predicate_or_group_count` | `505,876 us` | `2` |
+
+File-source SQL predicate pushdown snapshot, `200,000` rows, `3` internal rounds:
 
 | Case | No pushdown | Pushdown | Ratio |
 |---|---:|---:|---:|
-| `sql_csv_predicate_and_group_count` | `663,841 us` | `103,135 us` | `0.155` |
-| `sql_csv_predicate_or_group_count` | `636,964 us` | `149,105 us` | `0.234` |
-| `sql_csv_predicate_mixed_group_count` | `685,450 us` | `255,453 us` | `0.373` |
-| `sql_line_predicate_or_group_count` | `904,406 us` | `170,632 us` | `0.189` |
-| `sql_json_predicate_or_group_count` | `1,348,323 us` | `420,300 us` | `0.312` |
+| `sql_csv_predicate_and_group_count` | `760,868 us` | `131,533 us` | `0.173` |
+| `sql_csv_predicate_or_group_count` | `736,269 us` | `180,255 us` | `0.245` |
+| `sql_csv_predicate_mixed_group_count` | `791,505 us` | `294,823 us` | `0.372` |
+| `sql_line_predicate_or_group_count` | `1,110,699 us` | `208,696 us` | `0.188` |
+| `sql_json_predicate_or_group_count` | `1,641,476 us` | `505,876 us` | `0.308` |
+
+Baseline comparison against the April 26, 2026 local snapshot:
+
+| Area | Case | April 26 baseline | Current | Delta |
+|---|---|---:|---:|---:|
+| batch aggregate | `single-int64-low-domain` | `64.0 ms` | `57.4 ms` | `-10.3%` |
+| batch aggregate | `single-int64-high-domain` | `551.0 ms` | `561.6 ms` | `+1.9%` |
+| batch aggregate | `double-int64` | `304.0 ms` | `201.4 ms` | `-33.8%` |
+| batch aggregate | `mixed-string-int64` | `499.0 ms` | `335.0 ms` | `-32.9%` |
+| batch aggregate | `mixed-string-int64-nullable` | `452.0 ms` | `324.0 ms` | `-28.3%` |
+| batch aggregate | `int64-two-string` | `690.0 ms` | `500.4 ms` | `-27.5%` |
+| batch aggregate | `int64-string-bool` | `584.0 ms` | `427.4 ms` | `-26.8%` |
+| batch aggregate | `ordered-string` | `337.0 ms` | `311.4 ms` | `-7.6%` |
+| string builtin | `dependent-chain` | `488,326 us` | `489,359 us` | `+0.2%` |
+| string builtin | `sql-plan-and-execute` | `520,191 us` | `549,990 us` | `+5.7%` |
+| string builtin | `sql-reused-plan` | `170,364 us` | `171,188 us` | `+0.5%` |
+| file-source SQL pushdown | `sql_csv_predicate_and_group_count` | `103,135 us` | `131,533 us` | `+27.5%` |
+| file-source SQL pushdown | `sql_csv_predicate_or_group_count` | `149,105 us` | `180,255 us` | `+20.9%` |
+| file-source SQL pushdown | `sql_csv_predicate_mixed_group_count` | `255,453 us` | `294,823 us` | `+15.4%` |
+| file-source SQL pushdown | `sql_line_predicate_or_group_count` | `170,632 us` | `208,696 us` | `+22.3%` |
+| file-source SQL pushdown | `sql_json_predicate_or_group_count` | `420,300 us` | `505,876 us` | `+20.4%` |
+
+Negative delta means faster than the baseline. The remaining regressions are concentrated in repeated SQL planning and file-source SQL pushdown absolute time; pushdown ratios still preserve the expected reduction versus no-pushdown execution.
 
 Interpret this snapshot as a local regression guardrail. It is useful for catching order-of-magnitude regressions and preserving the expected pushdown shape, but it is not a release-grade cross-machine benchmark.
+
+Known current regressions:
+
+- file-source SQL pushdown absolute latency is slower than the April 26, 2026 local baseline in the latest snapshot
+- repeated SQL planning was improved with a bounded legacy parse cache, but planning/execution separation should continue to be watched in Python-facing benchmarks
+- the next performance phase should recover these regressions through typed source pushdown and reducer specialization, not by adding benchmark-shape shortcuts
 
 The remaining sections preserve the older April 6, 2026 `simd` measurements for historical comparison.
 

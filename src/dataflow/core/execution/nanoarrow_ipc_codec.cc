@@ -422,6 +422,7 @@ Table table_from_nanoarrow_batch(const ArrowSchema* schema, const ArrowArray* ar
   table.columnar_cache->schema = table.schema;
   table.columnar_cache->columns.resize(static_cast<std::size_t>(schema->n_children));
   table.columnar_cache->arrow_formats.reserve(static_cast<std::size_t>(schema->n_children));
+  table.columnar_cache->row_count = static_cast<std::size_t>(array->length);
   table.columnar_cache->batch_row_counts.push_back(static_cast<std::size_t>(array->length));
 
   std::vector<ArrowSchemaView> child_schema_views(static_cast<std::size_t>(schema->n_children));

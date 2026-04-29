@@ -124,9 +124,10 @@ The following pieces are already in place in the current repository state.
   - `Filter`
   - `Drop`
   - `Limit`
+  - `Sort` / `TopN`
   - `WindowAssign`
   - string `WithColumn`
-  - `Aggregate`
+  - `Aggregate`, including optimizer-selected dense, packed-hash, fixed-hash, and sort-streaming paths
   - current minimal `Join`
 - stream runtime:
   - `select / filter / withColumn / drop / limit / window`
@@ -144,6 +145,18 @@ The following pieces are already in place in the current repository state.
 - stream partition split/merge now carries columnar cache forward
 - `local_workers > 1` no longer forces these paths back into an avoidable row-only rematerialization pattern
 
+### Aggregate optimizer/executor path discipline
+
+- aggregate tuning stays behind the existing optimizer abstractions:
+  - `AggImplKind::Dense`
+  - `AggImplKind::HashPacked`
+  - `AggImplKind::HashFixed`
+  - `AggImplKind::SortStreaming`
+- executor paths do not add benchmark-shape probes for a specific scenario
+- sort-streaming and dense aggregate outputs now keep columnar cache directly instead of rebuilding row output first
+- the single-int64 sum shape uses an optimizer-informed non-null fixed-width key path, while nullable keys keep the conservative tagged-key path
+- empty aggregate outputs are expected to retain a schema-aligned empty columnar cache
+
 ### Regression coverage already added
 
 - planner roundtrip coverage for:
@@ -151,9 +164,13 @@ The following pieces are already in place in the current repository state.
   - string `WithColumn`
   - `Aggregate`
   - `Join`
+  - empty int64-key aggregate output retaining an empty columnar cache
 - stream runtime coverage for:
   - stateful window/grouped aggregate output
   - local-workers cache retention
+- SQL regression coverage for:
+  - invalid retained columnar cache fallback diagnostics
+  - after-parse SQL rewrite followed by re-parse before plan build
 - Arrow/Python regression coverage for:
   - fast path import
   - slow path import
@@ -225,6 +242,25 @@ rematerializing the same columns again in the middle of the pipeline.
 - preserve a clearer path to future zero-copy or lower-copy export/import work
 
 ### 4. Add explicit performance baselines
+
+Current status:
+
+- latest local benchmark averages are captured in `docs/benchmarks.md` and `docs/benchmarks-zh.md`
+- the April 29, 2026 snapshot on `auto/sql-optimization-a` uses 3 outer serial runs by default, with batch aggregate rerun 5 times, and covers:
+  - batch aggregate
+  - string builtin execution
+  - stream runtime
+  - stream actor runtime
+  - file-source explicit/probed/pushdown paths
+- the benchmark docs include a comparison against the April 26, 2026 local baseline; remaining measured regressions are concentrated in repeated SQL planning and file-source SQL pushdown absolute time
+- repeated legacy SQL text now reuses a bounded parse cache without skipping after-parse or plan-build hooks
+- file-source selected-column null backing repair avoids full cache validation in benchmark hot paths; full validation remains available through explicit validation helpers and tests
+
+Current review notes:
+
+- `ColumnarTable` remains an internal retained representation; public row and Arrow APIs keep their existing behavior.
+- fallback explain diagnostics should preserve invalid-cache reasons rather than reporting them as normal row-boundary materialization.
+- remaining performance work should focus on typed source pushdown and reducer specialization, not benchmark-specific branches.
 
 Required benchmark targets:
 

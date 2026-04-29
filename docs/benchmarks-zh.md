@@ -55,46 +55,135 @@ perf report
 
 ## 最新本地回归快照
 
-- 快照时间：2026 年 4 月 26 日
-- 当前分支：`auto/sql-cast-column-regression`
+- 快照时间：2026 年 4 月 29 日
+- 当前分支：`auto/sql-optimization-a`
 - 运行方式：开发机本地串行 Bazel benchmark
+- 统计口径：默认外层串行复测 `3` 次后取平均值；表格如注明其他复测次数则以表格为准；各 benchmark 保持自身内部 `rounds`
 - 覆盖范围：仅 native execution benchmark；不包含 Python API 开销、打包 CLI 启动时间或 agent runtime 启动时间
+- 这组快照包含 columnar 热路径调优：重复执行循环不再做全量 cache 校验，packed aggregate key 也避免了逐行字符串拷贝。
+- Batch aggregate 表格是在移除 benchmark 专用 sorted-key 探测后重新串行复测 `5` 次得到，只使用优化器选择的 dense、packed-hash、fixed-hash 和 sort-streaming 执行路径。
+- 重复 legacy SQL 文本会在 `kBeforeSqlParse` 后复用有界 parse cache；after-parse 和 plan-build plugin hook 仍会逐次执行。
 
-String builtin 快照，`100,000` 行，`5` 轮：
+String builtin 快照，`100,000` 行，内部 `5` 轮：
 
 | Case | 平均耗时 | Rows/s |
 |---|---:|---:|
-| `copy-column` | `106,816 us` | `936,188` |
-| `single-arg-functions` | `257,904 us` | `387,741` |
-| `multi-arg-functions` | `351,683 us` | `284,347` |
-| `dependent-chain` | `488,326 us` | `204,781` |
-| `sql-plan-and-execute` | `520,191 us` | `192,237` |
-| `sql-reused-plan` | `170,364 us` | `586,980` |
+| `copy-column` | `99,416 us` | `1,005,872` |
+| `single-arg-functions` | `226,192 us` | `442,103` |
+| `multi-arg-functions` | `329,301 us` | `303,674` |
+| `dependent-chain` | `489,359 us` | `204,349` |
+| `sql-plan-and-execute` | `549,990 us` | `181,821` |
+| `sql-reused-plan` | `171,188 us` | `584,153` |
 
-Batch aggregate 快照，`1,048,576` 行：
+Batch aggregate 快照，`1,048,576` 行，外层 `5` 次复测：
 
 | Scenario | Selected impl | 耗时 | Rows/s | 输出 group |
 |---|---|---:|---:|---:|
-| `single-int64-low-domain` | `dense` | `64 ms` | `16,384,000` | `1,024` |
-| `single-int64-high-domain` | `hash-fixed` | `551 ms` | `1,903,040` | `1,048,576` |
-| `double-int64` | `hash-packed` | `304 ms` | `3,449,260` | `4,096` |
-| `mixed-string-int64` | `hash-packed` | `499 ms` | `2,101,350` | `16,384` |
-| `mixed-string-int64-nullable` | `hash-packed` | `452 ms` | `2,319,860` | `17,921` |
-| `int64-two-string` | `hash-packed` | `690 ms` | `1,519,680` | `32,768` |
-| `int64-string-bool` | `hash-packed` | `584 ms` | `1,795,510` | `32,768` |
-| `ordered-string` | `sort-streaming` | `337 ms` | `3,111,500` | `32,768` |
+| `single-int64-low-domain` | `dense` | `57.4 ms` | `18,267,875` | `1,024` |
+| `single-int64-high-domain` | `hash-fixed` | `561.6 ms` | `1,867,123` | `1,048,576` |
+| `double-int64` | `hash-packed` | `201.4 ms` | `5,206,435` | `4,096` |
+| `mixed-string-int64` | `hash-packed` | `335.0 ms` | `3,130,078` | `16,384` |
+| `mixed-string-int64-nullable` | `hash-packed` | `324.0 ms` | `3,236,346` | `17,921` |
+| `int64-two-string` | `hash-packed` | `500.4 ms` | `2,095,476` | `32,768` |
+| `int64-string-bool` | `hash-packed` | `427.4 ms` | `2,453,383` | `32,768` |
+| `ordered-string` | `sort-streaming` | `311.4 ms` | `3,367,296` | `32,768` |
 
-File-source SQL predicate pushdown 快照，`200,000` 行，`3` 轮：
+Stream runtime 快照：
+
+| Case | 耗时 | Rows/s | last batch latency |
+|---|---:|---:|---:|
+| `stateless-single` | `1.5 s` | `170,694` | `45.0 ms` |
+| `stateless-local-workers` | `1.9 s` | `138,088` | `55.3 ms` |
+| `stateful-single` | `2.9 s` | `91,697` | `91.7 ms` |
+| `stateful-local-workers` | `5.4 s` | `48,460` | `167.7 ms` |
+| `stateful-single-sliding` | `5.5 s` | `47,496` | `170.3 ms` |
+| `stateful-local-workers-sliding` | `9.9 s` | `26,394` | `317.0 ms` |
+
+Stream actor runtime 快照：
+
+| Case | 耗时 | Rows/s | 输出行数 |
+|---|---:|---:|---:|
+| `single-process` | `157.7 ms` | `835,750` | `1,280` |
+| `actor-credit` | `247.3 ms` | `530,352` | `1,280` |
+| `auto-selected` | `110.7 ms` | `1,186,292` | `1,280` |
+
+File-source benchmark 快照，`200,000` 行，内部 `3` 轮：
+
+| Case | 最佳耗时 | 输出行数 |
+|---|---:|---:|
+| `probe_csv` | `95 us` | `3` |
+| `probe_line` | `96 us` | `3` |
+| `probe_json_lines` | `97 us` | `3` |
+| `read_csv_hardcode_group_sum` | `57,103 us` | `16` |
+| `read_csv_explicit_group_sum` | `149,302 us` | `16` |
+| `read_csv_auto_group_sum` | `151,156 us` | `16` |
+| `read_csv_scan_only` | `63,231 us` | `200,000` |
+| `read_csv_full_columnar_only` | `184,786 us` | `200,000` |
+| `read_csv_full_materialize_rows` | `336,807 us` | `200,000` |
+| `read_csv_projected_group_sum` | `148,139 us` | `16` |
+| `read_csv_filter_only` | `260,682 us` | `99,800` |
+| `read_csv_aggregate_pushdown` | `179,868 us` | `16` |
+| `read_line_hardcode_group_sum` | `54,728 us` | `16` |
+| `read_line_explicit_group_sum` | `286,047 us` | `16` |
+| `read_line_auto_group_sum` | `285,538 us` | `16` |
+| `read_line_filter_only` | `292,154 us` | `99,800` |
+| `read_line_aggregate_pushdown` | `293,716 us` | `16` |
+| `read_line_regex_parse` | `111 us` | `1` |
+| `read_line_regex_hardcode_group_sum` | `244,894 us` | `16` |
+| `read_line_regex_explicit_group_sum` | `783,038 us` | `16` |
+| `read_json_hardcode_group_sum` | `165,309 us` | `16` |
+| `read_json_explicit_group_sum` | `641,127 us` | `16` |
+| `read_json_auto_group_sum` | `635,095 us` | `16` |
+| `read_json_filter_only` | `635,698 us` | `99,800` |
+| `read_json_aggregate_pushdown` | `638,904 us` | `16` |
+| `sql_create_table_probe_only_json` | `1,808,254 us` | `1` |
+| `sql_create_table_explicit_json` | `1,766,208 us` | `1` |
+| `sql_csv_predicate_and_group_count` | `131,533 us` | `1` |
+| `sql_csv_predicate_or_group_count` | `180,255 us` | `2` |
+| `sql_csv_predicate_mixed_group_count` | `294,823 us` | `2` |
+| `sql_line_predicate_or_group_count` | `208,696 us` | `2` |
+| `sql_json_predicate_or_group_count` | `505,876 us` | `2` |
+
+File-source SQL predicate pushdown 快照，`200,000` 行，内部 `3` 轮：
 
 | Case | 无 pushdown | pushdown | Ratio |
 |---|---:|---:|---:|
-| `sql_csv_predicate_and_group_count` | `663,841 us` | `103,135 us` | `0.155` |
-| `sql_csv_predicate_or_group_count` | `636,964 us` | `149,105 us` | `0.234` |
-| `sql_csv_predicate_mixed_group_count` | `685,450 us` | `255,453 us` | `0.373` |
-| `sql_line_predicate_or_group_count` | `904,406 us` | `170,632 us` | `0.189` |
-| `sql_json_predicate_or_group_count` | `1,348,323 us` | `420,300 us` | `0.312` |
+| `sql_csv_predicate_and_group_count` | `760,868 us` | `131,533 us` | `0.173` |
+| `sql_csv_predicate_or_group_count` | `736,269 us` | `180,255 us` | `0.245` |
+| `sql_csv_predicate_mixed_group_count` | `791,505 us` | `294,823 us` | `0.372` |
+| `sql_line_predicate_or_group_count` | `1,110,699 us` | `208,696 us` | `0.188` |
+| `sql_json_predicate_or_group_count` | `1,641,476 us` | `505,876 us` | `0.308` |
+
+相对 2026 年 4 月 26 日本地 baseline 的对比：
+
+| 领域 | Case | 4 月 26 baseline | 当前 | 变化 |
+|---|---|---:|---:|---:|
+| batch aggregate | `single-int64-low-domain` | `64.0 ms` | `57.4 ms` | `-10.3%` |
+| batch aggregate | `single-int64-high-domain` | `551.0 ms` | `561.6 ms` | `+1.9%` |
+| batch aggregate | `double-int64` | `304.0 ms` | `201.4 ms` | `-33.8%` |
+| batch aggregate | `mixed-string-int64` | `499.0 ms` | `335.0 ms` | `-32.9%` |
+| batch aggregate | `mixed-string-int64-nullable` | `452.0 ms` | `324.0 ms` | `-28.3%` |
+| batch aggregate | `int64-two-string` | `690.0 ms` | `500.4 ms` | `-27.5%` |
+| batch aggregate | `int64-string-bool` | `584.0 ms` | `427.4 ms` | `-26.8%` |
+| batch aggregate | `ordered-string` | `337.0 ms` | `311.4 ms` | `-7.6%` |
+| string builtin | `dependent-chain` | `488,326 us` | `489,359 us` | `+0.2%` |
+| string builtin | `sql-plan-and-execute` | `520,191 us` | `549,990 us` | `+5.7%` |
+| string builtin | `sql-reused-plan` | `170,364 us` | `171,188 us` | `+0.5%` |
+| file-source SQL pushdown | `sql_csv_predicate_and_group_count` | `103,135 us` | `131,533 us` | `+27.5%` |
+| file-source SQL pushdown | `sql_csv_predicate_or_group_count` | `149,105 us` | `180,255 us` | `+20.9%` |
+| file-source SQL pushdown | `sql_csv_predicate_mixed_group_count` | `255,453 us` | `294,823 us` | `+15.4%` |
+| file-source SQL pushdown | `sql_line_predicate_or_group_count` | `170,632 us` | `208,696 us` | `+22.3%` |
+| file-source SQL pushdown | `sql_json_predicate_or_group_count` | `420,300 us` | `505,876 us` | `+20.4%` |
+
+负数表示比 baseline 更快。剩余退化集中在重复 SQL planning 和 file-source SQL pushdown 的绝对耗时；pushdown 相对 no-pushdown 的 ratio 仍保持预期收益。
 
 这组快照用于本地回归守护，适合发现数量级回退并确认 pushdown 收益形态；它不是跨机器、发布级别的严格 benchmark。
+
+当前已知退化：
+
+- 最新快照中，file-source SQL pushdown 的绝对耗时仍慢于 2026-04-26 本地 baseline
+- 重复 SQL planning 已通过有界 legacy parse cache 改善，但 Python-facing benchmark 里仍应继续区分 planning 与 execution/Arrow export
+- 下一阶段性能恢复应通过 typed source pushdown 与 reducer specialization 完成，不增加 benchmark-shape shortcut
 
 后续章节保留 2026 年 4 月 6 日 `simd` 分支的历史测量结果，用于对比参考。
 

@@ -8,6 +8,8 @@
 #include "src/dataflow/core/logical/sql/frontend/sql_frontend.h"
 #include "src/dataflow/core/logical/sql/sql_parser.h"
 #include "src/dataflow/core/logical/sql/sql_planner.h"
+#include <deque>
+#include <mutex>
 #include <unordered_map>
 
 namespace dataflow {
@@ -66,6 +68,9 @@ class DataflowSession {
   ViewCatalog catalog_;
   std::unordered_map<std::string, StreamingDataFrame> stream_views_;
   std::unordered_map<std::string, std::shared_ptr<StreamSink>> stream_sinks_;
+  mutable std::mutex legacy_parse_cache_mu_;
+  std::deque<std::string> legacy_parse_cache_order_;
+  std::unordered_map<std::string, sql::SqlStatement> legacy_parse_cache_;
 };
 
 }  // namespace dataflow

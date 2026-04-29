@@ -98,6 +98,10 @@ Arrow / CSV / Python ingress
 - 一个 native kernel 同时支持 batch + streaming
 - native 路径明确以性能优先为导向
 - 明确朝 column-first 执行推进，并在兼容边界上采用 lazy row materialization
+- 已为保留的 `ColumnarTable` cache 增加一致性校验与 batch explain fallback 诊断
+- 主要 batch operator chain 已具备 columnar-in / columnar-out 覆盖：
+  - `select`、`filter`、`withColumn`、`drop`、`limit`、`sort`、`window`、`aggregate`、当前最小 `join`，以及 file-source projection/pushdown helper
+- stream transform 内部可以携带 columnar-only table；console/file/memory sink 与 row-wire format 仍在显式边界物化 rows
 - batch 文件输入已经支持显式与自动探测两条入口：
   - `session.read_csv(...)`、`session.read_line_file(...)`、`session.read_json(...)`
   - `session.probe(...)` 与 `session.read(...)` 用于通用 file input
@@ -147,6 +151,8 @@ Arrow / CSV / Python ingress
 - `CREATE SINK TABLE` 可写但不能作为查询输入
 - SQL v1 不扩展到 `CTE`、子查询、更复杂 join 语义，也不支持 aggregate `KEYWORD SEARCH` / `HYBRID SEARCH`
 - Python callback / Python UDF 不进入热路径
+- `ColumnarTable` 仍然是保留在 runtime 内部的表示，还不是公开 table 类型
+- file-source SQL pushdown 的绝对耗时相对 2026-04-26 本地 baseline 仍有测量退化；当前 PR 先保持正确性与诊断可见，下一阶段聚焦 typed source pushdown 恢复性能
 - Electron 桌面 app 仍然只是本地原型，还不是稳定公开产品面
 - Agent runtime 支持 Codex（默认）和 Claude（需可选依赖 `claude-agent-sdk`）
 - Codex runtime 默认使用 `gpt-5.4-mini`；Claude runtime 默认使用 `claude-sonnet-4-20250514`

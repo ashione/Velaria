@@ -178,6 +178,19 @@ int main() {
   expect(aggregate_total.values.size() == 2, "aggregate cached total size mismatch");
   expect(aggregate_total.values[0].asDouble() == 10.0, "aggregate cached total first row mismatch");
 
+  dataflow::Table empty_int64_source(dataflow::Schema({"user_id", "score"}), {});
+  dataflow::PlanNodePtr empty_aggregate_plan =
+      std::make_shared<dataflow::SourcePlan>("memory", empty_int64_source);
+  empty_aggregate_plan = std::make_shared<dataflow::AggregatePlan>(
+      empty_aggregate_plan, std::vector<std::size_t>{0},
+      std::vector<dataflow::AggregateSpec>{
+          {dataflow::AggregateFunction::Sum, 1, "total_score"}});
+  auto empty_aggregate_out = executor.execute(empty_aggregate_plan);
+  expect(empty_aggregate_out.rowCount() == 0, "empty int64 aggregate should stay empty");
+  expect(empty_aggregate_out.columnar_cache != nullptr,
+         "empty int64 aggregate should retain empty columnar cache");
+  dataflow::validateTableColumnarCache(empty_aggregate_out, "empty int64 aggregate");
+
   dataflow::Schema left_schema({"user_id", "region"});
   dataflow::Table left_source(
       left_schema,

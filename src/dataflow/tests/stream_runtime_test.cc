@@ -849,6 +849,33 @@ void testLocalWorkersRetainColumnarCacheAcrossPartitions() {
   expect(user_b == 2, "local worker cache test should keep userB count");
 }
 
+void testColumnarOnlyStreamProgressUsesRowCount() {
+  dataflow::DataflowSession& session = dataflow::DataflowSession::builder();
+  auto sink = std::make_shared<CollectSink>();
+  auto rowless = makeWindowBatch({{"2026-03-28T15:00:00", "userA", 1},
+                                  {"2026-03-28T15:00:05", "userB", 2}});
+  rowless.columnar_cache = dataflow::makeColumnarCache(rowless);
+  rowless.rows.clear();
+
+  auto query = session.readStream(std::make_shared<dataflow::MemoryStreamSource>(
+                       std::vector<dataflow::Table>{rowless}))
+                   .writeStream(sink, dataflow::StreamingQueryOptions{});
+  query.start();
+  expect(query.awaitTermination() == 1,
+         "columnar-only stream progress test should process one batch");
+  const auto progress = query.progress();
+  expect(progress.estimated_batch_cost >= 6,
+         "columnar-only stream progress should use rowCount for batch cost");
+
+  const auto outputs = sink->batches();
+  expect(outputs.size() == 1, "columnar-only stream progress should emit one batch");
+  auto table = outputs.front();
+  expect(table.rows.empty(), "columnar-only stream output should stay rowless internally");
+  expect(table.rowCount() == 2, "columnar-only stream output rowCount mismatch");
+  dataflow::materializeRows(&table);
+  expect(table.rows.size() == 2, "columnar-only stream output should materialize at boundary");
+}
+
 }  // namespace
 
 int main() {
@@ -865,6 +892,7 @@ int main() {
     testWindowEvictionAggregateVariants();
     testSnapshotJsonContract();
     testLocalWorkersRetainColumnarCacheAcrossPartitions();
+    testColumnarOnlyStreamProgressUsesRowCount();
     std::cout << "[test] stream runtime ok" << std::endl;
     return 0;
   } catch (const std::exception& ex) {

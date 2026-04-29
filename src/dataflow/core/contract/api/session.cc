@@ -5,6 +5,7 @@
 #include <cctype>
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <sstream>
@@ -35,6 +36,57 @@ std::string nextQueryId() {
   std::ostringstream oss;
   oss << "query-" << id.fetch_add(1);
   return oss.str();
+}
+
+struct ColumnarFallbackStatus {
+  bool columnar_ok = false;
+  std::string fallback_type;
+  std::string reason;
+};
+
+ColumnarFallbackStatus inspectColumnarFallbackStatus(const Table& table) {
+  std::shared_ptr<ColumnarTable> cache;
+  {
+    std::lock_guard<std::mutex> lock(table.columnar_cache_mu);
+    cache = table.columnar_cache;
+  }
+  if (!cache) {
+    return {false,
+            table.rows.empty() ? "missing-columnar-cache" : "row-materialized-input",
+            "input table requires row-compatible materialization at this boundary"};
+  }
+  try {
+    validateColumnarCache(*cache, "explain");
+  } catch (const std::exception& e) {
+    return {false, "invalid-columnar-cache",
+            std::string("input table has an invalid retained columnar cache: ") + e.what()};
+  }
+  return {true, "none", "input table has a valid retained columnar cache"};
+}
+
+std::string joinColumnNames(const Schema& schema, const std::vector<std::size_t>& indices) {
+  std::ostringstream out;
+  for (std::size_t i = 0; i < indices.size(); ++i) {
+    if (i > 0) out << ",";
+    if (indices[i] < schema.fields.size()) {
+      out << schema.fields[indices[i]];
+    } else {
+      out << "#" << indices[i];
+    }
+  }
+  return out.str();
+}
+
+void appendColumnarFallbackExplain(std::ostringstream& out,
+                                   const std::string& operator_name,
+                                   const Table& input,
+                                   const std::string& affected_columns) {
+  const auto columnar_status = inspectColumnarFallbackStatus(input);
+  out << "columnar_operator=" << operator_name << "\n";
+  out << "columnar_fallback_type=" << columnar_status.fallback_type << "\n";
+  out << "columnar_reason=" << columnar_status.reason << "\n";
+  out << "columnar_input_row_count=" << input.rowCount() << "\n";
+  out << "columnar_affected_columns=" << affected_columns << "\n";
 }
 
 std::string formatStreamStrategyExplain(const StreamingStrategyDecision& strategy,
@@ -76,15 +128,42 @@ std::string formatStreamStrategyExplain(const StreamingStrategyDecision& strateg
       << (options.shared_memory_transport ? "true" : "false") << "\n";
   out << "shared_memory_min_payload_bytes="
       << options.shared_memory_min_payload_bytes << "\n";
+  out << "columnar_operator=stream\n";
+  out << "columnar_fallback_type=boundary-materialization\n";
+  out << "columnar_reason=stream transforms may stay columnar; sinks and row-wire formats materialize rows as compatibility boundaries\n";
+  out << "columnar_input_row_count=0\n";
+  out << "columnar_affected_columns=all\n";
   return out.str();
 }
 
 std::string formatBatchAggregateStrategyExplain(
     const Table& input, const std::vector<std::size_t>& group_keys,
     const std::vector<AggregateSpec>& aggregates) {
+  std::ostringstream out;
+  std::vector<std::size_t> affected = group_keys;
+  for (const auto& aggregate : aggregates) {
+    if (aggregate.value_index != static_cast<std::size_t>(-1)) {
+      affected.push_back(aggregate.value_index);
+    }
+  }
+  const auto columnar_status = inspectColumnarFallbackStatus(input);
+  if (columnar_status.fallback_type == "invalid-columnar-cache") {
+    out << "selected_impl=not-applicable\n";
+    out << "simd_backend=" << activeSimdBackendName() << "\n";
+    out << "compiled_backends=";
+    const auto compiled_backends = compiledSimdBackendNames();
+    for (std::size_t i = 0; i < compiled_backends.size(); ++i) {
+      if (i > 0) out << ",";
+      out << compiled_backends[i];
+    }
+    out << "\n";
+    out << "reason=aggregate input has invalid columnar cache; see columnar fallback diagnostics\n";
+    appendColumnarFallbackExplain(out, "aggregate", input, joinColumnNames(input.schema, affected));
+    return out.str();
+  }
+
   const auto pattern = analyzeAggregateExecution(input, group_keys, aggregates);
   const auto compiled_backends = compiledSimdBackendNames();
-  std::ostringstream out;
   out << "selected_impl=" << aggregateExecKindName(pattern.exec_spec.impl_kind) << "\n";
   out << "simd_backend=" << activeSimdBackendName() << "\n";
   out << "compiled_backends=";
@@ -115,6 +194,7 @@ std::string formatBatchAggregateStrategyExplain(
     }
     out << "\n";
   }
+  appendColumnarFallbackExplain(out, "aggregate", input, joinColumnNames(input.schema, affected));
   return out.str();
 }
 
@@ -1073,36 +1153,57 @@ DataFrame DataflowSession::sql(const std::string& sql) {
   std::string final_sql = payload.sql;
 
   auto frontend_config = sql::sqlFrontendConfigFromEnv();
-  sql::SqlStatement statement;
-
-  if (frontend_config.kind == sql::SqlFrontendKind::PgQuery) {
-    sql::PgQueryFrontend pg_frontend;
-    auto pg_result = pg_frontend.process(final_sql, sql::SqlFeaturePolicy::cliDefault());
-    if (!pg_result.diagnostics.empty()) {
-      // PG frontend failed: fall back to legacy parser
-      statement = sql::SqlParser::parse(final_sql);
-    } else {
-      statement = std::move(pg_result.statement);
-    }
-  } else if (frontend_config.kind == sql::SqlFrontendKind::Dual) {
-    // Dual mode: use legacy for execution, pg_query for comparison
-    statement = sql::SqlParser::parse(final_sql);
-    try {
+  auto parse_statement = [&](const std::string& sql_text) {
+    sql::SqlStatement parsed;
+    if (frontend_config.kind == sql::SqlFrontendKind::PgQuery) {
       sql::PgQueryFrontend pg_frontend;
-      auto pg_result = pg_frontend.process(final_sql, sql::SqlFeaturePolicy::cliDefault());
+      auto pg_result = pg_frontend.process(sql_text, sql::SqlFeaturePolicy::cliDefault());
       if (!pg_result.diagnostics.empty()) {
-        fprintf(stderr, "[dual] pg_query frontend diagnostics:\n");
-        for (const auto& d : pg_result.diagnostics) {
-          fprintf(stderr, "[dual]   [%s] %s\n", d.error_type.c_str(), d.message.c_str());
+        // PG frontend failed: fall back to legacy parser
+        parsed = sql::SqlParser::parse(sql_text);
+      } else {
+        parsed = std::move(pg_result.statement);
+      }
+    } else if (frontend_config.kind == sql::SqlFrontendKind::Dual) {
+      // Dual mode: use legacy for execution, pg_query for comparison
+      parsed = sql::SqlParser::parse(sql_text);
+      try {
+        sql::PgQueryFrontend pg_frontend;
+        auto pg_result = pg_frontend.process(sql_text, sql::SqlFeaturePolicy::cliDefault());
+        if (!pg_result.diagnostics.empty()) {
+          fprintf(stderr, "[dual] pg_query frontend diagnostics:\n");
+          for (const auto& d : pg_result.diagnostics) {
+            fprintf(stderr, "[dual]   [%s] %s\n", d.error_type.c_str(), d.message.c_str());
+          }
+        }
+      } catch (const std::exception& e) {
+        fprintf(stderr, "[dual] pg_query frontend exception: %s\n", e.what());
+      }
+    } else {
+      {
+        std::lock_guard<std::mutex> lock(legacy_parse_cache_mu_);
+        const auto it = legacy_parse_cache_.find(sql_text);
+        if (it != legacy_parse_cache_.end()) {
+          return it->second;
         }
       }
-    } catch (const std::exception& e) {
-      fprintf(stderr, "[dual] pg_query frontend exception: %s\n", e.what());
+      parsed = sql::SqlParser::parse(sql_text);
+      {
+        std::lock_guard<std::mutex> lock(legacy_parse_cache_mu_);
+        const auto [it, inserted] = legacy_parse_cache_.emplace(sql_text, parsed);
+        if (!inserted) {
+          return it->second;
+        }
+        legacy_parse_cache_order_.push_back(sql_text);
+        while (legacy_parse_cache_order_.size() > 128) {
+          legacy_parse_cache_.erase(legacy_parse_cache_order_.front());
+          legacy_parse_cache_order_.pop_front();
+        }
+      }
     }
-  } else {
-    // Legacy: current behavior
-    statement = sql::SqlParser::parse(final_sql);
-  }
+    return parsed;
+  };
+  sql::SqlStatement statement = parse_statement(final_sql);
 
   setSqlPayloadAfterParse(payload, final_sql, statement);
 
@@ -1112,7 +1213,11 @@ DataFrame DataflowSession::sql(const std::string& sql) {
     throw std::runtime_error(after_parse.reason.empty() ? "sql was blocked by ai plugin after parse"
                                                        : after_parse.reason);
   }
-  final_sql = payload.sql;
+  if (payload.sql != final_sql) {
+    final_sql = payload.sql;
+    statement = parse_statement(final_sql);
+    setSqlPayloadAfterParse(payload, final_sql, statement);
+  }
 
   build_payload.sql = final_sql;
   build_payload.summary = "plan building";
@@ -1228,7 +1333,7 @@ std::string DataflowSession::explainSql(const std::string& sql_text) {
                          step.logical.join_right_column, step.logical.join_kind);
         break;
       case sql::LogicalStepKind::Aggregate: {
-        const Table aggregate_input = current.toTable();
+        const Table aggregate_input = current.materializedTable();
         strategy << formatBatchAggregateStrategyExplain(aggregate_input, step.logical.group_keys,
                                                         step.logical.aggregates);
         current = current.aggregate(step.logical.group_keys, step.logical.aggregates);
@@ -1268,6 +1373,11 @@ std::string DataflowSession::explainSql(const std::string& sql_text) {
   if (!saw_aggregate) {
     strategy << "selected_impl=not-applicable\n";
     strategy << "reason=query does not contain GROUP BY aggregate planning\n";
+    strategy << "columnar_operator=plan\n";
+    strategy << "columnar_fallback_type=not-observed\n";
+    strategy << "columnar_reason=query explain did not need a materialized aggregate input; runtime operators keep columnar cache when executed\n";
+    strategy << "columnar_input_row_count=0\n";
+    strategy << "columnar_affected_columns=all\n";
   }
 
   std::ostringstream out;

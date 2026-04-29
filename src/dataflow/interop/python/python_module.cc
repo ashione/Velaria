@@ -727,6 +727,7 @@ bool tryTableFromArrowCapsules(PyObject* obj, df::Table* table) {
   out.columnar_cache->schema = out.schema;
   out.columnar_cache->columns.reserve(static_cast<size_t>(schema->n_children));
   out.columnar_cache->arrow_formats.reserve(static_cast<size_t>(schema->n_children));
+  out.columnar_cache->row_count = static_cast<std::size_t>(array->length);
   out.columnar_cache->batch_row_counts.push_back(static_cast<std::size_t>(array->length));
   for (int64_t column = 0; column < array->n_children; ++column) {
     const auto* child_array = array->children[column];
@@ -737,7 +738,9 @@ bool tryTableFromArrowCapsules(PyObject* obj, df::Table* table) {
     out.columnar_cache->arrow_formats.emplace_back(schema->children[column]->format != nullptr
                                                        ? schema->children[column]->format
                                                        : "");
-    df::appendColumn(&out, materializeFastArrowColumn(specs[static_cast<size_t>(column)], child_array));
+    df::appendColumn(&out,
+                     materializeFastArrowColumn(specs[static_cast<size_t>(column)], child_array),
+                     false);
   }
 
   Py_DECREF(pair);
@@ -791,6 +794,7 @@ df::Table tableFromArrowSlow(PyObject* obj) {
   out.columnar_cache->schema = out.schema;
   out.columnar_cache->columns.reserve(column_count);
   out.columnar_cache->arrow_formats.resize(column_count);
+  out.columnar_cache->row_count = static_cast<std::size_t>(row_count);
   out.columnar_cache->batch_row_counts.push_back(static_cast<std::size_t>(row_count));
   for (size_t column = 0; column < column_count; ++column) {
     PyObject* column_obj =
@@ -806,7 +810,8 @@ df::Table tableFromArrowSlow(PyObject* obj) {
       Py_DECREF(table_obj);
       throw std::runtime_error("failed to convert pyarrow column to python list");
     }
-    df::appendColumn(&out, materializePyListColumn(pylist, out.schema.fields[column].c_str()));
+    df::appendColumn(&out, materializePyListColumn(pylist, out.schema.fields[column].c_str()),
+                     false);
     Py_DECREF(pylist);
   }
 
@@ -857,6 +862,7 @@ df::Table mergeArrowTables(const std::vector<df::Table>& tables) {
       merged.rows.insert(merged.rows.end(), table.rows.begin(), table.rows.end());
     }
   }
+  merged.columnar_cache->row_count = merged.rowCount();
   if (merged.rows.empty() && !merged.columnar_cache->columns.empty()) {
     const auto row_count = merged.columnar_cache->columns.front().values.size();
     if (row_count > 0 && merged.columnar_cache->batch_row_counts.empty()) {

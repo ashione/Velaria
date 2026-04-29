@@ -714,6 +714,66 @@ std::size_t valueColumnRowCount(const ValueColumnBuffer& buffer) {
   return 0;
 }
 
+void validateColumnarCache(const ColumnarTable& cache, const std::string& context) {
+  const auto prefix = context.empty() ? std::string("columnar cache")
+                                      : (context + " columnar cache");
+  if (cache.schema.fields.size() != cache.columns.size()) {
+    throw std::runtime_error(prefix + " schema/column count mismatch: schema=" +
+                             std::to_string(cache.schema.fields.size()) +
+                             ", columns=" + std::to_string(cache.columns.size()));
+  }
+  if (cache.arrow_formats.size() != cache.columns.size()) {
+    throw std::runtime_error(prefix + " arrow format count mismatch: formats=" +
+                             std::to_string(cache.arrow_formats.size()) +
+                             ", columns=" + std::to_string(cache.columns.size()));
+  }
+
+  const auto expected_row_count = cache.row_count;
+  std::size_t batch_rows = 0;
+  for (const auto batch_row_count : cache.batch_row_counts) {
+    batch_rows += batch_row_count;
+  }
+  if (!cache.batch_row_counts.empty() && batch_rows != expected_row_count) {
+    throw std::runtime_error(prefix + " batch row count mismatch");
+  }
+
+  for (std::size_t column_index = 0; column_index < cache.columns.size(); ++column_index) {
+    const auto& column = cache.columns[column_index];
+    const auto column_row_count = valueColumnRowCount(column);
+    if (column_row_count != expected_row_count) {
+      throw std::runtime_error(prefix + " input row count mismatch: expected=" +
+                               std::to_string(expected_row_count) +
+                               ", column=" + std::to_string(column_index) +
+                               ", actual=" + std::to_string(column_row_count));
+    }
+    if (column.arrow_backing != nullptr &&
+        column.arrow_backing->length != column_row_count) {
+      throw std::runtime_error(prefix + " Arrow backing length mismatch");
+    }
+    if (column.arrow_backing != nullptr && !cache.arrow_formats[column_index].empty() &&
+        cache.arrow_formats[column_index] != column.arrow_backing->format) {
+      throw std::runtime_error(prefix + " Arrow format mismatch");
+    }
+  }
+}
+
+void validateTableColumnarCache(const Table& table, const std::string& context) {
+  std::shared_ptr<ColumnarTable> cache;
+  {
+    std::lock_guard<std::mutex> lock(table.columnar_cache_mu);
+    cache = table.columnar_cache;
+  }
+  if (!cache) {
+    return;
+  }
+  validateColumnarCache(*cache, context);
+  if (!table.rows.empty() && table.rows.size() != cache->row_count) {
+    const auto prefix = context.empty() ? std::string("table")
+                                        : (context + " table");
+    throw std::runtime_error(prefix + " row/materialized row count mismatch");
+  }
+}
+
 bool valueColumnIsNullAt(const ValueColumnBuffer& buffer, std::size_t row_index) {
   if (!buffer.values.empty()) {
     return buffer.values[row_index].isNull();
@@ -949,6 +1009,7 @@ std::shared_ptr<ColumnarTable> makeColumnarCache(const Table& table) {
     }
     cache->columns.push_back(std::move(column));
   }
+  validateColumnarCache(*cache, "makeColumnarCache");
   return cache;
 }
 
@@ -1734,30 +1795,35 @@ Table assignSlidingWindow(const Table& table, std::size_t time_column_index, uin
     return out;
   }
 
-  Table materialized = table;
-  materializeRows(&materialized);
+  const auto input_cache = ensureColumnarCache(&table);
+  const auto row_count = table.rowCount();
+  const auto windows_per_row = std::max<uint64_t>(1, (window_ms + slide_ms - 1) / slide_ms);
+  if (time_column_index >= input_cache->columns.size()) {
+    throw std::runtime_error("window column index out of range");
+  }
+
   Table out;
-  out.schema = materialized.schema;
+  out.schema = table.schema;
   if (out.schema.has(output_column)) {
     throw std::runtime_error("window output column already exists: " + output_column);
   }
   out.schema.fields.push_back(output_column);
   out.schema.index.emplace(output_column, out.schema.fields.size() - 1);
 
-  const auto windows_per_row = std::max<uint64_t>(1, (window_ms + slide_ms - 1) / slide_ms);
-  out.rows.reserve(materialized.rows.size() * static_cast<std::size_t>(windows_per_row));
-  for (const auto& row : materialized.rows) {
-    if (time_column_index >= row.size()) {
-      throw std::runtime_error("window column index out of range");
-    }
-    const auto& value = row[time_column_index];
-    if (value.isNull()) {
-      auto new_row = row;
-      new_row.push_back(Value());
-      out.rows.push_back(std::move(new_row));
+  std::vector<size_t> selected_indices;
+  selected_indices.reserve(row_count * static_cast<std::size_t>(windows_per_row));
+  std::vector<Value> output_column_values;
+  output_column_values.reserve(row_count * static_cast<std::size_t>(windows_per_row));
+
+  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+    const auto& source_ts = input_cache->columns[time_column_index];
+    if (valueColumnIsNullAt(source_ts, row_index)) {
+      selected_indices.push_back(row_index);
+      output_column_values.emplace_back();
       continue;
     }
-    const int64_t ts_ms = value.isNumber() ? value.asInt64() : parseEpochMillis(value.toString());
+
+    const int64_t ts_ms = valueColumnEpochMillisAt(source_ts, row_index);
     const int64_t slide = static_cast<int64_t>(slide_ms);
     const int64_t window = static_cast<int64_t>(window_ms);
     const int64_t last_start = (ts_ms / slide) * slide;
@@ -1765,23 +1831,56 @@ Table assignSlidingWindow(const Table& table, std::size_t time_column_index, uin
     for (uint64_t i = 0; i < windows_per_row; ++i) {
       const int64_t start = last_start - static_cast<int64_t>(i) * slide;
       if (ts_ms >= start && ts_ms < start + window) {
-        auto new_row = row;
-        new_row.push_back(format_window_as_timestamp ? Value(formatTimestampMillis(start))
-                                                    : Value(start));
-        out.rows.push_back(std::move(new_row));
+        selected_indices.push_back(row_index);
+        output_column_values.push_back(format_window_as_timestamp ? Value(formatTimestampMillis(start))
+                                                                  : Value(start));
         emitted = true;
       }
     }
     if (!emitted) {
-      auto new_row = row;
-      new_row.push_back(Value());
-      out.rows.push_back(std::move(new_row));
+      selected_indices.push_back(row_index);
+      output_column_values.emplace_back();
     }
   }
 
-  if (!materialize_rows) {
-    // Keep row representation only; callers that need columnar cache can build it lazily.
-    out.columnar_cache.reset();
+  const auto output_row_count = output_column_values.size();
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = out.schema;
+  cache->columns.reserve(input_cache->columns.size() + 1);
+  cache->arrow_formats.reserve(input_cache->arrow_formats.size() + 1);
+  cache->row_count = output_row_count;
+  if (output_row_count > 0) {
+    cache->batch_row_counts.push_back(output_row_count);
+  }
+  RowSelection selection;
+  selection.input_row_count = row_count;
+  selection.selected_count = output_row_count;
+  selection.indices = std::move(selected_indices);
+  for (const auto& source_column : input_cache->columns) {
+    ValueColumnBuffer output = copySelectedArrowColumn(source_column, selection);
+    if (output.arrow_backing == nullptr) {
+      output.values.reserve(output_row_count);
+      for (const auto selected_index : selection.indices) {
+        output.values.push_back(valueColumnValueAt(source_column, selected_index));
+      }
+    }
+    cache->columns.push_back(std::move(output));
+    if (cache->columns.back().arrow_backing != nullptr) {
+      cache->arrow_formats.push_back(cache->columns.back().arrow_backing->format);
+    } else {
+      cache->arrow_formats.push_back("");
+    }
+  }
+  ValueColumnBuffer output_window;
+  output_window.values = std::move(output_column_values);
+  cache->columns.push_back(std::move(output_window));
+  cache->arrow_formats.push_back("");
+  out.columnar_cache = std::move(cache);
+
+  if (materialize_rows) {
+    materializeRows(&out);
+  } else {
+    out.rows.clear();
   }
   return out;
 }
@@ -2559,9 +2658,14 @@ void appendColumn(Table* table, std::vector<Value>&& values, bool materialize_ro
     }
     cache->schema = table->schema;
     cache->row_count = expected_row_count;
-    cache->columns.push_back(std::move(appended));
-    if (cache->arrow_formats.size() < cache->columns.size()) {
-      cache->arrow_formats.push_back("");
+    if (cache->columns.size() < cache->schema.fields.size()) {
+      cache->columns.push_back(std::move(appended));
+      if (cache->arrow_formats.size() < cache->columns.size()) {
+        cache->arrow_formats.push_back("");
+      }
+    }
+    if (cache->columns.size() == cache->schema.fields.size()) {
+      validateColumnarCache(*cache, "appendColumn");
     }
     table->columnar_cache = std::move(cache);
   }
@@ -2598,13 +2702,18 @@ void appendColumn(Table* table, ValueColumnBuffer&& column, bool materialize_row
     }
     cache->schema = table->schema;
     cache->row_count = expected_row_count;
-    cache->columns.push_back(std::move(appended));
-    if (cache->arrow_formats.size() < cache->columns.size()) {
-      if (cache->columns.back().arrow_backing != nullptr) {
-        cache->arrow_formats.push_back(cache->columns.back().arrow_backing->format);
-      } else {
-        cache->arrow_formats.push_back("");
+    if (cache->columns.size() < cache->schema.fields.size()) {
+      cache->columns.push_back(std::move(appended));
+      if (cache->arrow_formats.size() < cache->columns.size()) {
+        if (cache->columns.back().arrow_backing != nullptr) {
+          cache->arrow_formats.push_back(cache->columns.back().arrow_backing->format);
+        } else {
+          cache->arrow_formats.push_back("");
+        }
       }
+    }
+    if (cache->columns.size() == cache->schema.fields.size()) {
+      validateColumnarCache(*cache, "appendColumn");
     }
     table->columnar_cache = std::move(cache);
   }

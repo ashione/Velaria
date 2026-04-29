@@ -74,6 +74,20 @@ std::unordered_map<std::string, int64_t> count_by_group(const dataflow::Table& t
   return out;
 }
 
+std::unordered_map<std::string, double> double_by_group(const dataflow::Table& table,
+                                                        std::size_t key_column,
+                                                        std::size_t value_column) {
+  expect(table.columnar_cache != nullptr, "columnar cache missing");
+  std::unordered_map<std::string, double> out;
+  const auto& keys = table.columnar_cache->columns[key_column].values;
+  const auto& values = table.columnar_cache->columns[value_column].values;
+  expect(keys.size() == values.size(), "group double column size mismatch");
+  for (std::size_t i = 0; i < keys.size(); ++i) {
+    out[keys[i].asString()] = values[i].asDouble();
+  }
+  return out;
+}
+
 }  // namespace
 
 int main() {
@@ -456,6 +470,40 @@ int main() {
              "line predicate pushdown val mismatch");
     }
 
+    dataflow::SourcePushdownSpec line_count_pushdown;
+    line_count_pushdown.predicate_expr = line_predicate;
+    line_count_pushdown.has_aggregate = true;
+    line_count_pushdown.aggregate.keys = {1};
+    line_count_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Count, 1, "cnt"},
+    };
+    dataflow::Table line_count_result;
+    expect(dataflow::execute_file_source_pushdown(
+               line_spec, dataflow::infer_line_file_schema(line_logic_options),
+               line_count_pushdown, false, &line_count_result),
+           "line predicate count aggregate pushdown failed");
+    const auto line_counts = count_by_group(line_count_result, 0, 1);
+    expect(line_counts.size() == 2, "line predicate count aggregate group count mismatch");
+    expect(line_counts.at("A") == 1, "line predicate count aggregate A mismatch");
+    expect(line_counts.at("C") == 1, "line predicate count aggregate C mismatch");
+
+    dataflow::SourcePushdownSpec line_sum_pushdown;
+    line_sum_pushdown.predicate_expr = line_predicate;
+    line_sum_pushdown.has_aggregate = true;
+    line_sum_pushdown.aggregate.keys = {1};
+    line_sum_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Sum, 2, "sum_val"},
+    };
+    dataflow::Table line_sum_result;
+    expect(dataflow::execute_file_source_pushdown(
+               line_spec, dataflow::infer_line_file_schema(line_logic_options),
+               line_sum_pushdown, false, &line_sum_result),
+           "line predicate sum aggregate pushdown failed");
+    const auto line_sums = double_by_group(line_sum_result, 0, 1);
+    expect(line_sums.size() == 2, "line predicate sum aggregate group count mismatch");
+    expect(line_sums.at("A") == 20.0, "line predicate sum aggregate A mismatch");
+    expect(line_sums.at("C") == 30.0, "line predicate sum aggregate C mismatch");
+
     const auto json_logic_path = make_temp_file("velaria-source-predicate-json");
     write_file(json_logic_path,
                "{\"id\":1,\"grp\":\"A\",\"val\":10}\n"
@@ -497,6 +545,40 @@ int main() {
                  json_reference.columnar_cache->columns[1].values[i],
              "json predicate pushdown val mismatch");
     }
+
+    dataflow::SourcePushdownSpec json_count_pushdown;
+    json_count_pushdown.predicate_expr = line_predicate;
+    json_count_pushdown.has_aggregate = true;
+    json_count_pushdown.aggregate.keys = {1};
+    json_count_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Count, 1, "cnt"},
+    };
+    dataflow::Table json_count_result;
+    expect(dataflow::execute_file_source_pushdown(
+               json_spec, dataflow::infer_json_file_schema(json_logic_options),
+               json_count_pushdown, false, &json_count_result),
+           "json predicate count aggregate pushdown failed");
+    const auto json_counts = count_by_group(json_count_result, 0, 1);
+    expect(json_counts.size() == 2, "json predicate count aggregate group count mismatch");
+    expect(json_counts.at("A") == 1, "json predicate count aggregate A mismatch");
+    expect(json_counts.at("C") == 1, "json predicate count aggregate C mismatch");
+
+    dataflow::SourcePushdownSpec json_sum_pushdown;
+    json_sum_pushdown.predicate_expr = line_predicate;
+    json_sum_pushdown.has_aggregate = true;
+    json_sum_pushdown.aggregate.keys = {1};
+    json_sum_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Sum, 2, "sum_val"},
+    };
+    dataflow::Table json_sum_result;
+    expect(dataflow::execute_file_source_pushdown(
+               json_spec, dataflow::infer_json_file_schema(json_logic_options),
+               json_sum_pushdown, false, &json_sum_result),
+           "json predicate sum aggregate pushdown failed");
+    const auto json_sums = double_by_group(json_sum_result, 0, 1);
+    expect(json_sums.size() == 2, "json predicate sum aggregate group count mismatch");
+    expect(json_sums.at("A") == 20.0, "json predicate sum aggregate A mismatch");
+    expect(json_sums.at("C") == 30.0, "json predicate sum aggregate C mismatch");
 
     std::cout << "[test] file source split/regex/json array/jsonl ok" << std::endl;
     return 0;

@@ -1641,6 +1641,7 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
 
   struct PackedAggregateKey {
     // Up to 3 components; only first (arity) elements are meaningful.
+    // String views borrow from the input table/cache and are consumed before input lifetime ends.
     uint8_t arity = 0;
     std::array<uint8_t, 3> tag{};  // 0=null, 1=int64, 2=string
     std::array<int64_t, 3> i64{};
@@ -1776,6 +1777,8 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
         return true;
       }
       if (value.type() == DataType::String) {
+        // valueColumnValueAt() would create a temporary string here; reject packed keys
+        // and let the generic aggregate path keep ownership explicit.
         return false;
       }
       return false;

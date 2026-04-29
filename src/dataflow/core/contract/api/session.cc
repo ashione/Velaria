@@ -1180,15 +1180,25 @@ DataFrame DataflowSession::sql(const std::string& sql) {
         fprintf(stderr, "[dual] pg_query frontend exception: %s\n", e.what());
       }
     } else {
-      const auto it = legacy_parse_cache_.find(sql_text);
-      if (it != legacy_parse_cache_.end()) {
-        parsed = it->second;
-      } else {
-        parsed = sql::SqlParser::parse(sql_text);
-        if (legacy_parse_cache_.size() >= 128) {
-          legacy_parse_cache_.clear();
+      {
+        std::lock_guard<std::mutex> lock(legacy_parse_cache_mu_);
+        const auto it = legacy_parse_cache_.find(sql_text);
+        if (it != legacy_parse_cache_.end()) {
+          return it->second;
         }
-        legacy_parse_cache_.emplace(sql_text, parsed);
+      }
+      parsed = sql::SqlParser::parse(sql_text);
+      {
+        std::lock_guard<std::mutex> lock(legacy_parse_cache_mu_);
+        const auto [it, inserted] = legacy_parse_cache_.emplace(sql_text, parsed);
+        if (!inserted) {
+          return it->second;
+        }
+        legacy_parse_cache_order_.push_back(sql_text);
+        while (legacy_parse_cache_order_.size() > 128) {
+          legacy_parse_cache_.erase(legacy_parse_cache_order_.front());
+          legacy_parse_cache_order_.pop_front();
+        }
       }
     }
     return parsed;

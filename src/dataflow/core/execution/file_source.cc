@@ -545,7 +545,7 @@ void assignNullBackingsForMissingColumns(ColumnarTable* cache, const std::string
       continue;
     }
     if (column_row_count != 0) {
-      throw std::runtime_error(context + " columnar cache partial column row count mismatch");
+      throw std::runtime_error(prefix + " partial column row count mismatch");
     }
     auto backing = std::make_shared<ArrowColumnBacking>();
     backing->format = "n";

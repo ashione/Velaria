@@ -8,8 +8,10 @@
 #include <utility>
 #include <vector>
 
+#include "src/dataflow/ai/plugin_runtime.h"
 #include "src/dataflow/core/contract/catalog/catalog.h"
 #include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/logical/sql/sql_errors.h"
 #include "src/dataflow/core/logical/sql/sql_planner.h"
 #include "src/dataflow/core/logical/sql/sql_parser.h"
@@ -94,6 +96,35 @@ bool hasSummaryRow(const Table& t, const std::string& region, int64_t total_scor
   }
   return false;
 }
+
+class AfterParseRewritePlugin final : public dataflow::ai::IExecutionPlugin {
+ public:
+  const char* name() const override { return "sql-regression-after-parse-rewrite"; }
+
+  bool supports(dataflow::ai::HookPoint point) const override {
+    return point == dataflow::ai::HookPoint::kAfterSqlParse;
+  }
+
+  dataflow::ai::PluginResult onAfterSqlParse(const dataflow::ai::PluginContext&,
+                                             dataflow::ai::PluginPayload&) override {
+    dataflow::ai::PluginResult result;
+    result.rewritten_sql = "SELECT score FROM after_parse_rewrite_input";
+    return result;
+  }
+};
+
+struct ScopedPluginRegistration {
+  explicit ScopedPluginRegistration(std::shared_ptr<dataflow::ai::IExecutionPlugin> plugin)
+      : name(plugin->name()) {
+    dataflow::ai::PluginManager::instance().registerPlugin(std::move(plugin));
+  }
+
+  ~ScopedPluginRegistration() {
+    dataflow::ai::PluginManager::instance().unregisterPlugin(name);
+  }
+
+  std::string name;
+};
 
 void runParserRegression() {
   expectNoThrow(
@@ -1191,6 +1222,54 @@ void runBatchExplainRegression() {
          "batch_group_by_preserves_leading_zero_hour_groups");
 }
 
+void runColumnarFallbackExplainRegression() {
+  DataflowSession session;
+  Table invalid_cache_table(
+      Schema({"region", "score"}),
+      {Row({Value("apac"), Value(int64_t(3))}),
+       Row({Value("emea"), Value(int64_t(5))})});
+  invalid_cache_table.columnar_cache = std::make_shared<dataflow::ColumnarTable>();
+  invalid_cache_table.columnar_cache->schema = invalid_cache_table.schema;
+  invalid_cache_table.columnar_cache->columns.resize(invalid_cache_table.schema.fields.size());
+  invalid_cache_table.columnar_cache->arrow_formats.resize(invalid_cache_table.schema.fields.size());
+  invalid_cache_table.columnar_cache->row_count = invalid_cache_table.rows.size();
+  invalid_cache_table.columnar_cache->batch_row_counts.push_back(invalid_cache_table.rows.size());
+  invalid_cache_table.columnar_cache->columns[0].values.push_back(Value("apac"));
+  invalid_cache_table.columnar_cache->columns[1].values.push_back(Value(int64_t(3)));
+  invalid_cache_table.columnar_cache->columns[1].values.push_back(Value(int64_t(5)));
+
+  session.createTempView("invalid_columnar_explain_input", DataFrame(invalid_cache_table));
+  const std::string explain = session.explainSql(
+      "SELECT region, SUM(score) AS total_score "
+      "FROM invalid_columnar_explain_input GROUP BY region");
+  expect(explain.find("columnar_fallback_type=invalid-columnar-cache") != std::string::npos,
+         "batch_explain_reports_invalid_columnar_cache");
+  expect(explain.find("columnar_reason=input table has an invalid retained columnar cache") !=
+             std::string::npos,
+         "batch_explain_reports_invalid_columnar_reason");
+  expect(explain.find("input row count mismatch") != std::string::npos,
+         "batch_explain_preserves_invalid_columnar_validation_detail");
+}
+
+void runAfterParseRewriteRegression() {
+  expectNoThrow(
+      "after_parse_rewrite_reparses_statement",
+      []() {
+        ScopedPluginRegistration registration(std::make_shared<AfterParseRewritePlugin>());
+        DataflowSession session;
+        Table input(
+            Schema({"region", "score"}),
+            {Row({Value("apac"), Value(int64_t(7))})});
+        session.createTempView("after_parse_rewrite_input", DataFrame(input));
+
+        auto out = session.sql("SELECT region FROM after_parse_rewrite_input").toTable();
+        expect(out.schema.fields.size() == 1, "after_parse_rewrite_schema_width");
+        expect(out.schema.fields[0] == "score", "after_parse_rewrite_schema_uses_new_sql");
+        expect(out.rows.size() == 1, "after_parse_rewrite_row_count");
+        expect(out.rows[0][0].asInt64() == 7, "after_parse_rewrite_result_value");
+      });
+}
+
 void runStreamSqlRegression() {
   namespace fs = std::filesystem;
 
@@ -1844,6 +1923,8 @@ int main() {
   runComplexDmlRegression();
   runPlannerPlanRegression();
   runBatchExplainRegression();
+  runColumnarFallbackExplainRegression();
+  runAfterParseRewriteRegression();
   runStreamSqlRegression();
 
   if (g_failed == 0) {

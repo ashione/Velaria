@@ -66,6 +66,7 @@ class DataflowSession {
   ViewCatalog catalog_;
   std::unordered_map<std::string, StreamingDataFrame> stream_views_;
   std::unordered_map<std::string, std::shared_ptr<StreamSink>> stream_sinks_;
+  std::unordered_map<std::string, sql::SqlStatement> legacy_parse_cache_;
 };
 
 }  // namespace dataflow

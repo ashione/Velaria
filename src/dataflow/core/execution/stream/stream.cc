@@ -2265,7 +2265,7 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
           std::max(strategy_decision_.projected_payload_bytes, estimateTablePayloadBytes(envelope.table));
       strategy_decision_.estimated_batch_cost =
           std::max(strategy_decision_.estimated_batch_cost,
-                   envelope.table.rows.size() * envelope.table.schema.fields.size());
+                   envelope.table.rowCount() * envelope.table.schema.fields.size());
       applyStrategyDecision(strategy_decision_);
 
       {
@@ -2327,7 +2327,7 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
     ctx.labels["api"] = "StreamingQuery::awaitTermination";
     ai::PluginPayload payload;
     payload.summary = "batch start";
-    payload.row_count = envelope.table.rows.size();
+    payload.row_count = envelope.table.rowCount();
 
     auto batch_hook =
         ai::PluginManager::instance().runHook(ai::HookPoint::kStreamingBatchStart, ctx, &payload);
@@ -2449,8 +2449,8 @@ size_t StreamingQuery::awaitTermination(size_t maxBatches) {
     persistCheckpoint(progress());
 
     payload.summary = "batch end";
-    payload.row_count = out.rows.size();
-    payload.attributes["batch_out_rows"] = std::to_string(out.rows.size());
+    payload.row_count = out.rowCount();
+    payload.attributes["batch_out_rows"] = std::to_string(out.rowCount());
     payload.attributes["batch_latency_ms"] = std::to_string(batch_ms);
     payload.attributes["sink_latency_ms"] = std::to_string(sink_ms);
     payload.attributes["state_latency_ms"] = std::to_string(state_ms);

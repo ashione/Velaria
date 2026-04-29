@@ -54,8 +54,10 @@ int main() {
   const auto selection = dataflow::vectorizedFilterSelection(
       value_column, dataflow::Value(int64_t(2)), gteValue);
   expect(selection.selected_count == 2, "selection count mismatch");
+  dataflow::validateTableColumnarCache(table, "columnar test input");
 
   const auto filtered = dataflow::filterTable(table, selection);
+  dataflow::validateTableColumnarCache(filtered, "filtered output");
   expect(filtered.rowCount() == 2, "filterTable row count mismatch");
   auto filtered_rows = filtered;
   dataflow::materializeRows(&filtered_rows);
@@ -74,6 +76,15 @@ int main() {
   auto limited_rows = limited;
   dataflow::materializeRows(&limited_rows);
   expect(limited_rows.rows[0][0].toString() == "A", "limitTable row value mismatch");
+  auto invalid_cache = *limited.columnar_cache;
+  invalid_cache.row_count += 1;
+  bool saw_invalid_cache = false;
+  try {
+    dataflow::validateColumnarCache(invalid_cache, "invalid test cache");
+  } catch (const std::runtime_error&) {
+    saw_invalid_cache = true;
+  }
+  expect(saw_invalid_cache, "validateColumnarCache should reject row count mismatch");
 
   const auto suffix = dataflow::makeConstantStringColumn(table.rowCount(), "_x");
   const auto concat = dataflow::vectorizedStringConcat({region, suffix});
@@ -91,6 +102,43 @@ int main() {
   expect(window.size() == 2, "window result size mismatch");
   expect(window[0].asInt64() == 10000, "window first row mismatch");
   expect(window[1].asInt64() == 15000, "window second row mismatch");
+
+  dataflow::Table sliding_window_table(
+      dataflow::Schema({"ts", "key"}),
+      {{dataflow::Value(int64_t(12000)), dataflow::Value("a")},
+       {dataflow::Value("17000"), dataflow::Value("b")},
+       {dataflow::Value(), dataflow::Value("null")}})
+  ;
+  sliding_window_table.columnar_cache = dataflow::makeColumnarCache(sliding_window_table);
+  sliding_window_table.rows.clear();
+
+  const auto sliding_out =
+      dataflow::assignSlidingWindow(sliding_window_table, 0, 60000, 30000, "window_start", false, false);
+  expect(sliding_out.rows.empty(), "sliding window should keep columnar output lazy");
+  expect(sliding_out.rowCount() == 5, "sliding window output row count mismatch");
+  const auto sliding_ts = dataflow::materializeValueColumn(sliding_out, 2);
+  const auto sliding_key = dataflow::materializeValueColumn(sliding_out, 1);
+  expect(sliding_ts.values[0].asInt64() == 0, "sliding window first row start mismatch");
+  expect(sliding_ts.values[1].asInt64() == -30000, "sliding window second row start mismatch");
+  expect(sliding_ts.values[4].isNull(), "sliding window null input should produce null bucket");
+  expect(sliding_key.values[0].toString() == "a", "sliding window first output key mismatch");
+  expect(sliding_key.values[4].toString() == "null", "sliding window null input key mismatch");
+
+  auto sliding_out_rows = dataflow::assignSlidingWindow(sliding_window_table, 0, 60000, 30000,
+                                                       "window_start", true, false);
+  expect(sliding_out_rows.rows.size() == 5, "materialized sliding window row count mismatch");
+
+  const auto sliding_out_ts = dataflow::assignSlidingWindow(
+      sliding_window_table, 0, 60000, 30000, "window_start_ts", false, true);
+  expect(!sliding_out_ts.rows.size(),
+         "timestamp sliding window should keep columnar output lazy");
+  const auto sliding_ts_ts = dataflow::materializeValueColumn(sliding_out_ts, 2);
+  expect(sliding_ts_ts.values[0].type() == dataflow::DataType::String,
+         "timestamp sliding window should output string timestamps");
+  expect(sliding_ts_ts.values[1].type() == dataflow::DataType::String,
+         "timestamp sliding window should output string timestamps");
+  expect(sliding_ts_ts.values[4].isNull(),
+         "timestamp sliding window null input should still produce null bucket");
 
   dataflow::Table abs_table(
       dataflow::Schema({"value"}),

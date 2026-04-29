@@ -65,7 +65,7 @@
   - 典型用途：语句清洗、模板纠偏、权限前置扫描。
 
 - `kAfterSqlParse`
-  - 调用时机：`SqlParser::parse` 成功；
+  - 调用时机：pg_query-only frontend parse/lower 成功；
   - 典型用途：语法/语义提示、审计标记。
 
 - `kBeforePlanBuild`

@@ -80,6 +80,7 @@ Does not imply:
 - `DataflowSession` remains the public session entry
 - rows are compatibility boundaries, not the preferred hot-path form
 - SQL is an ingress surface, not the driver of runtime architecture
+- SQL parsing is pg_query-only; Velaria SQL v1 extensions are normalized before parse and lowered back into the existing Velaria AST/planner contract
 
 The golden path is:
 
@@ -109,6 +110,7 @@ Available today:
   - `CREATE TABLE ... USING csv|line|json OPTIONS(...)`
   - `CREATE TABLE ... OPTIONS(path: '...')` with source probing
 - batch SQL v1:
+  - parsed through the pg_query-only frontend with Velaria extension preprocessing
   - `CREATE TABLE`, `CREATE SOURCE TABLE`, `CREATE SINK TABLE`
   - `INSERT INTO ... VALUES`
   - `INSERT INTO ... SELECT`

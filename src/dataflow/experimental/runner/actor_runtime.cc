@@ -28,7 +28,6 @@
 #include "src/dataflow/experimental/runtime/job_master.h"
 #include "src/dataflow/core/execution/runtime/observability.h"
 #include "src/dataflow/core/execution/stream/binary_row_batch.h"
-#include "src/dataflow/core/logical/sql/sql_parser.h"
 #include "src/dataflow/experimental/transport/ipc_transport.h"
 
 namespace dataflow {

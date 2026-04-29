@@ -81,8 +81,8 @@ void checkNode(const PgQuery__Node* n, const SqlFeaturePolicy& pol,
       if (!pol.allow_dml && !seen.count("dml")) {
         seen.insert("dml");
         diags.push_back(unsupported("dml",
-          "DML via pg_query frontend not supported in Phase 1.",
-          "Use VELARIA_SQL_FRONTEND=legacy for DML."));
+          "DML is not enabled by the current SQL policy.",
+          "Use the Velaria SQL v1 INSERT subset or enable DML in the caller policy."));
       }
       break;
 
@@ -93,8 +93,8 @@ void checkNode(const PgQuery__Node* n, const SqlFeaturePolicy& pol,
       if (!pol.allow_ddl && !seen.count("ddl")) {
         seen.insert("ddl");
         diags.push_back(unsupported("ddl",
-          "DDL via pg_query frontend not supported in Phase 1.",
-          "Use VELARIA_SQL_FRONTEND=legacy for DDL."));
+          "DDL is not enabled by the current SQL policy.",
+          "Use CREATE TABLE through a policy that allows Velaria SQL v1 DDL."));
       }
       break;
 
@@ -102,8 +102,8 @@ void checkNode(const PgQuery__Node* n, const SqlFeaturePolicy& pol,
       if (!pol.allow_join && !seen.count("join")) {
         seen.insert("join");
         diags.push_back(unsupported("join",
-          "JOIN not supported via pg_query frontend.",
-          "Use VELARIA_SQL_FRONTEND=legacy for JOIN queries."));
+          "JOIN is not enabled by the current SQL policy.",
+          "Use the Velaria SQL v1 INNER/LEFT equality JOIN subset or enable JOIN in the caller policy."));
       }
       break;
 

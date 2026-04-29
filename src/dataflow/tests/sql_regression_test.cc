@@ -12,9 +12,9 @@
 #include "src/dataflow/core/contract/catalog/catalog.h"
 #include "src/dataflow/core/contract/api/session.h"
 #include "src/dataflow/core/execution/columnar_batch.h"
+#include "src/dataflow/core/logical/sql/frontend/pg_query_frontend.h"
 #include "src/dataflow/core/logical/sql/sql_errors.h"
 #include "src/dataflow/core/logical/sql/sql_planner.h"
-#include "src/dataflow/core/logical/sql/sql_parser.h"
 
 namespace {
 
@@ -26,6 +26,22 @@ using dataflow::Table;
 using dataflow::Value;
 
 int g_failed = 0;
+
+dataflow::sql::SqlStatement parseSqlForRegression(const std::string& sql) {
+  dataflow::sql::PgQueryFrontend frontend;
+  auto result = frontend.process(sql, dataflow::sql::SqlFeaturePolicy::cliDefault());
+  if (result.diagnostics.empty()) {
+    return std::move(result.statement);
+  }
+  const auto& d = result.diagnostics.front();
+  std::string message = d.message;
+  if (!d.error_type.empty()) message = "error_type=" + d.error_type + "; message=" + message;
+  if (!d.hint.empty()) message += "; hint=" + d.hint;
+  if (d.error_type == "unsupported_sql_feature" || d.error_type == "unsupported_statement") {
+    throw dataflow::SQLUnsupportedError(message);
+  }
+  throw dataflow::SQLSyntaxError(message);
+}
 
 void expect(bool cond, const std::string& name) {
   if (cond) {
@@ -130,7 +146,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_having_aggregate_parenthesized_regression",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT token, SUM(score) AS total_score FROM rpc_input GROUP BY token "
             "HAVING SUM(score) > 15");
         expect(static_cast<bool>(st.query.having), "parser_having_aggregate_present");
@@ -139,7 +155,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_projection_where_group_join_limit",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT u.region, SUM(a.score) AS total_score, COUNT(*) AS user_count "
             "FROM users u INNER JOIN actions a ON u.user_id = a.user_id "
             "WHERE a.score > 6 GROUP BY u.region HAVING SUM(a.score) > 15 LIMIT 10");
@@ -154,7 +170,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_create_table_using_json_without_columns",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "CREATE TABLE rpc_input USING json OPTIONS(path: '/tmp/input.jsonl', "
             "columns: 'user_id,name', format: 'json_lines')");
         expect(st.kind == dataflow::sql::SqlStatementKind::CreateTable, "parser_create_kind");
@@ -166,7 +182,7 @@ void runParserRegression() {
       "parser_create_table_probe_only_path",
       []() {
         const auto st =
-            dataflow::sql::SqlParser::parse("CREATE TABLE rpc_auto OPTIONS(path: '/tmp/input.jsonl')");
+            parseSqlForRegression("CREATE TABLE rpc_auto OPTIONS(path: '/tmp/input.jsonl')");
         expect(st.create.table == "rpc_auto", "parser_create_probe_table_name");
         expect(st.create.options.at("path") == "/tmp/input.jsonl", "parser_create_probe_path");
       });
@@ -174,7 +190,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_string_function_projection_parsed",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT LOWER(region) AS region_lower, SUBSTR(region, 1, 3) AS pref, "
             "CONCAT(region, '-', user_id) AS combined "
             "FROM users u");
@@ -188,7 +204,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_more_string_function_projection_parsed",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT LTRIM(name) AS left_trimmed, RTRIM(name) AS right_trimmed, "
             "REPLACE(region, 'ap', 'AP') AS replaced "
             "FROM users u");
@@ -201,7 +217,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_extended_string_function_projection_parsed",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT CONCAT_WS('-', region, user_id) AS region_id, LEFT(region, 2) AS head, "
             "RIGHT(region, 2) AS tail, POSITION('a', region) AS first_a "
             "FROM users u");
@@ -215,7 +231,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_substring_alias_string_function_projection_parsed",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT SUBSTRING(region, 2, 2) AS head FROM users u");
         expect(st.query.select_items.size() == 1, "parser_substring_alias_string_function_projection_size");
         expect(st.query.select_items[0].is_string_function, "parser_substring_alias_function");
@@ -224,7 +240,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_string_function_boolean_argument_is_literal",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT LEFT(region, TRUE) AS one FROM users u");
         expect(st.query.select_items.size() == 1, "parser_string_function_boolean_argument_size");
         expect(st.query.select_items[0].is_string_function, "parser_string_function_boolean_argument_flag");
@@ -233,7 +249,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_length_alias_string_function_projection_parsed",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT LENGTH(region) AS region_len, LEN(region) AS region_len_alias, "
             "CHAR_LENGTH(region) AS char_len, CHARACTER_LENGTH(region) AS char_len2, "
             "REVERSE(region) AS region_rev "
@@ -249,7 +265,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_hybrid_search_clause_parsed",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT id, bucket FROM users "
             "WHERE bucket = 1 "
             "HYBRID SEARCH embedding QUERY '[1 0 0]' METRIC cosine TOP_K 7 SCORE_THRESHOLD 0.02");
@@ -267,7 +283,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_where_and_or_clause_parsed",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT user_id FROM users WHERE region = 'apac' OR (region = 'emea' AND score > 10)");
         expect(static_cast<bool>(st.query.where), "parser_where_and_or_present");
       });
@@ -275,7 +291,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_alias_and_limit_projection",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT u.user_id AS uid, token FROM users u INNER JOIN actions a "
             "ON u.user_id = a.user_id WHERE u.score >= 0 LIMIT 2");
         expect(st.query.select_items.size() == 2, "parser_alias_projection_size");
@@ -286,7 +302,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_order_by_projection",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT user_id, score FROM users ORDER BY score DESC, user_id ASC LIMIT 2");
         expect(st.query.order_by.size() == 2, "parser_order_by_size");
         expect(!st.query.order_by[0].ascending, "parser_order_by_first_desc");
@@ -297,7 +313,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_union_all_projection",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT user_id FROM users UNION ALL SELECT user_id FROM archived_users");
         expect(st.query.union_terms.size() == 1, "parser_union_all_term_size");
         expect(st.query.union_terms[0].all, "parser_union_all_flag");
@@ -306,7 +322,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_union_distinct_projection",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT region FROM users UNION SELECT region FROM archived_users");
         expect(st.query.union_terms.size() == 1, "parser_union_distinct_term_size");
         expect(!st.query.union_terms[0].all, "parser_union_distinct_flag");
@@ -315,7 +331,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_keyword_search_clause_parsed",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT id, title, keyword_score FROM docs "
             "WHERE bucket = 1 "
             "KEYWORD SEARCH(title, body) QUERY 'payment timeout' TOP_K 20");
@@ -329,7 +345,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_join_with_parenthesized_on",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT u.user_id FROM users u INNER JOIN actions a ON (u.user_id = a.user_id) "
             "WHERE u.user_id > (1)");
         expect(st.query.join.has_value(), "parser_parenthesized_join_present");
@@ -338,7 +354,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_predicate_with_parenthesized_rhs",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT u.user_id FROM users u WHERE u.user_id > (1) LIMIT 1");
         expect(static_cast<bool>(st.query.where), "parser_predicate_where_present");
         expect(st.query.limit.value_or(0) == 1, "parser_predicate_limit_present");
@@ -347,7 +363,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_create_source_table_csv_options",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "CREATE SOURCE TABLE stream_events (key STRING, value INT) "
             "USING csv OPTIONS(path: '/tmp/stream-input', delimiter: ',')");
         expect(st.kind == dataflow::sql::SqlStatementKind::CreateTable, "parser_create_csv_kind");
@@ -360,7 +376,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_stream_window_clause",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT window_start, key, SUM(value) AS value_sum FROM stream_events "
             "WINDOW BY ts EVERY 60000 AS window_start GROUP BY window_start, key");
         expect(st.query.window.has_value(), "parser_window_present");
@@ -372,7 +388,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_stream_sliding_window_clause",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT window_start, key, COUNT(*) AS event_count FROM stream_events "
             "WINDOW BY ts EVERY 60000 SLIDE 30000 AS window_start GROUP BY window_start, key");
         expect(st.query.window.has_value(), "parser_sliding_window_present");
@@ -384,7 +400,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_group_by_scalar_expression",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT ISO_YEAR(ts) AS iso_year, WEEK(ts) AS iso_week, COUNT(*) AS n "
             "FROM input_table GROUP BY ISO_YEAR(ts), WEEK(ts)");
         expect(st.query.group_by.size() == 2, "parser_group_by_scalar_expression_size");
@@ -397,7 +413,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_time_function_projection_parsed",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT NOW() AS now_value, today() AS day_value, currentTimestamp() AS current_ts, "
             "CURRENT_TIMESTAMP() AS current_ts_2, UNIX_TIMESTAMP('2026-01-01') AS epoch_s "
             "FROM users u");
@@ -412,7 +428,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_nested_cast_string_function",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT SUBSTR(CAST(open AS STRING), 1, 4) AS open_prefix FROM input_table");
         expect(st.query.select_items.size() == 1, "parser_nested_cast_projection_size");
         expect(st.query.select_items[0].is_string_function,
@@ -424,7 +440,7 @@ void runParserRegression() {
   expectNoThrow(
       "parser_insert_select_with_target_columns",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "INSERT INTO sink_table (score, region) "
             "SELECT user_score AS points, user_region AS area FROM source_table LIMIT 1");
         expect(st.kind == dataflow::sql::SqlStatementKind::InsertSelect,
@@ -437,14 +453,14 @@ void runParserRegression() {
   expectThrowsType<dataflow::SQLSyntaxError>(
       "parser_syntax_error_category",
       []() {
-        dataflow::sql::SqlParser::parse("SELECT 'unterminated");
+        parseSqlForRegression("SELECT 'unterminated");
       },
-      "unterminated string literal");
+      "unterminated quoted string");
 
   expectNoThrow(
       "parser_quoted_identifier_with_unicode_columns",
       []() {
-        const auto st = dataflow::sql::SqlParser::parse(
+        const auto st = parseSqlForRegression(
             "SELECT \"目的市\" FROM input_table WHERE \"始发市\" = '杭州' LIMIT 50");
         expect(st.query.select_items.size() == 1, "parser_quoted_identifier_projection_size");
         expect(st.query.select_items[0].column.name == "目的市",
@@ -456,14 +472,14 @@ void runParserRegression() {
   expectThrowsType<dataflow::SQLSyntaxError>(
       "parser_unquoted_unicode_identifier_reports_readable_error",
       []() {
-        dataflow::sql::SqlParser::parse("SELECT 目的市 FROM input_table");
+        parseSqlForRegression("SELECT 目的市 FROM input_table");
       },
       "invalid token byte 0x");
 
   expectThrowsType<dataflow::SQLUnsupportedError>(
       "parser_unsupported_statement_category",
       []() {
-        dataflow::sql::SqlParser::parse("UPDATE users SET score = 1");
+        parseSqlForRegression("UPDATE users SET score = 1");
       },
       "not supported in SQL v1");
 }
@@ -668,7 +684,7 @@ void runSemanticRegression() {
       "stream_sql_union_rejected",
       [&]() {
         const auto parsed =
-            dataflow::sql::SqlParser::parse(
+            parseSqlForRegression(
                 "SELECT user_id FROM stream_left_v1 UNION SELECT user_id FROM stream_right_v1");
         dataflow::sql::SqlPlanner planner;
         planner.buildStreamLogicalPlan(parsed.query);
@@ -1100,7 +1116,7 @@ void runPlannerPlanRegression() {
   catalog.createView("users", DataFrame(t_users));
   catalog.createView("actions", DataFrame(t_actions));
 
-  const auto st = dataflow::sql::SqlParser::parse(
+  const auto st = parseSqlForRegression(
       "SELECT u.region, SUM(a.score) AS total_score "
       "FROM users u INNER JOIN actions a ON (u.user_id = a.user_id) "
       "WHERE a.score > 5 "

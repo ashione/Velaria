@@ -80,6 +80,7 @@ Velaria 围绕一个 kernel 和两个非 kernel 层组织。
 - `DataflowSession` 是统一的公开 session 入口
 - rows 是兼容边界，不是热路径主形态
 - SQL 是 ingress surface，不反向主导 runtime 架构
+- SQL parser 已收敛为 pg_query-only；Velaria SQL v1 扩展语法会在 parse 前做窄范围规范化，并 lower 回现有 Velaria AST / planner contract
 
 黄金路径是：
 
@@ -109,6 +110,7 @@ Arrow / CSV / Python ingress
   - `CREATE TABLE ... USING csv|line|json OPTIONS(...)`
   - `CREATE TABLE ... OPTIONS(path: '...')` 通过 source probing 自动建表
 - batch SQL v1：
+  - 统一通过 pg_query-only frontend 解析，并保留 Velaria extension preprocessor
   - `CREATE TABLE`、`CREATE SOURCE TABLE`、`CREATE SINK TABLE`
   - `INSERT INTO ... VALUES`
   - `INSERT INTO ... SELECT`

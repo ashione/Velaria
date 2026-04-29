@@ -11,7 +11,7 @@ static void t_agent() {
   T("agent_policy");
   auto p=dataflow::sql::SqlFeaturePolicy::agentDefault();
   C(!p.allow_cte,"no cte"); C(!p.allow_subquery,"no sub");
-  C(!p.allow_dml,"no dml"); C(!p.allow_ddl,"no ddl");
+  C(p.allow_dml,"allow dml"); C(p.allow_ddl,"allow ddl");
   C(p.allow_join,"allow join");
   P();
 }

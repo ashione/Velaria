@@ -153,7 +153,7 @@ Model defaults: Codex = `gpt-5.4-mini`, Claude = `claude-sonnet-4-20250514`.
 Both runtimes support `agentReasoningEffort` (default `none`) and API key auth
 mode (`agentAuthMode: "api_key"` with `agentApiKey`/`agentBaseUrl`).
 
-Use non-interactive SQL generation from the legacy compatibility command:
+Use non-interactive SQL generation from the compatibility command:
 
 ```bash
 uv run --project python python python/velaria_cli.py ai generate-sql \

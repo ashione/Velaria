@@ -253,7 +253,7 @@ Current status:
   - stream actor runtime
   - file-source explicit/probed/pushdown paths
 - the benchmark docs include a comparison against the April 26, 2026 local baseline; remaining measured regressions are concentrated in repeated SQL planning and file-source SQL pushdown absolute time
-- repeated legacy SQL text now reuses a bounded parse cache without skipping after-parse or plan-build hooks
+- SQL planning now uses the pg_query-only frontend while preserving after-parse and plan-build hooks
 - file-source selected-column null backing repair avoids full cache validation in benchmark hot paths; full validation remains available through explicit validation helpers and tests
 
 Current review notes:

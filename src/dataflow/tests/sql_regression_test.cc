@@ -328,6 +328,22 @@ void runParserRegression() {
         expect(!st.query.union_terms[0].all, "parser_union_distinct_flag");
       });
 
+  expectThrowsType<dataflow::SQLUnsupportedError>(
+      "parser_intersect_rejected",
+      []() {
+        parseSqlForRegression(
+            "SELECT region FROM users INTERSECT SELECT region FROM archived_users");
+      },
+      "INTERSECT");
+
+  expectThrowsType<dataflow::SQLUnsupportedError>(
+      "parser_except_rejected",
+      []() {
+        parseSqlForRegression(
+            "SELECT region FROM users EXCEPT SELECT region FROM archived_users");
+      },
+      "EXCEPT");
+
   expectNoThrow(
       "parser_keyword_search_clause_parsed",
       []() {
@@ -511,6 +527,20 @@ void runSemanticRegression() {
       },
       "INSERT VALUES column count mismatch");
 
+  s.submit("CREATE TABLE t_values_mixed_v1 (id INT, label STRING, flag BOOL, amount DOUBLE, missing STRING)");
+  s.submit("INSERT INTO t_values_mixed_v1 VALUES "
+           "(1, 'a', TRUE, 3.5, NULL), "
+           "(2, 'b', FALSE, 4.25, NULL)");
+  Table mixed_values = s.submit(
+      "SELECT id, label, flag, amount, missing FROM t_values_mixed_v1 ORDER BY id");
+  expect(mixed_values.rows.size() == 2, "insert_values_mixed_rows");
+  expect(mixed_values.rows[0][0].asInt64() == 1, "insert_values_mixed_int");
+  expect(mixed_values.rows[0][1].asString() == "a", "insert_values_mixed_string");
+  expect(mixed_values.rows[0][2].asBool(), "insert_values_mixed_true");
+  expect(mixed_values.rows[0][3].asDouble() == 3.5, "insert_values_mixed_double");
+  expect(mixed_values.rows[0][4].isNull(), "insert_values_mixed_null");
+  expect(!mixed_values.rows[1][2].asBool(), "insert_values_mixed_false");
+
   expectThrows(
       "planner_where_aggregate_rejected",
       [&]() {
@@ -610,6 +640,35 @@ void runSemanticRegression() {
   expect(or_rows.rows.size() == 2, "planner_where_or_rows");
   expect(or_rows.rows[0][0].asInt64() == 1, "planner_where_or_first_user");
   expect(or_rows.rows[1][0].asInt64() == 2, "planner_where_or_second_user");
+
+  Table table_star_rows = s.submit(
+      "SELECT u.* FROM t_users_v1 u ORDER BY u.user_id");
+  expect(table_star_rows.rows.size() == 3, "planner_table_star_rows");
+  expect(table_star_rows.schema.fields.size() == 3, "planner_table_star_schema_size");
+  expect(table_star_rows.schema.fields[0].find("user_id") != std::string::npos,
+         "planner_table_star_first_field");
+  expect(table_star_rows.rows[0][0].asInt64() == 1, "planner_table_star_first_user");
+
+  s.submit("CREATE TABLE t_left_actions_v1 (user_id INT, action_name STRING)");
+  s.submit("INSERT INTO t_left_actions_v1 VALUES (1, 'view'), (1, 'buy'), (3, 'view')");
+  Table left_join_rows = s.submit(
+      "SELECT u.user_id, a.action_name FROM t_users_v1 u "
+      "LEFT JOIN t_left_actions_v1 a ON u.user_id = a.user_id "
+      "ORDER BY u.user_id");
+  expect(left_join_rows.rows.size() == 4, "planner_left_join_rows");
+  bool saw_user2_null = false;
+  for (const auto& row : left_join_rows.rows) {
+    if (row[0].asInt64() == 2 && row[1].isNull()) saw_user2_null = true;
+  }
+  expect(saw_user2_null, "planner_left_join_null_row");
+
+  expectThrowsType<dataflow::SQLUnsupportedError>(
+      "planner_non_equality_join_rejected",
+      [&]() {
+        s.submit("SELECT u.user_id FROM t_users_v1 u INNER JOIN t_left_actions_v1 a "
+                 "ON u.user_id > a.user_id");
+      },
+      "equality JOIN");
 
   s.submit("CREATE TABLE t_prices_v1 (trade_date STRING, open DOUBLE, close DOUBLE, open_text STRING)");
   s.submit("INSERT INTO t_prices_v1 VALUES "

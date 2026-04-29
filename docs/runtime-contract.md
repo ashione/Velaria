@@ -84,6 +84,33 @@ Current probed result shape exposed through Python:
 - `candidates`
 - `warnings`
 
+## Columnar Runtime Contract
+
+Columnar execution is an internal runtime contract, not a new public table API.
+Rows remain supported at user-facing boundaries, but runtime operators should
+preserve a valid `ColumnarTable` cache whenever they can do so without changing
+observable semantics.
+
+Stable behavior:
+
+- `DataFrame::toTable()` / `toRows()` and Python `to_rows()` materialize rows explicitly
+- `to_arrow()` should prefer retained columnar / Arrow backing and fall back column by column when needed
+- stream transforms may pass columnar-only `Table` values internally
+- stream sinks, memory sink snapshots, and binary row / actor RPC row formats remain row-compatible boundaries
+- stream progress and plugin metrics must use `rowCount()` rather than `rows.size()`
+
+Columnar fallback explain diagnostics must include:
+
+- `columnar_operator`
+- `columnar_fallback_type`
+- `columnar_reason`
+- `columnar_input_row_count`
+- `columnar_affected_columns`
+
+Invalid retained caches must be reported as `invalid-columnar-cache` with the
+validation reason preserved. They must not be collapsed into normal
+`missing-columnar-cache` or row-boundary materialization diagnostics.
+
 ## StreamingQueryProgress
 
 The following fields are treated as stable contract output:

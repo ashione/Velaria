@@ -415,8 +415,14 @@ Table executeSingleSumSingleInt64KeyTable(const Table& input, std::size_t key_in
   const auto key_column = viewValueColumn(input, key_index);
   const auto value_column = viewValueColumn(input, agg.value_index);
   const auto row_count = input.rowCount();
+  Table out = makeAggregateOutputSchema(input, {key_index}, std::vector<AggregateSpec>{agg});
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = out.schema;
+  cache->columns.resize(2);
+  cache->arrow_formats.resize(2);
   if (row_count == 0) {
-    return makeAggregateOutputSchema(input, {key_index}, std::vector<AggregateSpec>{agg});
+    out.columnar_cache = std::move(cache);
+    return out;
   }
 
   if (!nullable_key) {
@@ -440,11 +446,6 @@ Table executeSingleSumSingleInt64KeyTable(const Table& input, std::size_t key_in
       }
     }
 
-    Table out = makeAggregateOutputSchema(input, {key_index}, std::vector<AggregateSpec>{agg});
-    auto cache = std::make_shared<ColumnarTable>();
-    cache->schema = out.schema;
-    cache->columns.resize(2);
-    cache->arrow_formats.resize(2);
     cache->row_count = ordered_keys.size();
     cache->columns[0].values.reserve(ordered_keys.size());
     cache->columns[1].values.reserve(ordered_keys.size());
@@ -482,11 +483,6 @@ Table executeSingleSumSingleInt64KeyTable(const Table& input, std::size_t key_in
     }
   }
 
-  Table out = makeAggregateOutputSchema(input, {key_index}, std::vector<AggregateSpec>{agg});
-  auto cache = std::make_shared<ColumnarTable>();
-  cache->schema = out.schema;
-  cache->columns.resize(2);
-  cache->arrow_formats.resize(2);
   cache->row_count = ordered_keys.size();
   cache->columns[0].values.reserve(ordered_keys.size());
   cache->columns[1].values.reserve(ordered_keys.size());

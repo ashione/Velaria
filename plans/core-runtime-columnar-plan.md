@@ -124,6 +124,7 @@ The following pieces are already in place in the current repository state.
   - `Filter`
   - `Drop`
   - `Limit`
+  - `Sort` / `TopN`
   - `WindowAssign`
   - string `WithColumn`
   - `Aggregate`, including optimizer-selected dense, packed-hash, fixed-hash, and sort-streaming paths
@@ -154,6 +155,7 @@ The following pieces are already in place in the current repository state.
 - executor paths do not add benchmark-shape probes for a specific scenario
 - sort-streaming and dense aggregate outputs now keep columnar cache directly instead of rebuilding row output first
 - the single-int64 sum shape uses an optimizer-informed non-null fixed-width key path, while nullable keys keep the conservative tagged-key path
+- empty aggregate outputs are expected to retain a schema-aligned empty columnar cache
 
 ### Regression coverage already added
 
@@ -162,9 +164,13 @@ The following pieces are already in place in the current repository state.
   - string `WithColumn`
   - `Aggregate`
   - `Join`
+  - empty int64-key aggregate output retaining an empty columnar cache
 - stream runtime coverage for:
   - stateful window/grouped aggregate output
   - local-workers cache retention
+- SQL regression coverage for:
+  - invalid retained columnar cache fallback diagnostics
+  - after-parse SQL rewrite followed by re-parse before plan build
 - Arrow/Python regression coverage for:
   - fast path import
   - slow path import
@@ -249,6 +255,12 @@ Current status:
 - the benchmark docs include a comparison against the April 26, 2026 local baseline; remaining measured regressions are concentrated in repeated SQL planning and file-source SQL pushdown absolute time
 - repeated legacy SQL text now reuses a bounded parse cache without skipping after-parse or plan-build hooks
 - file-source selected-column null backing repair avoids full cache validation in benchmark hot paths; full validation remains available through explicit validation helpers and tests
+
+Current review notes:
+
+- `ColumnarTable` remains an internal retained representation; public row and Arrow APIs keep their existing behavior.
+- fallback explain diagnostics should preserve invalid-cache reasons rather than reporting them as normal row-boundary materialization.
+- remaining performance work should focus on typed source pushdown and reducer specialization, not benchmark-specific branches.
 
 Required benchmark targets:
 

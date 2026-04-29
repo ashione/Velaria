@@ -179,6 +179,12 @@ File-source SQL predicate pushdown 快照，`200,000` 行，内部 `3` 轮：
 
 这组快照用于本地回归守护，适合发现数量级回退并确认 pushdown 收益形态；它不是跨机器、发布级别的严格 benchmark。
 
+当前已知退化：
+
+- 最新快照中，file-source SQL pushdown 的绝对耗时仍慢于 2026-04-26 本地 baseline
+- 重复 SQL planning 已通过有界 legacy parse cache 改善，但 Python-facing benchmark 里仍应继续区分 planning 与 execution/Arrow export
+- 下一阶段性能恢复应通过 typed source pushdown 与 reducer specialization 完成，不增加 benchmark-shape shortcut
+
 后续章节保留 2026 年 4 月 6 日 `simd` 分支的历史测量结果，用于对比参考。
 
 ## 历史 File-Source 对比

@@ -179,6 +179,12 @@ Negative delta means faster than the baseline. The remaining regressions are con
 
 Interpret this snapshot as a local regression guardrail. It is useful for catching order-of-magnitude regressions and preserving the expected pushdown shape, but it is not a release-grade cross-machine benchmark.
 
+Known current regressions:
+
+- file-source SQL pushdown absolute latency is slower than the April 26, 2026 local baseline in the latest snapshot
+- repeated SQL planning was improved with a bounded legacy parse cache, but planning/execution separation should continue to be watched in Python-facing benchmarks
+- the next performance phase should recover these regressions through typed source pushdown and reducer specialization, not by adding benchmark-shape shortcuts
+
 The remaining sections preserve the older April 6, 2026 `simd` measurements for historical comparison.
 
 ## Historical File-Source Comparison

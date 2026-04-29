@@ -98,6 +98,10 @@ Available today:
 - one native kernel for batch + streaming
 - a performance-first execution direction on the native path
 - column-first execution direction with lazy row materialization at compatibility boundaries
+- retained `ColumnarTable` cache validation and fallback diagnostics for batch explain output
+- columnar-in / columnar-out coverage for the main batch operator chain:
+  - `select`, `filter`, `withColumn`, `drop`, `limit`, `sort`, `window`, `aggregate`, current minimal `join`, and file-source projection/pushdown helpers
+- stream transforms may carry columnar-only tables internally; console/file/memory sinks and row-wire formats still materialize rows at explicit boundaries
 - batch file ingress through explicit and probed readers:
   - `session.read_csv(...)`, `session.read_line_file(...)`, `session.read_json(...)`
   - `session.probe(...)` and `session.read(...)` for generic file input
@@ -147,6 +151,8 @@ Current constraints:
 - `CREATE SINK TABLE` accepts writes but cannot be used as query input
 - SQL v1 does not expand to `CTE`, subquery, richer join semantics, or aggregate `KEYWORD SEARCH` / `HYBRID SEARCH`
 - Python callbacks / Python UDFs are not part of the hot path
+- `ColumnarTable` is still a retained runtime representation rather than a fully promoted public table type
+- file-source SQL pushdown still has measured absolute-time regression versus the April 26, 2026 local baseline; the current PR keeps correctness and diagnostics explicit while the next optimization phase targets typed source pushdown
 - the Electron desktop app is still a local prototype, not a stable product surface
 - Agent runtime supports both Codex (default) and Claude via optional `claude-agent-sdk`
 - Codex runtime defaults to `gpt-5.4-mini`; Claude runtime defaults to `claude-sonnet-4-20250514`

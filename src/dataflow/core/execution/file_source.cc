@@ -1185,21 +1185,7 @@ class JsonCursor {
   std::size_t pos_ = 0;
 };
 
-std::string toLowerCopy(std::string value) {
-  for (char& ch : value) {
-    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-  }
-  return value;
-}
 
-std::string trimCopy(std::string value) {
-  const auto begin = value.find_first_not_of(" \t\r\n");
-  if (begin == std::string::npos) {
-    return "";
-  }
-  const auto end = value.find_last_not_of(" \t\r\n");
-  return value.substr(begin, end - begin + 1);
-}
 
 std::string readFilePayload(const std::string& path) {
   std::ifstream input(path, std::ios::binary);
@@ -1259,7 +1245,7 @@ std::vector<std::string> readSampleLines(const std::string& path, std::size_t li
   std::vector<std::string> lines;
   std::string line;
   while (lines.size() < limit && std::getline(input, line)) {
-    const auto trimmed = trimCopy(line);
+    const auto trimmed = trimString(line);
     if (!trimmed.empty()) {
       lines.push_back(trimmed);
     }
@@ -1277,7 +1263,7 @@ bool looksLikeIdentifierList(const std::vector<std::string_view>& tokens) {
     return false;
   }
   for (const auto token_view : tokens) {
-    const auto token = trimCopy(std::string(token_view));
+    const auto token = trimString(std::string(token_view));
     if (token.empty()) {
       return false;
     }
@@ -1398,7 +1384,7 @@ FileSourceProbeCandidate makeCandidate(std::string format_name, FileSourceKind k
 std::vector<FileSourceProbeCandidate> buildProbeCandidates(
     const std::string& path, const std::vector<std::string>& lines) {
   std::vector<FileSourceProbeCandidate> candidates;
-  const auto lower_path = toLowerCopy(path);
+  const auto lower_path = lowerString(path);
 
   const bool csv_ext = lower_path.ends_with(".csv");
   const bool tsv_ext = lower_path.ends_with(".tsv");

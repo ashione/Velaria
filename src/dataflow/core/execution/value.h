@@ -10,24 +10,25 @@
 
 namespace dataflow {
 
-enum class DataType { Nil = 0, Bool = 1, Int64 = 2, Double = 3, String = 4, FixedVector = 5 };
+enum class DataType { Nil = 0, Bool = 1, Int64 = 2, Double = 3, String = 4, FixedVector = 5, Float32 = 6 };
 
 class Value {
  public:
-  Value() : type_(DataType::Nil), b_(false), i64_(0), d_(0.0), s_("") {}
-  Value(bool v) : type_(DataType::Bool), b_(v), i64_(v ? 1 : 0), d_(v ? 1.0 : 0.0), s_("") {}
-  Value(int64_t v) : type_(DataType::Int64), b_(false), i64_(v), d_(static_cast<double>(v)), s_("") {}
-  Value(double v) : type_(DataType::Double), b_(false), i64_(0), d_(v), s_("") {}
-  Value(const char* s) : type_(DataType::String), b_(false), i64_(0), d_(0.0), s_(s) {}
-  Value(std::string s) : type_(DataType::String), b_(false), i64_(0), d_(0.0), s_(std::move(s)) {}
+  Value() : type_(DataType::Nil), b_(false), i64_(0), f32_(0.0f), d_(0.0), s_("") {}
+  Value(bool v) : type_(DataType::Bool), b_(v), i64_(v ? 1 : 0), f32_(v ? 1.0f : 0.0f), d_(v ? 1.0 : 0.0), s_("") {}
+  Value(int64_t v) : type_(DataType::Int64), b_(false), i64_(v), f32_(static_cast<float>(v)), d_(static_cast<double>(v)), s_("") {}
+  Value(double v) : type_(DataType::Double), b_(false), i64_(0), f32_(static_cast<float>(v)), d_(v), s_("") {}
+  Value(float v) : type_(DataType::Float32), b_(false), i64_(0), f32_(v), d_(static_cast<double>(v)), s_("") {}
+  Value(const char* s) : type_(DataType::String), b_(false), i64_(0), f32_(0.0f), d_(0.0), s_(s) {}
+  Value(std::string s) : type_(DataType::String), b_(false), i64_(0), f32_(0.0f), d_(0.0), s_(std::move(s)) {}
   Value(std::vector<float> v)
-      : type_(DataType::FixedVector), b_(false), i64_(0), d_(0.0), s_(""), vec_(std::move(v)) {}
+      : type_(DataType::FixedVector), b_(false), i64_(0), f32_(0.0f), d_(0.0), s_(""), vec_(std::move(v)) {}
 
   DataType type() const { return type_; }
 
   bool isNull() const { return type_ == DataType::Nil; }
   bool isBool() const { return type_ == DataType::Bool; }
-  bool isNumber() const { return type_ == DataType::Int64 || type_ == DataType::Double; }
+  bool isNumber() const { return type_ == DataType::Int64 || type_ == DataType::Double || type_ == DataType::Float32; }
 
   bool asBool() const {
     switch (type_) {
@@ -35,6 +36,8 @@ class Value {
         return b_;
       case DataType::Int64:
         return i64_ != 0;
+      case DataType::Float32:
+        return f32_ != 0.0f;
       case DataType::Double:
         return d_ != 0.0;
       default:
@@ -48,8 +51,25 @@ class Value {
         return b_ ? 1 : 0;
       case DataType::Int64:
         return i64_;
+      case DataType::Float32:
+        return static_cast<int64_t>(f32_);
       case DataType::Double:
         return static_cast<int64_t>(d_);
+      default:
+        throw std::runtime_error("value is not numeric");
+    }
+  }
+
+  float asFloat() const {
+    switch (type_) {
+      case DataType::Bool:
+        return b_ ? 1.0f : 0.0f;
+      case DataType::Int64:
+        return static_cast<float>(i64_);
+      case DataType::Float32:
+        return f32_;
+      case DataType::Double:
+        return static_cast<float>(d_);
       default:
         throw std::runtime_error("value is not numeric");
     }
@@ -61,6 +81,8 @@ class Value {
         return b_ ? 1.0 : 0.0;
       case DataType::Int64:
         return static_cast<double>(i64_);
+      case DataType::Float32:
+        return static_cast<double>(f32_);
       case DataType::Double:
         return d_;
       default:
@@ -92,9 +114,9 @@ class Value {
     }
     std::vector<float> out;
     std::stringstream ss(text);
-    float value = 0.0f;
-    while (ss >> value) {
-      out.push_back(value);
+    float val = 0.0f;
+    while (ss >> val) {
+      out.push_back(val);
     }
     return out;
   }
@@ -107,6 +129,11 @@ class Value {
         return b_ ? "true" : "false";
       case DataType::Int64:
         return std::to_string(i64_);
+      case DataType::Float32: {
+        std::ostringstream oss;
+        oss << std::setprecision(std::numeric_limits<float>::max_digits10) << f32_;
+        return oss.str();
+      }
       case DataType::Double: {
         std::ostringstream oss;
         oss << std::setprecision(std::numeric_limits<double>::max_digits10) << d_;
@@ -137,6 +164,7 @@ class Value {
   DataType type_;
   bool b_;
   int64_t i64_;
+  float f32_;
   double d_;
   std::string s_;
   std::vector<float> vec_;
@@ -157,6 +185,8 @@ class Value {
         return (b_ == rhs.b_) ? 0 : (b_ ? 1 : -1);
       case DataType::Int64:
         return (i64_ < rhs.i64_) ? -1 : (i64_ > rhs.i64_ ? 1 : 0);
+      case DataType::Float32:
+        return (f32_ < rhs.f32_) ? -1 : (f32_ > rhs.f32_ ? 1 : 0);
       case DataType::Double:
         return (d_ < rhs.d_) ? -1 : (d_ > rhs.d_ ? 1 : 0);
       case DataType::String:

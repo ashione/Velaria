@@ -636,35 +636,6 @@ int64_t valueColumnEpochMillisAt(const ValueColumnBuffer& buffer, std::size_t ro
   }
 }
 
-std::string trimString(std::string input) {
-  auto is_space = [](char ch) { return std::isspace(static_cast<unsigned char>(ch)) != 0; };
-  auto start = input.begin();
-  while (start != input.end() && is_space(*start)) ++start;
-  auto end = input.end();
-  while (end != start && is_space(*(end - 1))) --end;
-  return std::string(start, end);
-}
-
-std::string ltrimString(std::string input) {
-  auto is_space = [](char ch) { return std::isspace(static_cast<unsigned char>(ch)) != 0; };
-  auto start = input.begin();
-  while (start != input.end() && is_space(*start)) ++start;
-  return std::string(start, input.end());
-}
-
-std::string rtrimString(std::string input) {
-  auto is_space = [](char ch) { return std::isspace(static_cast<unsigned char>(ch)) != 0; };
-  auto end = input.end();
-  while (end != input.begin() && is_space(*(end - 1))) --end;
-  return std::string(input.begin(), end);
-}
-
-std::string lowerString(std::string input) {
-  for (char& ch : input) {
-    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-  }
-  return input;
-}
 
 std::string upperString(std::string input) {
   for (char& ch : input) {
@@ -703,6 +674,35 @@ std::vector<Value> unaryStringKernel(const StringColumnBuffer& input, Fn&& fn) {
 }
 
 }  // namespace
+std::string trimString(std::string input) {
+  auto is_space = [](char ch) { return std::isspace(static_cast<unsigned char>(ch)) != 0; };
+  auto start = input.begin();
+  while (start != input.end() && is_space(*start)) ++start;
+  auto end = input.end();
+  while (end != start && is_space(*(end - 1))) --end;
+  return std::string(start, end);
+}
+
+std::string ltrimString(std::string input) {
+  auto is_space = [](char ch) { return std::isspace(static_cast<unsigned char>(ch)) != 0; };
+  auto start = input.begin();
+  while (start != input.end() && is_space(*start)) ++start;
+  return std::string(start, input.end());
+}
+
+std::string rtrimString(std::string input) {
+  auto is_space = [](char ch) { return std::isspace(static_cast<unsigned char>(ch)) != 0; };
+  auto end = input.end();
+  while (end != input.begin() && is_space(*(end - 1))) --end;
+  return std::string(input.begin(), end);
+}
+
+std::string lowerString(std::string input) {
+  for (char& ch : input) {
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  }
+  return input;
+}
 
 std::size_t valueColumnRowCount(const ValueColumnBuffer& buffer) {
   if (!buffer.values.empty()) {
@@ -920,6 +920,39 @@ double valueColumnDoubleAt(const ValueColumnBuffer& buffer, std::size_t row_inde
       return static_cast<const double*>(backing.value_buffer.get())[row_index];
     default:
       return valueColumnValueAt(buffer, row_index).asDouble();
+  }
+}
+
+float valueColumnFloatAt(const ValueColumnBuffer& buffer, std::size_t row_index) {
+  if (!buffer.values.empty()) {
+    return buffer.values[row_index].asFloat();
+  }
+  if (buffer.arrow_backing == nullptr) {
+    return 0.0f;
+  }
+  const auto& backing = *buffer.arrow_backing;
+  if (valueColumnIsNullAt(buffer, row_index)) {
+    return 0.0f;
+  }
+  switch (backing.format.empty() ? '?' : backing.format[0]) {
+    case 'b':
+      return static_cast<float>((static_cast<const uint8_t*>(backing.value_buffer.get())[row_index >> 3] >> (row_index & 7)) & 0x01u);
+    case 'c':
+    case 'C':
+    case 'i':
+      return static_cast<float>(static_cast<const int32_t*>(backing.value_buffer.get())[row_index]);
+    case 'I':
+      return static_cast<float>(static_cast<const uint32_t*>(backing.value_buffer.get())[row_index]);
+    case 'l':
+      return static_cast<float>(static_cast<const int64_t*>(backing.value_buffer.get())[row_index]);
+    case 'L':
+      return static_cast<float>(static_cast<const uint64_t*>(backing.value_buffer.get())[row_index]);
+    case 'f':
+      return static_cast<const float*>(backing.value_buffer.get())[row_index];
+    case 'g':
+      return static_cast<float>(static_cast<const double*>(backing.value_buffer.get())[row_index]);
+    default:
+      return valueColumnValueAt(buffer, row_index).asFloat();
   }
 }
 
@@ -1151,6 +1184,41 @@ DoubleColumnBuffer materializeDoubleColumn(const Table& table, std::size_t colum
   return out;
 }
 
+FloatColumnBuffer makeNullFloatColumn(std::size_t row_count) {
+  FloatColumnBuffer out;
+  out.values.resize(row_count);
+  out.is_null.assign(row_count, static_cast<uint8_t>(1));
+  return out;
+}
+
+FloatColumnBuffer makeConstantFloatColumn(std::size_t row_count, float value) {
+  FloatColumnBuffer out;
+  out.values.assign(row_count, value);
+  out.is_null.assign(row_count, 0);
+  return out;
+}
+
+FloatColumnBuffer materializeFloatColumn(const Table& table, std::size_t column_index) {
+  const auto value_column = viewValueColumn(table, column_index);
+  FloatColumnBuffer out;
+  const auto row_count = valueColumnRowCount(*value_column.buffer);
+  out.values.resize(row_count);
+  out.is_null.assign(row_count, 0);
+  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+    if (valueColumnIsNullAt(*value_column.buffer, row_index)) {
+      out.is_null[row_index] = 1;
+      continue;
+    }
+    try {
+      out.values[row_index] = valueColumnFloatAt(*value_column.buffer, row_index);
+    } catch (...) {
+      out.is_null[row_index] = 1;
+      throw;
+    }
+  }
+  return out;
+}
+
 std::vector<ValueColumnBuffer> materializeValueColumns(const Table& table,
                                                        const std::vector<std::size_t>& indices) {
   const auto columns = viewValueColumns(table, indices);
@@ -1318,7 +1386,25 @@ RowSelection vectorizedFilterSelection(const ValueColumnBuffer& input, const Val
       case 'I':
       case 'l':
       case 'L':
-      case 'f':
+      case 'f': {
+        FloatColumnBuffer numeric;
+        numeric.values.resize(row_count);
+        numeric.is_null.assign(row_count, 0);
+        for (std::size_t i = 0; i < row_count; ++i) {
+          if (valueColumnIsNullAt(input, i)) {
+            numeric.is_null[i] = 1;
+            continue;
+          }
+          numeric.values[i] = valueColumnFloatAt(input, i);
+        }
+        auto selected = simdDispatch().select_float(
+            numeric.values.data(), numeric.is_null.data(), row_count, static_cast<float>(rhs.asDouble()),
+            toNumericCompareOp(op), max_selected);
+        out.selected = std::move(selected.selected);
+        out.indices = std::move(selected.indices);
+        out.selected_count = selected.selected_count;
+        return out;
+      }
       case 'g': {
         DoubleColumnBuffer numeric;
         numeric.values.resize(row_count);
@@ -2458,8 +2544,10 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
                    target == "BIGINT") {
           out[i] = Value(value.isNumber() ? value.asInt64()
                                           : static_cast<int64_t>(std::stoll(value.toString())));
-        } else if (target == "DOUBLE" || target == "FLOAT" || target == "REAL") {
+        } else if (target == "DOUBLE") {
           out[i] = Value(value.isNumber() ? value.asDouble() : std::stod(value.toString()));
+        } else if (target == "FLOAT" || target == "REAL") {
+          out[i] = Value(value.isNumber() ? value.asFloat() : std::stof(value.toString()));
         } else if (target == "BOOL" || target == "BOOLEAN") {
           if (value.isBool()) {
             out[i] = Value(value.asBool());

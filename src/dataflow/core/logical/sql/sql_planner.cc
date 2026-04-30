@@ -24,23 +24,6 @@ namespace {
   throw SQLTableKindError("table-kind constraint violation: " + detail);
 }
 
-std::string opToString(BinaryOperatorKind op) {
-  switch (op) {
-    case BinaryOperatorKind::Eq:
-      return "=";
-    case BinaryOperatorKind::Ne:
-      return "!=";
-    case BinaryOperatorKind::Lt:
-      return "<";
-    case BinaryOperatorKind::Lte:
-      return "<=";
-    case BinaryOperatorKind::Gt:
-      return ">";
-    case BinaryOperatorKind::Gte:
-      return ">=";
-  }
-  return "=";
-}
 
 AggregateFunction toPlanFunction(AggregateFunctionKind fn) {
   switch (fn) {
@@ -244,11 +227,6 @@ bool isBarrierStep(LogicalStepKind kind) {
          kind == LogicalStepKind::Aggregate || kind == LogicalStepKind::OrderBy;
 }
 
-bool isAggregateQuery(const SqlQuery& query) {
-  return !query.group_by.empty() ||
-         std::any_of(query.select_items.begin(), query.select_items.end(),
-                     [](const SelectItem& item) { return item.is_aggregate; });
-}
 
 bool predicateExprHasAggregate(const std::shared_ptr<PredicateExpr>& expr) {
   if (!expr) return false;

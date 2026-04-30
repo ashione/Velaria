@@ -1209,6 +1209,11 @@ RocksDbStateStore::RocksDbStateStore(std::string dbPath) : dbPath_(std::move(dbP
   ensureOpen();
 }
 
+
+namespace {
+void deleteRocksDbIterator(rocksdb::Iterator* it) { delete it; }
+}  // namespace
+
 RocksDbStateStore::~RocksDbStateStore() {
   close();
 }
@@ -1248,22 +1253,22 @@ bool RocksDbStateStore::remove(const std::string& key) {
   bool removed = s.ok();
 
   auto mapPrefix = std::string(kMapPrefix) + encodeToken(key) + ":";
-  auto* iter = db->NewIterator(rocksdb::ReadOptions());
+  std::unique_ptr<rocksdb::Iterator, void(*)(rocksdb::Iterator*)> iter(
+      db->NewIterator(rocksdb::ReadOptions()), deleteRocksDbIterator);
   for (iter->Seek(mapPrefix); iter->Valid(); iter->Next()) {
     if (!iter->key().starts_with(mapPrefix)) break;
     removed = true;
     db->Delete(rocksdb::WriteOptions(), iter->key());
   }
-  delete iter;
 
   auto listPrefix = std::string(kListPrefix) + encodeToken(key);
-  auto* listIt = db->NewIterator(rocksdb::ReadOptions());
+  std::unique_ptr<rocksdb::Iterator, void(*)(rocksdb::Iterator*)> listIt(
+      db->NewIterator(rocksdb::ReadOptions()), deleteRocksDbIterator);
   for (listIt->Seek(listPrefix); listIt->Valid(); listIt->Next()) {
     if (!listIt->key().starts_with(listPrefix)) break;
     removed = true;
     db->Delete(rocksdb::WriteOptions(), listIt->key());
   }
-  delete listIt;
 
   return removed;
 }
@@ -1271,7 +1276,8 @@ bool RocksDbStateStore::remove(const std::string& key) {
 bool RocksDbStateStore::listKeys(std::vector<std::string>* keys) const {
   ensureOpen();
   auto* db = static_cast<rocksdb::DB*>(db_);
-  auto* iter = db->NewIterator(rocksdb::ReadOptions());
+  std::unique_ptr<rocksdb::Iterator, void(*)(rocksdb::Iterator*)> iter(
+      db->NewIterator(rocksdb::ReadOptions()), deleteRocksDbIterator);
   std::unordered_set<std::string> merged;
 
   for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
@@ -1299,7 +1305,6 @@ bool RocksDbStateStore::listKeys(std::vector<std::string>* keys) const {
     }
   }
 
-  delete iter;
   keys->assign(merged.begin(), merged.end());
   return !keys->empty();
 }
@@ -1352,7 +1357,8 @@ bool RocksDbStateStore::getMapFields(const std::string& mapKey,
   ensureOpen();
   auto* db = static_cast<rocksdb::DB*>(db_);
   auto prefix = std::string(kMapPrefix) + encodeToken(mapKey) + ":";
-  auto* iter = db->NewIterator(rocksdb::ReadOptions());
+  std::unique_ptr<rocksdb::Iterator, void(*)(rocksdb::Iterator*)> iter(
+      db->NewIterator(rocksdb::ReadOptions()), deleteRocksDbIterator);
   fields->clear();
   for (iter->Seek(prefix); iter->Valid(); iter->Next()) {
     auto key = iter->key().ToString();
@@ -1363,7 +1369,6 @@ bool RocksDbStateStore::getMapFields(const std::string& mapKey,
       fields->push_back(field);
     }
   }
-  delete iter;
   return !fields->empty();
 }
 

@@ -333,15 +333,15 @@ void registerBuiltinRpcSerializers() {
 }
 
 std::unique_ptr<IRpcSerializer> makeJsonControlRpcSerializer() {
-  return std::unique_ptr<IRpcSerializer>(new JsonControlRpcSerializer());
+  return std::make_unique<JsonControlRpcSerializer>();
 }
 
 std::unique_ptr<IRpcSerializer> makeTableRpcSerializer() {
-  return std::unique_ptr<IRpcSerializer>(new TableBatchRpcSerializer());
+  return std::make_unique<TableBatchRpcSerializer>();
 }
 
 std::unique_ptr<IRpcSerializer> makeArrowTableRpcSerializer() {
-  return std::unique_ptr<IRpcSerializer>(new ArrowTableBatchRpcSerializer());
+  return std::make_unique<ArrowTableBatchRpcSerializer>();
 }
 
 }  // namespace dataflow

@@ -58,7 +58,7 @@ const Table& tableWithRows(const Table& table, std::unique_ptr<Table>* materiali
   if (!table.rows.empty() || table.rowCount() == 0) {
     return table;
   }
-  materialized->reset(new Table(table));
+  *materialized = std::make_unique<Table>(table);
   materializeRows(materialized->get());
   return **materialized;
 }

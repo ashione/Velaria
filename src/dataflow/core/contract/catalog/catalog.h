@@ -18,7 +18,10 @@ class ViewCatalog {
                   sql::TableKind kind = sql::TableKind::Regular);
   void createTable(const std::string& name, const std::vector<std::string>& columns,
                   sql::TableKind kind = sql::TableKind::Regular);
+  void createTable(const std::string& name, const std::vector<std::string>& columns,
+                  const std::vector<std::string>& col_types, sql::TableKind kind);
   sql::TableKind tableKind(const std::string& name) const;
+  std::vector<std::string> getColumnTypes(const std::string& name) const;
   bool isSourceTable(const std::string& name) const;
   bool isSinkTable(const std::string& name) const;
   bool hasView(const std::string& name) const;
@@ -30,6 +33,7 @@ class ViewCatalog {
  private:
   std::unordered_map<std::string, DataFrame> views_;
   std::unordered_map<std::string, sql::TableKind> table_kinds_;
+  std::unordered_map<std::string, std::vector<std::string>> column_types_;
 };
 
 }  // namespace dataflow

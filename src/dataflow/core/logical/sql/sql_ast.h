@@ -8,6 +8,7 @@
 
 #include "src/dataflow/core/execution/table.h"
 #include "src/dataflow/core/execution/value.h"
+#include "src/dataflow/core/logical/sql/sql_errors.h"
 
 namespace dataflow {
 namespace sql {
@@ -204,6 +205,18 @@ struct SqlStatement {
   CreateTableStmt create;
   InsertStmt insert;
 };
+
+inline std::string opToString(BinaryOperatorKind op) {
+  switch (op) {
+    case BinaryOperatorKind::Eq: return "=";
+    case BinaryOperatorKind::Ne: return "!=";
+    case BinaryOperatorKind::Lt: return "<";
+    case BinaryOperatorKind::Lte: return "<=";
+    case BinaryOperatorKind::Gt: return ">";
+    case BinaryOperatorKind::Gte: return ">=";
+  }
+  throw SQLSemanticError("unsupported predicate operator");
+}
 
 }  // namespace sql
 }  // namespace dataflow

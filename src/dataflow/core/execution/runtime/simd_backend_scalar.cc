@@ -40,24 +40,6 @@ const char* scalarFindFirstOf(const char* begin, const char* end, const char* ne
   return nullptr;
 }
 
-bool matchesCompare(double lhs, double rhs, NumericCompareOp op) {
-  switch (op) {
-    case NumericCompareOp::Eq:
-      return lhs == rhs;
-    case NumericCompareOp::Ne:
-      return lhs != rhs;
-    case NumericCompareOp::Lt:
-      return lhs < rhs;
-    case NumericCompareOp::Le:
-      return lhs <= rhs;
-    case NumericCompareOp::Gt:
-      return lhs > rhs;
-    case NumericCompareOp::Ge:
-      return lhs >= rhs;
-  }
-  return false;
-}
-
 NumericSelectionResult scalarSelectDouble(const double* values, const uint8_t* is_null,
                                           std::size_t row_count, double rhs,
                                           NumericCompareOp op, std::size_t max_selected) {
@@ -134,6 +116,52 @@ double scalarSquaredL2F32(const float* lhs, const float* rhs, std::size_t size) 
   return squared;
 }
 
+
+NumericSelectionResult scalarSelectFloat(const float* values, const uint8_t* is_null,
+                                         std::size_t row_count, float rhs,
+                                         NumericCompareOp op, std::size_t max_selected) {
+  NumericSelectionResult out;
+  out.selected.assign(row_count, 0);
+  out.indices.reserve(row_count);
+  const bool bounded = max_selected != 0;
+  for (std::size_t i = 0; i < row_count; ++i) {
+    if (is_null != nullptr && is_null[i] != 0) continue;
+    if (!matchesCompareF32(values[i], rhs, op)) continue;
+    out.selected[i] = 1;
+    out.indices.push_back(i);
+    ++out.selected_count;
+    if (bounded && out.selected_count >= max_selected) break;
+  }
+  return out;
+}
+
+float scalarSumFloat(const float* values, const uint8_t* is_null, std::size_t row_count) {
+  float sum = 0.0f;
+  for (std::size_t i = 0; i < row_count; ++i) {
+    if (is_null != nullptr && is_null[i] != 0) continue;
+    sum += values[i];
+  }
+  return sum;
+}
+
+void scalarAccumulateFloat(float* dst, const float* src, std::size_t count) {
+  for (std::size_t i = 0; i < count; ++i) dst[i] += src[i];
+}
+
+void scalarCombineFloat(float* dst, const float* src, std::size_t count, NumericCombineOp op) {
+  switch (op) {
+    case NumericCombineOp::Sum:
+      scalarAccumulateFloat(dst, src, count);
+      return;
+    case NumericCombineOp::Min:
+      for (std::size_t i = 0; i < count; ++i) dst[i] = std::min(dst[i], src[i]);
+      return;
+    case NumericCombineOp::Max:
+      for (std::size_t i = 0; i < count; ++i) dst[i] = std::max(dst[i], src[i]);
+      return;
+  }
+}
+
 const SimdKernelDispatch kScalarDispatch = {
     SimdBackendKind::Scalar,
     simdBackendName(SimdBackendKind::Scalar),
@@ -143,6 +171,10 @@ const SimdKernelDispatch kScalarDispatch = {
     &scalarSumDouble,
     &scalarAccumulateDouble,
     &scalarCombineDouble,
+    &scalarSelectFloat,
+    &scalarSumFloat,
+    &scalarAccumulateFloat,
+    &scalarCombineFloat,
     &scalarDotF32,
     &scalarSquaredL2F32,
 };

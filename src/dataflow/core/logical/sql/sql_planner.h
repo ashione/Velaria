@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -135,6 +136,12 @@ struct StreamPhysicalPlan {
   std::size_t partition_local_prefix_nodes = 0;
   std::string actor_eligibility_reason;
 };
+
+inline bool isAggregateQuery(const SqlQuery& query) {
+  return !query.group_by.empty() ||
+         std::any_of(query.select_items.begin(), query.select_items.end(),
+                     [](const SelectItem& item) { return item.is_aggregate; });
+}
 
 class SqlPlanner {
  public:

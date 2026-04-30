@@ -459,6 +459,12 @@ cc_binary(
     deps = [":dataflow_core"],
 )
 
+cc_binary(
+    name = "float_simd_benchmark",
+    srcs = ["src/dataflow/examples/float_simd_benchmark.cc"],
+    deps = [":dataflow_core"],
+)
+
 cc_test(
     name = "columnar_batch_test",
     srcs = ["src/dataflow/tests/columnar_batch_test.cc"],

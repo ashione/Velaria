@@ -23,6 +23,11 @@ struct Int64ColumnBuffer {
   std::vector<uint8_t> is_null;
 };
 
+struct FloatColumnBuffer {
+  std::vector<float> values;
+  std::vector<uint8_t> is_null;
+};
+
 struct DoubleColumnBuffer {
   std::vector<double> values;
   std::vector<uint8_t> is_null;
@@ -75,6 +80,7 @@ bool valueColumnIsNullAt(const ValueColumnBuffer& buffer, std::size_t row_index)
 std::string_view valueColumnStringViewAt(const ValueColumnBuffer& buffer, std::size_t row_index);
 std::string valueColumnStringAt(const ValueColumnBuffer& buffer, std::size_t row_index);
 int64_t valueColumnInt64At(const ValueColumnBuffer& buffer, std::size_t row_index);
+float valueColumnFloatAt(const ValueColumnBuffer& buffer, std::size_t row_index);
 double valueColumnDoubleAt(const ValueColumnBuffer& buffer, std::size_t row_index);
 Value valueColumnValueAt(const ValueColumnBuffer& buffer, std::size_t row_index);
 ValueColumnView viewValueColumn(const Table& table, std::size_t column_index);
@@ -88,6 +94,9 @@ StringColumnBuffer materializeStringColumn(const Table& table, std::size_t colum
 Int64ColumnBuffer makeNullInt64Column(std::size_t row_count);
 Int64ColumnBuffer makeConstantInt64Column(std::size_t row_count, int64_t value);
 Int64ColumnBuffer materializeInt64Column(const Table& table, std::size_t column_index);
+FloatColumnBuffer makeNullFloatColumn(std::size_t row_count);
+FloatColumnBuffer makeConstantFloatColumn(std::size_t row_count, float value);
+FloatColumnBuffer materializeFloatColumn(const Table& table, std::size_t column_index);
 DoubleColumnBuffer makeNullDoubleColumn(std::size_t row_count);
 DoubleColumnBuffer materializeDoubleColumn(const Table& table, std::size_t column_index);
 ValueColumnBuffer materializeValueColumn(const Table& table, std::size_t column_index);
@@ -160,6 +169,11 @@ std::vector<Value> vectorizedRound(const DoubleColumnBuffer& input);
 std::vector<Value> vectorizedDateYear(const ValueColumnView& input);
 std::vector<Value> vectorizedDateMonth(const ValueColumnView& input);
 std::vector<Value> vectorizedDateDay(const ValueColumnView& input);
+
+std::string lowerString(std::string input);
+std::string trimString(std::string input);
+std::string ltrimString(std::string input);
+std::string rtrimString(std::string input);
 
 std::vector<Value> computeComputedColumnValues(
     Table* table,

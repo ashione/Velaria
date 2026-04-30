@@ -11,6 +11,8 @@ extern "C" {
 #include <cstdlib>
 #include <string_view>
 
+#include "src/dataflow/core/execution/columnar_batch.h"
+
 namespace dataflow {
 namespace sql {
 
@@ -39,10 +41,6 @@ SqlDiagnostic unsupported(const std::string& feature, const std::string& msg,
                   feature + ": " + msg, hint);
 }
 
-std::string toLower(std::string value) {
-  for (auto& c : value) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  return value;
-}
 
 std::string toUpper(std::string value) {
   for (auto& c : value) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
@@ -66,6 +64,24 @@ std::string typeNameStr(const PgQuery__TypeName* type_name) {
     out += nodeStr(type_name->names[i]);
   }
   return toUpper(out);
+}
+
+// Map pg internal type names to Velaria canonical type names.
+std::string normalizeTypeName(const std::string& raw) {
+  // Strip pg_catalog qualifier: "PG_CATALOG.FLOAT8" -> "FLOAT8"
+  std::string name = raw;
+  auto dot = name.rfind('.');
+  if (dot != std::string::npos) {
+    name = name.substr(dot + 1);
+  }
+  // Map pg type names to canonical forms
+  if (name == "FLOAT4" || name == "REAL") return "FLOAT";
+  if (name == "FLOAT8") return "DOUBLE";  // DOUBLE PRECISION -> DOUBLE
+  if (name == "INT2" || name == "INT4" || name == "INT8") return "INT";
+  if (name == "BOOL") return "BOOL";
+  if (name == "TEXT" || name == "VARCHAR" || name == "BPCHAR") return "STRING";
+  if (name == "NUMERIC" || name == "DECIMAL") return "DOUBLE";
+  return name;  // Pass through (may match canonical names directly)
 }
 
 std::string rangeName(const PgQuery__RangeVar* rv) {
@@ -189,7 +205,7 @@ std::string operatorName(const PgQuery__AExpr* ae) {
 }
 
 AggregateFunctionKind aggregateKind(const std::string& fn) {
-  const auto lower = toLower(fn);
+  const auto lower = dataflow::lowerString(fn);
   if (lower == "sum") return AggregateFunctionKind::Sum;
   if (lower == "count") return AggregateFunctionKind::Count;
   if (lower == "avg") return AggregateFunctionKind::Avg;
@@ -199,7 +215,7 @@ AggregateFunctionKind aggregateKind(const std::string& fn) {
 }
 
 bool isAggregateName(const std::string& fn) {
-  const auto lower = toLower(fn);
+  const auto lower = dataflow::lowerString(fn);
   return lower == "sum" || lower == "count" || lower == "avg" ||
          lower == "min" || lower == "max";
 }
@@ -215,7 +231,7 @@ std::string funcName(const PgQuery__FuncCall* fc) {
 }
 
 std::optional<StringFunctionKind> stringFunctionKind(const std::string& raw) {
-  auto fn = toLower(raw);
+  auto fn = dataflow::lowerString(raw);
   const auto dot = fn.rfind('.');
   if (dot != std::string::npos) {
     fn = fn.substr(dot + 1);
@@ -303,7 +319,7 @@ StringFunctionArg lowerTypeCastArg(const PgQuery__TypeCast* tc,
     out.function->args.push_back(lowerFunctionArg(tc->arg, diags));
   }
   StringFunctionArg target;
-  target.literal = Value(typeNameStr(tc ? tc->type_name : nullptr));
+  target.literal = Value(normalizeTypeName(typeNameStr(tc ? tc->type_name : nullptr)));
   out.function->args.push_back(std::move(target));
   return out;
 }
@@ -718,7 +734,7 @@ CreateTableStmt lowerCreate(const PgQuery__CreateStmt* create,
     if (!node || node->node_case != PG_QUERY__NODE__NODE_COLUMN_DEF || !node->column_def) continue;
     SqlColumnDef column;
     column.name = node->column_def->colname ? node->column_def->colname : "";
-    column.type = typeNameStr(node->column_def->type_name);
+    column.type = normalizeTypeName(typeNameStr(node->column_def->type_name));
     out.columns.push_back(std::move(column));
   }
   return out;

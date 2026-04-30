@@ -328,33 +328,29 @@ std::vector<std::string> collectCreateColumns(const sql::CreateTableStmt& stmt,
   return fields;
 }
 
+static std::vector<std::string> collectColumnTypes(const sql::CreateTableStmt& stmt) {
+  std::vector<std::string> types;
+  types.reserve(stmt.columns.size());
+  for (const auto& col : stmt.columns) {
+    types.push_back(col.type);
+  }
+  return types;
+}
+
 DataFrame executeCreateTable(ViewCatalog& catalog, const sql::CreateTableStmt& stmt) {
   const auto fields = collectCreateColumns(stmt);
-  catalog.createTable(stmt.table, fields, stmt.kind);
+  const auto types = collectColumnTypes(stmt);
+  catalog.createTable(stmt.table, fields, types, stmt.kind);
   return dmlResult("create table done", 0);
 }
 
-std::string toLower(std::string value) {
-  for (char& c : value) {
-    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  }
-  return value;
-}
 
-std::string trim(std::string value) {
-  const auto start = value.find_first_not_of(" \t\r\n");
-  if (start == std::string::npos) {
-    return "";
-  }
-  const auto end = value.find_last_not_of(" \t\r\n");
-  return value.substr(start, end - start + 1);
-}
 
 std::optional<std::string> findCreateOption(const sql::CreateTableStmt& stmt,
                                             const std::string& key) {
-  const auto expected = toLower(key);
+  const auto expected = lowerString(key);
   for (const auto& [name, value] : stmt.options) {
-    if (toLower(name) == expected) {
+    if (lowerString(name) == expected) {
       return value;
     }
   }
@@ -386,7 +382,7 @@ std::vector<std::string> splitOptionList(const std::string& value, const std::st
   while (start <= value.size()) {
     const auto comma = value.find(',', start);
     const auto piece =
-        trim(value.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
+        trimString(value.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
     if (!piece.empty()) {
       items.push_back(piece);
     }
@@ -402,7 +398,7 @@ std::vector<std::string> splitOptionList(const std::string& value, const std::st
 }
 
 FileSourceKind parseCreateFileSourceType(const std::string& raw_value) {
-  const auto value = toLower(trim(raw_value));
+  const auto value = lowerString(trimString(raw_value));
   if (value == "csv") {
     return FileSourceKind::Csv;
   }
@@ -446,7 +442,7 @@ LineFileOptions buildLineFileOptions(const sql::CreateTableStmt& stmt,
   LineFileOptions options = probe.has_value() ? probe->line_options : LineFileOptions{};
   const auto mode = findCreateOption(stmt, "mode");
   if (mode.has_value()) {
-    const auto normalized = toLower(trim(*mode));
+    const auto normalized = lowerString(trimString(*mode));
     if (normalized == "split") {
       options.mode = LineParseMode::Split;
     } else if (normalized == "regex") {
@@ -472,8 +468,8 @@ LineFileOptions buildLineFileOptions(const sql::CreateTableStmt& stmt,
       if (sep == std::string::npos) {
         throw SQLSemanticError("CREATE TABLE option mappings must use column:index pairs");
       }
-      const auto column = trim(mapping.substr(0, sep));
-      const auto index_text = trim(mapping.substr(sep + 1));
+      const auto column = trimString(mapping.substr(0, sep));
+      const auto index_text = trimString(mapping.substr(sep + 1));
       if (column.empty() || index_text.empty()) {
         throw SQLSemanticError("CREATE TABLE option mappings must use column:index pairs");
       }
@@ -517,7 +513,7 @@ JsonFileOptions buildJsonFileOptions(const sql::CreateTableStmt& stmt,
                                      const std::optional<FileSourceProbeResult>& probe) {
   JsonFileOptions options = probe.has_value() ? probe->json_options : JsonFileOptions{};
   if (const auto format = findCreateOption(stmt, "format"); format.has_value()) {
-    const auto normalized = toLower(trim(*format));
+    const auto normalized = lowerString(trimString(*format));
     if (normalized == "json_lines" || normalized == "jsonl" || normalized == "lines") {
       options.format = JsonFileFormat::JsonLines;
     } else if (normalized == "json_array" || normalized == "array") {
@@ -729,6 +725,24 @@ DataFrame executeInsert(ViewCatalog& catalog, const sql::InsertStmt& stmt) {
   } else {
     toInsert = normalizeInsertValues(target, stmt.columns, stmt.values);
   }
+  // Coerce FLOAT/REAL columns to Float32 values
+  const auto colTypes = catalog.getColumnTypes(stmt.table);
+  if (!colTypes.empty()) {
+    auto* cache = toInsert.columnar_cache.get();
+    if (cache != nullptr) {
+      for (std::size_t ci = 0; ci < colTypes.size() && ci < cache->columns.size(); ++ci) {
+        const auto& ct = colTypes[ci];
+        bool isFloat = (ct == "FLOAT" || ct == "REAL" || ct == "float" || ct == "real");
+        if (!isFloat) continue;
+        auto& col = cache->columns[ci];
+        for (auto& v : col.values) {
+          if (v.isNull()) continue;
+          v = Value(v.asFloat());
+        }
+      }
+    }
+  }
+
   auto rows = toInsert.rowCount();
   if (rows == 0) {
     return dmlResult("insert ignored: empty input", 0);
@@ -737,23 +751,6 @@ DataFrame executeInsert(ViewCatalog& catalog, const sql::InsertStmt& stmt) {
   return dmlResult("insert done", rows);
 }
 
-std::string filterOp(sql::BinaryOperatorKind op) {
-  switch (op) {
-    case sql::BinaryOperatorKind::Eq:
-      return "=";
-    case sql::BinaryOperatorKind::Ne:
-      return "!=";
-    case sql::BinaryOperatorKind::Lt:
-      return "<";
-    case sql::BinaryOperatorKind::Lte:
-      return "<=";
-    case sql::BinaryOperatorKind::Gt:
-      return ">";
-    case sql::BinaryOperatorKind::Gte:
-      return ">=";
-  }
-  throw SQLSemanticError("unsupported predicate operator");
-}
 
 void ensureSingleTableQuery(const sql::SqlQuery& query) {
   if (!query.has_from) {
@@ -780,11 +777,6 @@ std::string resolveColumnName(const sql::ColumnRef& ref, const sql::FromItem& fr
   return ref.name;
 }
 
-bool isAggregateQuery(const sql::SqlQuery& query) {
-  return !query.group_by.empty() ||
-         std::any_of(query.select_items.begin(), query.select_items.end(),
-                     [](const sql::SelectItem& item) { return item.is_aggregate; });
-}
 
 std::string aggregateOutputName(const sql::SelectItem& item) {
   if (!item.is_aggregate) {
@@ -967,7 +959,7 @@ StreamingDataFrame buildAggregateStream(const StreamingDataFrame& seed, const sq
     const auto& predicate = query.having->predicate;
     const std::string having_column =
         predicate.lhs_is_aggregate ? output_name : resolveColumnName(predicate.lhs, from);
-    aggregated = aggregated.filter(having_column, filterOp(predicate.op), predicate.rhs);
+    aggregated = aggregated.filter(having_column, sql::opToString(predicate.op), predicate.rhs);
   }
 
   std::vector<std::string> final_columns;
@@ -1001,10 +993,10 @@ StreamingDataFrame buildAggregateStream(const StreamingDataFrame& seed, const sq
       throw SQLSemanticError("WHERE does not support aggregate expressions");
     }
     current = current.filter(resolveColumnName(predicate.lhs, query.from),
-                             filterOp(predicate.op), predicate.rhs);
+                             sql::opToString(predicate.op), predicate.rhs);
   }
 
-  if (isAggregateQuery(query)) {
+  if (sql::isAggregateQuery(query)) {
     if (query.having && query.group_by.empty()) {
       throw SQLSemanticError("GROUP BY required for HAVING");
     }

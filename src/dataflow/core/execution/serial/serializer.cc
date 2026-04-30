@@ -14,7 +14,7 @@ const Table& tableWithRows(const Table& table, std::unique_ptr<Table>* materiali
   if (!table.rows.empty() || table.rowCount() == 0) {
     return table;
   }
-  materialized->reset(new Table(table));
+  *materialized = std::make_unique<Table>(table);
   materializeRows(materialized->get());
   return **materialized;
 }
@@ -189,10 +189,10 @@ Table ArrowLikeSerializer::deserialize(const std::string& payload) const {
 std::unique_ptr<ISerializer> makeSerializer(SerializationKind kind) {
   switch (kind) {
     case SerializationKind::ProtoLike:
-      return std::unique_ptr<ISerializer>(new ProtoLikeSerializer());
+      return std::make_unique<ProtoLikeSerializer>();
     case SerializationKind::ArrowLike:
     default:
-      return std::unique_ptr<ISerializer>(new ArrowLikeSerializer());
+      return std::make_unique<ArrowLikeSerializer>();
   }
 }
 

@@ -11,11 +11,25 @@ void ViewCatalog::createView(const std::string& name, const DataFrame& df, sql::
 
 void ViewCatalog::createTable(const std::string& name, const std::vector<std::string>& columns,
                              sql::TableKind kind) {
+  createTable(name, columns, {}, kind);
+}
+
+void ViewCatalog::createTable(const std::string& name, const std::vector<std::string>& columns,
+                             const std::vector<std::string>& col_types, sql::TableKind kind) {
   if (hasView(name)) {
     throw SQLSemanticError("table already exists: " + name);
   }
   views_[name] = DataFrame(Table(Schema(columns), {}));
   table_kinds_[name] = kind;
+  if (!col_types.empty()) {
+    column_types_[name] = col_types;
+  }
+}
+
+std::vector<std::string> ViewCatalog::getColumnTypes(const std::string& name) const {
+  auto it = column_types_.find(name);
+  if (it == column_types_.end()) return {};
+  return it->second;
 }
 
 bool ViewCatalog::hasView(const std::string& name) const {

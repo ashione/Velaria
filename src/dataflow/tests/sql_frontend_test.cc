@@ -1,9 +1,9 @@
 #include "src/dataflow/core/contract/api/session.h"
+#include "src/dataflow/core/logical/sql/frontend/pg_query_frontend.h"
 #include "src/dataflow/core/logical/sql/frontend/source_offset_map.h"
 #include "src/dataflow/core/logical/sql/frontend/sql_diagnostic.h"
 #include "src/dataflow/core/logical/sql/frontend/sql_feature_validator.h"
 #include "src/dataflow/core/logical/sql/frontend/sql_frontend.h"
-#include "src/dataflow/core/logical/sql/sql_parser.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -41,31 +41,25 @@ static void test_diag() {
   d.error_type="test"; C(!d.ok(), "not ok");
   P();
 }
-static void test_config() {
-  T("config_default");
-  unsetenv("VELARIA_SQL_FRONTEND");
-  auto c=dataflow::sql::sqlFrontendConfigFromEnv();
-  C(c.kind==dataflow::sql::SqlFrontendKind::Legacy, "legacy default");
-  setenv("VELARIA_SQL_FRONTEND","pg_query",1);
-  auto c2=dataflow::sql::sqlFrontendConfigFromEnv();
-  C(c2.kind==dataflow::sql::SqlFrontendKind::PgQuery, "pg_query");
-  unsetenv("VELARIA_SQL_FRONTEND");
-  P();
-}
-static void test_legacy() {
-  T("legacy_parser");
-  auto st=dataflow::sql::SqlParser::parse("SELECT a, b FROM t WHERE a > 1");
-  C(st.kind==dataflow::sql::SqlStatementKind::Select, "select");
-  C(st.query.has_from,"from");
-  C(st.query.where!=nullptr,"where");
+static void test_pg_query_frontend() {
+  T("pg_query_frontend");
+  dataflow::sql::PgQueryFrontend frontend;
+  auto result=frontend.process("SELECT a, b FROM t WHERE a > 1",
+                               dataflow::sql::SqlFeaturePolicy::cliDefault());
+  C(result.diagnostics.empty(), "diagnostics");
+  C(result.statement.kind==dataflow::sql::SqlStatementKind::Select, "select");
+  C(result.statement.query.has_from,"from");
+  C(result.statement.query.where!=nullptr,"where");
   P();
 }
 static void test_session() {
-  T("session_legacy");
+  T("session_pg_query");
+  setenv("VELARIA_SQL_FRONTEND","legacy",1);
   auto& s=dataflow::DataflowSession::builder();
   auto df=s.sql("SELECT 1 AS one");
   C(df.toTable().rowCount()==1,"rows");
-  C(s.sqlFrontendName()=="legacy","name");
+  C(s.sqlFrontendName()=="pg_query","name");
+  unsetenv("VELARIA_SQL_FRONTEND");
   P();
 }
 static void test_explain() {
@@ -78,8 +72,8 @@ static void test_explain() {
 }
 int main() {
   std::cout << "=== SQL Frontend Tests ===" << std::endl;
-  test_ascii(); test_unicode(); test_diag(); test_config();
-  test_legacy(); test_session(); test_explain();
+  test_ascii(); test_unicode(); test_diag();
+  test_pg_query_frontend(); test_session(); test_explain();
   std::cout << std::endl << "Run: "<<run<<" Pass: "<<pass<<" Fail: "<<fail<<std::endl;
   return fail>0?1:0;
 }

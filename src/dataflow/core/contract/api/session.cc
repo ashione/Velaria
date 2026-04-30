@@ -1026,7 +1026,7 @@ StreamingDataFrame buildAggregateStream(const StreamingDataFrame& seed, const sq
 }
 
 void setSqlPayloadAfterParse(ai::PluginPayload& payload, const std::string& sql,
-                            const sql::SqlStatement& statement) {
+                             const sql::SqlStatement& statement) {
   payload.sql = sql;
   payload.summary = "session.sql entry";
   if (statement.kind == sql::SqlStatementKind::CreateTable) {
@@ -1038,6 +1038,34 @@ void setSqlPayloadAfterParse(ai::PluginPayload& payload, const std::string& sql,
   } else {
     payload.summary = "select statement";
   }
+}
+
+std::string formatSqlDiagnostic(const sql::SqlDiagnostic& diagnostic) {
+  std::ostringstream out;
+  out << "error_type=" << (diagnostic.error_type.empty() ? "parse_error" : diagnostic.error_type)
+      << "; message=" << diagnostic.message;
+  if (!diagnostic.hint.empty()) {
+    out << "; hint=" << diagnostic.hint;
+  }
+  if (diagnostic.byte_offset.has_value()) {
+    out << "; byte_offset=" << *diagnostic.byte_offset;
+  }
+  return out.str();
+}
+
+sql::SqlStatement parseSqlStatement(const std::string& sql_text) {
+  sql::PgQueryFrontend frontend;
+  auto result = frontend.process(sql_text, sql::SqlFeaturePolicy::cliDefault());
+  if (result.diagnostics.empty()) {
+    return std::move(result.statement);
+  }
+  const auto& diagnostic = result.diagnostics.front();
+  const auto message = formatSqlDiagnostic(diagnostic);
+  if (diagnostic.error_type == "unsupported_sql_feature" ||
+      diagnostic.error_type == "unsupported_statement") {
+    throw SQLUnsupportedError(message);
+  }
+  throw SQLSyntaxError(message);
 }
 
 enum class StreamSqlStatementMode { SelectOnly, SelectOrInsert, InsertOnly };
@@ -1053,7 +1081,7 @@ PreparedStreamSqlStatement prepareStreamSqlStatement(
     const ViewCatalog& catalog,
     const std::unordered_map<std::string, StreamingDataFrame>& stream_views,
     const std::unordered_map<std::string, std::shared_ptr<StreamSink>>& stream_sinks) {
-  const auto statement = sql::SqlParser::parse(sql_text);
+  const auto statement = parseSqlStatement(sql_text);
 
   if (statement.kind == sql::SqlStatementKind::Select) {
     if (mode == StreamSqlStatementMode::InsertOnly) {
@@ -1152,58 +1180,7 @@ DataFrame DataflowSession::sql(const std::string& sql) {
 
   std::string final_sql = payload.sql;
 
-  auto frontend_config = sql::sqlFrontendConfigFromEnv();
-  auto parse_statement = [&](const std::string& sql_text) {
-    sql::SqlStatement parsed;
-    if (frontend_config.kind == sql::SqlFrontendKind::PgQuery) {
-      sql::PgQueryFrontend pg_frontend;
-      auto pg_result = pg_frontend.process(sql_text, sql::SqlFeaturePolicy::cliDefault());
-      if (!pg_result.diagnostics.empty()) {
-        // PG frontend failed: fall back to legacy parser
-        parsed = sql::SqlParser::parse(sql_text);
-      } else {
-        parsed = std::move(pg_result.statement);
-      }
-    } else if (frontend_config.kind == sql::SqlFrontendKind::Dual) {
-      // Dual mode: use legacy for execution, pg_query for comparison
-      parsed = sql::SqlParser::parse(sql_text);
-      try {
-        sql::PgQueryFrontend pg_frontend;
-        auto pg_result = pg_frontend.process(sql_text, sql::SqlFeaturePolicy::cliDefault());
-        if (!pg_result.diagnostics.empty()) {
-          fprintf(stderr, "[dual] pg_query frontend diagnostics:\n");
-          for (const auto& d : pg_result.diagnostics) {
-            fprintf(stderr, "[dual]   [%s] %s\n", d.error_type.c_str(), d.message.c_str());
-          }
-        }
-      } catch (const std::exception& e) {
-        fprintf(stderr, "[dual] pg_query frontend exception: %s\n", e.what());
-      }
-    } else {
-      {
-        std::lock_guard<std::mutex> lock(legacy_parse_cache_mu_);
-        const auto it = legacy_parse_cache_.find(sql_text);
-        if (it != legacy_parse_cache_.end()) {
-          return it->second;
-        }
-      }
-      parsed = sql::SqlParser::parse(sql_text);
-      {
-        std::lock_guard<std::mutex> lock(legacy_parse_cache_mu_);
-        const auto [it, inserted] = legacy_parse_cache_.emplace(sql_text, parsed);
-        if (!inserted) {
-          return it->second;
-        }
-        legacy_parse_cache_order_.push_back(sql_text);
-        while (legacy_parse_cache_order_.size() > 128) {
-          legacy_parse_cache_.erase(legacy_parse_cache_order_.front());
-          legacy_parse_cache_order_.pop_front();
-        }
-      }
-    }
-    return parsed;
-  };
-  sql::SqlStatement statement = parse_statement(final_sql);
+  sql::SqlStatement statement = parseSqlStatement(final_sql);
 
   setSqlPayloadAfterParse(payload, final_sql, statement);
 
@@ -1215,7 +1192,7 @@ DataFrame DataflowSession::sql(const std::string& sql) {
   }
   if (payload.sql != final_sql) {
     final_sql = payload.sql;
-    statement = parse_statement(final_sql);
+    statement = parseSqlStatement(final_sql);
     setSqlPayloadAfterParse(payload, final_sql, statement);
   }
 
@@ -1290,7 +1267,7 @@ DataFrame DataflowSession::sql(const std::string& sql) {
 }
 
 std::string DataflowSession::explainSql(const std::string& sql_text) {
-  const auto statement = sql::SqlParser::parse(sql_text);
+  const auto statement = parseSqlStatement(sql_text);
   if (statement.kind != sql::SqlStatementKind::Select) {
     throwUnsupportedSqlV1("explainSql only supports SELECT");
   }
@@ -1465,13 +1442,7 @@ StreamingQuery DataflowSession::startStreamSql(const std::string& sql,
 }
 
 std::string DataflowSession::sqlFrontendName() const {
-  auto config = sql::sqlFrontendConfigFromEnv();
-  switch (config.kind) {
-    case sql::SqlFrontendKind::Legacy: return "legacy";
-    case sql::SqlFrontendKind::PgQuery: return "pg_query";
-    case sql::SqlFrontendKind::Dual: return "dual";
-  }
-  return "unknown";
+  return "pg_query";
 }
 
 }  // namespace dataflow

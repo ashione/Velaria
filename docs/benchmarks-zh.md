@@ -62,7 +62,7 @@ perf report
 - 覆盖范围：仅 native execution benchmark；不包含 Python API 开销、打包 CLI 启动时间或 agent runtime 启动时间
 - 这组快照包含 columnar 热路径调优：重复执行循环不再做全量 cache 校验，packed aggregate key 也避免了逐行字符串拷贝。
 - Batch aggregate 表格是在移除 benchmark 专用 sorted-key 探测后重新串行复测 `5` 次得到，只使用优化器选择的 dense、packed-hash、fixed-hash 和 sort-streaming 执行路径。
-- 重复 legacy SQL 文本会在 `kBeforeSqlParse` 后复用有界 parse cache；after-parse 和 plan-build plugin hook 仍会逐次执行。
+- SQL planning 当前统一使用 pg_query-only frontend；after-parse 和 plan-build plugin hook 仍会逐次执行。
 
 String builtin 快照，`100,000` 行，内部 `5` 轮：
 
@@ -182,7 +182,7 @@ File-source SQL predicate pushdown 快照，`200,000` 行，内部 `3` 轮：
 当前已知退化：
 
 - 最新快照中，file-source SQL pushdown 的绝对耗时仍慢于 2026-04-26 本地 baseline
-- 重复 SQL planning 已通过有界 legacy parse cache 改善，但 Python-facing benchmark 里仍应继续区分 planning 与 execution/Arrow export
+- 在 pg_query-only 后，Python-facing benchmark 里仍应继续区分 SQL planning 与 execution/Arrow export
 - 下一阶段性能恢复应通过 typed source pushdown 与 reducer specialization 完成，不增加 benchmark-shape shortcut
 
 后续章节保留 2026 年 4 月 6 日 `simd` 分支的历史测量结果，用于对比参考。

@@ -62,7 +62,7 @@ Current file-source optimizer/executor layering:
 - Scope: native execution benchmarks only; Python API overhead, packaged CLI startup, and agent runtime startup are excluded
 - This snapshot includes the columnar hot-path tuning that keeps full cache validation out of repeated execution loops and avoids per-row string copies in packed aggregate keys.
 - The batch aggregate table was rerun with `5` outer serial runs after removing benchmark-specific sorted-key probing; it uses only optimizer-selected dense, packed-hash, fixed-hash, and sort-streaming execution paths.
-- Repeated legacy SQL text now reuses a bounded parse cache after `kBeforeSqlParse`; plugin hooks after parse and plan build still run for each call.
+- SQL planning now uses the pg_query-only frontend; plugin hooks after parse and plan build still run for each call.
 
 String builtin snapshot, `100,000` rows, `5` internal rounds:
 
@@ -182,7 +182,7 @@ Interpret this snapshot as a local regression guardrail. It is useful for catchi
 Known current regressions:
 
 - file-source SQL pushdown absolute latency is slower than the April 26, 2026 local baseline in the latest snapshot
-- repeated SQL planning was improved with a bounded legacy parse cache, but planning/execution separation should continue to be watched in Python-facing benchmarks
+- repeated SQL planning should continue to be tracked separately from execution/Arrow export in Python-facing benchmarks now that parsing is pg_query-only
 - the next performance phase should recover these regressions through typed source pushdown and reducer specialization, not by adding benchmark-shape shortcuts
 
 The remaining sections preserve the older April 6, 2026 `simd` measurements for historical comparison.

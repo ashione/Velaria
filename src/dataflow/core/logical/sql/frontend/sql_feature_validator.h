@@ -15,12 +15,12 @@ namespace sql {
 
 struct SqlFeaturePolicy {
   bool allow_multi_statement = false;
-  bool allow_dml = false;
-  bool allow_ddl = false;
+  bool allow_dml = true;
+  bool allow_ddl = true;
   bool allow_cte = false;
   bool allow_subquery = false;
   bool allow_window_function = false;
-  bool allow_set_operation = false;
+  bool allow_set_operation = true;
   bool allow_join = true;
 
   static SqlFeaturePolicy agentDefault() { SqlFeaturePolicy p; p.allow_join = true; return p; }

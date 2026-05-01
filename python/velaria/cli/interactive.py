@@ -514,7 +514,10 @@ def _send_agent_message(prompt: str) -> None:
                 if producer_cancel.is_set():
                     break
                 event_queue.put(event)
-        except Exception as exc:
+        except KeyboardInterrupt:
+            if not producer_cancel.is_set():
+                event_queue.put(AgentEvent("error", "cancelled", session_id=_current_session_id, data={"runtime_failure": True, "cancelled": True}))
+        except BaseException as exc:
             if not producer_cancel.is_set():
                 event_queue.put(AgentEvent("error", str(exc), session_id=_current_session_id, data={"runtime_failure": True}))
         event_queue.put(None)
@@ -522,7 +525,7 @@ def _send_agent_message(prompt: str) -> None:
     def _run_producer() -> None:
         try:
             asyncio.run(_produce())
-        except Exception as exc:
+        except BaseException as exc:
             if not producer_cancel.is_set():
                 event_queue.put(AgentEvent("error", str(exc), session_id=_current_session_id, data={"runtime_failure": True}))
                 event_queue.put(None)
@@ -550,6 +553,18 @@ def _send_agent_message(prompt: str) -> None:
                 failed = True
                 if data.get("runtime_failure"):
                     runtime_failed = True
+                if data.get("cancelled"):
+                    _clear_status_bar()
+                    _stop_spinner_thread()
+                    producer.join(timeout=1.0)
+                    _state.turn_state = "cancelled"
+                    _print_note("cancelled", "turn interrupted")
+                    while not event_queue.empty():
+                        try:
+                            event_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                    return
             if event_type == "done":
                 saw_done = True
             _trace(f"interactive.event type={event_type}")
@@ -612,6 +627,12 @@ def _stop_spinner_thread() -> None:
         thread.join(timeout=0.4)
     _turn_status_thread = None
     _turn_status_stop = None
+
+
+# Aliases for backward compatibility with existing tests
+_start_turn_status = _start_spinner_thread
+_stop_turn_status = _stop_spinner_thread
+_turn_status_paused = False
 
 
 def _should_show_turn_status() -> bool:
@@ -838,17 +859,21 @@ def _build_prompt_session():
     def _(event):
         event.app.current_buffer.validate_and_handle()
 
-    from prompt_toolkit.styles import Style
+    try:
+        from prompt_toolkit.styles import Style
+        toolbar_style = Style.from_dict({
+            "bottom-toolbar": "bg:#1a1a2e",
+            "bottom-toolbar.text": "#6a6a7a",
+        })
+    except ImportError:
+        toolbar_style = None
 
     return PromptSession(
         completer=WordCompleter(_SLASH_COMMANDS, ignore_case=True),
         history=InMemoryHistory(),
         key_bindings=bindings,
         bottom_toolbar=_statusline,
-        style=Style.from_dict({
-            "bottom-toolbar": "bg:#1a1a2e",
-            "bottom-toolbar.text": "#6a6a7a",
-        }),
+        style=toolbar_style,
         complete_while_typing=False,
         reserve_space_for_menu=0,
         multiline=False,

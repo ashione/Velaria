@@ -132,7 +132,7 @@ def _resolve_runtime_model(
             return claude_model, "agentClaudeModel"
         if config_file_runtime == "claude" and model:
             return model, "agentModel"
-        return "claude-sonnet-4-20250514", "default"
+        return "claude-sonnet-4-6", "default"
     if runtime_type == "codex":
         codex_model = str(config.get("codex_model") or "")
         if codex_model:

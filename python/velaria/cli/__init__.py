@@ -95,7 +95,7 @@ def _execute_stream_sql_once(*args: Any, **kwargs: Any) -> dict[str, Any]:
 
 def _build_parser():
     parser = JsonArgumentParser(
-        prog="velaria-cli",
+        prog="velaria",
         description="Velaria CLI for SQL query execution and workspace run management.",
     )
     parser.add_argument(

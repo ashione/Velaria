@@ -144,7 +144,7 @@ Velaria/
 - 所有与 agent 交互相关的错误必须保持 agentic-friendly：错误信息必须包含 `error_type`（机器可分类）、`message`（人类可读）、`hint`（修复建议/workaround），必要时附带 `candidates`（候选值列表）和 `byte_offset`（精确定位）。不要返回裸 exception message 或 traceback 到 agent 上下文；parse_error / unsupported_sql_feature / bind_error / execution_error 必须严格区分，让 agent 能够根据 error_type 选择合适的 react/retry 策略。
 - 新功能开发禁止一开始就堆多个版本、兼容路径或“莫须有”的兜底逻辑；先实现一条语义清晰、可验证的主路径。只有在真实用例、测试或运行错误证明边界存在后，才补充最小化、可诊断、可删除的处理分支。
 - `velaria_cli.py -i` 是交互式 Velaria Agent 主入口；普通输入默认进入 active agent thread，slash 命令负责会话/状态控制，`:<command>` 才作为原 CLI escape hatch。不要把交互式主路径重新设计成 `ai ...` 前缀命令。
-- Velaria Agent 复用 Codex/Claude 等既有 agent runtime，但产品身份、工具选择与用户交互语义都属于 Velaria。默认 runtime 为 Codex（默认模型 `gpt-5.4-mini`），Claude runtime（默认模型 `claude-sonnet-4-20250514`）需额外安装可选依赖。默认 reasoning effort 均为 `none`，网络访问默认开启。
+- Velaria Agent 复用 Codex/Claude 等既有 agent runtime，但产品身份、工具选择与用户交互语义都属于 Velaria。默认 runtime 为 Codex（默认模型 `gpt-5.4-mini`），Claude runtime（默认模型 `claude-sonnet-4-6`）需额外安装可选依赖。默认 reasoning effort 均为 `none`，网络访问默认开启。
 - Agent 配置统一使用 `agent*` 命名，例如 `agentRuntime`、`agentModel`、`agentAuthMode`、`agentRuntimeWorkspace`、`agentCodexNetworkAccess`（Codex）、`agentNetworkAccess`（Claude）、`agentProxy`；不要再新增 `ai*` 配置键。旧 `ai` 子命令只作为非交互 SQL 生成/历史兼容入口，不作为新交互能力的主设计面。
 - Velaria usage skill 与 SQL catalog 都按需暴露为 MCP resource/tool，不把完整 skill 或完整 SQL 函数清单内联进默认 prompt。SQL 函数、边界和模板通过 `velaria_sql_capabilities`、`velaria_sql_function_search`、`velaria_sql_query_patterns` 或 `velaria://sql/catalog` 检索。
 - 多 runtime 实现（Codex/Claude）之间禁止复制粘贴工具函数；共用逻辑（代理环境变量、bool 转换、trace 开关等）必须提取到一个共享模块或统一放在 `__init__.py` 的 module-level helper 中，不要让同一段代码出现在两个 runtime 文件里。

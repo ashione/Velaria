@@ -33,7 +33,7 @@ class ClaudeAgentRuntime:
         provider: str = "anthropic",
         auth_mode: str = "local",
         base_url: str = "",
-        model: str = "claude-sonnet-4-20250514",
+        model: str = "claude-sonnet-4-6",
         model_source: str = "default",
         runtime_path: str = "",
         runtime_workspace: str = "",
@@ -62,6 +62,7 @@ class ClaudeAgentRuntime:
 
         self.model = model
         self.model_source = model_source
+        self._use_local_model = self.reuse_local_config and model_source == "default"
         self.provider = provider
         self.auth_mode = auth_mode
         self.api_key = api_key
@@ -128,7 +129,7 @@ class ClaudeAgentRuntime:
                 prompt=user_msg,
                 options=ClaudeAgentOptions(
                     system_prompt=sql_system,
-                    model=self.model,
+                    **({} if self._use_local_model else {"model": self.model}),
                     max_turns=1,
                     permission_mode="bypassPermissions",
                     cli_path=self.runtime_path or None,
@@ -174,7 +175,7 @@ class ClaudeAgentRuntime:
             velaria_mcp = create_sdk_mcp_server(name="velaria", version="1.0.0", tools=sdk_tools)
             client = ClaudeSDKClient(
                 options=ClaudeAgentOptions(
-                    model=self.model,
+                    **({} if self._use_local_model else {"model": self.model}),
                     system_prompt=velaria_agent_instructions(),
                     permission_mode="bypassPermissions",
                     cli_path=self.runtime_path or None,
@@ -230,7 +231,7 @@ class ClaudeAgentRuntime:
         with self._trace_span("prewarm.create_client"):
             client = ClaudeSDKClient(
                 options=ClaudeAgentOptions(
-                    model=self.model,
+                    **({} if self._use_local_model else {"model": self.model}),
                     system_prompt=velaria_agent_instructions(),
                     permission_mode="bypassPermissions",
                     cli_path=self.runtime_path or None,
@@ -276,7 +277,7 @@ class ClaudeAgentRuntime:
         return {
             "runtime": "claude",
             "provider": self.provider,
-            "model": self.model,
+            "model": self.model if not self._use_local_model else "local-config",
             "model_source": self.model_source,
             "reasoning_effort": self.reasoning_effort,
             "auth_mode": self.auth_mode,
@@ -462,16 +463,31 @@ def _build_sql_user_message(prompt, schema, table_name, sample_rows=None):
 
 
 def _claude_runtime_path(runtime_path: str) -> str:
-    if not runtime_path:
-        return ""
-    path = pathlib.Path(runtime_path).expanduser()
-    if not path.exists():
-        raise RuntimeError(f"Claude runtime path does not exist: {path}")
-    if not path.is_file():
-        raise RuntimeError(f"Claude runtime path must be an executable file: {path}")
-    if not os.access(path, os.X_OK):
-        raise RuntimeError(f"Claude runtime path is not executable: {path}")
-    return str(path)
+    if runtime_path:
+        path = pathlib.Path(runtime_path).expanduser()
+        if not path.exists():
+            raise RuntimeError(f"Claude runtime path does not exist: {path}")
+        if not path.is_file():
+            raise RuntimeError(f"Claude runtime path must be an executable file: {path}")
+        if not os.access(path, os.X_OK):
+            raise RuntimeError(f"Claude runtime path is not executable: {path}")
+        return str(path)
+    bundled = _find_bundled_claude()
+    if bundled:
+        return str(bundled)
+    return ""
+
+
+def _find_bundled_claude() -> pathlib.Path | None:
+    try:
+        import claude_agent_sdk
+    except ImportError:
+        return None
+    sdk_dir = pathlib.Path(claude_agent_sdk.__file__).parent
+    candidate = sdk_dir / "_bundled" / "claude"
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return candidate
+    return None
 
 
 def _runtime_workspace(runtime_workspace: str, cwd: pathlib.Path) -> str:

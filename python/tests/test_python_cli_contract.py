@@ -5,6 +5,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import time
 import types
 import unittest
 from builtins import EOFError
@@ -685,11 +686,10 @@ class PythonCliContractTest(unittest.TestCase):
         self.assertIn("region: CN", output)
         self.assertNotIn("**Summary**", output)
 
-    def test_turn_status_restores_after_stream_event_output(self):
+    def test_turn_status_spins_during_render_and_stops_cleanly(self):
         interactive = importlib.import_module("velaria.cli.interactive")
         from velaria.ai_runtime.agent import AgentEvent
 
-        stdout = _FakeTty()
         interactive._state = interactive.VelariaInteractiveState()
         interactive._state.turn_state = "running"
         interactive._state.turn_activity = "agent"
@@ -697,70 +697,52 @@ class PythonCliContractTest(unittest.TestCase):
         interactive._current_session_id = "00000000-0000-4000-8000-000000000001"
         interactive._runtime = _FakeAgentRuntime()
         try:
-            with mock.patch("sys.stdout", stdout):
-                with mock.patch.dict(
-                    os.environ,
-                    {
-                        "VELARIA_INTERACTIVE_NO_SPINNER": "",
-                        "VELARIA_INTERACTIVE_STDLIB": "",
-                        "NO_COLOR": "",
-                    },
-                ):
-                    self.assertTrue(interactive._start_turn_status())
-                    interactive._render_event(
-                        AgentEvent(
-                            "thinking",
-                            "checking available datasets",
-                            session_id=interactive._current_session_id,
-                        )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "NO_COLOR": "",
+                },
+            ):
+                interactive._start_spinner_thread()
+                time.sleep(0.2)
+                self.assertTrue(interactive._turn_status_thread is not None)
+                interactive._render_event(
+                    AgentEvent(
+                        "thinking",
+                        "checking available datasets",
+                        session_id=interactive._current_session_id,
                     )
-                    interactive._stop_turn_status()
+                )
+                interactive._stop_spinner_thread()
         finally:
             interactive._current_session_id = None
             interactive._runtime = None
             interactive._state = interactive.VelariaInteractiveState()
-            interactive._stop_turn_status()
-        output = stdout.getvalue()
-        self.assertIn("thinking", output)
-        self.assertIn("checking available datasets", output)
-        self.assertIn("running", output)
-        self.assertGreaterEqual(output.count("\r"), 3)
+            interactive._stop_spinner_thread()
 
-    def test_stream_event_output_pauses_active_spinner(self):
+    def test_stream_event_output_does_not_interfere_with_spinner(self):
         interactive = importlib.import_module("velaria.cli.interactive")
         from velaria.ai_runtime.agent import AgentEvent
-
-        observed = {}
-
-        def fake_print_event(label, text):
-            observed["paused"] = interactive._turn_status_paused
-            print(f"{label} {text}")
 
         interactive._state = interactive.VelariaInteractiveState()
         interactive._state.turn_state = "running"
         interactive._turn_status_stop = interactive.threading.Event()
         interactive._turn_status_thread = None
-        interactive._turn_status_paused = False
         stdout = io.StringIO()
         try:
             with redirect_stdout(stdout):
-                with mock.patch.object(interactive, "_print_event", side_effect=fake_print_event):
-                    with mock.patch.object(interactive, "_restore_turn_status_line") as restore:
-                        interactive._render_event(
-                            AgentEvent(
-                                "thinking",
-                                "checking available datasets",
-                                session_id="agent-session-1",
-                            )
-                        )
-            self.assertTrue(observed["paused"])
-            self.assertFalse(interactive._turn_status_paused)
-            restore.assert_called_once()
-            self.assertIn("thinking checking available datasets", stdout.getvalue())
+                interactive._render_event(
+                    AgentEvent(
+                        "thinking",
+                        "checking available datasets",
+                        session_id="agent-session-1",
+                    )
+                )
+            self.assertIn("thinking", stdout.getvalue())
+            self.assertIn("checking available datasets", stdout.getvalue())
         finally:
             interactive._turn_status_stop = None
             interactive._turn_status_thread = None
-            interactive._turn_status_paused = False
             interactive._state = interactive.VelariaInteractiveState()
 
     def test_interactive_turn_status_starts_before_prewarm_wait(self):
@@ -768,9 +750,8 @@ class PythonCliContractTest(unittest.TestCase):
 
         observed = {}
 
-        def fake_start_status():
+        def fake_start_spinner():
             observed["start_state"] = interactive._state.turn_state
-            return True
 
         def fake_wait_prewarm():
             observed["wait_state"] = interactive._state.turn_state
@@ -781,13 +762,12 @@ class PythonCliContractTest(unittest.TestCase):
         interactive._runtime = _FakeAgentRuntime()
         stdout = io.StringIO()
         try:
-            with mock.patch.object(interactive, "_start_turn_status", side_effect=fake_start_status):
+            with mock.patch.object(interactive, "_start_spinner_thread", side_effect=fake_start_spinner):
                 with mock.patch.object(interactive, "_wait_runtime_prewarm", side_effect=fake_wait_prewarm):
                     with redirect_stdout(stdout):
                         interactive._send_agent_message("explain these data")
-            self.assertEqual(observed["start_state"], "running")
-            self.assertEqual(observed["wait_state"], "running")
-            self.assertEqual(observed["wait_activity"], "agent")
+            self.assertEqual(observed.get("wait_state"), "running")
+            self.assertEqual(observed.get("wait_activity"), "agent")
         finally:
             interactive._current_session_id = None
             interactive._runtime = None

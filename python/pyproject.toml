@@ -18,6 +18,7 @@ dependencies = [
 ]
 
 [project.scripts]
+velaria = "velaria.cli:main"
 velaria-cli = "velaria.cli:main"
 velaria_cli = "velaria.cli:main"
 

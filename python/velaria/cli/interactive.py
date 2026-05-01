@@ -75,7 +75,7 @@ _SLASH_COMMANDS = [
 ]
 
 
-_INTERACTIVE_FLAGS = {"-i", "--interactive", "--new", "--runtime", "--session"}
+_INTERACTIVE_FLAGS = {"-i", "--interactive", "--new"}
 
 
 def _wants_interactive(argv: list[str]) -> bool:
@@ -153,7 +153,7 @@ def _run_interactive_loop(argv: list[str] | None = None) -> int:
         try:
             _send_agent_message(command)
         except KeyboardInterrupt:
-            _stop_turn_status()
+            _stop_spinner_thread()
             _state.turn_state = "cancelled"
             _print_note("cancelled", "turn interrupted")
 
@@ -215,7 +215,7 @@ def _get_runtime():
 
 def _shutdown_runtime() -> None:
     global _runtime, _prewarm_thread, _session_start_thread, _session_start_error
-    _stop_turn_status()
+    _stop_spinner_thread()
     _wait_agent_session_start(timeout=0.2, quiet=True)
     if _current_session_id and _runtime is not None:
         try:
@@ -505,22 +505,27 @@ def _send_agent_message(prompt: str) -> None:
         _start_spinner_thread()
 
     event_queue: queue.Queue[Any | None] = queue.Queue()
+    producer_cancel = threading.Event()
 
     async def _produce() -> None:
         global _current_session_id
         try:
             async for event in runtime.send_message(_current_session_id, prompt):
+                if producer_cancel.is_set():
+                    break
                 event_queue.put(event)
         except Exception as exc:
-            event_queue.put(AgentEvent("error", str(exc), session_id=_current_session_id, data={"runtime_failure": True}))
+            if not producer_cancel.is_set():
+                event_queue.put(AgentEvent("error", str(exc), session_id=_current_session_id, data={"runtime_failure": True}))
         event_queue.put(None)
 
     def _run_producer() -> None:
         try:
             asyncio.run(_produce())
         except Exception as exc:
-            event_queue.put(AgentEvent("error", str(exc), session_id=_current_session_id, data={"runtime_failure": True}))
-            event_queue.put(None)
+            if not producer_cancel.is_set():
+                event_queue.put(AgentEvent("error", str(exc), session_id=_current_session_id, data={"runtime_failure": True}))
+                event_queue.put(None)
 
     producer = threading.Thread(target=_run_producer, name="velaria-agent-stream", daemon=True)
     producer.start()
@@ -555,8 +560,10 @@ def _send_agent_message(prompt: str) -> None:
     except KeyboardInterrupt:
         _clear_status_bar()
         _stop_spinner_thread()
+        producer_cancel.set()
         _state.turn_state = "cancelled"
         _print_note("cancelled", "turn interrupted")
+        producer.join(timeout=1.0)
         while not event_queue.empty():
             try:
                 event_queue.get_nowait()
@@ -566,6 +573,7 @@ def _send_agent_message(prompt: str) -> None:
 
     _clear_status_bar()
     _stop_spinner_thread()
+    producer.join(timeout=1.0)
     _state.turn_state = "failed" if failed else "done"
     if failed or not saw_done:
         _print_note(_state.turn_state, _elapsed_turn())

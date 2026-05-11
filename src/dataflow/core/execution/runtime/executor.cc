@@ -3,6 +3,7 @@
 #include <memory>
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <functional>
 #include <span>
@@ -29,6 +30,11 @@ namespace {
 
 constexpr char kGroupDelim = '\x1f';
 constexpr char kValueMetaDelim = '\x1e';
+
+constexpr uint8_t kPkTagNull = 0;
+constexpr uint8_t kPkTagInt64 = 1;
+constexpr uint8_t kPkTagString = 2;
+constexpr uint8_t kPkTagDouble = 3;
 
 enum class FilterCompareOp : uint8_t { Eq, Ne, Lt, Gt, Le, Ge };
 
@@ -358,14 +364,6 @@ Value finalizeAggregateValue(const AggregateAccumulator& acc, const AggregateSpe
   return Value();
 }
 
-void buildSchemaIndex(Schema* schema) {
-  schema->index.clear();
-  schema->index.reserve(schema->fields.size());
-  for (std::size_t i = 0; i < schema->fields.size(); ++i) {
-    schema->index[schema->fields[i]] = i;
-  }
-}
-
 Table makeAggregateOutputSchema(const Table& input, const std::vector<size_t>& key_indices,
                                 const std::vector<AggregateSpec>& aggs) {
   Table out;
@@ -376,7 +374,7 @@ Table makeAggregateOutputSchema(const Table& input, const std::vector<size_t>& k
   for (const auto& agg : aggs) {
     out.schema.fields.push_back(agg.output_name);
   }
-  buildSchemaIndex(&out.schema);
+  out.schema.rebuildIndex();
   return out;
 }
 
@@ -1646,7 +1644,7 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
     // Up to 3 components; only first (arity) elements are meaningful.
     // String views borrow from the input table/cache and are consumed before input lifetime ends.
     uint8_t arity = 0;
-    std::array<uint8_t, 3> tag{};  // 0=null, 1=int64, 2=string, 3=double
+    std::array<uint8_t, 3> tag{};
     std::array<int64_t, 3> i64{};
     std::array<std::string_view, 3> sv{};
     std::array<double, 3> f64{};
@@ -1696,10 +1694,10 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
             break;
           }
           case 3: {
-            // Hash double via bit_cast to uint64_t for stable hashing
-            union { double d; uint64_t u; } cvt;
-            cvt.d = key.f64[i];
-            mix(cvt.u);
+            // Normalize 0.0 so that +0.0 and -0.0 hash identically.
+            double v = key.f64[i];
+            if (v == 0.0) v = 0.0;
+            mix(std::bit_cast<uint64_t>(v));
             break;
           }
           default:
@@ -2140,11 +2138,16 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
                                  right_input.table->schema.fields.begin(),
                                  right_input.table->schema.fields.end());
       }
-      buildSchemaIndex(&out.schema);
+      out.schema.rebuildIndex();
       auto cache = std::make_shared<ColumnarTable>();
       cache->schema = out.schema;
       cache->columns.resize(out.schema.fields.size());
       cache->arrow_formats.resize(out.schema.fields.size());
+      const std::size_t estimated_rows =
+          left_input.table->rowCount() + right_input.table->rowCount();
+      for (auto& column : cache->columns) {
+        column.values.reserve(estimated_rows);
+      }
       std::size_t output_row_count = 0;
 
       const auto rightBuckets = buildHashBuckets(right_keys);

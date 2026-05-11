@@ -7,9 +7,7 @@
 namespace dataflow {
 
 Schema::Schema(std::vector<std::string> cols) : fields(std::move(cols)) {
-  for (size_t i = 0; i < fields.size(); ++i) {
-    index.emplace(fields[i], i);
-  }
+  rebuildIndex();
 }
 
 size_t Schema::indexOf(const std::string& col) const {

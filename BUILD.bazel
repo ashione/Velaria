@@ -434,7 +434,10 @@ cc_binary(
 
 cc_binary(
     name = "batch_aggregate_benchmark",
-    srcs = ["src/dataflow/examples/batch_aggregate_benchmark.cc"],
+    srcs = [
+        "src/dataflow/examples/batch_aggregate_benchmark.cc",
+        "src/dataflow/examples/benchmark_common.h",
+    ],
     deps = [":dataflow_core"],
 )
 
@@ -467,13 +470,19 @@ cc_binary(
 
 cc_binary(
     name = "join_benchmark",
-    srcs = ["src/dataflow/examples/join_benchmark.cc"],
+    srcs = [
+        "src/dataflow/examples/join_benchmark.cc",
+        "src/dataflow/examples/benchmark_common.h",
+    ],
     deps = [":dataflow_core"],
 )
 
 cc_binary(
     name = "aggregate_key_benchmark",
-    srcs = ["src/dataflow/examples/aggregate_key_benchmark.cc"],
+    srcs = [
+        "src/dataflow/examples/aggregate_key_benchmark.cc",
+        "src/dataflow/examples/benchmark_common.h",
+    ],
     deps = [":dataflow_core"],
 )
 

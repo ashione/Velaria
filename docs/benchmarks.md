@@ -93,22 +93,22 @@ Batch aggregate snapshot, `1,048,576` rows, `5` outer runs:
 Aggregate key snapshot, `1,048,576` rows, `3` internal rounds:
 
 | Scenario | Key count | Selected impl | Runtime shape | Elapsed | Rows/s | Output groups |
-|---|---|---|---:|---:|---:|---:|
-| `packed2-int-string` | `2` | `hash-packed` | `generic-packed-keys-2` | `N/A` | `N/A` | `N/A` |
-| `packed3-int-string-double` | `3` | `hash-packed` | `generic-packed-keys-3` | `N/A` | `N/A` | `N/A` |
-| `packed2-string-string` | `2` | `hash-packed` | `generic-packed-keys-2` | `N/A` | `N/A` | `N/A` |
-| `serialized-3-string` | `3` | `hash-packed` | `generic-packed-keys-3` | `N/A` | `N/A` | `N/A` |
+|---|---:|---:|---:|---:|---:|---:|
+| `packed2-int-string` | `2` | `hash-packed` | `generic-packed-keys-2` | `304 ms` | `3,449,260` | `4,096` |
+| `packed3-int-string-double` | `3` | `hash-packed` | `generic-packed-keys-3` | `669 ms` | `1,567,380` | `102,400` |
+| `packed2-string-string` | `2` | `hash-packed` | `generic-packed-keys-2` | `363 ms` | `2,888,640` | `2,048` |
+| `serialized-3-string` | `3` | `hash-packed` | `generic-packed-keys-3` | `565 ms` | `1,855,890` | `32,768` |
 
 Join benchmark snapshot, `3` internal rounds:
 
 | Scenario | Left rows | Right rows | Result rows | Elapsed | Rows/s |
 |---|---:|---:|---:|---:|---:|
-| `small-left-large-right-int` | `100` | `100,000` | `10,000` | `N/A` | `N/A` |
-| `large-left-small-right-int` | `100,000` | `100` | `10,000` | `N/A` | `N/A` |
-| `equal-size-int` | `50,000` | `50,000` | `2,500,000` | `N/A` | `N/A` |
-| `string-key-small-right` | `50,000` | `1,000` | `25,000` | `N/A` | `N/A` |
-| `string-key-small-left` | `1,000` | `50,000` | `25,000` | `N/A` | `N/A` |
-| `high-cardinality-int` | `10,000` | `5,000` | `5,000` | `N/A` | `N/A` |
+| `small-left-large-right-int` | `100` | `100,000` | `10,000` | `22 ms` | `4,550,000` |
+| `large-left-small-right-int` | `100,000` | `100` | `10,000` | `21 ms` | `4,766,670` |
+| `equal-size-int` | `50,000` | `50,000` | `2,500,000` | `1,777 ms` | `56,275` |
+| `string-key-small-right` | `50,000` | `1,000` | `25,000` | `20 ms` | `2,550,000` |
+| `string-key-small-left` | `1,000` | `50,000` | `25,000` | `20 ms` | `2,550,000` |
+| `high-cardinality-int` | `10,000` | `5,000` | `5,000` | `8 ms` | `1,875,000` |
 
 Stream runtime snapshot:
 

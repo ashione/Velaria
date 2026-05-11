@@ -1658,9 +1658,39 @@ Table sortTable(const Table& table, const std::vector<std::size_t>& indices,
     row_order[i] = i;
   }
 
+  // Pre-materialize sort key columns when they are Arrow-backed so that
+  // per-comparison valueColumnValueAt format dispatch is only paid once
+  // per row (during materialization) rather than O(N log N) times inside
+  // the comparison lambda.
+  const bool use_prematerialized =
+      !columns.empty() && columns.front().buffer->values.empty() &&
+      columns.front().buffer->arrow_backing != nullptr;
+  std::vector<std::vector<Value>> sort_keys;
+  if (use_prematerialized) {
+    sort_keys.resize(columns.size());
+    for (std::size_t ci = 0; ci < columns.size(); ++ci) {
+      sort_keys[ci].reserve(row_count);
+      for (std::size_t ri = 0; ri < row_count; ++ri) {
+        sort_keys[ci].push_back(valueColumnValueAt(*columns[ci].buffer, ri));
+      }
+    }
+  }
+
   std::stable_sort(
       row_order.begin(), row_order.end(),
       [&](std::size_t lhs_index, std::size_t rhs_index) {
+        if (use_prematerialized) {
+          for (std::size_t column_index = 0; column_index < columns.size(); ++column_index) {
+            const auto& lhs = sort_keys[column_index][lhs_index];
+            const auto& rhs = sort_keys[column_index][rhs_index];
+            if (lhs.isNull() && rhs.isNull()) continue;
+            if (lhs.isNull()) return false;
+            if (rhs.isNull()) return true;
+            if (lhs == rhs) continue;
+            return directions[column_index] ? (lhs < rhs) : (lhs > rhs);
+          }
+          return false;
+        }
         for (std::size_t column_index = 0; column_index < columns.size(); ++column_index) {
           const auto lhs = valueColumnValueAt(*columns[column_index].buffer, lhs_index);
           const auto rhs = valueColumnValueAt(*columns[column_index].buffer, rhs_index);
@@ -1730,7 +1760,35 @@ Table topNTable(const Table& table, const std::vector<std::size_t>& indices,
     directions.assign(indices.size(), true);
   }
 
+  // Pre-materialize sort key columns for Arrow-backed tables so that
+  // per-comparison format dispatch is avoided inside the partial_sort.
+  const bool use_prematerialized =
+      !columns.empty() && columns.front().buffer->values.empty() &&
+      columns.front().buffer->arrow_backing != nullptr;
+  std::vector<std::vector<Value>> sort_keys;
+  if (use_prematerialized) {
+    sort_keys.resize(columns.size());
+    for (std::size_t ci = 0; ci < columns.size(); ++ci) {
+      sort_keys[ci].reserve(row_count);
+      for (std::size_t ri = 0; ri < row_count; ++ri) {
+        sort_keys[ci].push_back(valueColumnValueAt(*columns[ci].buffer, ri));
+      }
+    }
+  }
+
   auto less = [&](std::size_t lhs_index, std::size_t rhs_index) {
+    if (use_prematerialized) {
+      for (std::size_t column_index = 0; column_index < columns.size(); ++column_index) {
+        const auto& lhs = sort_keys[column_index][lhs_index];
+        const auto& rhs = sort_keys[column_index][rhs_index];
+        if (lhs.isNull() && rhs.isNull()) continue;
+        if (lhs.isNull()) return false;
+        if (rhs.isNull()) return true;
+        if (lhs == rhs) continue;
+        return directions[column_index] ? (lhs < rhs) : (lhs > rhs);
+      }
+      return lhs_index < rhs_index;
+    }
     for (std::size_t column_index = 0; column_index < columns.size(); ++column_index) {
       const auto lhs = valueColumnValueAt(*columns[column_index].buffer, lhs_index);
       const auto rhs = valueColumnValueAt(*columns[column_index].buffer, rhs_index);

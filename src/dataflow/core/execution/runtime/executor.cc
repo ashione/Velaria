@@ -1549,10 +1549,9 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
     ordered_key_values.reserve(reserve_groups);
     ordered_states.reserve(reserve_groups);
     for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
-      const Int64AggregateKey key{valueColumnIsNullAt(*key_column.buffer, row_index),
-                                  valueColumnIsNullAt(*key_column.buffer, row_index)
-                                      ? 0
-                                      : valueColumnInt64At(*key_column.buffer, row_index)};
+      const bool key_is_null = valueColumnIsNullAt(*key_column.buffer, row_index);
+      const Int64AggregateKey key{key_is_null, key_is_null ? 0
+                                          : valueColumnInt64At(*key_column.buffer, row_index)};
       auto it = key_to_index.find(key);
       if (it == key_to_index.end()) {
         ordered_key_values.push_back(key);
@@ -1595,15 +1594,11 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
     ordered_key_values.reserve(reserve_groups);
     ordered_states.reserve(reserve_groups);
     for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
+      const bool first_is_null = valueColumnIsNullAt(*first_key.buffer, row_index);
+      const bool second_is_null = valueColumnIsNullAt(*second_key.buffer, row_index);
       const Int64PairAggregateKey key{
-          {valueColumnIsNullAt(*first_key.buffer, row_index),
-           valueColumnIsNullAt(*first_key.buffer, row_index)
-               ? 0
-               : valueColumnInt64At(*first_key.buffer, row_index)},
-          {valueColumnIsNullAt(*second_key.buffer, row_index),
-           valueColumnIsNullAt(*second_key.buffer, row_index)
-               ? 0
-               : valueColumnInt64At(*second_key.buffer, row_index)}};
+          {first_is_null, first_is_null ? 0 : valueColumnInt64At(*first_key.buffer, row_index)},
+          {second_is_null, second_is_null ? 0 : valueColumnInt64At(*second_key.buffer, row_index)}};
       auto it = key_to_index.find(key);
       if (it == key_to_index.end()) {
         ordered_key_values.push_back(key);

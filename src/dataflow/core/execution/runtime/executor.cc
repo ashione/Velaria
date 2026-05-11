@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <span>
@@ -31,10 +32,6 @@ namespace {
 constexpr char kGroupDelim = '\x1f';
 constexpr char kValueMetaDelim = '\x1e';
 
-constexpr uint8_t kPkTagNull = 0;
-constexpr uint8_t kPkTagInt64 = 1;
-constexpr uint8_t kPkTagString = 2;
-constexpr uint8_t kPkTagDouble = 3;
 
 enum class FilterCompareOp : uint8_t { Eq, Ne, Lt, Gt, Le, Ge };
 
@@ -1662,9 +1659,12 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
           case 2:
             if (sv[i] != other.sv[i]) return false;
             break;
-          case 3:
-            if (f64[i] != other.f64[i]) return false;
+          case 3: {
+            // NaN must compare equal to NaN even though IEEE 754 says NaN != NaN.
+            const double a = f64[i], b = other.f64[i];
+            if (a != b && !(std::isnan(a) && std::isnan(b))) return false;
             break;
+          }
           default:
             return false;
         }

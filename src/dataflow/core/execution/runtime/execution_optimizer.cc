@@ -443,7 +443,6 @@ AggregateExecutionPattern analyzeAggregateExecution(
         }
         pattern.shape = AggregateExecutionShape::GenericSingleStringKey;
         return pattern;
-      case KeyColumnShape::Double:
       case KeyColumnShape::Int64:
         if (pattern.exec_spec.impl_kind == AggImplKind::Dense) {
           pattern.shape = AggregateExecutionShape::GenericSingleInt64Key;
@@ -456,6 +455,10 @@ AggregateExecutionPattern analyzeAggregateExecution(
                        : AggregateExecutionShape::GenericSingleInt64Key;
         pattern.exec_spec.reserved_buckets = input.rowCount();
         return pattern;
+      case KeyColumnShape::Double:
+        // Route to generic serialized-keys path; Int64 fast paths would truncate
+        // floating-point values via valueColumnInt64At.
+        break;
       case KeyColumnShape::MixedKeyTypes:
       case KeyColumnShape::Unknown:
         break;

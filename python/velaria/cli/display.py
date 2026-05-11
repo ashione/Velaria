@@ -209,7 +209,7 @@ class PanelSystem:
     def render_all(self, *, header_text="", status_text="",
                    status_spinner="", status_elapsed=""):
         """Render the full three-panel layout (refresh mode)."""
-        self._term_width = self._term_width()
+        self._term_width = self._get_term_width()
 
         lines = []
         if self._header_pinned:
@@ -232,7 +232,7 @@ class PanelSystem:
         """Render a static view for after turn ends."""
         old_mode = self._layout_mode
         self._layout_mode = LayoutMode.FULL
-        self._term_width = self._term_width()
+        self._term_width = self._get_term_width()
 
         lines = []
         if self._header_pinned:
@@ -253,7 +253,7 @@ class PanelSystem:
 
     # ── Internal helpers ───────────────────────────────────────────────
 
-    def _term_width(self):
+    def _get_term_width(self):
         try:
             return max(40, os.get_terminal_size().columns)
         except OSError:

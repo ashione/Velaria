@@ -16,6 +16,18 @@ from typing import Any
 
 from velaria.cli._common import _json_dumps
 from velaria.ai_runtime.agent import AgentEvent
+from velaria.cli.display import (
+    get_system,
+    LayoutMode,
+    make_text_panel,
+    make_tool_call_panel,
+    make_tool_result_panel,
+    make_error_panel,
+    make_note_panel,
+    make_section_panel,
+    make_table_panel,
+    make_assistant_panel,
+)
 
 _current_session_id: str | None = None
 _runtime: Any | None = None
@@ -70,6 +82,7 @@ _SLASH_COMMANDS = [
     "/new",
     "/sessions",
     "/resume",
+    "/layout",
     "/close",
     "/exit",
 ]
@@ -170,7 +183,8 @@ def _parse_interactive_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _print_help() -> None:
-    _print_section(
+    ps = get_system()
+    ps.add_panel(make_section_panel(
         "Agent",
         [
             ("<prompt>", "send a message to the active agent thread"),
@@ -178,8 +192,8 @@ def _print_help() -> None:
             ("/shortcuts", "show keyboard shortcuts"),
             ("/keys", "alias for /shortcuts"),
         ],
-    )
-    _print_section(
+    ))
+    ps.add_panel(make_section_panel(
         "Velaria",
         [
             ("/dataset", "show current dataset, schema, and last result"),
@@ -187,17 +201,19 @@ def _print_help() -> None:
             ("/artifacts", "show recent/current artifacts"),
             (":<command>", "run a non-interactive Velaria CLI command"),
         ],
-    )
-    _print_section(
+    ))
+    ps.add_panel(make_section_panel(
         "Session",
         [
             ("/new", "start a new agent thread"),
             ("/sessions", "list active saved threads"),
             ("/resume <id>", "resume a saved thread"),
             ("/close [id]", "close a thread"),
+            ("/layout", "cycle panel layout (full/compact/minimal)"),
             ("/exit", "exit interactive mode"),
         ],
-    )
+    ))
+    ps.render_static(header_text=_build_header_text())
 
 
 def _get_runtime():
@@ -448,6 +464,11 @@ def _handle_control_command(command: str) -> None:
         if session_id == _current_session_id:
             _current_session_id = None
         return
+    if cmd == "/layout":
+        ps = get_system()
+        new_mode = ps.cycle_layout_mode()
+        _print_note("layout", new_mode)
+        return
     _print_note("unknown command", cmd, level="warn")
     print(_muted("Run /help for available commands."))
 
@@ -456,7 +477,7 @@ def _try_local_fast_response(command: str) -> bool:
     normalized = command.strip().lower()
     if normalized in {"hello", "hi", "hey", "你好", "您好"}:
         _state.turn_state = "done"
-        print("Hello, I am Velaria Agent.")
+        _print_note("agent", "Hello, I am Velaria Agent.")
         return True
     return False
 
@@ -498,8 +519,7 @@ def _send_agent_message(prompt: str) -> None:
     _state.turn_activity = "agent"
     _state.turn_started_at = time.time()
     _wait_runtime_prewarm()
-    print(_muted("─" * _terminal_width()))
-
+    _clear_status_bar()
     show_spinner = _should_show_turn_status()
     if show_spinner:
         _start_spinner_thread()
@@ -589,10 +609,12 @@ def _send_agent_message(prompt: str) -> None:
     _clear_status_bar()
     _stop_spinner_thread()
     producer.join(timeout=1.0)
+    ps = get_system()
+    if ps.panels:
+        ps.render_static(header_text=_build_header_text())
     _state.turn_state = "failed" if failed else "done"
     if failed or not saw_done:
         _print_note(_state.turn_state, _elapsed_turn())
-    print(_muted("─" * _terminal_width()))
     if runtime_failed:
         _current_session_id = None
 
@@ -675,7 +697,7 @@ def _status_bar_text() -> str:
     activity = _state.turn_activity or "agent"
     state_text = f"{_state.runtime_warmup}/{_state.turn_state}"
     return (
-        f"────── {frame} running {elapsed} | {runtime} {model} | "
+        f"{frame} running {elapsed} | {runtime} {model} | "
         f"session {session} | dataset {dataset} | run {run} | "
         f"tools {tool_count} | {activity} | {state_text} "
     )
@@ -685,6 +707,14 @@ def _write_status_bar() -> None:
     """Write the status bar at the current cursor position (last line). Main thread only."""
     if not _should_show_turn_status():
         return
+    if _wants_panel_render():
+        get_system().render_all(
+            header_text=_build_header_text(),
+            status_text=_status_bar_text(),
+            status_spinner=_turn_status_frame,
+            status_elapsed=_elapsed_turn(),
+        )
+        return
     text = _compact_line(_status_bar_text(), limit=_terminal_width())
     sys.stdout.write("\r" + _style(text, "event") + "\x1b[K")
     sys.stdout.flush()
@@ -692,6 +722,9 @@ def _write_status_bar() -> None:
 
 def _clear_status_bar() -> None:
     """Clear the status bar line. Main thread only."""
+    if _wants_panel_render():
+        get_system().clear_render()
+        return
     sys.stdout.write("\r\x1b[2K")
     sys.stdout.flush()
 
@@ -734,34 +767,38 @@ def _render_event(event: Any) -> None:
     data = getattr(event, "data", {}) or {}
     _update_state_from_event(event_type, content, data)
 
+    ps = get_system()
+
     if event_type == "done":
         _state.turn_state = "done"
-        _print_note("done", _elapsed_turn())
+        ps.add_panel(make_note_panel("done", _elapsed_turn()))
         return
     if event_type == "error":
-        _print_note("error", content or _json_dumps(data), level="error")
+        ps.add_panel(make_error_panel(content or "error", _json_dumps(data)))
         return
 
-    if event_type == "assistant_text":
-        if content:
-            _print_assistant_text(content)
-    elif event_type == "thinking":
-        if content:
-            _print_event("thinking", content)
+    if event_type == "assistant_text" and content:
+        ps.add_panel(make_assistant_panel(content))
+    elif event_type == "thinking" and content:
+        ps.add_panel(make_text_panel("thinking", content))
     elif event_type == "tool_call":
-        _print_event("tool", _format_tool_call(content, data))
+        ps.add_panel(make_tool_call_panel(
+            _format_tool_name(data) or content or "tool",
+            _format_tool_call_body(content, data),
+        ))
     elif event_type == "tool_result":
         summary = _summarize_tool_result(content, data)
         if summary:
-            _print_event("tool result", summary)
-    elif event_type == "command":
-        if content:
-            _print_event("command", content)
-    elif event_type == "file":
-        if content:
-            _print_event("file", content)
+            ps.add_panel(make_tool_result_panel(
+                _format_tool_label(data) or "tool result",
+                summary,
+            ))
+    elif event_type == "command" and content:
+        ps.add_panel(make_text_panel("command", content))
+    elif event_type == "file" and content:
+        ps.add_panel(make_text_panel("file", content))
     elif not _looks_like_runtime_payload(content) and content:
-        _print_assistant_text(content)
+        ps.add_panel(make_assistant_panel(content))
 
 
 def _extract_tool_name(data: dict[str, Any]) -> str:
@@ -789,6 +826,67 @@ def _extract_tool_name(data: dict[str, Any]) -> str:
             return name or namespace
     return ""
 
+
+
+
+def _format_tool_name(data: dict) -> str:
+    name = _extract_tool_name(data)
+    return name or "tool"
+
+
+def _format_tool_label(data: dict) -> str:
+    name = _extract_tool_name(data)
+    return "result: " + name if name else "tool result"
+
+
+def _format_tool_call_body(content: str, data: dict) -> str:
+    args = _tool_arguments(data)
+    if isinstance(args, dict):
+        pieces = []
+        for k, v in list(args.items())[:8]:
+            pieces.append("%s=%s" % (k, _format_tool_argument_value(v)))
+        return "  " + "\\n  ".join(pieces) if pieces else ""
+    if isinstance(args, str) and args:
+        return _compact_line(args, limit=240)
+    return ""
+
+
+def _wants_panel_render() -> bool:
+    return (
+        hasattr(sys.stdout, "isatty")
+        and sys.stdout.isatty()
+        and not os.environ.get("VELARIA_NO_PANELS")
+    )
+
+
+def _build_header_text() -> str:
+    runtime = "-"
+    model = "-"
+    tool_count = 0
+    try:
+        status = _get_cached_status()
+        runtime = str(status.get("runtime") or "-")
+        model = str(status.get("model") or "-")
+        tool_count = len(status.get("tools") or [])
+    except Exception:
+        pass
+    session = _short_id(_current_session_id) or "-"
+    dataset = _state.dataset_name or pathlib_basename(_state.source_path) or "no dataset"
+    parts = [
+        "Velaria Agent",
+        "|",
+        runtime,
+        model,
+        "|",
+        "session",
+        session,
+        "|",
+        dataset,
+        "|",
+        "tools",
+        str(tool_count),
+    ]
+    return " ".join(parts)
 
 def _run_cli_escape(argv: list[str], *, summarize: bool = False) -> int:
     from velaria.cli import main
@@ -1028,7 +1126,8 @@ def _artifact_schema_summary(artifact: dict[str, Any]) -> str:
 
 
 def _print_shortcuts() -> None:
-    _print_section(
+    ps = get_system()
+    ps.add_panel(make_section_panel(
         "Shortcuts",
         [
             ("Ctrl-C", "cancel current input; during a turn, interrupt the active stream"),
@@ -1038,7 +1137,8 @@ def _print_shortcuts() -> None:
             ("Up/Down", "navigate input history"),
             ("Tab", "complete slash commands"),
         ],
-    )
+    ))
+    ps.render_static(header_text=_build_header_text())
 
 
 def _format_result_state() -> str:
@@ -1235,9 +1335,12 @@ def pathlib_basename(path: str) -> str:
 
 
 def _print_banner() -> None:
-    print(_bold("Velaria Agent"))
-    print(_muted("Interactive agent runtime. Type /help for commands, /exit to quit."))
-    print()
+    ps = get_system()
+    ps.add_panel(make_text_panel(
+        "Velaria Agent",
+        "Interactive agent runtime. Type /help for commands, /exit to quit.",
+    ))
+    ps.render_static(header_text=_build_header_text())
 
 
 def _print_startup_status() -> None:
@@ -1251,6 +1354,8 @@ def _print_startup_status() -> None:
         status["session"] = None
     _print_status(status, title="Session")
     _print_dataset_state(title="Velaria State")
+    if _wants_panel_render() and get_system().panels:
+        get_system().render_static(header_text=_build_header_text())
 
 
 def _print_status(status: dict[str, Any], *, title: str = "Status") -> None:
@@ -1271,7 +1376,6 @@ def _print_status(status: dict[str, Any], *, title: str = "Status") -> None:
 
 
 def _print_sessions(sessions: list[dict[str, Any]], *, current_session_id: str | None) -> None:
-    print(_bold("Sessions"))
     headers = ("current", "session", "runtime", "status", "last active")
     rows = []
     for item in sessions:
@@ -1285,49 +1389,45 @@ def _print_sessions(sessions: list[dict[str, Any]], *, current_session_id: str |
                 str(item.get("last_active_at") or "-"),
             )
         )
-    widths = [
-        max(len(headers[i]), *(len(row[i]) for row in rows))
-        for i in range(len(headers))
-    ]
-    print("  " + "  ".join(headers[i].ljust(widths[i]) for i in range(len(headers))))
-    for row in rows:
-        print("  " + "  ".join(row[i].ljust(widths[i]) for i in range(len(row))))
-    print()
+    _print_table("Sessions", headers, rows)
 
 
 def _print_section(title: str, rows: list[tuple[str, str]]) -> None:
-    print(_bold(title))
-    width = max((len(k) for k, _ in rows), default=0)
-    for key, value in rows:
-        print(f"  {key.ljust(width)}  {_wrap_value(value, width + 4)}")
-    print()
+    ps = get_system()
+    ps.add_panel(make_section_panel(title, rows))
+    ps.render_static(header_text=_build_header_text())
 
 
 def _print_table(title: str, headers: tuple[str, ...], rows: list[tuple[str, ...]]) -> None:
-    print(_bold(title))
-    if not rows:
-        print("  -")
-        print()
-        return
-    widths = [
-        max(len(headers[i]), *(len(row[i]) for row in rows))
-        for i in range(len(headers))
-    ]
-    print("  " + "  ".join(headers[i].ljust(widths[i]) for i in range(len(headers))))
-    for row in rows:
-        print("  " + "  ".join(row[i].ljust(widths[i]) for i in range(len(row))))
-    print()
+    ps = get_system()
+    ps.add_panel(make_table_panel(title, headers, rows))
+    ps.render_static(header_text=_build_header_text())
 
 
 def _print_note(label: str, message: str, *, level: str = "info") -> None:
-    print(f"{_style(label.ljust(8), level)} {message}", flush=True)
+    if _wants_panel_render():
+        ps = get_system()
+        ps.add_panel(make_note_panel(label, message, level=level))
+        ps.render_static(header_text=_build_header_text())
+    else:
+        print(f"{_style(label.ljust(8), level)} {message}", flush=True)
 
 
 def _print_event(label: str, message: str) -> None:
-    print(f"{_style(label.ljust(12), 'event')} {_wrap_value(message, 13)}", flush=True)
+    if _wants_panel_render():
+        ps = get_system()
+        ps.add_panel(make_text_panel(label, message))
+        ps.render_static(header_text=_build_header_text())
+    else:
+        print(f"{_style(label.ljust(12), 'event')} {_wrap_value(message, 13)}", flush=True)
 
 
 def _print_assistant_text(message: str) -> None:
+    if _wants_panel_render():
+        ps = get_system()
+        ps.add_panel(make_assistant_panel(message))
+        ps.render_static(header_text=_build_header_text())
+        return
     if not _should_render_markdown():
         print(message, flush=True)
         return

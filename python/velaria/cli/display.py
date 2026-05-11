@@ -48,33 +48,36 @@ def _bold(text):
 # ── Color palette (24-bit) ──────────────────────────────────────────────────
 
 class Palette:
-    bg_root       = _sgr_rgb(18, 18, 28, bg=True)
-    bg_panel      = _sgr_rgb(24, 24, 36, bg=True)
-    bg_border     = _sgr_rgb(30, 30, 46, bg=True)
+    # Panel backgrounds are transparent ("") so terminal background shows through.
+    # Only semantic panels (error, tool_call, tool_result) get subtle colored fills.
+    bg_root       = ""
+    bg_panel      = ""
+    bg_border     = ""
     bg_header     = _sgr_rgb(22, 22, 35, bg=True)
     bg_status     = _sgr_rgb(20, 20, 32, bg=True)
-    bg_selected   = _sgr_rgb(36, 36, 52, bg=True)
-    bg_error      = _sgr_rgb(40, 20, 20, bg=True)
-    bg_tool_call  = _sgr_rgb(20, 30, 40, bg=True)
-    bg_tool_result= _sgr_rgb(20, 35, 25, bg=True)
-    bg_diff_add   = _sgr_rgb(22, 40, 26, bg=True)
-    bg_diff_del   = _sgr_rgb(40, 22, 22, bg=True)
+    bg_selected   = ""
 
-    fg_dim        = _sgr_rgb(100, 100, 120)
-    fg_muted      = _sgr_rgb(130, 130, 150)
-    fg_normal     = _sgr_rgb(200, 200, 210)
-    fg_bright     = _sgr_rgb(230, 230, 240)
-    fg_accent     = _sgr_rgb(150, 130, 220)
-    fg_cyan       = _sgr_rgb(100, 200, 220)
-    fg_green      = _sgr_rgb(120, 220, 150)
-    fg_yellow     = _sgr_rgb(220, 200, 100)
-    fg_red        = _sgr_rgb(220, 120, 120)
-    fg_orange     = _sgr_rgb(220, 160, 100)
-    fg_blue       = _sgr_rgb(110, 170, 230)
-    fg_pink       = _sgr_rgb(220, 140, 200)
+    bg_error      = _sgr_rgb(55, 20, 20, bg=True)
+    bg_tool_call  = _sgr_rgb(20, 32, 48, bg=True)
+    bg_tool_result= _sgr_rgb(20, 40, 24, bg=True)
+    bg_diff_add   = _sgr_rgb(24, 46, 28, bg=True)
+    bg_diff_del   = _sgr_rgb(46, 24, 24, bg=True)
 
-    border        = _sgr_rgb(60, 60, 85)
-    border_dim    = _sgr_rgb(45, 45, 65)
+    fg_dim        = _sgr_rgb(140, 140, 160)
+    fg_muted      = _sgr_rgb(170, 170, 190)
+    fg_normal     = _sgr_rgb(225, 225, 235)
+    fg_bright     = _sgr_rgb(248, 248, 252)
+    fg_accent     = _sgr_rgb(180, 160, 245)
+    fg_cyan       = _sgr_rgb(130, 225, 245)
+    fg_green      = _sgr_rgb(150, 240, 180)
+    fg_yellow     = _sgr_rgb(240, 220, 130)
+    fg_red        = _sgr_rgb(245, 150, 150)
+    fg_orange     = _sgr_rgb(245, 190, 130)
+    fg_blue       = _sgr_rgb(140, 200, 250)
+    fg_pink       = _sgr_rgb(245, 170, 225)
+
+    border        = _sgr_rgb(120, 120, 160)
+    border_dim    = _sgr_rgb(95, 95, 135)
 
     @classmethod
     def level_fg(cls, level):

@@ -22,6 +22,14 @@ struct Schema {
 
   size_t indexOf(const std::string& col) const;
   bool has(const std::string& col) const;
+
+  void rebuildIndex() {
+    index.clear();
+    index.reserve(fields.size());
+    for (std::size_t i = 0; i < fields.size(); ++i) {
+      index[fields[i]] = i;
+    }
+  }
 };
 
 struct Table {

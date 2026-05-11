@@ -854,11 +854,10 @@ std::string valueColumnStringAt(const ValueColumnBuffer& buffer, std::size_t row
     return std::to_string(static_cast<const uint64_t*>(backing.value_buffer.get())[row_index]);
   }
   if (backing.format == kArrowFormatFloat32) {
-    return Value(static_cast<double>(static_cast<const float*>(backing.value_buffer.get())[row_index]))
-        .toString();
+    return std::to_string(static_cast<double>(static_cast<const float*>(backing.value_buffer.get())[row_index]));
   }
   if (backing.format == kArrowFormatFloat64) {
-    return Value(static_cast<const double*>(backing.value_buffer.get())[row_index]).toString();
+    return std::to_string(static_cast<const double*>(backing.value_buffer.get())[row_index]);
   }
   return valueColumnValueAt(buffer, row_index).toString();
 }
@@ -1236,13 +1235,24 @@ std::vector<std::string> materializeSerializedKeys(const Table& table,
   std::vector<std::string> out;
   const auto row_count = columns.empty() ? table.rowCount() : valueColumnRowCount(*columns.front().buffer);
   out.reserve(row_count);
+  // Pre-classify columns: string-backed (UTF-8) vs general to avoid
+  // per-row temporary std::string allocations via valueColumnStringAt.
+  std::vector<bool> is_string_col(columns.size(), false);
+  for (std::size_t i = 0; i < columns.size(); ++i) {
+    is_string_col[i] = columns[i].buffer->arrow_backing != nullptr &&
+                       isArrowUtf8Format(columns[i].buffer->arrow_backing->format);
+  }
   for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
     std::string key;
     for (std::size_t i = 0; i < columns.size(); ++i) {
       if (i > 0) {
         key.push_back(kGroupDelim);
       }
-      key += valueColumnStringAt(*columns[i].buffer, row_index);
+      if (is_string_col[i]) {
+        key.append(valueColumnStringViewAt(*columns[i].buffer, row_index));
+      } else {
+        key += valueColumnStringAt(*columns[i].buffer, row_index);
+      }
     }
     out.push_back(std::move(key));
   }
@@ -1648,9 +1658,39 @@ Table sortTable(const Table& table, const std::vector<std::size_t>& indices,
     row_order[i] = i;
   }
 
+  // Pre-materialize sort key columns when they are Arrow-backed so that
+  // per-comparison valueColumnValueAt format dispatch is only paid once
+  // per row (during materialization) rather than O(N log N) times inside
+  // the comparison lambda.
+  const bool use_prematerialized =
+      !columns.empty() && columns.front().buffer->values.empty() &&
+      columns.front().buffer->arrow_backing != nullptr;
+  std::vector<std::vector<Value>> sort_keys;
+  if (use_prematerialized) {
+    sort_keys.resize(columns.size());
+    for (std::size_t ci = 0; ci < columns.size(); ++ci) {
+      sort_keys[ci].reserve(row_count);
+      for (std::size_t ri = 0; ri < row_count; ++ri) {
+        sort_keys[ci].push_back(valueColumnValueAt(*columns[ci].buffer, ri));
+      }
+    }
+  }
+
   std::stable_sort(
       row_order.begin(), row_order.end(),
       [&](std::size_t lhs_index, std::size_t rhs_index) {
+        if (use_prematerialized) {
+          for (std::size_t column_index = 0; column_index < columns.size(); ++column_index) {
+            const auto& lhs = sort_keys[column_index][lhs_index];
+            const auto& rhs = sort_keys[column_index][rhs_index];
+            if (lhs.isNull() && rhs.isNull()) continue;
+            if (lhs.isNull()) return false;
+            if (rhs.isNull()) return true;
+            if (lhs == rhs) continue;
+            return directions[column_index] ? (lhs < rhs) : (lhs > rhs);
+          }
+          return false;
+        }
         for (std::size_t column_index = 0; column_index < columns.size(); ++column_index) {
           const auto lhs = valueColumnValueAt(*columns[column_index].buffer, lhs_index);
           const auto rhs = valueColumnValueAt(*columns[column_index].buffer, rhs_index);
@@ -1720,7 +1760,35 @@ Table topNTable(const Table& table, const std::vector<std::size_t>& indices,
     directions.assign(indices.size(), true);
   }
 
+  // Pre-materialize sort key columns for Arrow-backed tables so that
+  // per-comparison format dispatch is avoided inside the partial_sort.
+  const bool use_prematerialized =
+      !columns.empty() && columns.front().buffer->values.empty() &&
+      columns.front().buffer->arrow_backing != nullptr;
+  std::vector<std::vector<Value>> sort_keys;
+  if (use_prematerialized) {
+    sort_keys.resize(columns.size());
+    for (std::size_t ci = 0; ci < columns.size(); ++ci) {
+      sort_keys[ci].reserve(row_count);
+      for (std::size_t ri = 0; ri < row_count; ++ri) {
+        sort_keys[ci].push_back(valueColumnValueAt(*columns[ci].buffer, ri));
+      }
+    }
+  }
+
   auto less = [&](std::size_t lhs_index, std::size_t rhs_index) {
+    if (use_prematerialized) {
+      for (std::size_t column_index = 0; column_index < columns.size(); ++column_index) {
+        const auto& lhs = sort_keys[column_index][lhs_index];
+        const auto& rhs = sort_keys[column_index][rhs_index];
+        if (lhs.isNull() && rhs.isNull()) continue;
+        if (lhs.isNull()) return false;
+        if (rhs.isNull()) return true;
+        if (lhs == rhs) continue;
+        return directions[column_index] ? (lhs < rhs) : (lhs > rhs);
+      }
+      return lhs_index < rhs_index;
+    }
     for (std::size_t column_index = 0; column_index < columns.size(); ++column_index) {
       const auto lhs = valueColumnValueAt(*columns[column_index].buffer, lhs_index);
       const auto rhs = valueColumnValueAt(*columns[column_index].buffer, rhs_index);
@@ -2483,16 +2551,20 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
         throw std::runtime_error("computed function argument row count mismatch");
       }
     }
+    // Hoist column index resolution outside the per-row loop to avoid
+    // repeated hash lookups in resolve_source_index.
+    const ValueColumnView input_view =
+        use_materialized_arg ? ValueColumnView{}
+                             : viewValueColumn(*table, resolve_source_index(arg));
     for (std::size_t i = 0; i < row_count; ++i) {
       Value value;
       if (use_materialized_arg) {
         value = materialized_arg[i];
       } else {
-        const auto input = viewValueColumn(*table, resolve_source_index(arg));
-        if (i >= valueColumnViewRowCount(input)) {
+        if (i >= valueColumnViewRowCount(input_view)) {
           throw std::runtime_error("computed function argument index out of range");
         }
-        value = valueColumnValueAt(*input.buffer, i);
+        value = valueColumnValueAt(*input_view.buffer, i);
       }
       if (value.isNull()) {
         continue;
@@ -2753,7 +2825,9 @@ void appendColumn(Table* table, std::vector<Value>&& values, bool materialize_ro
       }
     }
     if (cache->columns.size() == cache->schema.fields.size()) {
+#ifndef NDEBUG
       validateColumnarCache(*cache, "appendColumn");
+#endif
     }
     table->columnar_cache = std::move(cache);
   }
@@ -2801,7 +2875,9 @@ void appendColumn(Table* table, ValueColumnBuffer&& column, bool materialize_row
       }
     }
     if (cache->columns.size() == cache->schema.fields.size()) {
+#ifndef NDEBUG
       validateColumnarCache(*cache, "appendColumn");
+#endif
     }
     table->columnar_cache = std::move(cache);
   }

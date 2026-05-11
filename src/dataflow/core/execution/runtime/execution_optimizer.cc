@@ -46,7 +46,8 @@ enum class KeyColumnShape {
   Unknown = 0,
   String = 1,
   Int64 = 2,
-  MixedStringInt64OrNull = 3,
+  Double = 3,
+  MixedKeyTypes = 4,  // covers any blend of String/Int64/Double, with or without nulls
 };
 
 KeyColumnShape analyzeKeyColumnShape(const ValueColumnBuffer& column) {
@@ -61,11 +62,15 @@ KeyColumnShape analyzeKeyColumnShape(const ValueColumnBuffer& column) {
     if (isArrowIntegerLikeFormat(format)) {
       return KeyColumnShape::Int64;
     }
+    if (isArrowFloatingPointFormat(format)) {
+      return KeyColumnShape::Double;
+    }
     return KeyColumnShape::Unknown;
   }
 
   bool saw_string = false;
   bool saw_int64 = false;
+  bool saw_double = false;
   std::size_t sampled_non_null = 0;
   constexpr std::size_t kMaxTypeSamples = 256;
   for (const auto& value : column.values) {
@@ -77,11 +82,14 @@ KeyColumnShape analyzeKeyColumnShape(const ValueColumnBuffer& column) {
       saw_string = true;
     } else if (value.type() == DataType::Int64 || value.type() == DataType::Bool) {
       saw_int64 = true;
+    } else if (value.type() == DataType::Double || value.type() == DataType::Float32) {
+      saw_double = true;
     } else {
       return KeyColumnShape::Unknown;
     }
-    if (saw_string && saw_int64) {
-      return KeyColumnShape::MixedStringInt64OrNull;
+    int distinct_types = (saw_string ? 1 : 0) + (saw_int64 ? 1 : 0) + (saw_double ? 1 : 0);
+    if (distinct_types >= 2) {
+      return KeyColumnShape::MixedKeyTypes;
     }
     if (sampled_non_null >= kMaxTypeSamples) {
       break;
@@ -92,6 +100,9 @@ KeyColumnShape analyzeKeyColumnShape(const ValueColumnBuffer& column) {
   }
   if (saw_int64) {
     return KeyColumnShape::Int64;
+  }
+  if (saw_double) {
+    return KeyColumnShape::Double;
   }
   return KeyColumnShape::Unknown;
 }
@@ -184,7 +195,8 @@ AggregatePropertySet buildAggregateProperties(const Table& input,
     properties.all_string_like = properties.all_string_like && shape == KeyColumnShape::String;
     properties.packable = properties.packable &&
                           (shape == KeyColumnShape::String || shape == KeyColumnShape::Int64 ||
-                           shape == KeyColumnShape::MixedStringInt64OrNull);
+                           shape == KeyColumnShape::Double ||
+                           shape == KeyColumnShape::MixedKeyTypes);
   }
 
   if (key_indices.size() == 1 && properties.all_int64_like) {
@@ -443,7 +455,11 @@ AggregateExecutionPattern analyzeAggregateExecution(
                        : AggregateExecutionShape::GenericSingleInt64Key;
         pattern.exec_spec.reserved_buckets = input.rowCount();
         return pattern;
-      case KeyColumnShape::MixedStringInt64OrNull:
+      case KeyColumnShape::Double:
+        // Route to generic serialized-keys path; Int64 fast paths would truncate
+        // floating-point values via valueColumnInt64At.
+        break;
+      case KeyColumnShape::MixedKeyTypes:
       case KeyColumnShape::Unknown:
         break;
     }
@@ -467,9 +483,11 @@ AggregateExecutionPattern analyzeAggregateExecution(
     }
     const bool supported =
         (first_shape == KeyColumnShape::String || first_shape == KeyColumnShape::Int64 ||
-         first_shape == KeyColumnShape::MixedStringInt64OrNull) &&
+         first_shape == KeyColumnShape::Double ||
+         first_shape == KeyColumnShape::MixedKeyTypes) &&
         (second_shape == KeyColumnShape::String || second_shape == KeyColumnShape::Int64 ||
-         second_shape == KeyColumnShape::MixedStringInt64OrNull);
+         second_shape == KeyColumnShape::Double ||
+         second_shape == KeyColumnShape::MixedKeyTypes);
     if (supported && pattern.exec_spec.impl_kind == AggImplKind::HashPacked) {
       pattern.shape = AggregateExecutionShape::GenericPackedKeys2;
       pattern.exec_spec.reserved_buckets = input.rowCount();
@@ -492,11 +510,11 @@ AggregateExecutionPattern analyzeAggregateExecution(
     const auto s2 = analyzeKeyColumnShape(*k2.buffer);
     const bool supported =
         (s0 == KeyColumnShape::String || s0 == KeyColumnShape::Int64 ||
-         s0 == KeyColumnShape::MixedStringInt64OrNull) &&
+         s0 == KeyColumnShape::Double || s0 == KeyColumnShape::MixedKeyTypes) &&
         (s1 == KeyColumnShape::String || s1 == KeyColumnShape::Int64 ||
-         s1 == KeyColumnShape::MixedStringInt64OrNull) &&
+         s1 == KeyColumnShape::Double || s1 == KeyColumnShape::MixedKeyTypes) &&
         (s2 == KeyColumnShape::String || s2 == KeyColumnShape::Int64 ||
-         s2 == KeyColumnShape::MixedStringInt64OrNull);
+         s2 == KeyColumnShape::Double || s2 == KeyColumnShape::MixedKeyTypes);
     if (supported) {
       pattern.shape = AggregateExecutionShape::GenericPackedKeys3;
       return pattern;

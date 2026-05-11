@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include "src/dataflow/examples/benchmark_common.h"
 #include <vector>
 
 #include "src/dataflow/core/contract/api/session.h"
@@ -276,12 +277,12 @@ int main(int argc, char** argv) {
   std::string scenario = "string-keys";
   std::string benchmark_case = "q1";
 
-  if (argc > 1) batch_count = static_cast<size_t>(std::strtoull(argv[1], nullptr, 10));
-  if (argc > 2) rows_per_batch = static_cast<size_t>(std::strtoull(argv[2], nullptr, 10));
-  if (argc > 3) worker_count = static_cast<size_t>(std::strtoull(argv[3], nullptr, 10));
-  if (argc > 4) max_inflight = static_cast<size_t>(std::strtoull(argv[4], nullptr, 10));
-  if (argc > 5) worker_delay_ms = static_cast<uint64_t>(std::strtoull(argv[5], nullptr, 10));
-  if (argc > 6) cpu_spin_per_row = static_cast<size_t>(std::strtoull(argv[6], nullptr, 10));
+  if (argc > 1) batch_count = dataflow::parseSizeTArg(argv, 1, batch_count);
+  if (argc > 2) rows_per_batch = dataflow::parseSizeTArg(argv, 2, rows_per_batch);
+  if (argc > 3) worker_count = dataflow::parseSizeTArg(argv, 3, worker_count);
+  if (argc > 4) max_inflight = dataflow::parseSizeTArg(argv, 4, max_inflight);
+  if (argc > 5) worker_delay_ms = static_cast<uint64_t>(dataflow::parseSizeTArg(argv, 5, static_cast<std::size_t>(worker_delay_ms)));
+  if (argc > 6) cpu_spin_per_row = dataflow::parseSizeTArg(argv, 6, cpu_spin_per_row);
   if (argc > 7) mode = argv[7];
   if (argc > 8) scenario = argv[8];
   if (argc > 9) benchmark_case = argv[9];

@@ -3,6 +3,8 @@
 #include <memory>
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <span>
@@ -29,6 +31,7 @@ namespace {
 
 constexpr char kGroupDelim = '\x1f';
 constexpr char kValueMetaDelim = '\x1e';
+
 
 enum class FilterCompareOp : uint8_t { Eq, Ne, Lt, Gt, Le, Ge };
 
@@ -361,15 +364,14 @@ Value finalizeAggregateValue(const AggregateAccumulator& acc, const AggregateSpe
 Table makeAggregateOutputSchema(const Table& input, const std::vector<size_t>& key_indices,
                                 const std::vector<AggregateSpec>& aggs) {
   Table out;
+  out.schema.fields.reserve(key_indices.size() + aggs.size());
   for (const auto idx : key_indices) {
     out.schema.fields.push_back(input.schema.fields[idx]);
   }
   for (const auto& agg : aggs) {
     out.schema.fields.push_back(agg.output_name);
   }
-  for (std::size_t i = 0; i < out.schema.fields.size(); ++i) {
-    out.schema.index[out.schema.fields[i]] = i;
-  }
+  out.schema.rebuildIndex();
   return out;
 }
 
@@ -1547,10 +1549,9 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
     ordered_key_values.reserve(reserve_groups);
     ordered_states.reserve(reserve_groups);
     for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
-      const Int64AggregateKey key{valueColumnIsNullAt(*key_column.buffer, row_index),
-                                  valueColumnIsNullAt(*key_column.buffer, row_index)
-                                      ? 0
-                                      : valueColumnInt64At(*key_column.buffer, row_index)};
+      const bool key_is_null = valueColumnIsNullAt(*key_column.buffer, row_index);
+      const Int64AggregateKey key{key_is_null, key_is_null ? 0
+                                          : valueColumnInt64At(*key_column.buffer, row_index)};
       auto it = key_to_index.find(key);
       if (it == key_to_index.end()) {
         ordered_key_values.push_back(key);
@@ -1593,15 +1594,11 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
     ordered_key_values.reserve(reserve_groups);
     ordered_states.reserve(reserve_groups);
     for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
+      const bool first_is_null = valueColumnIsNullAt(*first_key.buffer, row_index);
+      const bool second_is_null = valueColumnIsNullAt(*second_key.buffer, row_index);
       const Int64PairAggregateKey key{
-          {valueColumnIsNullAt(*first_key.buffer, row_index),
-           valueColumnIsNullAt(*first_key.buffer, row_index)
-               ? 0
-               : valueColumnInt64At(*first_key.buffer, row_index)},
-          {valueColumnIsNullAt(*second_key.buffer, row_index),
-           valueColumnIsNullAt(*second_key.buffer, row_index)
-               ? 0
-               : valueColumnInt64At(*second_key.buffer, row_index)}};
+          {first_is_null, first_is_null ? 0 : valueColumnInt64At(*first_key.buffer, row_index)},
+          {second_is_null, second_is_null ? 0 : valueColumnInt64At(*second_key.buffer, row_index)}};
       auto it = key_to_index.find(key);
       if (it == key_to_index.end()) {
         ordered_key_values.push_back(key);
@@ -1639,9 +1636,10 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
     // Up to 3 components; only first (arity) elements are meaningful.
     // String views borrow from the input table/cache and are consumed before input lifetime ends.
     uint8_t arity = 0;
-    std::array<uint8_t, 3> tag{};  // 0=null, 1=int64, 2=string
+    std::array<uint8_t, 3> tag{};
     std::array<int64_t, 3> i64{};
     std::array<std::string_view, 3> sv{};
+    std::array<double, 3> f64{};
 
     bool operator==(const PackedAggregateKey& other) const {
       if (arity != other.arity) return false;
@@ -1656,6 +1654,12 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
           case 2:
             if (sv[i] != other.sv[i]) return false;
             break;
+          case 3: {
+            // NaN must compare equal to NaN even though IEEE 754 says NaN != NaN.
+            const double a = f64[i], b = other.f64[i];
+            if (a != b && !(std::isnan(a) && std::isnan(b))) return false;
+            break;
+          }
           default:
             return false;
         }
@@ -1682,6 +1686,13 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
             break;
           case 2: {
             mix(std::hash<std::string_view>{}(key.sv[i]));
+            break;
+          }
+          case 3: {
+            // Normalize 0.0 so that +0.0 and -0.0 hash identically.
+            double v = key.f64[i];
+            if (v == 0.0) v = 0.0;
+            mix(std::bit_cast<uint64_t>(v));
             break;
           }
           default:
@@ -1735,6 +1746,11 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
           out_key->i64[idx] = value.asBool() ? 1 : 0;
           return true;
         }
+        if (value.type() == DataType::Double || value.type() == DataType::Float32) {
+          out_key->tag[idx] = 3;
+          out_key->f64[idx] = value.asDouble();
+          return true;
+        }
         if (value.type() == DataType::String) {
           out_key->tag[idx] = 2;
           out_key->sv[idx] = std::string_view(value.asString());
@@ -1755,6 +1771,11 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
           out_key->i64[idx] = valueColumnInt64At(buffer, row);
           return true;
         }
+        if (isArrowFloatingPointFormat(format)) {
+          out_key->tag[idx] = 3;
+          out_key->f64[idx] = valueColumnDoubleAt(buffer, row);
+          return true;
+        }
       }
 
       const Value value = valueColumnValueAt(buffer, row);
@@ -1770,6 +1791,11 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
       if (value.type() == DataType::Bool) {
         out_key->tag[idx] = 1;
         out_key->i64[idx] = value.asBool() ? 1 : 0;
+        return true;
+      }
+      if (value.type() == DataType::Double || value.type() == DataType::Float32) {
+        out_key->tag[idx] = 3;
+        out_key->f64[idx] = value.asDouble();
         return true;
       }
       if (value.type() == DataType::String) {
@@ -1824,6 +1850,9 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
           case 2:
             cache->columns[out_column_index++].values.push_back(
                 Value(std::string(key.sv[i])));
+            break;
+          case 3:
+            cache->columns[out_column_index++].values.push_back(Value(key.f64[i]));
             break;
           default:
             cache->columns[out_column_index++].values.push_back(Value());
@@ -2068,46 +2097,107 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
     }
     case PlanKind::Join: {
       const auto* node = static_cast<const JoinPlan*>(plan.get());
-      const auto left_input = borrowOrExecute(executor, node->left, requirements);
-      const auto right_input = borrowOrExecute(executor, node->right, requirements);
-      const auto left_keys = materializeSerializedKeys(*left_input.table, {node->left_key});
-      const auto right_keys = materializeSerializedKeys(*right_input.table, {node->right_key});
-      const auto left_columns = viewValueColumns(*left_input.table, allColumnIndices(left_input.table->schema));
+      auto left_input = borrowOrExecute(executor, node->left, requirements);
+      auto right_input = borrowOrExecute(executor, node->right, requirements);
+
+      // P0 optimization: for Inner Join, build hash from the smaller side to reduce
+      // hash table size and probe cost. The "build" side's keys are hashed; the "probe"
+      // side is scanned linearly. We want the smaller side as the build input.
+      bool swapped = false;
+      if (node->kind == JoinKind::Inner &&
+          right_input.table->rowCount() > left_input.table->rowCount()) {
+        std::swap(left_input, right_input);
+        swapped = true;
+      }
+
+      const auto left_keys = materializeSerializedKeys(*left_input.table,
+          swapped ? std::vector<std::size_t>{node->right_key}
+                  : std::vector<std::size_t>{node->left_key});
+      const auto right_keys = materializeSerializedKeys(*right_input.table,
+          swapped ? std::vector<std::size_t>{node->left_key}
+                  : std::vector<std::size_t>{node->right_key});
+      const auto left_columns =
+          viewValueColumns(*left_input.table, allColumnIndices(left_input.table->schema));
       const auto right_columns =
           viewValueColumns(*right_input.table, allColumnIndices(right_input.table->schema));
       Table out;
-      out.schema.fields = left_input.table->schema.fields;
-      out.schema.fields.insert(out.schema.fields.end(), right_input.table->schema.fields.begin(),
-                               right_input.table->schema.fields.end());
-      for (size_t i = 0; i < out.schema.fields.size(); ++i) out.schema.index[out.schema.fields[i]] = i;
+      if (swapped) {
+        // When swapped for Inner Join, output schema is still left-original + right-original
+        out.schema.fields = right_input.table->schema.fields;
+        out.schema.fields.insert(out.schema.fields.end(),
+                                 left_input.table->schema.fields.begin(),
+                                 left_input.table->schema.fields.end());
+      } else {
+        out.schema.fields = left_input.table->schema.fields;
+        out.schema.fields.insert(out.schema.fields.end(),
+                                 right_input.table->schema.fields.begin(),
+                                 right_input.table->schema.fields.end());
+      }
+      out.schema.rebuildIndex();
       auto cache = std::make_shared<ColumnarTable>();
       cache->schema = out.schema;
       cache->columns.resize(out.schema.fields.size());
       cache->arrow_formats.resize(out.schema.fields.size());
+      const std::size_t estimated_rows =
+          left_input.table->rowCount() + right_input.table->rowCount();
+      for (auto& column : cache->columns) {
+        column.values.reserve(estimated_rows);
+      }
       std::size_t output_row_count = 0;
 
       const auto rightBuckets = buildHashBuckets(right_keys);
 
+      // Pre-materialize probe-side column values once per probe row so
+      // they are not reconstructed for every matching right row.
+      const std::size_t n_left_cols = left_columns.size();
+      const std::size_t n_right_cols = right_columns.size();
+      // When swapped, probe-side values come from left_columns (original right
+      // side); otherwise they come from left_columns (original left side).
+      const std::size_t n_probe_cols = n_left_cols;
+      std::vector<Value> probe_value_heap;
+      Value* probe_vals = nullptr;
+      if (n_probe_cols > 0) {
+        probe_value_heap.resize(n_probe_cols);
+        probe_vals = probe_value_heap.data();
+      }
+
       for (std::size_t left_index = 0; left_index < left_input.table->rowCount(); ++left_index) {
         auto hit = rightBuckets.find(left_keys[left_index]);
         if (hit != rightBuckets.end()) {
+          // Materialize probe-side (left_columns) once per probe row
+          for (std::size_t ci = 0; ci < n_left_cols; ++ci) {
+            probe_vals[ci] = valueColumnValueAt(*left_columns[ci].buffer, left_index);
+          }
           for (const auto right_index : hit->second) {
             std::size_t out_column_index = 0;
-            for (const auto& column : left_columns) {
-              const auto value = valueColumnValueAt(*column.buffer, left_index);
-              cache->columns[out_column_index++].values.push_back(value);
-            }
-            for (const auto& column : right_columns) {
-              const auto value = valueColumnValueAt(*column.buffer, right_index);
-              cache->columns[out_column_index++].values.push_back(value);
+            if (swapped) {
+              // Original right columns from build-side match, then probe-side from cache
+              for (std::size_t ci = 0; ci < n_right_cols; ++ci) {
+                cache->columns[out_column_index++].values.push_back(
+                    valueColumnValueAt(*right_columns[ci].buffer, right_index));
+              }
+              for (std::size_t ci = 0; ci < n_left_cols; ++ci) {
+                cache->columns[out_column_index++].values.push_back(probe_vals[ci]);
+              }
+            } else {
+              // Probe-side (left_columns) from cache, then right_columns from match
+              for (std::size_t ci = 0; ci < n_left_cols; ++ci) {
+                cache->columns[out_column_index++].values.push_back(probe_vals[ci]);
+              }
+              for (std::size_t ci = 0; ci < n_right_cols; ++ci) {
+                cache->columns[out_column_index++].values.push_back(
+                    valueColumnValueAt(*right_columns[ci].buffer, right_index));
+              }
             }
             ++output_row_count;
           }
-        } else if (node->kind == JoinKind::Left) {
+        } else if (node->kind == JoinKind::Left && !swapped) {
+          // LEFT JOIN with no match: emit left row + null-filled right.
+          // Only valid when not swapped (swapped only happens for Inner).
           std::size_t out_column_index = 0;
-          for (const auto& column : left_columns) {
-            const auto value = valueColumnValueAt(*column.buffer, left_index);
-            cache->columns[out_column_index++].values.push_back(value);
+          for (std::size_t ci = 0; ci < n_left_cols; ++ci) {
+            cache->columns[out_column_index++].values.push_back(
+                valueColumnValueAt(*left_columns[ci].buffer, left_index));
           }
           for (size_t i = 0; i < right_input.table->schema.fields.size(); ++i) {
             Value value;

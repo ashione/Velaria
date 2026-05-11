@@ -854,11 +854,10 @@ std::string valueColumnStringAt(const ValueColumnBuffer& buffer, std::size_t row
     return std::to_string(static_cast<const uint64_t*>(backing.value_buffer.get())[row_index]);
   }
   if (backing.format == kArrowFormatFloat32) {
-    return Value(static_cast<double>(static_cast<const float*>(backing.value_buffer.get())[row_index]))
-        .toString();
+    return std::to_string(static_cast<double>(static_cast<const float*>(backing.value_buffer.get())[row_index]));
   }
   if (backing.format == kArrowFormatFloat64) {
-    return Value(static_cast<const double*>(backing.value_buffer.get())[row_index]).toString();
+    return std::to_string(static_cast<const double*>(backing.value_buffer.get())[row_index]);
   }
   return valueColumnValueAt(buffer, row_index).toString();
 }
@@ -1236,13 +1235,24 @@ std::vector<std::string> materializeSerializedKeys(const Table& table,
   std::vector<std::string> out;
   const auto row_count = columns.empty() ? table.rowCount() : valueColumnRowCount(*columns.front().buffer);
   out.reserve(row_count);
+  // Pre-classify columns: string-backed (UTF-8) vs general to avoid
+  // per-row temporary std::string allocations via valueColumnStringAt.
+  std::vector<bool> is_string_col(columns.size(), false);
+  for (std::size_t i = 0; i < columns.size(); ++i) {
+    is_string_col[i] = columns[i].buffer->arrow_backing != nullptr &&
+                       isArrowUtf8Format(columns[i].buffer->arrow_backing->format);
+  }
   for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
     std::string key;
     for (std::size_t i = 0; i < columns.size(); ++i) {
       if (i > 0) {
         key.push_back(kGroupDelim);
       }
-      key += valueColumnStringAt(*columns[i].buffer, row_index);
+      if (is_string_col[i]) {
+        key.append(valueColumnStringViewAt(*columns[i].buffer, row_index));
+      } else {
+        key += valueColumnStringAt(*columns[i].buffer, row_index);
+      }
     }
     out.push_back(std::move(key));
   }
@@ -2483,16 +2493,20 @@ std::vector<Value> computeComputedColumnValues(Table* table, ComputedColumnKind 
         throw std::runtime_error("computed function argument row count mismatch");
       }
     }
+    // Hoist column index resolution outside the per-row loop to avoid
+    // repeated hash lookups in resolve_source_index.
+    const ValueColumnView input_view =
+        use_materialized_arg ? ValueColumnView{}
+                             : viewValueColumn(*table, resolve_source_index(arg));
     for (std::size_t i = 0; i < row_count; ++i) {
       Value value;
       if (use_materialized_arg) {
         value = materialized_arg[i];
       } else {
-        const auto input = viewValueColumn(*table, resolve_source_index(arg));
-        if (i >= valueColumnViewRowCount(input)) {
+        if (i >= valueColumnViewRowCount(input_view)) {
           throw std::runtime_error("computed function argument index out of range");
         }
-        value = valueColumnValueAt(*input.buffer, i);
+        value = valueColumnValueAt(*input_view.buffer, i);
       }
       if (value.isNull()) {
         continue;

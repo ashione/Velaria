@@ -2152,30 +2152,46 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
 
       const auto rightBuckets = buildHashBuckets(right_keys);
 
+      // Pre-materialize probe-side column values once per probe row so
+      // they are not reconstructed for every matching right row.
+      const std::size_t n_left_cols = left_columns.size();
+      const std::size_t n_right_cols = right_columns.size();
+      // When swapped, probe-side values come from left_columns (original right
+      // side); otherwise they come from left_columns (original left side).
+      const std::size_t n_probe_cols = n_left_cols;
+      std::vector<Value> probe_value_heap;
+      Value* probe_vals = nullptr;
+      if (n_probe_cols > 0) {
+        probe_value_heap.resize(n_probe_cols);
+        probe_vals = probe_value_heap.data();
+      }
+
       for (std::size_t left_index = 0; left_index < left_input.table->rowCount(); ++left_index) {
         auto hit = rightBuckets.find(left_keys[left_index]);
         if (hit != rightBuckets.end()) {
+          // Materialize probe-side (left_columns) once per probe row
+          for (std::size_t ci = 0; ci < n_left_cols; ++ci) {
+            probe_vals[ci] = valueColumnValueAt(*left_columns[ci].buffer, left_index);
+          }
           for (const auto right_index : hit->second) {
             std::size_t out_column_index = 0;
             if (swapped) {
-              // Original right (now build side) columns first
-              for (const auto& column : right_columns) {
-                const auto value = valueColumnValueAt(*column.buffer, right_index);
-                cache->columns[out_column_index++].values.push_back(value);
+              // Original right columns from build-side match, then probe-side from cache
+              for (std::size_t ci = 0; ci < n_right_cols; ++ci) {
+                cache->columns[out_column_index++].values.push_back(
+                    valueColumnValueAt(*right_columns[ci].buffer, right_index));
               }
-              // Original left (now probe side) columns
-              for (const auto& column : left_columns) {
-                const auto value = valueColumnValueAt(*column.buffer, left_index);
-                cache->columns[out_column_index++].values.push_back(value);
+              for (std::size_t ci = 0; ci < n_left_cols; ++ci) {
+                cache->columns[out_column_index++].values.push_back(probe_vals[ci]);
               }
             } else {
-              for (const auto& column : left_columns) {
-                const auto value = valueColumnValueAt(*column.buffer, left_index);
-                cache->columns[out_column_index++].values.push_back(value);
+              // Probe-side (left_columns) from cache, then right_columns from match
+              for (std::size_t ci = 0; ci < n_left_cols; ++ci) {
+                cache->columns[out_column_index++].values.push_back(probe_vals[ci]);
               }
-              for (const auto& column : right_columns) {
-                const auto value = valueColumnValueAt(*column.buffer, right_index);
-                cache->columns[out_column_index++].values.push_back(value);
+              for (std::size_t ci = 0; ci < n_right_cols; ++ci) {
+                cache->columns[out_column_index++].values.push_back(
+                    valueColumnValueAt(*right_columns[ci].buffer, right_index));
               }
             }
             ++output_row_count;
@@ -2184,9 +2200,9 @@ Table executePlanWithRequirements(const LocalExecutor& executor, const PlanNodeP
           // LEFT JOIN with no match: emit left row + null-filled right.
           // Only valid when not swapped (swapped only happens for Inner).
           std::size_t out_column_index = 0;
-          for (const auto& column : left_columns) {
-            const auto value = valueColumnValueAt(*column.buffer, left_index);
-            cache->columns[out_column_index++].values.push_back(value);
+          for (std::size_t ci = 0; ci < n_left_cols; ++ci) {
+            cache->columns[out_column_index++].values.push_back(
+                valueColumnValueAt(*left_columns[ci].buffer, left_index));
           }
           for (size_t i = 0; i < right_input.table->schema.fields.size(); ++i) {
             Value value;

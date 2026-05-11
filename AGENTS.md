@@ -112,6 +112,8 @@ Velaria/
 - `stream_benchmark`, `stream_actor_benchmark` — 流式基准
 - `tpch_q1_style_benchmark` — TPC-H Q1 风格基准
 - `batch_aggregate_benchmark` — 批聚合基准
+- `aggregate_key_benchmark` — 聚合键基准
+- `join_benchmark` — JOIN 基准
 - `string_builtin_benchmark` — 字符串内置函数基准
 - `vector_search_benchmark` — 向量搜索基准
 - `file_source_benchmark` — 文件源基准

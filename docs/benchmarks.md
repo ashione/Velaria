@@ -19,6 +19,8 @@ Batch benchmark:
 
 ```bash
 bazel run //:batch_aggregate_benchmark
+bazel run //:aggregate_key_benchmark
+bazel run //:join_benchmark
 bazel build //:tpch_q1_style_benchmark
 ./bazel-bin/tpch_q1_style_benchmark 500 4096 4 4 0 0 single string-keys q18
 ./bazel-bin/tpch_q1_style_benchmark 500 4096 4 4 0 0 single numeric-keys q1
@@ -87,6 +89,26 @@ Batch aggregate snapshot, `1,048,576` rows, `5` outer runs:
 | `int64-two-string` | `hash-packed` | `500.4 ms` | `2,095,476` | `32,768` |
 | `int64-string-bool` | `hash-packed` | `427.4 ms` | `2,453,383` | `32,768` |
 | `ordered-string` | `sort-streaming` | `311.4 ms` | `3,367,296` | `32,768` |
+
+Aggregate key snapshot, `1,048,576` rows, `3` internal rounds:
+
+| Scenario | Key count | Selected impl | Runtime shape | Elapsed | Rows/s | Output groups |
+|---|---|---|---:|---:|---:|---:|
+| `packed2-int-string` | `2` | `hash-packed` | `generic-packed-keys-2` | `N/A` | `N/A` | `N/A` |
+| `packed3-int-string-double` | `3` | `hash-packed` | `generic-packed-keys-3` | `N/A` | `N/A` | `N/A` |
+| `packed2-string-string` | `2` | `hash-packed` | `generic-packed-keys-2` | `N/A` | `N/A` | `N/A` |
+| `serialized-3-string` | `3` | `hash-packed` | `generic-packed-keys-3` | `N/A` | `N/A` | `N/A` |
+
+Join benchmark snapshot, `3` internal rounds:
+
+| Scenario | Left rows | Right rows | Result rows | Elapsed | Rows/s |
+|---|---:|---:|---:|---:|---:|
+| `small-left-large-right-int` | `100` | `100,000` | `10,000` | `N/A` | `N/A` |
+| `large-left-small-right-int` | `100,000` | `100` | `10,000` | `N/A` | `N/A` |
+| `equal-size-int` | `50,000` | `50,000` | `2,500,000` | `N/A` | `N/A` |
+| `string-key-small-right` | `50,000` | `1,000` | `25,000` | `N/A` | `N/A` |
+| `string-key-small-left` | `1,000` | `50,000` | `25,000` | `N/A` | `N/A` |
+| `high-cardinality-int` | `10,000` | `5,000` | `5,000` | `N/A` | `N/A` |
 
 Stream runtime snapshot:
 

@@ -2825,7 +2825,9 @@ void appendColumn(Table* table, std::vector<Value>&& values, bool materialize_ro
       }
     }
     if (cache->columns.size() == cache->schema.fields.size()) {
+#ifndef NDEBUG
       validateColumnarCache(*cache, "appendColumn");
+#endif
     }
     table->columnar_cache = std::move(cache);
   }
@@ -2873,7 +2875,9 @@ void appendColumn(Table* table, ValueColumnBuffer&& column, bool materialize_row
       }
     }
     if (cache->columns.size() == cache->schema.fields.size()) {
+#ifndef NDEBUG
       validateColumnarCache(*cache, "appendColumn");
+#endif
     }
     table->columnar_cache = std::move(cache);
   }

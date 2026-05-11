@@ -324,7 +324,10 @@ cc_binary(
 
 cc_binary(
     name = "stream_benchmark",
-    srcs = ["src/dataflow/examples/stream_benchmark.cc"],
+    srcs = [
+        "src/dataflow/examples/stream_benchmark.cc",
+        "src/dataflow/examples/benchmark_common.h",
+    ],
     deps = [":dataflow_core"],
 )
 
@@ -422,13 +425,19 @@ cc_binary(
 
 cc_binary(
     name = "stream_actor_benchmark",
-    srcs = ["src/dataflow/examples/stream_actor_benchmark.cc"],
+    srcs = [
+        "src/dataflow/examples/stream_actor_benchmark.cc",
+        "src/dataflow/examples/benchmark_common.h",
+    ],
     deps = [":dataflow_stream_actor_runtime"],
 )
 
 cc_binary(
     name = "tpch_q1_style_benchmark",
-    srcs = ["src/dataflow/examples/tpch_q1_style_benchmark.cc"],
+    srcs = [
+        "src/dataflow/examples/tpch_q1_style_benchmark.cc",
+        "src/dataflow/examples/benchmark_common.h",
+    ],
     deps = [":dataflow_stream_actor_runtime"],
 )
 
@@ -443,7 +452,10 @@ cc_binary(
 
 cc_binary(
     name = "string_builtin_benchmark",
-    srcs = ["src/dataflow/examples/string_builtin_benchmark.cc"],
+    srcs = [
+        "src/dataflow/examples/string_builtin_benchmark.cc",
+        "src/dataflow/examples/benchmark_common.h",
+    ],
     deps = [":dataflow_core"],
 )
 
@@ -458,7 +470,10 @@ cc_binary(
 
 cc_binary(
     name = "file_source_benchmark",
-    srcs = ["src/dataflow/examples/file_source_benchmark.cc"],
+    srcs = [
+        "src/dataflow/examples/file_source_benchmark.cc",
+        "src/dataflow/examples/benchmark_common.h",
+    ],
     deps = [":dataflow_core"],
 )
 

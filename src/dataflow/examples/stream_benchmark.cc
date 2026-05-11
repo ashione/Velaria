@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include "src/dataflow/examples/benchmark_common.h"
 #include <vector>
 
 #include <cstdlib>
@@ -108,10 +109,10 @@ int main(int argc, char** argv) {
   size_t worker_count = 4;
   uint64_t slide_ms = 30000;
 
-  if (argc > 1) batch_count = static_cast<size_t>(std::strtoull(argv[1], nullptr, 10));
-  if (argc > 2) rows_per_batch = static_cast<size_t>(std::strtoull(argv[2], nullptr, 10));
-  if (argc > 3) worker_count = static_cast<size_t>(std::strtoull(argv[3], nullptr, 10));
-  if (argc > 4) slide_ms = static_cast<uint64_t>(std::strtoull(argv[4], nullptr, 10));
+  if (argc > 1) batch_count = dataflow::parseSizeTArg(argv, 1, batch_count);
+  if (argc > 2) rows_per_batch = dataflow::parseSizeTArg(argv, 2, rows_per_batch);
+  if (argc > 3) worker_count = dataflow::parseSizeTArg(argv, 3, worker_count);
+  if (argc > 4) slide_ms = static_cast<uint64_t>(dataflow::parseSizeTArg(argv, 4, static_cast<std::size_t>(slide_ms)));
 
   runCase("stateless-single", dataflow::StreamingExecutionMode::SingleProcess, 1, false, batch_count,
           rows_per_batch);

@@ -5,6 +5,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include "src/dataflow/examples/benchmark_common.h"
 #include <vector>
 
 #include "src/dataflow/core/contract/api/session.h"
@@ -142,8 +143,8 @@ int main(int argc, char** argv) {
   std::size_t rows = 100000;
   std::size_t rounds = 5;
 
-  if (argc > 1) rows = static_cast<std::size_t>(std::strtoull(argv[1], nullptr, 10));
-  if (argc > 2) rounds = static_cast<std::size_t>(std::strtoull(argv[2], nullptr, 10));
+  if (argc > 1) rows = dataflow::parseSizeTArg(argv, 1, rows);
+  if (argc > 2) rounds = dataflow::parseSizeTArg(argv, 2, rounds);
 
   std::cout << "[string-benchmark] rows=" << rows << " rounds=" << rounds << std::endl;
 

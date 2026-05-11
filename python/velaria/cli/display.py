@@ -211,24 +211,30 @@ class PanelSystem:
 
     def render_all(self, *, header_text="", status_text="",
                    status_spinner="", status_elapsed=""):
-        """Render the full three-panel layout (refresh mode)."""
+        """Refresh only the status bar line during live animation.
+        First call draws header + content + status. Subsequent calls
+        overwrite only the status bar line to avoid terminal flicker."""
         self._term_width = self._get_term_width()
 
-        lines = []
-        if self._header_pinned:
-            lines.extend(self._render_header(header_text))
-        if self._layout_mode != LayoutMode.MINIMAL:
-            lines.extend(self._render_content())
         if self._status_pinned:
-            lines.append(self._render_status_bar(
-                status_text, spinner=status_spinner, elapsed=status_elapsed))
-
-        output = "\n".join(lines)
-        if self._has_rendered:
-            sys.stdout.write("\033[%dA" % len(lines))
+            status_line = self._render_status_bar(
+                status_text, spinner=status_spinner, elapsed=status_elapsed)
         else:
+            status_line = ""
+
+        if not self._has_rendered:
+            # First render: draw everything
+            lines = []
+            if self._header_pinned:
+                lines.extend(self._render_header(header_text))
+            if self._layout_mode != LayoutMode.MINIMAL:
+                lines.extend(self._render_content())
+            lines.append(status_line)
             self._has_rendered = True
-        sys.stdout.write(output)
+            sys.stdout.write("\n".join(lines))
+        else:
+            # Subsequent renders: overwrite only the status bar line
+            sys.stdout.write("\r" + status_line + "\x1b[K")
         sys.stdout.flush()
 
     def render_static(self, header_text=""):
@@ -248,9 +254,9 @@ class PanelSystem:
         self._layout_mode = old_mode
 
     def clear_render(self):
-        h = self._estimate_total_lines()
-        if h > 0 and self._has_rendered:
-            sys.stdout.write("\033[%dA\033[J" % h)
+        """Clear the last rendered status bar line."""
+        if self._has_rendered:
+            sys.stdout.write("\033[2K\r")
             sys.stdout.flush()
         self._has_rendered = False
 

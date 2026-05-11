@@ -31,6 +31,10 @@ inline bool isArrowPrimitiveNumericFormat(std::string_view format) {
          format == kArrowFormatFloat64;
 }
 
+inline bool isArrowFloatingPointFormat(std::string_view format) {
+  return format == kArrowFormatFloat32 || format == kArrowFormatFloat64;
+}
+
 inline bool isArrowFixedSizeListFormat(std::string_view format) {
   return format.rfind(kArrowFormatFixedSizeListPrefix, 0) == 0;
 }

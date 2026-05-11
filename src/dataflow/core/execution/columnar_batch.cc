@@ -1254,7 +1254,7 @@ std::unordered_map<std::string, std::vector<std::size_t>> buildHashBuckets(
   std::unordered_map<std::string, std::vector<std::size_t>> buckets;
   buckets.reserve(keys.size());
   for (std::size_t row_index = 0; row_index < keys.size(); ++row_index) {
-    buckets[keys[row_index]].push_back(row_index);
+    buckets.try_emplace(keys[row_index]).first->second.push_back(row_index);
   }
   return buckets;
 }

@@ -19,6 +19,7 @@ from velaria.ai_runtime.agent import AgentEvent
 from velaria.cli.display import (
     get_system,
     LayoutMode,
+    STYLE_DEFAULT,
     make_text_panel,
     make_tool_call_panel,
     make_tool_result_panel,
@@ -59,6 +60,7 @@ class VelariaInteractiveState:
     last_artifact_id: str = ""
     last_tool: str = ""
     last_function: str = ""
+    pending_tool_step: str = ""
     turn_state: str = "idle"
     turn_activity: str = "agent"
     turn_started_at: float | None = None
@@ -799,19 +801,19 @@ def _render_event(event: Any) -> None:
     if event_type == "assistant_text" and content:
         ps.add_panel(make_assistant_panel(content))
     elif event_type == "thinking" and content:
-        ps.add_panel(make_text_panel("thinking", content))
-    elif event_type == "tool_call":
-        ps.add_panel(make_tool_call_panel(
-            _format_tool_name(data) or content or "tool",
-            _format_tool_call_body(content, data),
+        ps.add_panel(make_text_panel(
+            "thinking",
+            "\n".join(content.strip().splitlines()[:3]),
+            style=STYLE_DEFAULT,
         ))
+    elif event_type == "tool_call":
+        return
     elif event_type == "tool_result":
         summary = _summarize_tool_result(content, data)
         if summary:
-            ps.add_panel(make_tool_result_panel(
-                _format_tool_label(data) or "tool result",
-                summary,
-            ))
+            label = _state.pending_tool_step or _format_tool_label(data) or "tool result"
+            ps.add_panel(make_tool_result_panel(label, summary))
+        _state.pending_tool_step = ""
     elif event_type == "command" and content:
         ps.add_panel(make_text_panel("command", content))
     elif event_type == "file" and content:
@@ -831,13 +833,15 @@ def _render_event_legacy(event_type: str, content: str, data: dict) -> None:
     if event_type == "assistant_text" and content:
         _print_assistant_text(content)
     elif event_type == "thinking" and content:
-        _print_event("thinking", content)
+        _print_event("thinking", "\n".join(content.strip().splitlines()[:3]))
     elif event_type == "tool_call":
-        _print_event("tool", _compact_line(content or _extract_tool_name(data) or "tool", limit=240))
+        return
     elif event_type == "tool_result":
         summary = _summarize_tool_result(content, data)
         if summary:
-            _print_event("tool result", summary)
+            label = _state.pending_tool_step or _extract_tool_name(data) or "tool"
+            _print_event("tool", _compact_line(f"{label} → {summary}", limit=240))
+        _state.pending_tool_step = ""
     elif event_type == "command" and content:
         _print_event("command", content)
     elif event_type == "file" and content:
@@ -1185,6 +1189,8 @@ def _update_state_from_event(event_type: str, content: str, data: dict[str, Any]
             _state.turn_activity = tool_name
         if tool_name and (event_type == "tool_call" or not _state.last_tool):
             _state.last_tool = tool_name
+        if event_type == "tool_call":
+            _state.pending_tool_step = tool_name or content or "tool"
     if event_type == "command" and content:
         _state.turn_activity = "command"
         _state.last_tool = "command"

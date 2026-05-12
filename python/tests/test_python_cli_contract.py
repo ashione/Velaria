@@ -745,6 +745,38 @@ class PythonCliContractTest(unittest.TestCase):
             interactive._turn_status_thread = None
             interactive._state = interactive.VelariaInteractiveState()
 
+    def test_legacy_tool_step_renders_as_single_block(self):
+        interactive = importlib.import_module("velaria.cli.interactive")
+        from velaria.ai_runtime.agent import AgentEvent
+
+        interactive._state = interactive.VelariaInteractiveState()
+        stdout = io.StringIO()
+        try:
+            with mock.patch.object(interactive, "_wants_panel_render", return_value=False):
+                with redirect_stdout(stdout):
+                    interactive._render_event(
+                        AgentEvent(
+                            "tool_call",
+                            "",
+                            session_id="agent-session-1",
+                            data={"tool_name": "velaria_read", "arguments": {"path": "a.csv"}},
+                        )
+                    )
+                    interactive._render_event(
+                        AgentEvent(
+                            "tool_result",
+                            "",
+                            session_id="agent-session-1",
+                            data={"tool_name": "velaria_read", "result": {"row_count": 10, "schema": ["id"]}},
+                        )
+                    )
+            lines = [line for line in stdout.getvalue().splitlines() if line.strip()]
+            self.assertEqual(len(lines), 1, stdout.getvalue())
+            self.assertIn("velaria_read", lines[0])
+            self.assertIn("10", lines[0])
+        finally:
+            interactive._state = interactive.VelariaInteractiveState()
+
     def test_interactive_turn_status_starts_before_prewarm_wait(self):
         interactive = importlib.import_module("velaria.cli.interactive")
 

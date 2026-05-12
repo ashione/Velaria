@@ -740,7 +740,6 @@ def _write_status_bar() -> None:
             header_text=_build_header_text(),
             status_text=_status_bar_text(),
             status_spinner=_turn_status_frame,
-            status_elapsed=_elapsed_turn(),
         )
         return
     text = _compact_line(_status_bar_text(), limit=_terminal_width())

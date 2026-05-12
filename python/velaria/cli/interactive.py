@@ -654,7 +654,6 @@ def _stop_spinner_thread() -> None:
 # Aliases for backward compatibility with existing tests
 _start_turn_status = _start_spinner_thread
 _stop_turn_status = _stop_spinner_thread
-_turn_status_paused = False
 
 
 def _should_show_turn_status() -> bool:
@@ -678,8 +677,12 @@ def _should_print_turn_fallback() -> bool:
     )
 
 
-def _status_bar_text() -> str:
-    frame = _turn_status_frame
+def _resolve_status():
+    """Shared view-model for runtime/model/tool_count/session/dataset.
+
+    Returns a dict so each consumer can pick the fields it needs.
+    Returns empty/zero values on any error (never raises).
+    """
     runtime = "-"
     model = "-"
     tool_count = 0
@@ -692,14 +695,26 @@ def _status_bar_text() -> str:
         pass
     session = _short_id(_current_session_id) or "-"
     dataset = _state.dataset_name or pathlib_basename(_state.source_path) or "no dataset"
+    return {
+        "runtime": runtime,
+        "model": model,
+        "tool_count": tool_count,
+        "session": session,
+        "dataset": dataset,
+    }
+
+
+def _status_bar_text() -> str:
+    frame = _turn_status_frame
+    v = _resolve_status()
     run = _short_id(_state.last_run_id) if _state.last_run_id else "no run"
     elapsed = _elapsed_turn()
     activity = _state.turn_activity or "agent"
     state_text = f"{_state.runtime_warmup}/{_state.turn_state}"
     return (
-        f"{frame} running {elapsed} | {runtime} {model} | "
-        f"session {session} | dataset {dataset} | run {run} | "
-        f"tools {tool_count} | {activity} | {state_text} "
+        f"{frame} running {elapsed} | {v['runtime']} {v['model']} | "
+        f"session {v['session']} | dataset {v['dataset']} | run {run} | "
+        f"tools {v['tool_count']} | {activity} | {state_text} "
     )
 
 
@@ -767,6 +782,10 @@ def _render_event(event: Any) -> None:
     data = getattr(event, "data", {}) or {}
     _update_state_from_event(event_type, content, data)
 
+    if not _wants_panel_render():
+        _render_event_legacy(event_type, content, data)
+        return
+
     ps = get_system()
 
     if event_type == "done":
@@ -799,6 +818,32 @@ def _render_event(event: Any) -> None:
         ps.add_panel(make_text_panel("file", content))
     elif not _looks_like_runtime_payload(content) and content:
         ps.add_panel(make_assistant_panel(content))
+
+
+def _render_event_legacy(event_type: str, content: str, data: dict) -> None:
+    if event_type == "done":
+        _state.turn_state = "done"
+        _print_note("done", _elapsed_turn())
+        return
+    if event_type == "error":
+        _print_note("error", content or _json_dumps(data), level="error")
+        return
+    if event_type == "assistant_text" and content:
+        _print_assistant_text(content)
+    elif event_type == "thinking" and content:
+        _print_event("thinking", content)
+    elif event_type == "tool_call":
+        _print_event("tool", _compact_line(content or _extract_tool_name(data) or "tool", limit=240))
+    elif event_type == "tool_result":
+        summary = _summarize_tool_result(content, data)
+        if summary:
+            _print_event("tool result", summary)
+    elif event_type == "command" and content:
+        _print_event("command", content)
+    elif event_type == "file" and content:
+        _print_event("file", content)
+    elif not _looks_like_runtime_payload(content) and content:
+        _print_assistant_text(content)
 
 
 def _extract_tool_name(data: dict[str, Any]) -> str:
@@ -860,31 +905,20 @@ def _wants_panel_render() -> bool:
 
 
 def _build_header_text() -> str:
-    runtime = "-"
-    model = "-"
-    tool_count = 0
-    try:
-        status = _get_cached_status()
-        runtime = str(status.get("runtime") or "-")
-        model = str(status.get("model") or "-")
-        tool_count = len(status.get("tools") or [])
-    except Exception:
-        pass
-    session = _short_id(_current_session_id) or "-"
-    dataset = _state.dataset_name or pathlib_basename(_state.source_path) or "no dataset"
+    v = _resolve_status()
     parts = [
         "Velaria Agent",
         "|",
-        runtime,
-        model,
+        v["runtime"],
+        v["model"],
         "|",
         "session",
-        session,
+        v["session"],
         "|",
-        dataset,
+        v["dataset"],
         "|",
         "tools",
-        str(tool_count),
+        str(v["tool_count"]),
     ]
     return " ".join(parts)
 
@@ -995,18 +1029,9 @@ def _read_prompt(prompt_session: Any | None) -> str:
 
 
 def _statusline() -> Any:
-    runtime = "-"
-    model = "-"
-    tool_count = 0
-    try:
-        status = _get_cached_status()
-        runtime = str(status.get("runtime") or "-")
-        model = str(status.get("model") or "-")
-        tool_count = len(status.get("tools") or [])
-    except Exception:
-        pass
-    session = _short_id(_current_session_id) or "-"
-    dataset = _state.dataset_name or pathlib_basename(_state.source_path) or "no dataset"
+    v = _resolve_status()
+    session = v["session"]
+    dataset = v["dataset"]
     run = _short_id(_state.last_run_id) if _state.last_run_id else "no run"
     spinner = _turn_status_frame if _state.turn_state == "running" else ""
     elapsed = _elapsed_turn() if _state.turn_state == "running" else ""
@@ -1018,12 +1043,12 @@ def _statusline() -> Any:
         parts.append(("class:bottom-toolbar.text", sep))
         if spinner:
             parts.append(("class:bottom-toolbar.text bold", f"{spinner} running {elapsed} "))
-        parts.append(("class:bottom-toolbar.text", f"{runtime} {model} | session {session} | dataset {dataset} | run {run} | tools {tool_count} | {state_text} "))
+        parts.append(("class:bottom-toolbar.text", f"{v['runtime']} {v['model']} | session {session} | dataset {dataset} | run {run} | tools {v['tool_count']} | {state_text} "))
         return parts
 
     if spinner:
-        return f"{sep}{spinner} running {elapsed} | {runtime} {model} | session {session} | dataset {dataset} | run {run} | tools {tool_count} | {state_text} "
-    return f"{sep}{runtime} {model} | session {session} | dataset {dataset} | run {run} | tools {tool_count} | {state_text} "
+        return f"{sep}{spinner} running {elapsed} | {v['runtime']} {v['model']} | session {session} | dataset {dataset} | run {run} | tools {v['tool_count']} | {state_text} "
+    return f"{sep}{v['runtime']} {v['model']} | session {session} | dataset {dataset} | run {run} | tools {v['tool_count']} | {state_text} "
 
 
 def _print_velaria_state() -> None:
@@ -1469,19 +1494,6 @@ def _compact_content(content: str) -> str:
     return text[:597] + "..."
 
 
-def _format_tool_call(content: str, data: dict[str, Any]) -> str:
-    name = _extract_tool_name(data) or content or "tool"
-    args = _tool_arguments(data)
-    status = _tool_status(data)
-    parts = [name]
-    arg_summary = _format_tool_arguments(args)
-    if arg_summary:
-        parts.append(arg_summary)
-    if status and status not in {"completed", "complete", "success"}:
-        parts.append(f"status={status}")
-    return _compact_line(" ".join(parts), limit=240)
-
-
 def _tool_status(data: dict[str, Any]) -> str:
     value = data.get("tool_status") if isinstance(data, dict) else None
     if isinstance(value, str) and value:
@@ -1528,39 +1540,6 @@ def _parse_tool_arguments(value: Any) -> dict[str, Any] | str | None:
             return parsed
         return raw
     return str(value)
-
-
-def _format_tool_arguments(args: dict[str, Any] | str | None) -> str:
-    if args is None:
-        return ""
-    if isinstance(args, str):
-        return _compact_line(args, limit=180)
-    preferred = [
-        "path",
-        "url",
-        "source_path",
-        "source_url",
-        "source_id",
-        "table_name",
-        "query",
-        "artifact_id",
-        "run_id",
-        "save_run",
-        "limit",
-    ]
-    pieces: list[str] = []
-    used: set[str] = set()
-    for key in preferred:
-        if key in args:
-            pieces.append(f"{key}={_format_tool_argument_value(args[key])}")
-            used.add(key)
-    for key, value in args.items():
-        if key in used:
-            continue
-        pieces.append(f"{key}={_format_tool_argument_value(value)}")
-        if len(pieces) >= 5:
-            break
-    return _compact_line(" ".join(pieces), limit=190)
 
 
 def _format_tool_argument_value(value: Any) -> str:

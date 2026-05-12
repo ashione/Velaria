@@ -60,8 +60,6 @@ class Palette:
     bg_error      = _sgr_rgb(55, 20, 20, bg=True)
     bg_tool_call  = _sgr_rgb(20, 32, 48, bg=True)
     bg_tool_result= _sgr_rgb(20, 40, 24, bg=True)
-    bg_diff_add   = _sgr_rgb(24, 46, 28, bg=True)
-    bg_diff_del   = _sgr_rgb(46, 24, 24, bg=True)
 
     fg_dim        = _sgr_rgb(140, 140, 160)
     fg_muted      = _sgr_rgb(170, 170, 190)
@@ -89,12 +87,6 @@ class Palette:
             "debug": cls.fg_dim,
         }.get(level, cls.fg_normal)
 
-    @classmethod
-    def level_bg(cls, level):
-        return {
-            "error": cls.bg_error,
-        }.get(level, cls.bg_panel)
-
 
 class Box:
     H   = "─"
@@ -105,10 +97,6 @@ class Box:
     BR  = "┘"
     LT  = "├"
     RT  = "┤"
-    TB  = "┬"
-    BB  = "┴"
-    CR  = "┼"
-    H2  = "╌"
 
 
 # ── Style constants ─────────────────────────────────────────────────────────
@@ -118,7 +106,6 @@ STYLE_TOOL_CALL   = "tool_call"
 STYLE_TOOL_RESULT = "tool_result"
 STYLE_ERROR       = "error"
 STYLE_SECTION     = "section"
-STYLE_DIFF        = "diff"
 
 
 def _style_attrs(style_name):
@@ -128,26 +115,17 @@ def _style_attrs(style_name):
         STYLE_TOOL_RESULT: (Palette.fg_green,   Palette.fg_green,   Palette.bg_tool_result),
         STYLE_ERROR:       (Palette.fg_red,     Palette.fg_red,     Palette.bg_error),
         STYLE_SECTION:     (Palette.border,     Palette.fg_bright,  Palette.bg_panel),
-        STYLE_DIFF:        (Palette.fg_yellow,  Palette.fg_yellow,  Palette.bg_panel),
     }
     return m.get(style_name, m[STYLE_DEFAULT])
 
 
 class Panel:
     """A single panel in the display system."""
-    def __init__(self, id, title="", body="", style=STYLE_DEFAULT,
-                 collapsible=True, collapsed=False, timestamp=None):
+    def __init__(self, id, title="", body="", style=STYLE_DEFAULT):
         self.id = id
         self.title = title
         self.body = body
         self.style = style
-        self.collapsible = collapsible
-        self.collapsed = collapsed
-        self.timestamp = timestamp if timestamp is not None else time.time()
-
-    def set_body(self, text):
-        self.body = text
-        self.timestamp = time.time()
 
 
 class LayoutMode:
@@ -169,8 +147,6 @@ class PanelSystem:
         self.panels = []
         self._layout_mode = LayoutMode.FULL
         self._max_panel_history = 200
-        self._header_pinned = True
-        self._status_pinned = True
         self._term_width = 80
         self._has_rendered = False
 
@@ -210,30 +186,24 @@ class PanelSystem:
     # ── Render methods ──────────────────────────────────────────────────
 
     def render_all(self, *, header_text="", status_text="",
-                   status_spinner="", status_elapsed=""):
+                   status_spinner=""):
         """Refresh only the status bar line during live animation.
         First call draws header + content + status. Subsequent calls
         overwrite only the status bar line to avoid terminal flicker."""
         self._term_width = self._get_term_width()
 
-        if self._status_pinned:
-            status_line = self._render_status_bar(
-                status_text, spinner=status_spinner, elapsed=status_elapsed)
-        else:
-            status_line = ""
+        status_line = self._render_status_bar(
+            status_text, spinner=status_spinner)
 
         if not self._has_rendered:
-            # First render: draw everything
             lines = []
-            if self._header_pinned:
-                lines.extend(self._render_header(header_text))
+            lines.extend(self._render_header(header_text))
             if self._layout_mode != LayoutMode.MINIMAL:
                 lines.extend(self._render_content())
             lines.append(status_line)
             self._has_rendered = True
             sys.stdout.write("\n".join(lines))
         else:
-            # Subsequent renders: overwrite only the status bar line
             sys.stdout.write("\r" + status_line + "\x1b[K")
         sys.stdout.flush()
 
@@ -244,8 +214,7 @@ class PanelSystem:
         self._term_width = self._get_term_width()
 
         lines = []
-        if self._header_pinned:
-            lines.extend(self._render_header(header_text))
+        lines.extend(self._render_header(header_text))
         lines.extend(self._render_content())
         lines.append("")
 
@@ -280,7 +249,7 @@ class PanelSystem:
                + Palette.fg_dim + Box.H * 2 + _RESET + reset_bg + Box.TR + _RESET)
         return [bar]
 
-    def _render_status_bar(self, text, *, spinner="", elapsed=""):
+    def _render_status_bar(self, text, *, spinner=""):
         w = self._term_width
         bg = Palette.bg_status
         fg = Palette.fg_muted
@@ -306,9 +275,6 @@ class PanelSystem:
     def _render_panel(self, panel):
         if self._layout_mode == LayoutMode.MINIMAL:
             return []
-        if panel.collapsed and panel.collapsible:
-            return self._render_collapsed_panel(panel)
-
         bdr, title_fg_sgr, bg = _style_attrs(panel.style)
         w = self._term_width
         bdr_dim = Palette.border_dim
@@ -346,35 +312,7 @@ class PanelSystem:
                      + bdr + Box.BR + _RESET)
         return lines
 
-    def _render_collapsed_panel(self, panel):
-        w = self._term_width
-        inner_w = max(2, w - 4)
-        bdr = Palette.border_dim
-        bg = Palette.bg_panel
-        reset_bg = Palette.bg_root
-        title = panel.title or panel.id
-
-        line = (reset_bg + bdr + Box.LT + bdr + Box.H + " "
-                + Palette.fg_dim + title + _RESET + bdr + " "
-                + Box.H * (inner_w - len(title) - 3) + Box.RT + _RESET)
-        return [line]
-
-    def _estimate_total_lines(self):
-        count = 0
-        if self._header_pinned:
-            count += 1
-        if self._layout_mode != LayoutMode.MINIMAL:
-            for panel in self.panels:
-                if panel.collapsed and panel.collapsible:
-                    count += 1
-                else:
-                    count += panel.body.count("\n") + 3  # +3: top+bottom border +1 safe
-        if self._status_pinned:
-            count += 1
-        return count + 1
-
-
-# ── Panel builders ──────────────────────────────────────────────────────────
+    # ── Panel builders ──────────────────────────────────────────────────────────
 
 _next_id = 0
 
@@ -450,5 +388,6 @@ def get_system():
 
 
 def reset_system():
-    global _system
+    global _system, _next_id
     _system = None
+    _next_id = 0

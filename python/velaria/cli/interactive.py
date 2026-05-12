@@ -525,6 +525,7 @@ def _send_agent_message(prompt: str) -> None:
     show_spinner = _should_show_turn_status()
     if show_spinner:
         _start_spinner_thread()
+    _reset_panel()
 
     event_queue: queue.Queue[Any | None] = queue.Queue()
     producer_cancel = threading.Event()
@@ -619,6 +620,16 @@ def _send_agent_message(prompt: str) -> None:
         _print_note(_state.turn_state, _elapsed_turn())
     if runtime_failed:
         _current_session_id = None
+
+
+def _reset_panel() -> None:
+    """Clear panels and render a fresh header at the start of each turn."""
+    if not _wants_panel_render():
+        return
+    ps = get_system()
+    ps.panels = []
+    ps._has_rendered = False
+    ps.render_all(header_text=_build_header_text(), status_text="")
 
 
 def _start_spinner_thread() -> None:
@@ -1439,7 +1450,6 @@ def _print_note(label: str, message: str, *, level: str = "info") -> None:
     if _wants_panel_render():
         ps = get_system()
         ps.add_panel(make_note_panel(label, message, level=level))
-        ps.render_static(header_text=_build_header_text())
     else:
         print(f"{_style(label.ljust(8), level)} {message}", flush=True)
 
@@ -1448,7 +1458,6 @@ def _print_event(label: str, message: str) -> None:
     if _wants_panel_render():
         ps = get_system()
         ps.add_panel(make_text_panel(label, message))
-        ps.render_static(header_text=_build_header_text())
     else:
         print(f"{_style(label.ljust(12), 'event')} {_wrap_value(message, 13)}", flush=True)
 
@@ -1457,7 +1466,6 @@ def _print_assistant_text(message: str) -> None:
     if _wants_panel_render():
         ps = get_system()
         ps.add_panel(make_assistant_panel(message))
-        ps.render_static(header_text=_build_header_text())
         return
     if not _should_render_markdown():
         print(message, flush=True)

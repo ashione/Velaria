@@ -16,19 +16,6 @@ from typing import Any
 
 from velaria.cli._common import _json_dumps
 from velaria.ai_runtime.agent import AgentEvent
-from velaria.cli.display import (
-    get_system,
-    LayoutMode,
-    STYLE_DEFAULT,
-    make_text_panel,
-    make_tool_call_panel,
-    make_tool_result_panel,
-    make_error_panel,
-    make_note_panel,
-    make_section_panel,
-    make_table_panel,
-    make_assistant_panel,
-)
 
 _current_session_id: str | None = None
 _runtime: Any | None = None
@@ -41,10 +28,17 @@ _session_start_error: str = ""
 _trace_start = time.perf_counter()
 _turn_status_thread: threading.Thread | None = None
 _turn_status_stop: threading.Event | None = None
+_turn_queue: queue.Queue[str] = queue.Queue()
+_turn_worker_thread: threading.Thread | None = None
+_turn_worker_lock = threading.Lock()
+_turn_worker_active: bool = False
+_active_turn_cancel: threading.Event | None = None
+_active_turn_lock = threading.Lock()
 
 _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 _SPINNER_INTERVAL_SECONDS = 0.12
 _turn_status_frame = _SPINNER_FRAMES[0]
+_layout_open: bool = False
 
 
 @dataclass
@@ -84,7 +78,7 @@ _SLASH_COMMANDS = [
     "/new",
     "/sessions",
     "/resume",
-    "/layout",
+    "/wait",
     "/close",
     "/exit",
 ]
@@ -100,11 +94,12 @@ def _wants_interactive(argv: list[str]) -> bool:
 
 
 def _run_interactive_loop(argv: list[str] | None = None) -> int:
-    global _state, _current_session_id, _session_start_thread, _session_start_error, _runtime_override
+    global _state, _current_session_id, _session_start_thread, _session_start_error, _runtime_override, _layout_open
     _state = VelariaInteractiveState()
     _current_session_id = None
     _session_start_thread = None
     _session_start_error = ""
+    _layout_open = False
     args = _parse_interactive_args(argv or [])
     _runtime_override = getattr(args, "runtime", None)
     from velaria.cli import main
@@ -132,11 +127,14 @@ def _run_interactive_loop(argv: list[str] | None = None) -> int:
             line = _read_prompt(_prompt_session)
         except EOFError:
             print()
+            _request_turn_cancel(clear_queue=True)
             _shutdown_runtime()
             _prompt_session = None
             return 0
         except KeyboardInterrupt:
             print()
+            if _request_turn_cancel(clear_queue=False):
+                _print_note("cancelled", "turn interrupted")
             continue
         finally:
             _prompt_active = False
@@ -166,7 +164,7 @@ def _run_interactive_loop(argv: list[str] | None = None) -> int:
         if _try_local_fast_response(command):
             continue
         try:
-            _send_agent_message(command)
+            _send_agent_message(command, wait=False)
         except KeyboardInterrupt:
             _stop_spinner_thread()
             _state.turn_state = "cancelled"
@@ -185,8 +183,7 @@ def _parse_interactive_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _print_help() -> None:
-    ps = get_system()
-    ps.add_panel(make_section_panel(
+    _print_section(
         "Agent",
         [
             ("<prompt>", "send a message to the active agent thread"),
@@ -194,8 +191,8 @@ def _print_help() -> None:
             ("/shortcuts", "show keyboard shortcuts"),
             ("/keys", "alias for /shortcuts"),
         ],
-    ))
-    ps.add_panel(make_section_panel(
+    )
+    _print_section(
         "Velaria",
         [
             ("/dataset", "show current dataset, schema, and last result"),
@@ -203,19 +200,18 @@ def _print_help() -> None:
             ("/artifacts", "show recent/current artifacts"),
             (":<command>", "run a non-interactive Velaria CLI command"),
         ],
-    ))
-    ps.add_panel(make_section_panel(
+    )
+    _print_section(
         "Session",
         [
             ("/new", "start a new agent thread"),
             ("/sessions", "list active saved threads"),
             ("/resume <id>", "resume a saved thread"),
+            ("/wait", "wait for queued agent messages to finish"),
             ("/close [id]", "close a thread"),
-            ("/layout", "cycle panel layout (full/compact/minimal)"),
             ("/exit", "exit interactive mode"),
         ],
-    ))
-    ps.render_static(header_text=_build_header_text())
+    )
 
 
 def _get_runtime():
@@ -234,6 +230,8 @@ def _get_runtime():
 def _shutdown_runtime() -> None:
     global _runtime, _prewarm_thread, _session_start_thread, _session_start_error
     _stop_spinner_thread()
+    _request_turn_cancel(clear_queue=True)
+    _wait_turn_worker(timeout=2.0)
     _wait_agent_session_start(timeout=0.2, quiet=True)
     if _current_session_id and _runtime is not None:
         try:
@@ -453,6 +451,11 @@ def _handle_control_command(command: str) -> None:
         else:
             _print_note("not found", rest, level="warn")
         return
+    if cmd == "/wait":
+        _print_note("waiting", "agent message queue")
+        _wait_turn_worker(timeout=None)
+        _print_note("idle", "agent message queue drained")
+        return
     if cmd == "/close":
         session_id = rest or _current_session_id
         if not session_id:
@@ -465,11 +468,6 @@ def _handle_control_command(command: str) -> None:
         _print_note("closed", session_id)
         if session_id == _current_session_id:
             _current_session_id = None
-        return
-    if cmd == "/layout":
-        ps = get_system()
-        new_mode = ps.cycle_layout_mode()
-        _print_note("layout", new_mode)
         return
     _print_note("unknown command", cmd, level="warn")
     print(_muted("Run /help for available commands."))
@@ -505,7 +503,113 @@ def _safe_runtime():
         return None
 
 
-def _send_agent_message(prompt: str) -> None:
+def _send_agent_message(prompt: str, *, wait: bool = True) -> None:
+    _turn_queue.put(prompt)
+    queued = _turn_queue.qsize()
+    if _turn_worker_active:
+        _state.turn_state = "queued"
+        _state.turn_activity = "queued"
+    _print_note("queued", f"message accepted ({queued} pending)")
+    _ensure_turn_worker()
+    if wait:
+        _turn_queue.join()
+        _wait_turn_worker(timeout=1.0)
+
+
+def _ensure_turn_worker() -> None:
+    global _turn_worker_thread
+    with _turn_worker_lock:
+        if _turn_worker_thread is not None and _turn_worker_thread.is_alive():
+            return
+        _turn_worker_thread = threading.Thread(
+            target=_turn_worker_loop,
+            name="velaria-agent-turn-worker",
+            daemon=True,
+        )
+        _turn_worker_thread.start()
+
+
+def _turn_worker_loop() -> None:
+    global _turn_worker_thread, _turn_worker_active
+    while True:
+        try:
+            prompt = _turn_queue.get(timeout=0.2)
+        except queue.Empty:
+            with _turn_worker_lock:
+                if _turn_queue.empty():
+                    _turn_worker_thread = None
+                    return
+            continue
+        _turn_worker_active = True
+        try:
+            _run_agent_turn_blocking(prompt)
+        finally:
+            _turn_worker_active = False
+            _turn_queue.task_done()
+            if not _turn_queue.empty() and _state.turn_state != "failed":
+                _state.turn_state = "queued"
+                _state.turn_activity = "queued"
+
+
+def _wait_turn_worker(timeout: float | None = None) -> bool:
+    start = time.time()
+    while _turn_worker_active or not _turn_queue.empty():
+        if timeout is not None and time.time() - start >= timeout:
+            return False
+        time.sleep(0.02)
+    thread = _turn_worker_thread
+    if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+        remaining = None if timeout is None else max(0.0, timeout - (time.time() - start))
+        thread.join(timeout=remaining)
+    return not _turn_worker_active and _turn_queue.empty()
+
+
+def _request_turn_cancel(*, clear_queue: bool) -> bool:
+    requested = False
+    with _active_turn_lock:
+        cancel = _active_turn_cancel
+        if cancel is not None and not cancel.is_set():
+            cancel.set()
+            requested = True
+    if clear_queue:
+        requested = _drain_turn_queue() or requested
+    if requested:
+        _state.turn_state = "cancelled"
+        _state.turn_activity = "cancelled"
+        _stop_spinner_thread()
+        _invalidate_prompt()
+    return requested
+
+
+def _drain_turn_queue() -> bool:
+    drained = False
+    while True:
+        try:
+            _turn_queue.get_nowait()
+        except queue.Empty:
+            return drained
+        drained = True
+        _turn_queue.task_done()
+
+
+def _set_active_turn_cancel(cancel: threading.Event) -> None:
+    global _active_turn_cancel
+    with _active_turn_lock:
+        _active_turn_cancel = cancel
+
+
+def _clear_active_turn_cancel(cancel: threading.Event) -> None:
+    global _active_turn_cancel
+    with _active_turn_lock:
+        if _active_turn_cancel is cancel:
+            _active_turn_cancel = None
+
+
+def _is_cancel_exception(exc: BaseException) -> bool:
+    return isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError))
+
+
+def _run_agent_turn_blocking(prompt: str) -> None:
     global _current_session_id
     if not _current_session_id:
         _start_agent_session_async()
@@ -522,18 +626,32 @@ def _send_agent_message(prompt: str) -> None:
     _state.turn_started_at = time.time()
     _wait_runtime_prewarm()
     _clear_status_bar()
-    show_spinner = _should_show_turn_status()
+    show_spinner = _should_show_turn_status() or _uses_prompt_toolbar()
     if show_spinner:
         _start_spinner_thread()
-    _reset_panel()
 
     event_queue: queue.Queue[Any | None] = queue.Queue()
     producer_cancel = threading.Event()
+    _set_active_turn_cancel(producer_cancel)
 
     async def _produce() -> None:
         global _current_session_id
+        iterator = None
+        pending: asyncio.Task | None = None
         try:
-            async for event in runtime.send_message(_current_session_id, prompt):
+            iterator = runtime.send_message(_current_session_id, prompt).__aiter__()
+            while not producer_cancel.is_set():
+                if pending is None:
+                    pending = asyncio.create_task(iterator.__anext__())
+                done, _ = await asyncio.wait({pending}, timeout=_SPINNER_INTERVAL_SECONDS)
+                if not done:
+                    continue
+                task = done.pop()
+                pending = None
+                try:
+                    event = task.result()
+                except StopAsyncIteration:
+                    break
                 if producer_cancel.is_set():
                     break
                 event_queue.put(event)
@@ -542,15 +660,44 @@ def _send_agent_message(prompt: str) -> None:
                 event_queue.put(AgentEvent("error", "cancelled", session_id=_current_session_id, data={"runtime_failure": True, "cancelled": True}))
         except BaseException as exc:
             if not producer_cancel.is_set():
-                event_queue.put(AgentEvent("error", str(exc), session_id=_current_session_id, data={"runtime_failure": True}))
-        event_queue.put(None)
+                cancelled = _is_cancel_exception(exc)
+                event_queue.put(AgentEvent(
+                    "error",
+                    "cancelled" if cancelled else str(exc),
+                    session_id=_current_session_id,
+                    data={"runtime_failure": True, "cancelled": True} if cancelled else {"runtime_failure": True},
+                ))
+        finally:
+            if pending is not None and not pending.done():
+                pending.cancel()
+                try:
+                    await pending
+                except BaseException:
+                    pass
+            close = getattr(iterator, "aclose", None)
+            if callable(close):
+                try:
+                    await close()
+                except BaseException:
+                    pass
+            event_queue.put(None)
 
     def _run_producer() -> None:
         try:
             asyncio.run(_produce())
+        except KeyboardInterrupt:
+            if not producer_cancel.is_set():
+                event_queue.put(AgentEvent("error", "cancelled", session_id=_current_session_id, data={"runtime_failure": True, "cancelled": True}))
+                event_queue.put(None)
         except BaseException as exc:
             if not producer_cancel.is_set():
-                event_queue.put(AgentEvent("error", str(exc), session_id=_current_session_id, data={"runtime_failure": True}))
+                cancelled = _is_cancel_exception(exc)
+                event_queue.put(AgentEvent(
+                    "error",
+                    "cancelled" if cancelled else str(exc),
+                    session_id=_current_session_id,
+                    data={"runtime_failure": True, "cancelled": True} if cancelled else {"runtime_failure": True},
+                ))
                 event_queue.put(None)
 
     producer = threading.Thread(target=_run_producer, name="velaria-agent-stream", daemon=True)
@@ -565,6 +712,19 @@ def _send_agent_message(prompt: str) -> None:
             try:
                 event = event_queue.get(timeout=_SPINNER_INTERVAL_SECONDS)
             except queue.Empty:
+                if producer_cancel.is_set():
+                    _clear_status_bar()
+                    _stop_spinner_thread()
+                    producer.join(timeout=1.0)
+                    _state.turn_state = "cancelled"
+                    _state.turn_activity = "cancelled"
+                    while not event_queue.empty():
+                        try:
+                            event_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                    _clear_active_turn_cancel(producer_cancel)
+                    return
                 if show_spinner:
                     _write_status_bar()
                 continue
@@ -587,6 +747,7 @@ def _send_agent_message(prompt: str) -> None:
                             event_queue.get_nowait()
                         except queue.Empty:
                             break
+                    _clear_active_turn_cancel(producer_cancel)
                     return
             if event_type == "done":
                 saw_done = True
@@ -607,29 +768,27 @@ def _send_agent_message(prompt: str) -> None:
                 event_queue.get_nowait()
             except queue.Empty:
                 break
+        _clear_active_turn_cancel(producer_cancel)
         return
 
     _clear_status_bar()
     _stop_spinner_thread()
     producer.join(timeout=1.0)
-    ps = get_system()
-    if ps.panels:
-        ps.render_static(header_text=_build_header_text())
-    _state.turn_state = "failed" if failed else "done"
+    _clear_active_turn_cancel(producer_cancel)
+    if producer_cancel.is_set():
+        _state.turn_state = "cancelled"
+        _state.turn_activity = "cancelled"
+        return
+    if failed:
+        _state.turn_state = "failed"
+    elif _turn_queue.empty():
+        _state.turn_state = "done"
+    else:
+        _state.turn_state = "queued"
     if failed or not saw_done:
         _print_note(_state.turn_state, _elapsed_turn())
     if runtime_failed:
         _current_session_id = None
-
-
-def _reset_panel() -> None:
-    """Clear panels and render a fresh header at the start of each turn."""
-    if not _wants_panel_render():
-        return
-    ps = get_system()
-    ps.panels = []
-    ps._has_rendered = False
-    ps.render_all(header_text=_build_header_text(), status_text="")
 
 
 def _start_spinner_thread() -> None:
@@ -643,6 +802,7 @@ def _start_spinner_thread() -> None:
         while _turn_status_stop is not None and not _turn_status_stop.wait(_SPINNER_INTERVAL_SECONDS):
             _turn_status_frame = _SPINNER_FRAMES[index % len(_SPINNER_FRAMES)]
             index += 1
+            _invalidate_prompt()
 
     _turn_status_thread = threading.Thread(
         target=_target,
@@ -672,6 +832,8 @@ _stop_turn_status = _stop_spinner_thread
 def _should_show_turn_status() -> bool:
     """Show a live status bar while the agent is running."""
     if os.environ.get("VELARIA_INTERACTIVE_NO_SPINNER"):
+        return False
+    if _uses_prompt_toolbar():
         return False
     return (
         hasattr(sys.stdout, "isatty")
@@ -714,6 +876,7 @@ def _resolve_status():
         "tool_count": tool_count,
         "session": session,
         "dataset": dataset,
+        "queued": _turn_queue.qsize(),
     }
 
 
@@ -724,23 +887,18 @@ def _status_bar_text() -> str:
     elapsed = _elapsed_turn()
     activity = _state.turn_activity or "agent"
     state_text = f"{_state.runtime_warmup}/{_state.turn_state}"
+    queue_text = f" | queue {v['queued']}" if v["queued"] else ""
     return (
         f"{frame} running {elapsed} | {v['runtime']} {v['model']} | "
         f"session {v['session']} | dataset {v['dataset']} | run {run} | "
-        f"tools {v['tool_count']} | {activity} | {state_text} "
+        f"tools {v['tool_count']}{queue_text} | {activity} | {state_text} "
     )
 
 
 def _write_status_bar() -> None:
     """Write the status bar at the current cursor position (last line). Main thread only."""
     if not _should_show_turn_status():
-        return
-    if _wants_panel_render():
-        get_system().render_all(
-            header_text=_build_header_text(),
-            status_text=_status_bar_text(),
-            status_spinner=_turn_status_frame,
-        )
+        _invalidate_prompt()
         return
     text = _compact_line(_status_bar_text(), limit=_terminal_width())
     sys.stdout.write("\r" + _style(text, "event") + "\x1b[K")
@@ -749,11 +907,77 @@ def _write_status_bar() -> None:
 
 def _clear_status_bar() -> None:
     """Clear the status bar line. Main thread only."""
-    if _wants_panel_render():
-        get_system().clear_render()
+    if _uses_prompt_toolbar():
+        _invalidate_prompt()
         return
     sys.stdout.write("\r\x1b[2K")
     sys.stdout.flush()
+
+
+def _uses_prompt_toolbar() -> bool:
+    return _prompt_session is not None and _should_use_prompt_toolkit()
+
+
+def _invalidate_prompt() -> None:
+    session = _prompt_session
+    app = getattr(session, "app", None)
+    invalidate = getattr(app, "invalidate", None)
+    if callable(invalidate):
+        try:
+            invalidate()
+        except Exception:
+            pass
+
+
+def _layout_enabled() -> bool:
+    return (
+        hasattr(sys.stdout, "isatty")
+        and sys.stdout.isatty()
+        and not os.environ.get("VELARIA_PLAIN_TRANSCRIPT")
+    )
+
+
+def _layout_width() -> int:
+    return max(48, _terminal_width())
+
+
+def _layout_rule(left: str, title: str = "", right: str = "") -> str:
+    width = _layout_width()
+    if title:
+        text = f" {title} "
+        fill = max(0, width - len(left) - len(right) - len(text))
+        return left + text + ("─" * fill) + right
+    return left + ("─" * max(0, width - len(left) - len(right))) + right
+
+
+def _layout_open_if_needed() -> None:
+    global _layout_open
+    if not _layout_enabled() or _layout_open:
+        return
+    print(_layout_rule("┌", _build_header_text(), "┐"))
+    print(_layout_content_line("Interactive agent runtime. Type /help for commands, /exit to quit."))
+    print(_layout_rule("├", "Transcript", "┤"))
+    _layout_open = True
+
+
+def _layout_content_line(text: str = "") -> str:
+    width = _layout_width()
+    content_width = max(1, width - 4)
+    clean = text.replace("\r", "").rstrip("\n")
+    if len(clean) > content_width:
+        clean = clean[: max(0, content_width - 3)] + "..."
+    return f"│ {clean.ljust(content_width)} │"
+
+
+def _layout_print(text: str = "", *, file: Any | None = None, flush: bool = False) -> None:
+    target = file or sys.stdout
+    if target is not sys.stdout or not _layout_enabled():
+        print(text, file=target, flush=flush)
+        return
+    _layout_open_if_needed()
+    lines = str(text).splitlines() or [""]
+    for line in lines:
+        print(_layout_content_line(line), flush=flush)
 
 
 def _terminal_width() -> int:
@@ -793,46 +1017,10 @@ def _render_event(event: Any) -> None:
     content = getattr(event, "content", "")
     data = getattr(event, "data", {}) or {}
     _update_state_from_event(event_type, content, data)
-
-    if not _wants_panel_render():
-        _render_event_legacy(event_type, content, data)
-        return
-
-    ps = get_system()
-
-    if event_type == "done":
-        _state.turn_state = "done"
-        ps.add_panel(make_note_panel("done", _elapsed_turn()))
-        return
-    if event_type == "error":
-        ps.add_panel(make_error_panel(content or "error", _json_dumps(data)))
-        return
-
-    if event_type == "assistant_text" and content:
-        ps.add_panel(make_assistant_panel(content))
-    elif event_type == "thinking" and content:
-        ps.add_panel(make_text_panel(
-            "thinking",
-            "\n".join(content.strip().splitlines()[:3]),
-            style=STYLE_DEFAULT,
-        ))
-    elif event_type == "tool_call":
-        return
-    elif event_type == "tool_result":
-        summary = _summarize_tool_result(content, data)
-        if summary:
-            label = _state.pending_tool_step or _format_tool_label(data) or "tool result"
-            ps.add_panel(make_tool_result_panel(label, summary))
-        _state.pending_tool_step = ""
-    elif event_type == "command" and content:
-        ps.add_panel(make_text_panel("command", content))
-    elif event_type == "file" and content:
-        ps.add_panel(make_text_panel("file", content))
-    elif not _looks_like_runtime_payload(content) and content:
-        ps.add_panel(make_assistant_panel(content))
+    _render_event_transcript(event_type, content, data)
 
 
-def _render_event_legacy(event_type: str, content: str, data: dict) -> None:
+def _render_event_transcript(event_type: str, content: str, data: dict) -> None:
     if event_type == "done":
         _state.turn_state = "done"
         _print_note("done", _elapsed_turn())
@@ -845,12 +1033,19 @@ def _render_event_legacy(event_type: str, content: str, data: dict) -> None:
     elif event_type == "thinking" and content:
         _print_event("thinking", "\n".join(content.strip().splitlines()[:3]))
     elif event_type == "tool_call":
-        return
+        label = _extract_tool_name(data) or content or "tool"
+        details = _format_tool_call_body(content, data)
+        status = _tool_status(data)
+        if status and status not in {"completed", "complete", "success"}:
+            details = _compact_line(f"{details} status={status}", limit=240) if details else f"status={status}"
+        _print_event("tool", _compact_line(f"{label} {details}", limit=240))
     elif event_type == "tool_result":
         summary = _summarize_tool_result(content, data)
         if summary:
-            label = _state.pending_tool_step or _extract_tool_name(data) or "tool"
-            _print_event("tool", _compact_line(f"{label} → {summary}", limit=240))
+            label = _state.pending_tool_step or _extract_tool_name(data)
+            if label and not summary.startswith(f"{label}:"):
+                summary = f"{label}: {summary}"
+            _print_event("result", _compact_line(summary, limit=240))
         _state.pending_tool_step = ""
     elif event_type == "command" and content:
         _print_event("command", content)
@@ -884,38 +1079,16 @@ def _extract_tool_name(data: dict[str, Any]) -> str:
         if name or namespace:
             return name or namespace
     return ""
-
-
-
-
-def _format_tool_name(data: dict) -> str:
-    name = _extract_tool_name(data)
-    return name or "tool"
-
-
-def _format_tool_label(data: dict) -> str:
-    name = _extract_tool_name(data)
-    return "result: " + name if name else "tool result"
-
-
 def _format_tool_call_body(content: str, data: dict) -> str:
     args = _tool_arguments(data)
     if isinstance(args, dict):
         pieces = []
         for k, v in list(args.items())[:8]:
             pieces.append("%s=%s" % (k, _format_tool_argument_value(v)))
-        return "  " + "\\n  ".join(pieces) if pieces else ""
+        return " ".join(pieces) if pieces else ""
     if isinstance(args, str) and args:
         return _compact_line(args, limit=240)
     return ""
-
-
-def _wants_panel_render() -> bool:
-    return (
-        hasattr(sys.stdout, "isatty")
-        and sys.stdout.isatty()
-        and not os.environ.get("VELARIA_NO_PANELS")
-    )
 
 
 def _build_header_text() -> str:
@@ -1038,7 +1211,12 @@ def _should_use_prompt_toolkit() -> bool:
 
 def _read_prompt(prompt_session: Any | None) -> str:
     if prompt_session is not None:
-        return prompt_session.prompt("› ")
+        try:
+            from prompt_toolkit.patch_stdout import patch_stdout
+        except Exception:
+            return prompt_session.prompt("› ")
+        with patch_stdout(raw=True):
+            return prompt_session.prompt("› ")
     return input(_style("› ", "prompt"))
 
 
@@ -1050,6 +1228,7 @@ def _statusline() -> Any:
     spinner = _turn_status_frame if _state.turn_state == "running" else ""
     elapsed = _elapsed_turn() if _state.turn_state == "running" else ""
     state_text = f"{_state.runtime_warmup}/{_state.turn_state}"
+    queue_text = f" | queue {v['queued']}" if v["queued"] else ""
     sep = "─" * 6 + " "
 
     if _prompt_session is not None:
@@ -1057,12 +1236,12 @@ def _statusline() -> Any:
         parts.append(("class:bottom-toolbar.text", sep))
         if spinner:
             parts.append(("class:bottom-toolbar.text bold", f"{spinner} running {elapsed} "))
-        parts.append(("class:bottom-toolbar.text", f"{v['runtime']} {v['model']} | session {session} | dataset {dataset} | run {run} | tools {v['tool_count']} | {state_text} "))
+        parts.append(("class:bottom-toolbar.text", f"{v['runtime']} {v['model']} | session {session} | dataset {dataset} | run {run} | tools {v['tool_count']}{queue_text} | {state_text} "))
         return parts
 
     if spinner:
-        return f"{sep}{spinner} running {elapsed} | {v['runtime']} {v['model']} | session {session} | dataset {dataset} | run {run} | tools {v['tool_count']} | {state_text} "
-    return f"{sep}{v['runtime']} {v['model']} | session {session} | dataset {dataset} | run {run} | tools {v['tool_count']} | {state_text} "
+        return f"{sep}{spinner} running {elapsed} | {v['runtime']} {v['model']} | session {session} | dataset {dataset} | run {run} | tools {v['tool_count']}{queue_text} | {state_text} "
+    return f"{sep}{v['runtime']} {v['model']} | session {session} | dataset {dataset} | run {run} | tools {v['tool_count']}{queue_text} | {state_text} "
 
 
 def _print_velaria_state() -> None:
@@ -1165,8 +1344,7 @@ def _artifact_schema_summary(artifact: dict[str, Any]) -> str:
 
 
 def _print_shortcuts() -> None:
-    ps = get_system()
-    ps.add_panel(make_section_panel(
+    _print_section(
         "Shortcuts",
         [
             ("Ctrl-C", "cancel current input; during a turn, interrupt the active stream"),
@@ -1175,9 +1353,9 @@ def _print_shortcuts() -> None:
             ("Esc Enter", "submit current input in prompt_toolkit mode"),
             ("Up/Down", "navigate input history"),
             ("Tab", "complete slash commands"),
+            ("/wait", "wait for queued agent messages to finish"),
         ],
-    ))
-    ps.render_static(header_text=_build_header_text())
+    )
 
 
 def _format_result_state() -> str:
@@ -1376,12 +1554,12 @@ def pathlib_basename(path: str) -> str:
 
 
 def _print_banner() -> None:
-    ps = get_system()
-    ps.add_panel(make_text_panel(
-        "Velaria Agent",
-        "Interactive agent runtime. Type /help for commands, /exit to quit.",
-    ))
-    ps.render_static(header_text=_build_header_text())
+    if _layout_enabled():
+        _layout_open_if_needed()
+        return
+    print(_bold("Velaria Agent"))
+    print(_muted("Interactive agent runtime. Type /help for commands, /exit to quit."))
+    print()
 
 
 def _print_startup_status() -> None:
@@ -1395,8 +1573,6 @@ def _print_startup_status() -> None:
         status["session"] = None
     _print_status(status, title="Session")
     _print_dataset_state(title="Velaria State")
-    if _wants_panel_render() and get_system().panels:
-        get_system().render_static(header_text=_build_header_text())
 
 
 def _print_status(status: dict[str, Any], *, title: str = "Status") -> None:
@@ -1434,55 +1610,100 @@ def _print_sessions(sessions: list[dict[str, Any]], *, current_session_id: str |
 
 
 def _print_section(title: str, rows: list[tuple[str, str]]) -> None:
-    ps = get_system()
-    ps.add_panel(make_section_panel(title, rows))
-    ps.render_static(header_text=_build_header_text())
+    if _layout_enabled():
+        _layout_print(f"{title}")
+        width = max((len(k) for k, _ in rows), default=0)
+        for key, value in rows:
+            _layout_print(f"  {key.ljust(width)}  {_wrap_value(value, width + 4)}")
+        _layout_print()
+        return
+    print(_bold(title))
+    width = max((len(k) for k, _ in rows), default=0)
+    for key, value in rows:
+        print(f"  {key.ljust(width)}  {_wrap_value(value, width + 4)}")
+    print()
 
 
 def _print_table(title: str, headers: tuple[str, ...], rows: list[tuple[str, ...]]) -> None:
-    ps = get_system()
-    ps.add_panel(make_table_panel(title, headers, rows))
-    ps.render_static(header_text=_build_header_text())
+    if _layout_enabled():
+        _layout_print(title)
+        if not rows:
+            _layout_print("  -")
+            _layout_print()
+            return
+        widths = [
+            max(len(headers[i]), *(len(row[i]) for row in rows))
+            for i in range(len(headers))
+        ]
+        _layout_print("  " + "  ".join(headers[i].ljust(widths[i]) for i in range(len(headers))))
+        for row in rows:
+            _layout_print("  " + "  ".join(row[i].ljust(widths[i]) for i in range(len(row))))
+        _layout_print()
+        return
+    print(_bold(title))
+    if not rows:
+        print("  -")
+        print()
+        return
+    widths = [
+        max(len(headers[i]), *(len(row[i]) for row in rows))
+        for i in range(len(headers))
+    ]
+    print("  " + "  ".join(headers[i].ljust(widths[i]) for i in range(len(headers))))
+    for row in rows:
+        print("  " + "  ".join(row[i].ljust(widths[i]) for i in range(len(row))))
+    print()
 
 
 def _print_note(label: str, message: str, *, level: str = "info") -> None:
-    if _wants_panel_render():
-        ps = get_system()
-        ps.add_panel(make_note_panel(label, message, level=level))
-    else:
-        print(f"{_style(label.ljust(8), level)} {message}", flush=True)
+    text = f"{label.ljust(8)} {message}"
+    if _layout_enabled():
+        _layout_print(text, flush=True)
+        return
+    print(f"{_style(label.ljust(8), level)} {message}", flush=True)
 
 
 def _print_event(label: str, message: str) -> None:
-    if _wants_panel_render():
-        ps = get_system()
-        ps.add_panel(make_text_panel(label, message))
-    else:
-        print(f"{_style(label.ljust(12), 'event')} {_wrap_value(message, 13)}", flush=True)
+    text = f"{label.ljust(12)} {_wrap_value(message, 13)}"
+    if _layout_enabled():
+        _layout_print(text, flush=True)
+        return
+    print(f"{_style(label.ljust(12), 'event')} {_wrap_value(message, 13)}", flush=True)
 
 
 def _print_assistant_text(message: str) -> None:
-    if _wants_panel_render():
-        ps = get_system()
-        ps.add_panel(make_assistant_panel(message))
+    if _layout_enabled():
+        _layout_open_if_needed()
+        if _should_render_markdown() and _print_markdown(message):
+            return
+        _layout_print(message, flush=True)
         return
     if not _should_render_markdown():
         print(message, flush=True)
         return
+    if _print_markdown(message):
+        return
+    print(message, flush=True)
+
+
+def _print_markdown(message: str) -> bool:
     try:
         from rich.console import Console
         from rich.markdown import Markdown
     except Exception:
-        print(message, flush=True)
-        return
+        return False
+    color_enabled = _supports_color()
     console = Console(
         file=sys.stdout,
-        force_terminal=_supports_color(),
+        force_terminal=color_enabled,
+        no_color=not color_enabled,
         soft_wrap=True,
         highlight=False,
+        width=_terminal_width(),
     )
     console.print(Markdown(message))
     sys.stdout.flush()
+    return True
 
 
 def _should_render_markdown() -> bool:

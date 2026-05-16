@@ -17,6 +17,13 @@ from typing import Any
 from velaria.cli._common import _json_dumps
 from velaria.ai_runtime.agent import AgentEvent
 
+
+@dataclass(frozen=True)
+class _TurnRequest:
+    prompt: str
+    session_id: str | None
+
+
 _current_session_id: str | None = None
 _runtime: Any | None = None
 _runtime_override: str | None = None
@@ -28,7 +35,7 @@ _session_start_error: str = ""
 _trace_start = time.perf_counter()
 _turn_status_thread: threading.Thread | None = None
 _turn_status_stop: threading.Event | None = None
-_turn_queue: queue.Queue[str] = queue.Queue()
+_turn_queue: queue.Queue[_TurnRequest] = queue.Queue()
 _turn_worker_thread: threading.Thread | None = None
 _turn_worker_lock = threading.Lock()
 _turn_worker_active: bool = False
@@ -164,7 +171,7 @@ def _run_interactive_loop(argv: list[str] | None = None) -> int:
         if _try_local_fast_response(command):
             continue
         try:
-            _send_agent_message(command, wait=False)
+            _send_agent_message(command, wait=_prompt_session is None)
         except KeyboardInterrupt:
             _stop_spinner_thread()
             _state.turn_state = "cancelled"
@@ -504,7 +511,7 @@ def _safe_runtime():
 
 
 def _send_agent_message(prompt: str, *, wait: bool = True) -> None:
-    _turn_queue.put(prompt)
+    _turn_queue.put(_TurnRequest(prompt=prompt, session_id=_current_session_id))
     queued = _turn_queue.qsize()
     if _turn_worker_active:
         _state.turn_state = "queued"
@@ -533,7 +540,7 @@ def _turn_worker_loop() -> None:
     global _turn_worker_thread, _turn_worker_active
     while True:
         try:
-            prompt = _turn_queue.get(timeout=0.2)
+            request = _turn_queue.get(timeout=0.2)
         except queue.Empty:
             with _turn_worker_lock:
                 if _turn_queue.empty():
@@ -542,7 +549,7 @@ def _turn_worker_loop() -> None:
             continue
         _turn_worker_active = True
         try:
-            _run_agent_turn_blocking(prompt)
+            _run_agent_turn_blocking(request.prompt, session_id=request.session_id)
         finally:
             _turn_worker_active = False
             _turn_queue.task_done()
@@ -609,12 +616,15 @@ def _is_cancel_exception(exc: BaseException) -> bool:
     return isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError))
 
 
-def _run_agent_turn_blocking(prompt: str) -> None:
+def _run_agent_turn_blocking(prompt: str, *, session_id: str | None = None) -> None:
     global _current_session_id
-    if not _current_session_id:
+    target_session_id = session_id
+    if target_session_id is None and not _current_session_id:
         _start_agent_session_async()
         _wait_agent_session_start(timeout=None)
-    if not _current_session_id:
+    if target_session_id is None:
+        target_session_id = _current_session_id
+    if not target_session_id:
         _print_note("session", "no active session", level="warn")
         return
     runtime = _safe_runtime()
@@ -639,7 +649,7 @@ def _run_agent_turn_blocking(prompt: str) -> None:
         iterator = None
         pending: asyncio.Task | None = None
         try:
-            iterator = runtime.send_message(_current_session_id, prompt).__aiter__()
+            iterator = runtime.send_message(target_session_id, prompt).__aiter__()
             while not producer_cancel.is_set():
                 if pending is None:
                     pending = asyncio.create_task(iterator.__anext__())
@@ -657,23 +667,29 @@ def _run_agent_turn_blocking(prompt: str) -> None:
                 event_queue.put(event)
         except KeyboardInterrupt:
             if not producer_cancel.is_set():
-                event_queue.put(AgentEvent("error", "cancelled", session_id=_current_session_id, data={"runtime_failure": True, "cancelled": True}))
+                event_queue.put(AgentEvent("error", "cancelled", session_id=target_session_id, data={"runtime_failure": True, "cancelled": True}))
         except BaseException as exc:
             if not producer_cancel.is_set():
                 cancelled = _is_cancel_exception(exc)
                 event_queue.put(AgentEvent(
                     "error",
                     "cancelled" if cancelled else str(exc),
-                    session_id=_current_session_id,
+                    session_id=target_session_id,
                     data={"runtime_failure": True, "cancelled": True} if cancelled else {"runtime_failure": True},
                 ))
         finally:
-            if pending is not None and not pending.done():
-                pending.cancel()
-                try:
-                    await pending
-                except BaseException:
-                    pass
+            if pending is not None:
+                if not pending.done():
+                    pending.cancel()
+                    try:
+                        await pending
+                    except BaseException:
+                        pass
+                else:
+                    try:
+                        pending.exception()
+                    except BaseException:
+                        pass
             close = getattr(iterator, "aclose", None)
             if callable(close):
                 try:
@@ -687,7 +703,7 @@ def _run_agent_turn_blocking(prompt: str) -> None:
             asyncio.run(_produce())
         except KeyboardInterrupt:
             if not producer_cancel.is_set():
-                event_queue.put(AgentEvent("error", "cancelled", session_id=_current_session_id, data={"runtime_failure": True, "cancelled": True}))
+                event_queue.put(AgentEvent("error", "cancelled", session_id=target_session_id, data={"runtime_failure": True, "cancelled": True}))
                 event_queue.put(None)
         except BaseException as exc:
             if not producer_cancel.is_set():
@@ -695,7 +711,7 @@ def _run_agent_turn_blocking(prompt: str) -> None:
                 event_queue.put(AgentEvent(
                     "error",
                     "cancelled" if cancelled else str(exc),
-                    session_id=_current_session_id,
+                    session_id=target_session_id,
                     data={"runtime_failure": True, "cancelled": True} if cancelled else {"runtime_failure": True},
                 ))
                 event_queue.put(None)
@@ -787,7 +803,7 @@ def _run_agent_turn_blocking(prompt: str) -> None:
         _state.turn_state = "queued"
     if failed or not saw_done:
         _print_note(_state.turn_state, _elapsed_turn())
-    if runtime_failed:
+    if runtime_failed and target_session_id == _current_session_id:
         _current_session_id = None
 
 
@@ -1674,8 +1690,11 @@ def _print_event(label: str, message: str) -> None:
 def _print_assistant_text(message: str) -> None:
     if _layout_enabled():
         _layout_open_if_needed()
-        if _should_render_markdown() and _print_markdown(message):
-            return
+        if _should_render_markdown():
+            rendered = _format_markdown(message)
+            if rendered is not None:
+                _layout_print(rendered, flush=True)
+                return
         _layout_print(message, flush=True)
         return
     if not _should_render_markdown():
@@ -1686,23 +1705,32 @@ def _print_assistant_text(message: str) -> None:
     print(message, flush=True)
 
 
-def _print_markdown(message: str) -> bool:
+def _format_markdown(message: str) -> str | None:
     try:
         from rich.console import Console
         from rich.markdown import Markdown
     except Exception:
-        return False
+        return None
     color_enabled = _supports_color()
+    output = io.StringIO()
     console = Console(
-        file=sys.stdout,
+        file=output,
         force_terminal=color_enabled,
+        color_system="truecolor" if color_enabled else None,
         no_color=not color_enabled,
         soft_wrap=True,
         highlight=False,
         width=_terminal_width(),
     )
     console.print(Markdown(message))
-    sys.stdout.flush()
+    return output.getvalue().rstrip("\n")
+
+
+def _print_markdown(message: str) -> bool:
+    rendered = _format_markdown(message)
+    if rendered is None:
+        return False
+    print(rendered, flush=True)
     return True
 
 

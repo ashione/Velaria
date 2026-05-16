@@ -929,7 +929,7 @@ class PythonCliContractTest(unittest.TestCase):
         release = threading.Event()
         processed = []
 
-        def fake_turn(prompt):
+        def fake_turn(prompt, **_kwargs):
             started.set()
             release.wait(timeout=2.0)
             processed.append(prompt)
@@ -954,6 +954,45 @@ class PythonCliContractTest(unittest.TestCase):
         finally:
             release.set()
             interactive._wait_turn_worker(timeout=1.0)
+            interactive._state = interactive.VelariaInteractiveState()
+
+    def test_queued_message_keeps_session_active_at_enqueue_time(self):
+        interactive = importlib.import_module("velaria.cli.interactive")
+
+        first_started = threading.Event()
+        release = threading.Event()
+        processed = []
+
+        def fake_turn(prompt, **kwargs):
+            processed.append((kwargs.get("session_id"), prompt))
+            if prompt == "first":
+                first_started.set()
+                release.wait(timeout=2.0)
+            interactive._state.turn_state = "done"
+
+        interactive._state = interactive.VelariaInteractiveState()
+        interactive._current_session_id = "agent-session-1"
+        stdout = io.StringIO()
+        try:
+            with mock.patch.object(interactive, "_run_agent_turn_blocking", side_effect=fake_turn):
+                with redirect_stdout(stdout):
+                    interactive._send_agent_message("first", wait=False)
+                    self.assertTrue(first_started.wait(timeout=1.0))
+                    interactive._send_agent_message("second", wait=False)
+                    interactive._current_session_id = "agent-session-2"
+                    release.set()
+                    self.assertTrue(interactive._wait_turn_worker(timeout=2.0))
+            self.assertEqual(
+                processed,
+                [
+                    ("agent-session-1", "first"),
+                    ("agent-session-1", "second"),
+                ],
+            )
+        finally:
+            release.set()
+            interactive._wait_turn_worker(timeout=1.0)
+            interactive._current_session_id = None
             interactive._state = interactive.VelariaInteractiveState()
 
     def test_interactive_running_turn_can_be_cancelled_from_prompt_thread(self):

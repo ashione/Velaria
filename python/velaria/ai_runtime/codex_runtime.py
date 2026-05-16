@@ -11,6 +11,7 @@ import shutil
 import sys
 import threading
 import time
+import tomllib
 import contextlib
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
@@ -30,6 +31,7 @@ from .session_registry import SessionRegistry
 
 _STREAM_DONE = object()
 _RESUME_TIMEOUT_SECONDS = 8.0
+_DEFAULT_CODEX_MODEL = "gpt-5.4-mini"
 
 
 @dataclass
@@ -44,7 +46,7 @@ class CodexRuntime:
     def __init__(
         self,
         provider: str = "openai",
-        model: str = "gpt-5.4-mini",
+        model: str = "",
         model_source: str = "default",
         reasoning_effort: str = "none",
         network_access: bool = True,
@@ -76,8 +78,11 @@ class CodexRuntime:
         self._auth_mode = auth_mode
         from codex_app_server_sdk import CodexClient, ThreadConfig  # noqa: F401 -- validated at init
 
-        self.model = model
-        self.model_source = model_source
+        self.model, self.model_source = _resolve_codex_model(
+            model,
+            model_source,
+            reuse_local_config=reuse_local_config,
+        )
         self.reasoning_effort = reasoning_effort or "none"
         self.network_access = coerce_bool(network_access, True)
         self.registry = SessionRegistry(self._workspace / "sessions.sqlite")
@@ -769,6 +774,34 @@ def _local_codex_home() -> pathlib.Path:
     if configured:
         return pathlib.Path(configured).expanduser()
     return pathlib.Path.home() / ".codex"
+
+
+def _resolve_codex_model(
+    model: str,
+    model_source: str,
+    *,
+    reuse_local_config: bool,
+) -> tuple[str, str]:
+    configured_model = str(model or "").strip()
+    if configured_model:
+        return configured_model, model_source or "config"
+    if reuse_local_config:
+        local_model = _local_codex_config_model()
+        if local_model:
+            return local_model, "localCodexConfig"
+    return _DEFAULT_CODEX_MODEL, "default"
+
+
+def _local_codex_config_model() -> str:
+    config_path = _local_codex_home() / "config.toml"
+    if not config_path.exists():
+        return ""
+    try:
+        parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    model = parsed.get("model")
+    return str(model).strip() if isinstance(model, str) else ""
 
 
 def _write_minimal_codex_config(

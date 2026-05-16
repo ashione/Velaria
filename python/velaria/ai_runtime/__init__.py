@@ -125,6 +125,12 @@ def _resolve_runtime_model(
     runtime_type: str,
     config_file_runtime: str,
 ) -> tuple[str, str]:
+    """Resolve only Velaria-managed model overrides.
+
+    Codex intentionally returns an empty model when neither agentCodexModel nor
+    the active agentModel is configured; CodexRuntime then inherits the local
+    Codex config model before falling back to its hard default.
+    """
     model = str(config.get("model") or "")
     if runtime_type == "claude":
         claude_model = str(config.get("claude_model") or "")
@@ -139,7 +145,7 @@ def _resolve_runtime_model(
             return codex_model, "agentCodexModel"
         if config_file_runtime == "codex" and model:
             return model, "agentModel"
-        return "gpt-5.4-mini", "default"
+        return "", "localCodexConfig"
     return model, "config"
 
 def _bool_config(config: dict[str, Any], key: str, default: bool) -> bool:

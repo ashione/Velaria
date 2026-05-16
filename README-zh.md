@@ -247,6 +247,30 @@ uv run --project python python python/velaria_cli.py file-sql \
   --query "SELECT * FROM input_table LIMIT 5"
 ```
 
+交互式 Agent CLI：
+
+```bash
+uv run --project python python python/velaria_cli.py -i
+```
+
+在交互模式中，普通文本会进入 active agent thread。Slash 命令负责会话控制，
+`:<command>` 可以在同一个终端内执行普通 Velaria CLI 命令。
+
+```text
+读取 data/sales.csv，按 region 汇总 amount，并保存 run
+/status
+:run list --limit 5
+/exit
+```
+
+非交互 SQL 生成仍可通过历史兼容命令使用：
+
+```bash
+uv run --project python python python/velaria_cli.py ai generate-sql \
+  --prompt "top 5 by score" \
+  --schema "name,score,region"
+```
+
 真实入口：
 
 ```bash

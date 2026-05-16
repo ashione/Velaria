@@ -247,6 +247,32 @@ uv run --project python python python/velaria_cli.py file-sql \
   --query "SELECT * FROM input_table LIMIT 5"
 ```
 
+Interactive Agent CLI:
+
+```bash
+uv run --project python python python/velaria_cli.py -i
+```
+
+Inside interactive mode, plain text is sent to the active agent thread. Slash
+commands control the session, and `:<command>` runs a normal Velaria CLI command
+from inside the same terminal.
+
+```text
+Read data/sales.csv, group amount by region, and save the run
+/status
+:run list --limit 5
+/exit
+```
+
+Non-interactive SQL generation remains available through the compatibility
+command:
+
+```bash
+uv run --project python python python/velaria_cli.py ai generate-sql \
+  --prompt "top 5 by score" \
+  --schema "name,score,region"
+```
+
 Real entry points:
 
 ```bash

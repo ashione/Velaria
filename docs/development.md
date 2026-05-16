@@ -106,7 +106,6 @@ cat > ~/.velaria/config.json << 'EOF'
   "agentProvider": "openai",
   "agentAuthMode": "local",
   "agentRuntime": "codex",
-  "agentModel": "gpt-5.4-mini",
   "agentReasoningEffort": "none",
   "agentRuntimeWorkspace": "~/.velaria/ai-runtime",
   "agentReuseLocalConfig": true,
@@ -149,7 +148,9 @@ both defaulting to `true`. `agentProxy` sets both `http_proxy` and
 `agentAllProxy`, and `agentNoProxy` for separate values. Shell proxy variables are
 also inherited, and Velaria keeps localhost bypassed for local MCP/data URLs.
 
-Model defaults: Codex = `gpt-5.4-mini`, Claude = `claude-sonnet-4-20250514`.
+Model defaults: Codex reuses the local Codex config model and falls back to
+`gpt-5.4-mini`; set `agentCodexModel` only when Velaria should override the
+local Codex model. Claude defaults to `claude-sonnet-4-20250514`.
 Both runtimes support `agentReasoningEffort` (default `none`) and API key auth
 mode (`agentAuthMode: "api_key"` with `agentApiKey`/`agentBaseUrl`).
 

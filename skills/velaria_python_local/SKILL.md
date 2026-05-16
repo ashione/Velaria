@@ -416,7 +416,6 @@ uv run --project python python \\
   "agentRuntime": "codex",
   "agentAuthMode": "local",
   "agentProvider": "openai",
-  "agentModel": "gpt-5.4-mini",
   "agentReasoningEffort": "none",
   "agentRuntimeWorkspace": "~/.velaria/ai-runtime",
   "agentCodexNetworkAccess": true
@@ -436,7 +435,9 @@ uv run --project python python \\
 }
 ```
 
-未显式设置 `agentModel` 时，Codex 默认 `gpt-5.4-mini`，Claude 默认 `claude-sonnet-4-20250514`。
+Codex 默认复用本地 Codex config 中的模型，并在没有本地模型时回退到 `gpt-5.4-mini`；
+只有需要让 Velaria 覆盖本地 Codex 模型时才设置 `agentCodexModel`。
+Claude 默认 `claude-sonnet-4-20250514`。
 `agentReasoningEffort` 默认是 `none`，两个 runtime 均支持。
 `agentRuntimeWorkspace` 是 runtime 工作目录，用于保存 agent thread、session 与工具日志。
 `agentAuthMode: "local"` 复用本地 Codex 或 Claude 登录；需要显式凭证时改为

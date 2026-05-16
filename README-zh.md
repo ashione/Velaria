@@ -157,7 +157,7 @@ Arrow / CSV / Python ingress
 - file-source SQL pushdown 的绝对耗时相对 2026-04-26 本地 baseline 仍有测量退化；当前 PR 先保持正确性与诊断可见，下一阶段聚焦 typed source pushdown 恢复性能
 - Electron 桌面 app 仍然只是本地原型，还不是稳定公开产品面
 - Agent runtime 支持 Codex（默认）和 Claude（需可选依赖 `claude-agent-sdk`）
-- Codex runtime 默认使用 `gpt-5.4-mini`；Claude runtime 默认使用 `claude-sonnet-4-20250514`
+- Codex runtime 默认复用本地 Codex config 中的模型，并在没有本地模型时回退到 `gpt-5.4-mini`；Claude runtime 默认使用 `claude-sonnet-4-20250514`
 - 两个 runtime 均默认 reasoning effort 为 `none`，并继承标准代理环境变量
 - 网络访问分别由 `agentCodexNetworkAccess`（Codex）和 `agentNetworkAccess`（Claude）控制
 - 仓库不宣称已完成 distributed runtime

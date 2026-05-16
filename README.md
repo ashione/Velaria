@@ -157,7 +157,7 @@ Current constraints:
 - file-source SQL pushdown still has measured absolute-time regression versus the April 26, 2026 local baseline; the current PR keeps correctness and diagnostics explicit while the next optimization phase targets typed source pushdown
 - the Electron desktop app is still a local prototype, not a stable product surface
 - Agent runtime supports both Codex (default) and Claude via optional `claude-agent-sdk`
-- Codex runtime defaults to `gpt-5.4-mini`; Claude runtime defaults to `claude-sonnet-4-20250514`
+- Codex runtime reuses the local Codex config model by default and falls back to `gpt-5.4-mini`; Claude runtime defaults to `claude-sonnet-4-20250514`
 - Both runtimes support reasoning effort `none` by default and inherit standard proxy environment variables
 - Network access is controlled via `agentCodexNetworkAccess` (Codex) or `agentNetworkAccess` (Claude)
 - the repository does not claim a completed distributed runtime

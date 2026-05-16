@@ -157,7 +157,7 @@ Arrow / CSV / Python ingress
 - file-source SQL pushdown 的绝对耗时相对 2026-04-26 本地 baseline 仍有测量退化；当前 PR 先保持正确性与诊断可见，下一阶段聚焦 typed source pushdown 恢复性能
 - Electron 桌面 app 仍然只是本地原型，还不是稳定公开产品面
 - Agent runtime 支持 Codex（默认）和 Claude（需可选依赖 `claude-agent-sdk`）
-- Codex runtime 默认使用 `gpt-5.4-mini`；Claude runtime 默认使用 `claude-sonnet-4-20250514`
+- Codex runtime 默认复用本地 Codex config 中的模型，并在没有本地模型时回退到 `gpt-5.4-mini`；Claude runtime 默认使用 `claude-sonnet-4-20250514`
 - 两个 runtime 均默认 reasoning effort 为 `none`，并继承标准代理环境变量
 - 网络访问分别由 `agentCodexNetworkAccess`（Codex）和 `agentNetworkAccess`（Claude）控制
 - 仓库不宣称已完成 distributed runtime
@@ -245,6 +245,30 @@ uv run --project python python python/velaria_cli.py file-sql \
   --regex-pattern '^uid=(\\d+) action=\"([^\"]+)\" latency=(\\d+) ok=(true|false) note=(.+)$' \
   --mappings 'uid:1,action:2,latency:3,ok:4,note:5' \
   --query "SELECT * FROM input_table LIMIT 5"
+```
+
+交互式 Agent CLI：
+
+```bash
+uv run --project python python python/velaria_cli.py -i
+```
+
+在交互模式中，普通文本会进入 active agent thread。Slash 命令负责会话控制，
+`:<command>` 可以在同一个终端内执行普通 Velaria CLI 命令。
+
+```text
+读取 data/sales.csv，按 region 汇总 amount，并保存 run
+/status
+:run list --limit 5
+/exit
+```
+
+非交互 SQL 生成仍可通过历史兼容命令使用：
+
+```bash
+uv run --project python python python/velaria_cli.py ai generate-sql \
+  --prompt "top 5 by score" \
+  --schema "name,score,region"
 ```
 
 真实入口：

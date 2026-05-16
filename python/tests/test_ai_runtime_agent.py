@@ -632,16 +632,17 @@ class AiRuntimeAgentTest(unittest.TestCase):
             skill_file.parent.mkdir(parents=True)
             skill_file.write_text("# Configured Velaria Skill\n", encoding="utf-8")
             try:
-                runtime = CodexRuntime(
-                    runtime_workspace=tmp,
-                    skill_dir=str(skill_dir),
-                    cwd=str(pathlib.Path.cwd()),
-                    proxy_env={
-                        "http_proxy": "http://127.0.0.1:7897",
-                        "https_proxy": "http://127.0.0.1:7897",
-                        "all_proxy": "socks5://127.0.0.1:7897",
-                    },
-                )
+                with mock.patch.dict(os.environ, {"CODEX_HOME": str(local_codex_home)}):
+                    runtime = CodexRuntime(
+                        runtime_workspace=tmp,
+                        skill_dir=str(skill_dir),
+                        cwd=str(pathlib.Path.cwd()),
+                        proxy_env={
+                            "http_proxy": "http://127.0.0.1:7897",
+                            "https_proxy": "http://127.0.0.1:7897",
+                            "all_proxy": "socks5://127.0.0.1:7897",
+                        },
+                    )
             except ImportError as exc:
                 raise unittest.SkipTest("codex-app-server-sdk is not installed") from exc
             runtime._client_cls = FakeClient
@@ -924,15 +925,19 @@ class AiRuntimeAgentTest(unittest.TestCase):
         from velaria.ai_runtime import create_runtime
 
         with tempfile.TemporaryDirectory(prefix="velaria-codex-runtime-factory-model-") as tmp:
+            local_codex_home = pathlib.Path(tmp) / "local-codex"
+            local_codex_home.mkdir()
+            (local_codex_home / "config.toml").write_text("", encoding="utf-8")
             try:
-                runtime = create_runtime(
-                    {
-                        "runtime": "codex",
-                        "configured_runtime": "claude",
-                        "model": "claude-sonnet-4-20250514",
-                        "runtime_workspace": tmp,
-                    }
-                )
+                with mock.patch.dict(os.environ, {"CODEX_HOME": str(local_codex_home)}):
+                    runtime = create_runtime(
+                        {
+                            "runtime": "codex",
+                            "configured_runtime": "claude",
+                            "model": "claude-sonnet-4-20250514",
+                            "runtime_workspace": tmp,
+                        }
+                    )
             except ImportError as exc:
                 raise unittest.SkipTest("codex-app-server-sdk is not installed") from exc
             try:
@@ -941,24 +946,53 @@ class AiRuntimeAgentTest(unittest.TestCase):
             finally:
                 runtime.shutdown()
 
-    def test_create_runtime_codex_uses_agent_model_when_configured_runtime_is_codex(self):
+    def test_create_runtime_codex_defaults_to_local_codex_config_model(self):
         from velaria.ai_runtime import create_runtime
 
-        with tempfile.TemporaryDirectory(prefix="velaria-codex-runtime-factory-agent-model-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="velaria-codex-runtime-local-model-") as tmp:
+            local_codex_home = pathlib.Path(tmp) / "local-codex"
+            local_codex_home.mkdir()
+            (local_codex_home / "config.toml").write_text('model = "gpt-local-codex"\n', encoding="utf-8")
             try:
-                runtime = create_runtime(
-                    {
-                        "runtime": "codex",
-                        "configured_runtime": "codex",
-                        "model": "gpt-shared",
-                        "runtime_workspace": tmp,
-                    }
-                )
+                with mock.patch.dict(os.environ, {"CODEX_HOME": str(local_codex_home)}):
+                    runtime = create_runtime(
+                        {
+                            "runtime": "codex",
+                            "configured_runtime": "claude",
+                            "model": "claude-sonnet-4-20250514",
+                            "runtime_workspace": tmp,
+                        }
+                    )
             except ImportError as exc:
                 raise unittest.SkipTest("codex-app-server-sdk is not installed") from exc
             try:
-                self.assertEqual(runtime.model, "gpt-shared")
-                self.assertEqual(runtime.model_source, "agentModel")
+                self.assertEqual(runtime.model, "gpt-local-codex")
+                self.assertEqual(runtime.model_source, "localCodexConfig")
+            finally:
+                runtime.shutdown()
+
+    def test_create_runtime_codex_prefers_local_config_over_agent_model(self):
+        from velaria.ai_runtime import create_runtime
+
+        with tempfile.TemporaryDirectory(prefix="velaria-codex-runtime-factory-agent-model-") as tmp:
+            local_codex_home = pathlib.Path(tmp) / "local-codex"
+            local_codex_home.mkdir()
+            (local_codex_home / "config.toml").write_text('model = "gpt-local-codex"\n', encoding="utf-8")
+            try:
+                with mock.patch.dict(os.environ, {"CODEX_HOME": str(local_codex_home)}):
+                    runtime = create_runtime(
+                        {
+                            "runtime": "codex",
+                            "configured_runtime": "codex",
+                            "model": "gpt-shared",
+                            "runtime_workspace": tmp,
+                        }
+                    )
+            except ImportError as exc:
+                raise unittest.SkipTest("codex-app-server-sdk is not installed") from exc
+            try:
+                self.assertEqual(runtime.model, "gpt-local-codex")
+                self.assertEqual(runtime.model_source, "localCodexConfig")
             finally:
                 runtime.shutdown()
 

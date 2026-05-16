@@ -105,7 +105,6 @@ cat > ~/.velaria/config.json << 'EOF'
   "agentProvider": "openai",
   "agentAuthMode": "local",
   "agentRuntime": "codex",
-  "agentModel": "gpt-5.4-mini",
   "agentReasoningEffort": "none",
   "agentRuntimeWorkspace": "~/.velaria/ai-runtime",
   "agentReuseLocalConfig": true,
@@ -147,7 +146,9 @@ thread、生成配置以及 MCP/function 日志；如果省略，Velaria 会使�
 `agentHttpsProxy`、`agentAllProxy` 和 `agentNoProxy`。Shell 里的代理变量也会被继承，
 Velaria 会默认保留 localhost 绕过，以免影响本地 MCP/data URL。
 
-模型默认值：Codex = `gpt-5.4-mini`，Claude = `claude-sonnet-4-20250514`。
+模型默认值：Codex 默认复用本地 Codex config 中的模型，并在没有本地模型时回退到
+`gpt-5.4-mini`；只有需要让 Velaria 覆盖本地 Codex 模型时才设置 `agentCodexModel`。
+Claude 默认使用 `claude-sonnet-4-20250514`。
 两个 runtime 均支持 `agentReasoningEffort`（默认 `none`）和 API Key 认证模式
 （`agentAuthMode: "api_key"` 配合 `agentApiKey`/`agentBaseUrl`）。
 

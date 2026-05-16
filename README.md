@@ -157,7 +157,7 @@ Current constraints:
 - file-source SQL pushdown still has measured absolute-time regression versus the April 26, 2026 local baseline; the current PR keeps correctness and diagnostics explicit while the next optimization phase targets typed source pushdown
 - the Electron desktop app is still a local prototype, not a stable product surface
 - Agent runtime supports both Codex (default) and Claude via optional `claude-agent-sdk`
-- Codex runtime defaults to `gpt-5.4-mini`; Claude runtime defaults to `claude-sonnet-4-20250514`
+- Codex runtime reuses the local Codex config model by default and falls back to `gpt-5.4-mini`; Claude runtime defaults to `claude-sonnet-4-20250514`
 - Both runtimes support reasoning effort `none` by default and inherit standard proxy environment variables
 - Network access is controlled via `agentCodexNetworkAccess` (Codex) or `agentNetworkAccess` (Claude)
 - the repository does not claim a completed distributed runtime
@@ -245,6 +245,32 @@ uv run --project python python python/velaria_cli.py file-sql \
   --regex-pattern '^uid=(\\d+) action=\"([^\"]+)\" latency=(\\d+) ok=(true|false) note=(.+)$' \
   --mappings 'uid:1,action:2,latency:3,ok:4,note:5' \
   --query "SELECT * FROM input_table LIMIT 5"
+```
+
+Interactive Agent CLI:
+
+```bash
+uv run --project python python python/velaria_cli.py -i
+```
+
+Inside interactive mode, plain text is sent to the active agent thread. Slash
+commands control the session, and `:<command>` runs a normal Velaria CLI command
+from inside the same terminal.
+
+```text
+Read data/sales.csv, group amount by region, and save the run
+/status
+:run list --limit 5
+/exit
+```
+
+Non-interactive SQL generation remains available through the compatibility
+command:
+
+```bash
+uv run --project python python python/velaria_cli.py ai generate-sql \
+  --prompt "top 5 by score" \
+  --schema "name,score,region"
 ```
 
 Real entry points:

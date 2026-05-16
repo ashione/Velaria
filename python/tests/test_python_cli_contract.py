@@ -720,7 +720,8 @@ class PythonCliContractTest(unittest.TestCase):
             output = stdout.getvalue()
             self.assertIn("┌ Velaria Agent", output)
             self.assertIn("├ Transcript", output)
-            self.assertIn("│ thinking", output)
+            self.assertIn("thinking", output)
+            self.assertIn("checking available datasets", output)
         finally:
             interactive._layout_open = False
 
@@ -891,6 +892,54 @@ class PythonCliContractTest(unittest.TestCase):
             self.assertIn("result", lines[1])
             self.assertIn("velaria_read", lines[1])
             self.assertIn("10", lines[1])
+        finally:
+            interactive._state = interactive.VelariaInteractiveState()
+
+    def test_tty_event_labels_use_distinct_colors(self):
+        interactive = importlib.import_module("velaria.cli.interactive")
+
+        stdout = _FakeTty()
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch("sys.stdout", stdout):
+                interactive._print_event("thinking", "checking dataset")
+                interactive._print_event("tool", "bash cmd=\"git status --short\"")
+                interactive._print_event("result", "ok")
+        output = stdout.getvalue()
+        self.assertIn("\x1b[36mthinking", output)
+        self.assertIn("\x1b[34mtool", output)
+        self.assertIn("\x1b[32mresult", output)
+
+    def test_bash_tool_call_renders_compact_arguments(self):
+        interactive = importlib.import_module("velaria.cli.interactive")
+        from velaria.ai_runtime.agent import AgentEvent
+
+        stdout = io.StringIO()
+        try:
+            interactive._state = interactive.VelariaInteractiveState()
+            with redirect_stdout(stdout):
+                interactive._render_event(
+                    AgentEvent(
+                        "tool_call",
+                        "",
+                        session_id="agent-session-1",
+                        data={
+                            "tool_name": "bash",
+                            "arguments": {
+                                "cmd": "git status --short --branch",
+                                "cwd": "/tmp/project",
+                                "yield_time_ms": 1000,
+                                "max_output_tokens": 4000,
+                            },
+                        },
+                    )
+                )
+            output = stdout.getvalue()
+            self.assertIn("tool", output)
+            self.assertIn("bash", output)
+            self.assertIn('cmd="git status --short --branch"', output)
+            self.assertIn("cwd=/tmp/project", output)
+            self.assertNotIn("yield_time_ms", output)
+            self.assertNotIn("max_output_tokens", output)
         finally:
             interactive._state = interactive.VelariaInteractiveState()
 

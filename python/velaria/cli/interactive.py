@@ -7,6 +7,7 @@ import queue
 import io
 import json
 import os
+import re
 import shlex
 import sys
 import threading
@@ -16,6 +17,8 @@ from typing import Any
 
 from velaria.cli._common import _json_dumps
 from velaria.ai_runtime.agent import AgentEvent
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 @dataclass(frozen=True)
@@ -980,9 +983,10 @@ def _layout_content_line(text: str = "") -> str:
     width = _layout_width()
     content_width = max(1, width - 4)
     clean = text.replace("\r", "").rstrip("\n")
-    if len(clean) > content_width:
-        clean = clean[: max(0, content_width - 3)] + "..."
-    return f"│ {clean.ljust(content_width)} │"
+    if _visible_len(clean) > content_width:
+        clean = _truncate_visible(clean, max(0, content_width - 3)) + "..."
+    padding = " " * max(0, content_width - _visible_len(clean))
+    return f"│ {clean}{padding} │"
 
 
 def _layout_print(text: str = "", *, file: Any | None = None, flush: bool = False) -> None:
@@ -1050,7 +1054,7 @@ def _render_event_transcript(event_type: str, content: str, data: dict) -> None:
         _print_event("thinking", "\n".join(content.strip().splitlines()[:3]))
     elif event_type == "tool_call":
         label = _extract_tool_name(data) or content or "tool"
-        details = _format_tool_call_body(content, data)
+        details = _format_tool_call_body(label, content, data)
         status = _tool_status(data)
         if status and status not in {"completed", "complete", "success"}:
             details = _compact_line(f"{details} status={status}", limit=240) if details else f"status={status}"
@@ -1095,8 +1099,12 @@ def _extract_tool_name(data: dict[str, Any]) -> str:
         if name or namespace:
             return name or namespace
     return ""
-def _format_tool_call_body(content: str, data: dict) -> str:
+
+
+def _format_tool_call_body(tool_name: str, content: str, data: dict) -> str:
     args = _tool_arguments(data)
+    if _is_shell_tool(tool_name, args):
+        return _format_shell_tool_arguments(args)
     if isinstance(args, dict):
         pieces = []
         for k, v in list(args.items())[:8]:
@@ -1105,6 +1113,32 @@ def _format_tool_call_body(content: str, data: dict) -> str:
     if isinstance(args, str) and args:
         return _compact_line(args, limit=240)
     return ""
+
+
+def _is_shell_tool(tool_name: str, args: dict[str, Any] | str | None) -> bool:
+    normalized = tool_name.strip().lower().replace("_", "-")
+    if normalized in {"bash", "shell", "sh", "exec", "exec-command", "run-command"}:
+        return True
+    if not isinstance(args, dict):
+        return False
+    return any(key in args for key in ("cmd", "command", "script")) and (
+        "cwd" in args or normalized.endswith(".bash") or normalized.endswith(".shell")
+    )
+
+
+def _format_shell_tool_arguments(args: dict[str, Any] | str | None) -> str:
+    if isinstance(args, str):
+        return "cmd=%s" % _format_tool_argument_value(_compact_line(args, limit=120))
+    if not isinstance(args, dict):
+        return ""
+    command = args.get("cmd") or args.get("command") or args.get("script") or ""
+    pieces: list[str] = []
+    if command:
+        pieces.append("cmd=%s" % _format_tool_argument_value(_compact_line(str(command), limit=120)))
+    cwd = args.get("cwd") or args.get("workdir")
+    if cwd:
+        pieces.append("cwd=%s" % _format_tool_argument_value(str(cwd)))
+    return " ".join(pieces)
 
 
 def _build_header_text() -> str:
@@ -1680,11 +1714,13 @@ def _print_note(label: str, message: str, *, level: str = "info") -> None:
 
 
 def _print_event(label: str, message: str) -> None:
-    text = f"{label.ljust(12)} {_wrap_value(message, 13)}"
+    style = _event_style(label)
+    label_text = _style(label.ljust(12), style)
+    text = f"{label_text} {_wrap_value(message, 13)}"
     if _layout_enabled():
         _layout_print(text, flush=True)
         return
-    print(f"{_style(label.ljust(12), 'event')} {_wrap_value(message, 13)}", flush=True)
+    print(text, flush=True)
 
 
 def _print_assistant_text(message: str) -> None:
@@ -1899,6 +1935,11 @@ def _style(text: str, style: str) -> str:
         "warn": "\033[33m",
         "error": "\033[31m",
         "event": "\033[35m",
+        "thinking": "\033[36m",
+        "tool": "\033[34m",
+        "result": "\033[32m",
+        "command": "\033[33m",
+        "file": "\033[35m",
         "bold": "\033[1m",
         "muted": "\033[2m",
     }
@@ -1906,6 +1947,44 @@ def _style(text: str, style: str) -> str:
     if not color:
         return text
     return f"{color}{text}\033[0m"
+
+
+def _event_style(label: str) -> str:
+    normalized = label.strip().lower()
+    if normalized in {"thinking", "tool", "result", "command", "file"}:
+        return normalized
+    return "event"
+
+
+def _visible_len(text: str) -> int:
+    return len(_ANSI_RE.sub("", text))
+
+
+def _truncate_visible(text: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    parts: list[str] = []
+    visible = 0
+    index = 0
+    for match in _ANSI_RE.finditer(text):
+        if match.start() > index:
+            chunk = text[index : match.start()]
+            room = limit - visible
+            if room <= 0:
+                break
+            parts.append(chunk[:room])
+            visible += min(len(chunk), room)
+            if visible >= limit:
+                break
+        parts.append(match.group(0))
+        index = match.end()
+    if visible < limit and index < len(text):
+        room = limit - visible
+        parts.append(text[index : index + room])
+    rendered = "".join(parts)
+    if "\033[" in rendered and not rendered.endswith("\033[0m"):
+        rendered += "\033[0m"
+    return rendered
 
 
 def _bold(text: str) -> str:

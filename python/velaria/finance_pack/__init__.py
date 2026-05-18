@@ -1,0 +1,503 @@
+from __future__ import annotations
+
+import importlib
+import json
+import math
+from datetime import datetime, timezone
+from typing import Any, Iterable
+from urllib import request as urllib_request
+
+import pandas as pd
+
+
+AKSHARE_STOCK_DOC_URL = "https://akshare.akfamily.xyz/data/stock/stock.html"
+TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q="
+DEFAULT_LICENSE_NOTE = (
+    "Public market-data provider metadata; validate upstream terms, freshness, "
+    "and exchange delay before using for decisions."
+)
+
+
+class FinanceProviderError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_type: str = "finance_provider_error",
+        hint: str = "Check provider availability, symbol format, network access, and upstream terms.",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_type = error_type
+        self.hint = hint
+        self.details = details or {}
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "error_type": self.error_type,
+            "message": str(self),
+            "hint": self.hint,
+            "details": self.details,
+        }
+
+
+def normalize_market(market: str) -> str:
+    normalized = market.strip().lower()
+    aliases = {
+        "a": "cn",
+        "a股": "cn",
+        "ashare": "cn",
+        "china": "cn",
+        "zh": "cn",
+        "cn": "cn",
+        "us": "us",
+        "美股": "us",
+        "usa": "us",
+    }
+    if normalized not in aliases:
+        raise FinanceProviderError(
+            f"unsupported market: {market}",
+            error_type="unsupported_market",
+            hint="Use market 'cn' for A-share or 'us' for U.S. stocks.",
+            details={"market": market},
+        )
+    return aliases[normalized]
+
+
+def normalize_provider(provider: str) -> str:
+    normalized = provider.strip().lower()
+    if normalized not in {"akshare", "tencent"}:
+        raise FinanceProviderError(
+            f"unsupported finance provider: {provider}",
+            error_type="unsupported_provider",
+            hint="Use provider 'akshare' for history or 'tencent' for public quote rows.",
+            details={"provider": provider},
+        )
+    return normalized
+
+
+def normalize_symbols(symbols: str | Iterable[str]) -> list[str]:
+    if isinstance(symbols, str):
+        parts = symbols.replace("，", ",").split(",")
+    else:
+        parts = list(symbols)
+    normalized = [str(item).strip() for item in parts if str(item).strip()]
+    if not normalized:
+        raise FinanceProviderError(
+            "at least one symbol is required",
+            error_type="missing_symbol",
+            hint="Pass one or more comma-separated symbols.",
+        )
+    return normalized
+
+
+def normalize_history_frame(
+    frame: pd.DataFrame,
+    *,
+    market: str,
+    symbol: str,
+    provider: str,
+    source_url: str,
+    freshness: str,
+    delay_sec: int | None = None,
+    fetched_at: str | None = None,
+    license_note: str = DEFAULT_LICENSE_NOTE,
+) -> list[dict[str, Any]]:
+    market = normalize_market(market)
+    fetched_at = fetched_at or _utc_now()
+    rows: list[dict[str, Any]] = []
+    for raw in frame.to_dict(orient="records"):
+        rows.append(
+            {
+                "market": market,
+                "symbol": symbol,
+                "date": _date_text(_pick(raw, "日期", "date", "Date")),
+                "open": _number(_pick(raw, "开盘", "open", "Open")),
+                "high": _number(_pick(raw, "最高", "high", "High")),
+                "low": _number(_pick(raw, "最低", "low", "Low")),
+                "close": _number(_pick(raw, "收盘", "close", "Close")),
+                "volume": _integer(_pick(raw, "成交量", "volume", "Volume")),
+                "amount": _number(_pick(raw, "成交额", "amount", "turnover", "Amount")),
+                "pct_change": _number(_pick(raw, "涨跌幅", "pct_change", "change_percent")),
+                "provider": provider,
+                "source_url": source_url,
+                "fetched_at": fetched_at,
+                "freshness": freshness,
+                "delay_sec": delay_sec,
+                "license_note": license_note,
+            }
+        )
+    return rows
+
+
+def normalize_quote_frame(
+    frame: pd.DataFrame,
+    *,
+    market: str,
+    symbols: str | Iterable[str],
+    provider: str,
+    source_url: str,
+    freshness: str,
+    delay_sec: int | None,
+    fetched_at: str | None = None,
+    license_note: str = DEFAULT_LICENSE_NOTE,
+) -> list[dict[str, Any]]:
+    market = normalize_market(market)
+    symbol_set = set(normalize_symbols(symbols))
+    fetched_at = fetched_at or _utc_now()
+    rows: list[dict[str, Any]] = []
+    for raw in frame.to_dict(orient="records"):
+        symbol = str(_pick(raw, "代码", "symbol", "Symbol") or "").strip()
+        if symbol not in symbol_set:
+            continue
+        price = _number(_pick(raw, "最新价", "price", "last", "最新"))
+        rows.append(
+            {
+                "event_time": fetched_at,
+                "event_type": "quote",
+                "source_key": symbol,
+                "market": market,
+                "symbol": symbol,
+                "name": _text(_pick(raw, "名称", "name", "Name")),
+                "price": price,
+                "open": _number(_pick(raw, "开盘", "open", "Open")),
+                "high": _number(_pick(raw, "最高", "high", "High")),
+                "low": _number(_pick(raw, "最低", "low", "Low")),
+                "previous_close": _number(_pick(raw, "昨收", "previous_close", "prev_close")),
+                "volume": _integer(_pick(raw, "成交量", "volume", "Volume")),
+                "amount": _number(_pick(raw, "成交额", "amount", "turnover", "Amount")),
+                "pct_change": _number(_pick(raw, "涨跌幅", "pct_change", "change_percent")),
+                "provider": provider,
+                "source_url": source_url,
+                "fetched_at": fetched_at,
+                "freshness": freshness,
+                "delay_sec": delay_sec,
+                "license_note": license_note,
+            }
+        )
+    return rows
+
+
+def fetch_history(
+    *,
+    provider: str,
+    market: str,
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    period: str = "daily",
+    adjust: str = "",
+) -> list[dict[str, Any]]:
+    provider = normalize_provider(provider)
+    if provider != "akshare":
+        raise FinanceProviderError(
+            f"provider does not support history: {provider}",
+            error_type="unsupported_provider_operation",
+            hint="Use provider 'akshare' for historical OHLCV data.",
+            details={"provider": provider, "operation": "fetch_history"},
+        )
+    market = normalize_market(market)
+    ak = _load_akshare()
+    try:
+        if market == "cn":
+            frame = ak.stock_zh_a_hist(
+                symbol=symbol,
+                period=period,
+                start_date=start_date,
+                end_date=end_date,
+                adjust=adjust,
+            )
+        else:
+            frame = ak.stock_us_hist(
+                symbol=symbol,
+                period=period,
+                start_date=start_date,
+                end_date=end_date,
+                adjust=adjust,
+            )
+    except Exception as exc:  # pragma: no cover - exercised by network smoke
+        raise FinanceProviderError(
+            f"failed to fetch {market} history from {provider}: {exc}",
+            error_type="provider_fetch_failed",
+            details={"provider": provider, "market": market, "symbol": symbol},
+        ) from exc
+    return normalize_history_frame(
+        frame,
+        market=market,
+        symbol=symbol,
+        provider=provider,
+        source_url=AKSHARE_STOCK_DOC_URL,
+        freshness="eod",
+    )
+
+
+def fetch_quotes(
+    *,
+    provider: str,
+    market: str,
+    symbols: str | Iterable[str],
+) -> list[dict[str, Any]]:
+    provider = normalize_provider(provider)
+    market = normalize_market(market)
+    symbol_list = normalize_symbols(symbols)
+    if provider == "tencent":
+        return _fetch_tencent_quotes(market=market, symbols=symbol_list)
+    ak = _load_akshare()
+    try:
+        frame = ak.stock_zh_a_spot_em() if market == "cn" else ak.stock_us_spot_em()
+    except Exception as exc:  # pragma: no cover - exercised by network smoke
+        raise FinanceProviderError(
+            f"failed to fetch {market} quotes from {provider}: {exc}",
+            error_type="provider_fetch_failed",
+            details={"provider": provider, "market": market, "symbols": symbol_list},
+        ) from exc
+    rows = normalize_quote_frame(
+        frame,
+        market=market,
+        symbols=symbol_list,
+        provider=provider,
+        source_url=AKSHARE_STOCK_DOC_URL,
+        freshness="realtime" if market == "cn" else "delayed",
+        delay_sec=0 if market == "cn" else None,
+    )
+    if not rows:
+        raise FinanceProviderError(
+            "provider returned no matching quote rows",
+            error_type="symbol_not_found",
+            hint="For U.S. stocks, inspect akshare stock_us_spot_em() codes and pass the provider-specific code such as '105.AAPL'.",
+            details={"provider": provider, "market": market, "symbols": symbol_list},
+        )
+    return rows
+
+
+def parse_tencent_quote_payload(
+    payload: str,
+    *,
+    market: str,
+    symbols: str | Iterable[str],
+    fetched_at: str | None = None,
+) -> list[dict[str, Any]]:
+    market = normalize_market(market)
+    symbol_set = set(normalize_symbols(symbols))
+    fetched_at = fetched_at or _utc_now()
+    rows: list[dict[str, Any]] = []
+    for item in payload.split(";"):
+        if "=\"" not in item:
+            continue
+        body = item.split("=\"", 1)[1].rstrip('"')
+        fields = body.split("~")
+        if market == "cn":
+            if len(fields) < 7:
+                continue
+            symbol = fields[2].strip()
+            if symbol not in symbol_set:
+                continue
+            rows.append(
+                {
+                    "event_time": fetched_at,
+                    "event_type": "quote",
+                    "source_key": symbol,
+                    "market": "cn",
+                    "symbol": symbol,
+                    "name": fields[1].strip() or None,
+                    "price": _number(fields[3]),
+                    "open": None,
+                    "high": None,
+                    "low": None,
+                    "previous_close": None,
+                    "volume": _integer(fields[6]),
+                    "amount": _number(fields[7] if len(fields) > 7 else None),
+                    "pct_change": _number(fields[5]),
+                    "provider": "tencent",
+                    "source_url": TENCENT_QUOTE_URL,
+                    "fetched_at": fetched_at,
+                    "freshness": "realtime",
+                    "delay_sec": 0,
+                    "license_note": DEFAULT_LICENSE_NOTE,
+                }
+            )
+            continue
+        if len(fields) < 7:
+            continue
+        symbol = _normalize_us_tencent_symbol(fields[2])
+        requested = {_normalize_us_tencent_symbol(item) for item in symbol_set}
+        if symbol not in requested:
+            continue
+        rows.append(
+            {
+                "event_time": fetched_at,
+                "event_type": "quote",
+                "source_key": symbol,
+                "market": "us",
+                "symbol": symbol,
+                "name": fields[1].strip() or None,
+                "price": _number(fields[3]),
+                "open": _number(fields[5]),
+                "high": _number(fields[33] if len(fields) > 33 else None),
+                "low": _number(fields[34] if len(fields) > 34 else None),
+                "previous_close": _number(fields[4]),
+                "volume": _integer(fields[36] if len(fields) > 36 else fields[6]),
+                "amount": _number(fields[37] if len(fields) > 37 else None),
+                "pct_change": _number(fields[32] if len(fields) > 32 else None),
+                "provider": "tencent",
+                "source_url": TENCENT_QUOTE_URL,
+                "fetched_at": fetched_at,
+                "freshness": "delayed",
+                "delay_sec": None,
+                "license_note": DEFAULT_LICENSE_NOTE,
+            }
+        )
+    if not rows:
+        raise FinanceProviderError(
+            "Tencent quote payload did not include requested symbols",
+            error_type="symbol_not_found",
+            hint="Use A-share symbols like 000001/600519 or U.S. symbols like AAPL.",
+            details={"market": market, "symbols": sorted(symbol_set)},
+        )
+    return rows
+
+
+def finance_quote_schema_binding() -> dict[str, Any]:
+    return {
+        "time_field": "event_time",
+        "type_field": "event_type",
+        "key_field": "symbol",
+        "field_mappings": {
+            "market": "market",
+            "symbol": "symbol",
+            "price": "price",
+            "volume": "volume",
+            "pct_change": "pct_change",
+            "provider": "provider",
+            "freshness": "freshness",
+            "delay_sec": "delay_sec",
+        },
+    }
+
+
+def build_research_prompt(
+    *,
+    focus_events: list[dict[str, Any]],
+    datasets: list[dict[str, Any]] | None = None,
+    user_question: str | None = None,
+) -> str:
+    event_block = json.dumps(focus_events, ensure_ascii=False, indent=2, sort_keys=True)
+    dataset_block = json.dumps(datasets or [], ensure_ascii=False, indent=2, sort_keys=True)
+    question = user_question or "解释这些 A股/美股异动事件，并给出可继续验证的研究线索。"
+    return (
+        "你是 Velaria 金融事件研究助理。请基于 Velaria FocusEvent、历史数据 artifact，"
+        "并进行实时联网研究来生成研究摘要。\n\n"
+        f"用户问题：{question}\n\n"
+        "FocusEvent 证据：\n"
+        f"{event_block}\n\n"
+        "相关数据集 / artifact：\n"
+        f"{dataset_block}\n\n"
+        "输出要求：\n"
+        "1. 先说明触发事件、标的、市场、价格/成交量等结构化证据。\n"
+        "2. 做实时联网研究，列出每条关键判断的来源链接、发布时间或访问时间。\n"
+        "3. 区分数据事实、推断和不确定性；标明行情 freshness / delay 信息。\n"
+        "4. 给出后续可在 Velaria 中执行的 SQL 或 monitor 验证建议。\n"
+        "5. 明确说明这不是投资建议，不包含买卖指令或收益承诺。"
+    )
+
+
+def _load_akshare() -> Any:
+    try:
+        return importlib.import_module("akshare")
+    except ModuleNotFoundError as exc:
+        raise FinanceProviderError(
+            "akshare is not installed",
+            error_type="missing_dependency",
+            hint="Install the finance extra with: uv sync --project python --extra finance",
+            details={"dependency": "akshare"},
+        ) from exc
+
+
+def _fetch_tencent_quotes(*, market: str, symbols: list[str]) -> list[dict[str, Any]]:
+    codes = [_tencent_code(market, symbol) for symbol in symbols]
+    url = TENCENT_QUOTE_URL + ",".join(codes)
+    req = urllib_request.Request(url, headers={"User-Agent": "Velaria/finance-pack"})
+    try:
+        with urllib_request.urlopen(req, timeout=15) as response:
+            payload = response.read().decode("gbk", errors="replace")
+    except Exception as exc:  # pragma: no cover - exercised by network smoke
+        raise FinanceProviderError(
+            f"failed to fetch {market} quotes from tencent: {exc}",
+            error_type="provider_fetch_failed",
+            details={"provider": "tencent", "market": market, "symbols": symbols, "source_url": url},
+        ) from exc
+    return parse_tencent_quote_payload(payload, market=market, symbols=symbols)
+
+
+def _tencent_code(market: str, symbol: str) -> str:
+    value = symbol.strip()
+    if market == "us":
+        ticker = _normalize_us_tencent_symbol(value)
+        return f"us{ticker}"
+    if value.startswith("s_"):
+        return value
+    if value.startswith(("sh", "sz")):
+        return f"s_{value}"
+    exchange = "sh" if value.startswith("6") else "sz"
+    return f"s_{exchange}{value}"
+
+
+def _normalize_us_tencent_symbol(symbol: str) -> str:
+    value = symbol.strip().upper()
+    if value.startswith("US"):
+        value = value[2:]
+    if "." in value:
+        left, right = value.split(".", 1)
+        value = right if left.isdigit() else left
+    return value
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _pick(row: dict[str, Any], *names: str) -> Any:
+    for name in names:
+        if name in row:
+            return row[name]
+    return None
+
+
+def _is_missing(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    try:
+        return bool(pd.isna(value))
+    except Exception:
+        return False
+
+
+def _number(value: Any) -> float | None:
+    if _is_missing(value):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _integer(value: Any) -> int | None:
+    number = _number(value)
+    return None if number is None else int(number)
+
+
+def _text(value: Any) -> str | None:
+    if _is_missing(value):
+        return None
+    return str(value)
+
+
+def _date_text(value: Any) -> str | None:
+    if _is_missing(value):
+        return None
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    text = str(value)
+    return text[:10] if len(text) >= 10 else text

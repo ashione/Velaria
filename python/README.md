@@ -31,6 +31,7 @@ The supported Python ecosystem includes:
 - vector search and vector explain APIs
 - offline embedding pipeline helpers for versioned vector assets
 - offline keyword-index build helpers and reusable BM25 keyword-search assets
+- public-data finance helpers for A-share / U.S. stock history and quote ingestion
 - agent runtime wrapper for Codex App Server and Claude Code / Claude Agent SDK integration
 - interactive agent CLI via `velaria_cli.py -i`
 
@@ -44,6 +45,7 @@ Examples and helper assets include:
 - `examples/demo_vector_search.py`
 - `benchmarks/bench_arrow_ingestion.py`
 - `examples/demo_embedding_pipeline.py`
+- `examples/finance_public_data_smoke.py`
 - `benchmarks/bench_embedding_pipeline.py`
 - local ecosystem scripts and skills
 
@@ -98,12 +100,80 @@ Additional ecosystem helpers:
 - `CustomArrowStreamSink`
 - `create_stream_from_custom_source(...)`
 - `consume_arrow_batches_with_custom_sink(...)`
+- `finance_pack.fetch_history(...)`
+- `finance_pack.fetch_quotes(...)`
+- `finance_pack.build_research_prompt(...)`
 
 Mapping rule:
 
 - Python names may be ecosystem-friendly
 - behavior must map back to the same native kernel contract exposed by C++
 - Python wrappers should not force row materialization earlier than required by the user-facing boundary
+
+## Finance Agentic Pack
+
+The finance pack is a Python ecosystem helper for agentic monitor workflows. It
+does not add financial semantics to the native kernel.
+
+Install the optional public-data provider dependency:
+
+```bash
+uv sync --project python --extra finance
+```
+
+Fetch A-share historical data through AkShare and write a Parquet dataset:
+
+```bash
+uv run --project python --extra finance python -m velaria.finance_pack.cli fetch-history \
+  --provider akshare \
+  --market cn \
+  --symbol 000001 \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --adjust qfq \
+  --output /tmp/velaria-cn-history.parquet
+```
+
+Fetch public quote rows and ingest them as a Velaria `external_event` source:
+
+```bash
+uv run --project python --extra finance python -m velaria.finance_pack.cli ingest-quotes \
+  --provider tencent \
+  --market cn \
+  --symbols 000001,600519 \
+  --source-id finance_cn_quotes
+```
+
+Run the public-data smoke against real AkShare endpoints:
+
+```bash
+uv run --project python --extra finance python python/examples/finance_public_data_smoke.py
+```
+
+When AkShare / Eastmoney is blocked by a local proxy or upstream network policy,
+verify public quote ingestion through Tencent's lightweight quote endpoint:
+
+```bash
+uv run --project python --extra finance python python/examples/finance_public_data_smoke.py --quotes-only
+```
+
+The standardized rows include provider evidence fields:
+
+- `provider`
+- `source_url`
+- `fetched_at`
+- `freshness`
+- `delay_sec`
+- `license_note`
+
+U.S. quote freshness is reported from the provider path and may be delayed or
+unknown. The finance pack records that metadata instead of treating every quote
+as exchange-grade realtime data.
+
+For research workflows, use `finance_pack.build_research_prompt(...)` to turn
+`FocusEvent` objects and related datasets into a prompt for the interactive
+Velaria Agent. The prompt requires live source links and states that output is
+research assistance, not investment advice.
 
 File reader mapping:
 

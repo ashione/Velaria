@@ -174,6 +174,19 @@ class FinancePackTest(unittest.TestCase):
         self.assertEqual(payload["provider"], "tencent")
         self.assertEqual(payload["row_count"], 1)
 
+    def test_top_level_finance_help_guides_agent_cli_run_usage(self):
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            exit_code = velaria_cli_main(["finance", "--help"])
+
+        self.assertEqual(exit_code, 0)
+        output = stdout.getvalue()
+        self.assertIn("Agent mode", output)
+        self.assertIn("velaria_cli_run", output)
+        self.assertIn("finance fetch-quotes --provider tencent --market cn --symbols 000001", output)
+        self.assertIn("freshness", output)
+        self.assertIn("not investment advice", output)
+
     def test_research_prompt_requires_live_sources_and_not_advice(self):
         prompt = build_research_prompt(
             focus_events=[

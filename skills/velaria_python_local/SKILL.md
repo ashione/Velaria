@@ -14,6 +14,7 @@ description: How to use a locally installed Velaria Python package for local ana
 - 本地文件：用 `velaria_dataset_import` 注册、`velaria_read` / `velaria_schema` 检查、`velaria_sql` 查询、`velaria_dataset_process` 保存 run/artifact。
 - 编码、中文列名、`invalid token byte` 或 SQL 标识符问题：先用 `velaria_dataset_normalize` 转成 UTF-8 CSV 和 SQL-safe 字段名，再按返回的 `schema` / `column_mapping` 写 SQL。
 - SQL 函数、能力边界和常见模板：按需用 `velaria_sql_capabilities`、`velaria_sql_function_search`、`velaria_sql_query_patterns` 或资源 `velaria://sql/catalog` 检索，不要凭记忆猜函数。
+- 公开财经数据：不要假设存在专用 finance agent tool；在 Velaria Agent 中通过 `velaria_cli_run` 调用 `finance ...` 子命令，例如 `finance fetch-quotes --provider tencent --market cn --symbols 000001`。
 - 不要在 Velaria 工具失败前先写 `curl`、`wget` 或自定义 Python 下载脚本；只有 Velaria 工具无法覆盖时再回退到通用方式。
 
 本 Skill 默认只使用 `uv` 执行。仓库内可直接使用的入口只有两类：
@@ -90,7 +91,68 @@ uv run --project python python python/velaria_cli.py run show --run-id <run_id>
 uv run --project python python python/velaria_cli.py artifacts list --run-id <run_id>
 ```
 
-## 3.1 当前 SQL v1 边界
+## 3.1 公开财经数据 CLI
+
+用途：
+
+- 通过公开 provider 获取 A股 / 美股历史数据或 quote
+- 把 quote 写入 Velaria `external_event` source
+- 给 monitor / FocusEvent / Agent 研究链路提供带来源 metadata 的输入
+
+可用子命令：
+
+- `finance fetch-history`：获取历史 OHLCV 行情；当前使用 `provider=akshare`
+- `finance fetch-quotes`：获取 quote 行；可用 `provider=akshare` 或 `provider=tencent`
+- `finance ingest-quotes`：获取 quote 并写入 `external_event` source，供 monitor 使用
+
+源码入口示例：
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance fetch-quotes \
+  --provider tencent \
+  --market cn \
+  --symbols 000001,600519
+
+uv run --project python --extra finance python python/velaria_cli.py finance ingest-quotes \
+  --provider tencent \
+  --market cn \
+  --symbols 000001 \
+  --source-id finance_cn_quotes
+
+uv run --project python --extra finance python python/velaria_cli.py finance fetch-history \
+  --provider akshare \
+  --market cn \
+  --symbol 000001 \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --adjust qfq \
+  --output /tmp/velaria-cn-history.parquet
+```
+
+在 `velaria_cli.py -i` 交互式 Agent 模式中，使用已注册 agent tool
+`velaria_cli_run`，并且只传 Velaria 子命令，不要包含 `uv`、`python` 或
+`python/velaria_cli.py`：
+
+```text
+finance fetch-quotes --provider tencent --market cn --symbols 000001
+finance ingest-quotes --provider tencent --market cn --symbols 000001 --source-id finance_cn_quotes
+```
+
+输出约束：
+
+- stdout 是 JSON，失败也是 JSON
+- provider 失败应读取 `error_type`、`message`、`hint`、`details`
+- 行数据包含 `provider`、`source_url`、`fetched_at`、`freshness`、`delay_sec`、`license_note`
+- `freshness` / `delay_sec` 是研究证据，不要把所有 quote 都当成交易所级实时数据
+- 金融输出只作为研究辅助，不构成投资建议
+
+Provider 使用建议：
+
+- 历史行情优先尝试 `provider=akshare`
+- 轻量 quote 优先尝试 `provider=tencent`
+- AkShare / Eastmoney 上游不可达时，不要 mock 或编造历史数据；把结构化 provider 错误返回给用户，并可用 Tencent quote 做实时监控链路验证
+
+## 3.2 当前 SQL v1 边界
 
 批量 SQL 当前适合直接走 `session.sql(...)` 的形态：
 

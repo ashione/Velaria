@@ -174,6 +174,50 @@ class FinancePackTest(unittest.TestCase):
         self.assertEqual(payload["provider"], "tencent")
         self.assertEqual(payload["row_count"], 1)
 
+    def test_top_level_finance_analyze_forwards_to_productized_workflow(self):
+        quote_rows = [
+            {
+                "event_time": "2026-01-02T00:00:00Z",
+                "event_type": "quote",
+                "source_key": "000001",
+                "symbol": "000001",
+                "market": "cn",
+                "price": 12.34,
+                "volume": 1000,
+                "pct_change": 1.2,
+                "provider": "tencent",
+                "freshness": "realtime",
+                "delay_sec": 0,
+                "fetched_at": "2026-01-02T00:00:00Z",
+                "source_url": "https://qt.gtimg.cn/q=",
+                "license_note": "public provider metadata",
+            }
+        ]
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-top-analyze-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                with mock.patch("velaria.finance_pack.cli.fetch_quotes", return_value=quote_rows):
+                    stdout = StringIO()
+                    with redirect_stdout(stdout):
+                        exit_code = velaria_cli_main(
+                            [
+                                "finance",
+                                "analyze",
+                                "--market",
+                                "cn",
+                                "--symbol",
+                                "000001",
+                                "--format",
+                                "json",
+                            ]
+                        )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["action"], "analyze")
+        self.assertEqual(payload["provider"], "tencent")
+        self.assertEqual(payload["quote"]["symbol"], "000001")
+
     def test_watch_cli_ingests_runs_monitor_and_returns_analysis(self):
         quote_rows = [
             {
@@ -227,6 +271,141 @@ class FinancePackTest(unittest.TestCase):
         self.assertIn("latest price=12.34", tick["analysis"]["summary"])
         self.assertIn("实时联网研究", tick["analysis_prompt"])
 
+    def test_sources_cli_lists_user_ready_public_providers(self):
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            exit_code = finance_cli_main(["sources", "--format", "json"])
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["action"], "sources")
+        provider_ids = {item["provider"] for item in payload["sources"]}
+        self.assertIn("tencent", provider_ids)
+        self.assertIn("akshare", provider_ids)
+        tencent = next(item for item in payload["sources"] if item["provider"] == "tencent")
+        self.assertIn("fetch-quotes", tencent["commands"])
+        self.assertEqual(tencent["recommended_quote_provider"], True)
+        self.assertIn("cn", tencent["markets"])
+
+    def test_doctor_cli_reports_dependency_and_provider_probe(self):
+        quote_rows = [
+            {
+                "event_time": "2026-01-02T00:00:00Z",
+                "event_type": "quote",
+                "source_key": "000001",
+                "symbol": "000001",
+                "market": "cn",
+                "price": 12.34,
+                "volume": 1000,
+                "provider": "tencent",
+                "freshness": "realtime",
+                "delay_sec": 0,
+                "fetched_at": "2026-01-02T00:00:00Z",
+                "source_url": "https://qt.gtimg.cn/q=",
+                "license_note": "public provider metadata",
+            }
+        ]
+        with mock.patch("velaria.finance_pack.cli.fetch_quotes", return_value=quote_rows):
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                exit_code = finance_cli_main(["doctor", "--format", "json"])
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["action"], "doctor")
+        checks = {item["name"]: item for item in payload["checks"]}
+        self.assertEqual(checks["tencent_quote_probe"]["status"], "ok")
+        self.assertIn("finance analyze --market cn --symbol 000001", payload["next_steps"])
+
+    def test_analyze_cli_returns_human_readable_report_by_default(self):
+        quote_rows = [
+            {
+                "event_time": "2026-01-02T00:00:00Z",
+                "event_type": "quote",
+                "source_key": "000001",
+                "symbol": "000001",
+                "market": "cn",
+                "name": "平安银行",
+                "price": 12.34,
+                "volume": 1000,
+                "pct_change": 1.2,
+                "provider": "tencent",
+                "freshness": "realtime",
+                "delay_sec": 0,
+                "fetched_at": "2026-01-02T00:00:00Z",
+                "source_url": "https://qt.gtimg.cn/q=",
+                "license_note": "public provider metadata",
+            }
+        ]
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-analyze-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                with mock.patch("velaria.finance_pack.cli.fetch_quotes", return_value=quote_rows):
+                    stdout = StringIO()
+                    with redirect_stdout(stdout):
+                        exit_code = finance_cli_main(
+                            [
+                                "analyze",
+                                "--market",
+                                "cn",
+                                "--symbol",
+                                "000001",
+                            ]
+                        )
+
+        self.assertEqual(exit_code, 0)
+        output = stdout.getvalue()
+        self.assertIn("Velaria 金融分析", output)
+        self.assertIn("cn:000001", output)
+        self.assertIn("平安银行", output)
+        self.assertIn("12.34", output)
+        self.assertIn("tencent", output)
+        self.assertIn("不是投资建议", output)
+
+    def test_analyze_cli_supports_json_for_agent_automation(self):
+        quote_rows = [
+            {
+                "event_time": "2026-01-02T00:00:00Z",
+                "event_type": "quote",
+                "source_key": "000001",
+                "symbol": "000001",
+                "market": "cn",
+                "price": 12.34,
+                "volume": 1000,
+                "pct_change": 1.2,
+                "provider": "tencent",
+                "freshness": "realtime",
+                "delay_sec": 0,
+                "fetched_at": "2026-01-02T00:00:00Z",
+                "source_url": "https://qt.gtimg.cn/q=",
+                "license_note": "public provider metadata",
+            }
+        ]
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-analyze-json-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                with mock.patch("velaria.finance_pack.cli.fetch_quotes", return_value=quote_rows):
+                    stdout = StringIO()
+                    with redirect_stdout(stdout):
+                        exit_code = finance_cli_main(
+                            [
+                                "analyze",
+                                "--market",
+                                "cn",
+                                "--symbol",
+                                "000001",
+                                "--format",
+                                "json",
+                            ]
+                        )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["action"], "analyze")
+        self.assertEqual(payload["quote"]["symbol"], "000001")
+        self.assertIn("analysis_prompt", payload)
+
     def test_top_level_finance_help_guides_agent_cli_run_usage(self):
         stdout = StringIO()
         with redirect_stdout(stdout):
@@ -236,6 +415,9 @@ class FinancePackTest(unittest.TestCase):
         output = stdout.getvalue()
         self.assertIn("Agent mode", output)
         self.assertIn("velaria_cli_run", output)
+        self.assertIn("finance doctor", output)
+        self.assertIn("finance sources", output)
+        self.assertIn("finance analyze --market cn --symbol 000001", output)
         self.assertIn("finance watch --provider tencent --market cn --symbol 000001", output)
         self.assertIn("finance fetch-quotes --provider tencent --market cn --symbols 000001", output)
         self.assertIn("freshness", output)

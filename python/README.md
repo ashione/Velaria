@@ -121,6 +121,33 @@ Install the optional public-data provider dependency:
 uv sync --project python --extra finance
 ```
 
+Start with the product readiness check and source guide:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance doctor
+
+uv run --project python --extra finance python python/velaria_cli.py finance sources
+```
+
+Run the one-command A-share analysis workflow. This fetches a public quote,
+stores it as a Velaria observation, runs a monitor, and prints a readable
+research report with source evidence:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance analyze \
+  --market cn \
+  --symbol 000001
+```
+
+Use JSON output for agent automation:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance analyze \
+  --market cn \
+  --symbol 000001 \
+  --format json
+```
+
 Fetch A-share historical data through AkShare and write a Parquet dataset:
 
 ```bash
@@ -149,22 +176,19 @@ source, run a monitor, and return FocusEvent plus analysis context:
 
 ```bash
 uv run --project python --extra finance python python/velaria_cli.py finance watch \
-  --provider tencent \
   --market cn \
   --symbol 000001 \
   --interval-sec 30 \
   --iterations 0 \
-  --jsonl \
-  --source-id finance_cn_000001_watch
+  --jsonl
 ```
 
 The same finance commands are available to `velaria_cli.py -i` through the
 registered agent tool `velaria_cli_run`. In agent mode, pass only the Velaria
-subcommand, for example `finance fetch-quotes --provider tencent --market cn
---symbols 000001` or `finance watch --provider tencent --market cn --symbol
-000001 --interval-sec 30 --iterations 0 --jsonl`; do not include `uv`,
-`python`, or `python/velaria_cli.py` in
-the tool arguments.
+subcommand, for example `finance doctor`, `finance sources`, `finance analyze
+--market cn --symbol 000001 --format json`, or `finance watch --market cn
+--symbol 000001 --interval-sec 30 --iterations 0 --jsonl`; do not include
+`uv`, `python`, or `python/velaria_cli.py` in the tool arguments.
 
 Run the public-data smoke against real AkShare endpoints:
 

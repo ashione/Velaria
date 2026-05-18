@@ -18,6 +18,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         epilog=textwrap.dedent(
             """\
             Examples:
+              velaria finance doctor
+              velaria finance sources
+              velaria finance analyze --market cn --symbol 000001
               velaria finance fetch-quotes --provider tencent --market cn --symbols 000001,600519
               velaria finance fetch-quotes --provider tencent --market us --symbols AAPL
               velaria finance ingest-quotes --provider tencent --market cn --symbols 000001 --source-id finance_cn_quotes
@@ -27,6 +30,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             Agent mode:
               In velaria_cli.py -i, call the registered agent tool velaria_cli_run
               with only the Velaria subcommand, for example:
+              finance doctor
+              finance sources
+              finance analyze --market cn --symbol 000001
               finance fetch-quotes --provider tencent --market cn --symbols 000001
 
             Data-source notes:
@@ -40,12 +46,49 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
     finance_subparsers = finance.add_subparsers(dest="finance_command", required=True)
 
+    sources = finance_subparsers.add_parser(
+        "sources",
+        help="List public finance providers and supported workflows.",
+        description="Show available public data providers, supported markets, freshness, and recommended first commands.",
+    )
+    _add_report_format(sources)
+
+    doctor = finance_subparsers.add_parser(
+        "doctor",
+        help="Check finance dependencies and public quote provider reachability.",
+        description="Run a product readiness check for finance commands before analyze/watch.",
+    )
+    doctor.add_argument("--market", default="cn", choices=["cn", "us"], help="Market used for the quote provider probe.")
+    doctor.add_argument("--symbol", default="000001", help="Symbol used for the quote provider probe.")
+    doctor.add_argument("--skip-network", action="store_true", help="Skip public provider network probes.")
+    _add_report_format(doctor)
+
+    analyze = finance_subparsers.add_parser(
+        "analyze",
+        help="Fetch one quote, ingest it, run a monitor, and print a readable research report.",
+        description=(
+            "One-command finance workflow for users: fetch a public quote, store the observation, "
+            "run a monitor, and print a readable report with data-source evidence."
+        ),
+    )
+    _add_provider_market(analyze, default_provider="tencent")
+    analyze.add_argument("--symbol", required=True, help="Single symbol to analyze, e.g. 000001 or AAPL.")
+    analyze.add_argument("--source-id", help="Defaults to finance_<market>_<symbol>_analysis.")
+    analyze.add_argument("--monitor-id", help="Defaults to monitor_<source_id>.")
+    analyze.add_argument("--name", help="Source and monitor display name.")
+    analyze.add_argument("--pct-change-threshold", type=float, help="Only create focus events when ABS(pct_change) is at least this value.")
+    analyze.add_argument("--min-price", type=float, help="Only create focus events when price is at least this value.")
+    analyze.add_argument("--max-price", type=float, help="Only create focus events when price is at most this value.")
+    analyze.add_argument("--cooldown-sec", type=int, default=0, help="FocusEvent suppression cooldown for this analyze monitor.")
+    analyze.add_argument("--no-analysis-prompt", action="store_true", help="Omit the Velaria Agent research prompt from JSON output.")
+    _add_report_format(analyze)
+
     history = finance_subparsers.add_parser(
         "fetch-history",
         help="Fetch public historical OHLCV data.",
         description="Fetch historical OHLCV rows from a public provider and optionally write Parquet or JSONL.",
     )
-    _add_provider_market(history)
+    _add_provider_market(history, default_provider="akshare")
     history.add_argument("--symbol", required=True, help="Provider-specific symbol, e.g. 000001 or 105.AAPL.")
     history.add_argument("--start-date", required=True, help="YYYYMMDD.")
     history.add_argument("--end-date", required=True, help="YYYYMMDD.")
@@ -58,7 +101,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Fetch public quote rows.",
         description="Fetch current public quote rows with provider evidence metadata.",
     )
-    _add_provider_market(quotes)
+    _add_provider_market(quotes, default_provider="tencent")
     quotes.add_argument("--symbols", required=True, help="Comma-separated provider-specific symbols.")
     _add_output(quotes)
 
@@ -70,7 +113,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             "so monitors can generate FocusEvent objects."
         ),
     )
-    _add_provider_market(ingest)
+    _add_provider_market(ingest, default_provider="tencent")
     ingest.add_argument("--symbols", required=True, help="Comma-separated provider-specific symbols.")
     ingest.add_argument("--source-id", help="Defaults to finance_<market>_quotes.")
     ingest.add_argument("--name", help="Source display name.")
@@ -84,7 +127,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             "analysis prompt context."
         ),
     )
-    _add_provider_market(watch)
+    _add_provider_market(watch, default_provider="tencent")
     watch.add_argument("--symbol", required=True, help="Single symbol to watch, e.g. 000001 or AAPL.")
     watch.add_argument("--source-id", help="Defaults to finance_<market>_<symbol>_watch.")
     watch.add_argument("--monitor-id", help="Defaults to monitor_<source_id>.")
@@ -103,10 +146,10 @@ def _run_finance(args: argparse.Namespace) -> int:
     return finance_pack_main(_to_finance_pack_argv(args))
 
 
-def _add_provider_market(parser: argparse.ArgumentParser) -> None:
+def _add_provider_market(parser: argparse.ArgumentParser, *, default_provider: str) -> None:
     parser.add_argument(
         "--provider",
-        default="akshare",
+        default=default_provider,
         choices=["akshare", "tencent"],
         help="Public data provider. Use akshare for history; tencent is a lightweight quote provider.",
     )
@@ -117,6 +160,10 @@ def _add_output(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output", help="Optional output path for fetched rows.")
     parser.add_argument("--output-format", default="parquet", choices=["parquet", "jsonl"], help="Output format when --output is set.")
     parser.add_argument("--preview-rows", type=int, default=5, help="Number of rows to include in JSON stdout preview.")
+
+
+def _add_report_format(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--format", dest="report_format", default="text", choices=["text", "json"], help="Output format.")
 
 
 def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
@@ -150,6 +197,10 @@ def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
             continue
         flag = f"--{name.replace('_', '-')}"
         argv.extend([flag, str(value)])
+    if hasattr(args, "report_format") and args.report_format is not None:
+        argv.extend(["--format", str(args.report_format)])
+    if getattr(args, "skip_network", False):
+        argv.append("--skip-network")
     if getattr(args, "jsonl", False):
         argv.append("--jsonl")
     if getattr(args, "no_analysis_prompt", False):

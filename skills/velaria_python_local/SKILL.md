@@ -101,13 +101,30 @@ uv run --project python python python/velaria_cli.py artifacts list --run-id <ru
 
 可用子命令：
 
+- `finance doctor`：检查 finance 依赖和公开 quote provider 是否可达
+- `finance sources`：列出公开 provider、支持市场、freshness 和推荐用法
+- `finance analyze`：面向用户的一条命令分析入口；获取 quote、入库、运行 monitor，并输出可读研究报告或 JSON
 - `finance fetch-history`：获取历史 OHLCV 行情；当前使用 `provider=akshare`
 - `finance fetch-quotes`：获取 quote 行；可用 `provider=akshare` 或 `provider=tencent`
 - `finance ingest-quotes`：获取 quote 并写入 `external_event` source，供 monitor 使用
+- `finance watch`：持续监听一个标的，逐 tick 写入 observation、运行 monitor，并输出事件上下文
 
 源码入口示例：
 
 ```bash
+uv run --project python --extra finance python python/velaria_cli.py finance doctor
+
+uv run --project python --extra finance python python/velaria_cli.py finance sources
+
+uv run --project python --extra finance python python/velaria_cli.py finance analyze \
+  --market cn \
+  --symbol 000001
+
+uv run --project python --extra finance python python/velaria_cli.py finance analyze \
+  --market cn \
+  --symbol 000001 \
+  --format json
+
 uv run --project python --extra finance python python/velaria_cli.py finance fetch-quotes \
   --provider tencent \
   --market cn \
@@ -120,12 +137,11 @@ uv run --project python --extra finance python python/velaria_cli.py finance ing
   --source-id finance_cn_quotes
 
 uv run --project python --extra finance python python/velaria_cli.py finance watch \
-  --provider tencent \
   --market cn \
   --symbol 000001 \
   --interval-sec 30 \
   --iterations 0 \
-  --source-id finance_cn_000001_watch
+  --jsonl
 
 uv run --project python --extra finance python python/velaria_cli.py finance fetch-history \
   --provider akshare \
@@ -142,14 +158,19 @@ uv run --project python --extra finance python python/velaria_cli.py finance fet
 `python/velaria_cli.py`：
 
 ```text
+finance doctor
+finance sources
+finance analyze --market cn --symbol 000001 --format json
 finance fetch-quotes --provider tencent --market cn --symbols 000001
 finance ingest-quotes --provider tencent --market cn --symbols 000001 --source-id finance_cn_quotes
-finance watch --provider tencent --market cn --symbol 000001 --interval-sec 30 --iterations 0
+finance watch --market cn --symbol 000001 --interval-sec 30 --iterations 0 --jsonl
 ```
 
 输出约束：
 
-- stdout 是 JSON，失败也是 JSON
+- `finance analyze` 默认输出人类可读中文报告；Agent 自动化应传 `--format json`
+- `finance doctor` / `finance sources` 默认输出人类可读文本；Agent 自动化可传 `--format json`
+- `fetch-*`、`ingest-quotes`、`watch` 默认 stdout 是 JSON，失败也是 JSON
 - `finance watch` 默认在有限 `--iterations` 后输出一个 JSON；`--iterations 0` 是持续监听，配合 `--jsonl` 可逐 tick 输出
 - provider 失败应读取 `error_type`、`message`、`hint`、`details`
 - 行数据包含 `provider`、`source_url`、`fetched_at`、`freshness`、`delay_sec`、`license_note`
@@ -159,6 +180,7 @@ finance watch --provider tencent --market cn --symbol 000001 --interval-sec 30 -
 
 Provider 使用建议：
 
+- 普通用户第一步先运行 `finance doctor`，再运行 `finance analyze --market cn --symbol 000001`
 - 历史行情优先尝试 `provider=akshare`
 - 轻量 quote 优先尝试 `provider=tencent`
 - AkShare / Eastmoney 上游不可达时，不要 mock 或编造历史数据；把结构化 provider 错误返回给用户，并可用 Tencent quote 做实时监控链路验证

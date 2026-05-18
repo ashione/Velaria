@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import pathlib
 import sys
@@ -27,6 +28,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "sources":
+            return _run_sources(args)
+        if args.command == "doctor":
+            return _run_doctor(args)
+        if args.command == "analyze":
+            return _analyze_symbol(args)
         if args.command == "fetch-history":
             rows = fetch_history(
                 provider=args.provider,
@@ -114,8 +121,33 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    sources = subparsers.add_parser("sources", help="List public finance providers and supported workflows.")
+    _add_report_format(sources)
+
+    doctor = subparsers.add_parser("doctor", help="Check finance dependencies and public quote provider reachability.")
+    doctor.add_argument("--market", default="cn", choices=["cn", "us"], help="Market used for the quote provider probe.")
+    doctor.add_argument("--symbol", default="000001", help="Symbol used for the quote provider probe.")
+    doctor.add_argument("--skip-network", action="store_true", help="Skip public provider network probes.")
+    _add_report_format(doctor)
+
+    analyze = subparsers.add_parser(
+        "analyze",
+        help="Fetch one quote, ingest it, run a monitor, and print a readable research report.",
+    )
+    _add_provider_market(analyze, default_provider="tencent")
+    analyze.add_argument("--symbol", required=True, help="Single symbol to analyze, e.g. 000001 or AAPL.")
+    analyze.add_argument("--source-id", help="Defaults to finance_<market>_<symbol>_analysis.")
+    analyze.add_argument("--monitor-id", help="Defaults to monitor_<source_id>.")
+    analyze.add_argument("--name", help="Source and monitor display name.")
+    analyze.add_argument("--pct-change-threshold", type=float, help="Only create focus events when ABS(pct_change) is at least this value.")
+    analyze.add_argument("--min-price", type=float, help="Only create focus events when price is at least this value.")
+    analyze.add_argument("--max-price", type=float, help="Only create focus events when price is at most this value.")
+    analyze.add_argument("--cooldown-sec", type=int, default=0, help="FocusEvent suppression cooldown for this analyze monitor.")
+    analyze.add_argument("--no-analysis-prompt", action="store_true", help="Omit the Velaria Agent research prompt from JSON output.")
+    _add_report_format(analyze)
+
     history = subparsers.add_parser("fetch-history", help="Fetch public historical OHLCV data.")
-    _add_provider_market(history)
+    _add_provider_market(history, default_provider="akshare")
     history.add_argument("--symbol", required=True, help="Provider-specific symbol, e.g. 000001 or 105.AAPL.")
     history.add_argument("--start-date", required=True, help="YYYYMMDD.")
     history.add_argument("--end-date", required=True, help="YYYYMMDD.")
@@ -124,12 +156,12 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_output(history)
 
     quotes = subparsers.add_parser("fetch-quotes", help="Fetch public quote rows.")
-    _add_provider_market(quotes)
+    _add_provider_market(quotes, default_provider="tencent")
     quotes.add_argument("--symbols", required=True, help="Comma-separated provider-specific symbols.")
     _add_output(quotes)
 
     ingest = subparsers.add_parser("ingest-quotes", help="Fetch quotes and append them to a Velaria external_event source.")
-    _add_provider_market(ingest)
+    _add_provider_market(ingest, default_provider="tencent")
     ingest.add_argument("--symbols", required=True, help="Comma-separated provider-specific symbols.")
     ingest.add_argument("--source-id", help="Defaults to finance_<market>_quotes.")
     ingest.add_argument("--name", help="Source display name.")
@@ -138,7 +170,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "watch",
         help="Watch one public quote symbol, ingest observations, run a monitor, and emit analysis context.",
     )
-    _add_provider_market(watch)
+    _add_provider_market(watch, default_provider="tencent")
     watch.add_argument("--symbol", required=True, help="Single symbol to watch, e.g. 000001 or AAPL.")
     watch.add_argument("--source-id", help="Defaults to finance_<market>_<symbol>_watch.")
     watch.add_argument("--monitor-id", help="Defaults to monitor_<source_id>.")
@@ -155,8 +187,8 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _add_provider_market(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--provider", default="akshare", choices=["akshare", "tencent"])
+def _add_provider_market(parser: argparse.ArgumentParser, *, default_provider: str) -> None:
+    parser.add_argument("--provider", default=default_provider, choices=["akshare", "tencent"])
     parser.add_argument("--market", required=True, choices=["cn", "us"])
 
 
@@ -164,6 +196,99 @@ def _add_output(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output", help="Optional output path.")
     parser.add_argument("--output-format", default="parquet", choices=["parquet", "jsonl"])
     parser.add_argument("--preview-rows", type=int, default=5)
+
+
+def _add_report_format(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--format", dest="report_format", default="text", choices=["text", "json"], help="Output format.")
+
+
+def _run_sources(args: argparse.Namespace) -> int:
+    payload = {
+        "ok": True,
+        "action": "sources",
+        "sources": _public_source_catalog(),
+        "next_steps": [
+            "finance doctor",
+            "finance analyze --market cn --symbol 000001",
+            "finance watch --market cn --symbol 000001 --iterations 0 --jsonl",
+        ],
+        "disclaimer": "Research assistance only; not investment advice.",
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_sources(payload))
+    return 0
+
+
+def _run_doctor(args: argparse.Namespace) -> int:
+    checks: list[dict[str, Any]] = []
+    akshare_available = importlib.util.find_spec("akshare") is not None
+    checks.append(
+        {
+            "name": "akshare_dependency",
+            "status": "ok" if akshare_available else "warning",
+            "required": False,
+            "message": "akshare is installed" if akshare_available else "akshare is not installed; history commands need the finance extra",
+            "hint": "Run: uv sync --project python --extra finance",
+        }
+    )
+    if args.skip_network:
+        checks.append(
+            {
+                "name": "tencent_quote_probe",
+                "status": "skipped",
+                "required": True,
+                "message": "network probe skipped",
+                "hint": "Run without --skip-network to verify public quote reachability.",
+            }
+        )
+    else:
+        try:
+            rows = fetch_quotes(provider="tencent", market=args.market, symbols=[args.symbol])
+            quote = rows[0] if rows else {}
+            checks.append(
+                {
+                    "name": "tencent_quote_probe",
+                    "status": "ok",
+                    "required": True,
+                    "message": f"received quote for {quote.get('market')}:{quote.get('symbol')}",
+                    "hint": "Tencent quote path is usable for finance analyze/watch.",
+                    "evidence": {
+                        "provider": quote.get("provider"),
+                        "source_url": quote.get("source_url"),
+                        "freshness": quote.get("freshness"),
+                        "delay_sec": quote.get("delay_sec"),
+                        "fetched_at": quote.get("fetched_at"),
+                    },
+                }
+            )
+        except FinanceProviderError as exc:
+            checks.append(
+                {
+                    "name": "tencent_quote_probe",
+                    "status": "failed",
+                    "required": True,
+                    "message": str(exc),
+                    "hint": exc.hint,
+                    "details": exc.details,
+                    "error_type": exc.error_type,
+                }
+            )
+    ok = not any(check["required"] and check["status"] == "failed" for check in checks)
+    payload = {
+        "ok": ok,
+        "action": "doctor",
+        "checks": checks,
+        "next_steps": [
+            "finance sources",
+            "finance analyze --market cn --symbol 000001",
+            "finance watch --market cn --symbol 000001 --iterations 0 --jsonl",
+        ],
+    }
+    if args.report_format == "json":
+        return _emit_json(payload, exit_code=0 if ok else 1)
+    print(_render_doctor(payload))
+    return 0 if ok else 1
 
 
 def _write_rows(output: pathlib.Path, rows: list[dict[str, Any]], output_format: str) -> None:
@@ -186,28 +311,41 @@ def _emit_json(payload: dict[str, Any], *, exit_code: int = 0) -> int:
     return exit_code
 
 
+def _analyze_symbol(args: argparse.Namespace) -> int:
+    symbol = str(args.symbol).strip()
+    source_id = args.source_id or f"finance_{args.market}_{_id_part(symbol)}_analysis"
+    monitor_id = args.monitor_id or f"monitor_{source_id}"
+    display_name = args.name or f"finance {args.market} {symbol} analysis"
+    source, monitor = _upsert_watch_source_and_monitor(args, source_id=source_id, monitor_id=monitor_id, display_name=display_name)
+    tick = _run_watch_tick(args, source_id=source_id, monitor_id=monitor_id, iteration=1)
+    payload = {
+        "ok": True,
+        "action": "analyze",
+        "provider": args.provider,
+        "market": args.market,
+        "symbol": tick.get("symbol") or symbol,
+        "source": source,
+        "monitor": monitor,
+        "quote": tick.get("quote") or {},
+        "observations": tick.get("observations") or [],
+        "signals": tick.get("signals") or [],
+        "focus_events": tick.get("focus_events") or [],
+        "artifacts": tick.get("artifacts") or [],
+        "analysis": tick.get("analysis") or {},
+        **({"analysis_prompt": tick["analysis_prompt"]} if "analysis_prompt" in tick else {}),
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_analysis_report(payload))
+    return 0
+
+
 def _watch_quotes(args: argparse.Namespace) -> int:
     symbol = str(args.symbol).strip()
     source_id = args.source_id or f"finance_{args.market}_{_id_part(symbol)}_watch"
     monitor_id = args.monitor_id or f"monitor_{source_id}"
     display_name = args.name or f"finance {args.market} {symbol} watch"
-    with AgenticStore() as store:
-        source = store.upsert_source(
-            {
-                "source_id": source_id,
-                "kind": "external_event",
-                "name": display_name,
-                "schema_binding": finance_quote_schema_binding(),
-                "metadata": {
-                    "domain": "finance",
-                    "provider": args.provider,
-                    "market": args.market,
-                    "symbols": [symbol],
-                    "watch": True,
-                },
-            }
-        )
-        monitor = store.upsert_monitor(_watch_monitor_payload(args, source_id=source_id, monitor_id=monitor_id, name=display_name))
+    source, monitor = _upsert_watch_source_and_monitor(args, source_id=source_id, monitor_id=monitor_id, display_name=display_name)
 
     ticks: list[dict[str, Any]] = []
     iteration = 0
@@ -243,6 +381,33 @@ def _watch_quotes(args: argparse.Namespace) -> int:
             "interrupted": interrupted,
         }
     )
+
+
+def _upsert_watch_source_and_monitor(
+    args: argparse.Namespace,
+    *,
+    source_id: str,
+    monitor_id: str,
+    display_name: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    with AgenticStore() as store:
+        source = store.upsert_source(
+            {
+                "source_id": source_id,
+                "kind": "external_event",
+                "name": display_name,
+                "schema_binding": finance_quote_schema_binding(),
+                "metadata": {
+                    "domain": "finance",
+                    "provider": args.provider,
+                    "market": args.market,
+                    "symbols": [str(args.symbol).strip()],
+                    "watch": True,
+                },
+            }
+        )
+        monitor = store.upsert_monitor(_watch_monitor_payload(args, source_id=source_id, monitor_id=monitor_id, name=display_name))
+    return source, monitor
 
 
 def _run_watch_tick(args: argparse.Namespace, *, source_id: str, monitor_id: str, iteration: int) -> dict[str, Any]:
@@ -359,6 +524,106 @@ def _quote_analysis(row: dict[str, Any], *, focus_events: list[dict[str, Any]]) 
         "next_step": "Use analysis_prompt with Velaria Agent for live news, filings, and uncertainty checks.",
         "disclaimer": "Research assistance only; not investment advice.",
     }
+
+
+def _public_source_catalog() -> list[dict[str, Any]]:
+    return [
+        {
+            "provider": "tencent",
+            "markets": ["cn", "us"],
+            "commands": ["fetch-quotes", "ingest-quotes", "analyze", "watch"],
+            "freshness": {"cn": "realtime", "us": "delayed"},
+            "recommended_quote_provider": True,
+            "recommended_history_provider": False,
+            "source_url": "https://qt.gtimg.cn/q=",
+            "notes": "Lightweight public quote endpoint. Use for first-run analyze/watch validation.",
+        },
+        {
+            "provider": "akshare",
+            "markets": ["cn", "us"],
+            "commands": ["fetch-history", "fetch-quotes"],
+            "freshness": {"history": "eod", "quotes": "provider-dependent"},
+            "recommended_quote_provider": False,
+            "recommended_history_provider": True,
+            "source_url": "https://akshare.akfamily.xyz/data/stock/stock.html",
+            "notes": "Public Python data package; upstream Eastmoney endpoints may be blocked by local network policy.",
+        },
+    ]
+
+
+def _render_sources(payload: dict[str, Any]) -> str:
+    lines = ["Velaria 公开财经数据源", ""]
+    for source in payload["sources"]:
+        lines.append(f"- {source['provider']}: markets={','.join(source['markets'])}; commands={','.join(source['commands'])}")
+        lines.append(f"  freshness={json.dumps(source['freshness'], ensure_ascii=False, sort_keys=True)}")
+        lines.append(f"  source_url={source['source_url']}")
+        lines.append(f"  note={source['notes']}")
+    lines.append("")
+    lines.append("下一步:")
+    for step in payload["next_steps"]:
+        lines.append(f"- {step}")
+    lines.append("")
+    lines.append(payload["disclaimer"])
+    return "\n".join(lines)
+
+
+def _render_doctor(payload: dict[str, Any]) -> str:
+    lines = ["Velaria Finance Doctor", ""]
+    lines.append(f"status: {'ok' if payload['ok'] else 'failed'}")
+    for check in payload["checks"]:
+        lines.append(f"- {check['name']}: {check['status']} - {check['message']}")
+        if check.get("hint"):
+            lines.append(f"  hint: {check['hint']}")
+    lines.append("")
+    lines.append("Next steps:")
+    for step in payload["next_steps"]:
+        lines.append(f"- {step}")
+    return "\n".join(lines)
+
+
+def _render_analysis_report(payload: dict[str, Any]) -> str:
+    quote = payload["quote"]
+    analysis = payload.get("analysis") or {}
+    evidence = analysis.get("evidence") or {}
+    focus_events = payload.get("focus_events") or []
+    lines = [
+        f"Velaria 金融分析: {quote.get('market')}:{quote.get('symbol')}",
+        "",
+        "行情快照",
+        f"- 名称: {_display(quote.get('name'))}",
+        f"- 最新价: {_display(quote.get('price'))}",
+        f"- 涨跌幅: {_display(quote.get('pct_change'))}",
+        f"- 成交量: {_display(quote.get('volume'))}",
+        f"- 趋势: {_display(analysis.get('movement'))}",
+        "",
+        "监控事件",
+        f"- FocusEvent 数量: {len(focus_events)}",
+    ]
+    for event in focus_events[:3]:
+        lines.append(f"- {event.get('title')}: {event.get('summary')}")
+    lines.extend(
+        [
+            "",
+            "数据来源",
+            f"- provider: {_display(evidence.get('provider') or quote.get('provider'))}",
+            f"- source_url: {_display(evidence.get('source_url') or quote.get('source_url'))}",
+            f"- fetched_at: {_display(evidence.get('fetched_at') or quote.get('fetched_at'))}",
+            f"- freshness: {_display(evidence.get('freshness') or quote.get('freshness'))}",
+            f"- delay_sec: {_display(evidence.get('delay_sec') if evidence.get('delay_sec') is not None else quote.get('delay_sec'))}",
+            "",
+            "下一步",
+            f"- {_display(analysis.get('next_step'))}",
+            "- 在 Velaria Agent 中可继续要求结合公告、新闻和历史数据做联网研究。",
+            "",
+            "声明",
+            "- 这是研究辅助，不是投资建议，不包含买卖指令或收益承诺。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _display(value: Any) -> str:
+    return "unknown" if value is None else str(value)
 
 
 def _sql_literal(value: str) -> str:

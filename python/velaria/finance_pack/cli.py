@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import math
 import os
 import pathlib
 import sys
@@ -19,7 +20,9 @@ from velaria.agentic_store import AgenticStore
 from . import (
     FinanceProviderError,
     build_research_prompt,
+    evaluate_news_sentiment,
     fetch_history,
+    fetch_news,
     fetch_quotes,
     finance_quote_schema_binding,
     provider_catalog,
@@ -39,6 +42,8 @@ def main(argv: list[str] | None = None) -> int:
             return _analyze_symbol(args)
         if args.command == "pipeline":
             return _run_pipeline(args)
+        if args.command == "rank-candidates":
+            return _rank_candidates(args)
         if args.command == "fetch-history":
             rows = fetch_history(
                 provider=args.provider,
@@ -78,6 +83,26 @@ def main(argv: list[str] | None = None) -> int:
                     "market": args.market,
                     "symbols": _split_symbols(args.symbols),
                     "row_count": len(rows),
+                    "output": str(output) if output else None,
+                    "format": args.output_format if output else None,
+                    "preview": rows[: args.preview_rows],
+                }
+            )
+        if args.command == "fetch-news":
+            rows = fetch_news(provider=args.provider, market=args.market, symbol=args.symbol, query=args.query, limit=args.limit)
+            output = pathlib.Path(args.output) if args.output else None
+            if output is not None:
+                _write_rows(output, rows, args.output_format)
+            return _emit_json(
+                {
+                    "ok": True,
+                    "action": "fetch-news",
+                    "provider": args.provider,
+                    "market": args.market,
+                    "symbol": args.symbol,
+                    "query": args.query,
+                    "row_count": len(rows),
+                    "sentiment": evaluate_news_sentiment(rows),
                     "output": str(output) if output else None,
                     "format": args.output_format if output else None,
                     "preview": rows[: args.preview_rows],
@@ -178,6 +203,27 @@ def _build_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--no-analysis-prompt", action="store_true", help="Omit the Velaria Agent research prompt from JSON output.")
     _add_report_format(pipeline)
 
+    rank = subparsers.add_parser(
+        "rank-candidates",
+        help="Continuously rank top research candidates from quotes, history, news, and sentiment.",
+    )
+    rank.add_argument("--market", required=True, choices=["cn", "us"])
+    rank.add_argument("--symbols", required=True, help="Comma-separated candidate symbols, e.g. AAPL,MSFT,NVDA.")
+    rank.add_argument("--history-provider", default="yahoo", choices=provider_names_for_operation("fetch_history"), help="Historical OHLCV provider.")
+    rank.add_argument("--quote-provider", default="tencent", choices=provider_names_for_operation("fetch_quotes"), help="Quote provider used for polling.")
+    rank.add_argument("--news-provider", default="google-news", choices=provider_names_for_operation("fetch_news"), help="News provider used for public news and sentiment context.")
+    rank.add_argument("--start-date", required=True, help="YYYYMMDD.")
+    rank.add_argument("--end-date", required=True, help="YYYYMMDD.")
+    rank.add_argument("--period", default="daily", choices=["daily", "weekly", "monthly"])
+    rank.add_argument("--adjust", default="", help="Provider adjustment flag, e.g. qfq/hfq for AkShare.")
+    rank.add_argument("--top", type=int, default=3, help="Number of research candidates to emit.")
+    rank.add_argument("--news-limit", type=int, default=5, help="Maximum news items per symbol per iteration.")
+    rank.add_argument("--source-id", help="Defaults to finance_<market>_rank_candidates.")
+    rank.add_argument("--interval-sec", type=float, default=30.0, help="Seconds between polling iterations.")
+    rank.add_argument("--iterations", type=int, default=1, help="Number of ranking iterations. Use 0 to run until interrupted.")
+    rank.add_argument("--jsonl", action="store_true", help="Emit one JSON object per ranking tick.")
+    _add_report_format(rank)
+
     history = subparsers.add_parser("fetch-history", help="Fetch public historical OHLCV data.")
     _add_provider_market(history, default_provider="yahoo", choices=provider_names_for_operation("fetch_history"))
     history.add_argument("--symbol", required=True, help="Provider-specific symbol, e.g. 000001 or 105.AAPL.")
@@ -191,6 +237,14 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_provider_market(quotes, default_provider="tencent")
     quotes.add_argument("--symbols", required=True, help="Comma-separated provider-specific symbols.")
     _add_output(quotes)
+
+    news = subparsers.add_parser("fetch-news", help="Fetch public news rows and sentiment evidence.")
+    news.add_argument("--provider", default="google-news", choices=provider_names_for_operation("fetch_news"))
+    news.add_argument("--market", required=True, choices=["cn", "us"])
+    news.add_argument("--symbol", required=True, help="Single symbol, e.g. 000001 or AAPL.")
+    news.add_argument("--query", help="Override provider search query. Defaults to a market-aware symbol query.")
+    news.add_argument("--limit", type=int, default=5, help="Maximum news rows to fetch.")
+    _add_output(news)
 
     ingest = subparsers.add_parser("ingest-quotes", help="Fetch quotes and append them to a Velaria external_event source.")
     _add_provider_market(ingest, default_provider="tencent")
@@ -242,6 +296,7 @@ def _run_sources(args: argparse.Namespace) -> int:
         "next_steps": [
             "finance doctor",
             "finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131",
+            "finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --top 3",
             "finance analyze --market cn --symbol 000001",
             "finance watch --market cn --symbol 000001 --iterations 0 --jsonl",
         ],
@@ -444,6 +499,233 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         return _emit_json(payload)
     print(_render_pipeline_report(payload))
     return 0
+
+
+def _rank_candidates(args: argparse.Namespace) -> int:
+    symbols = _split_symbols(args.symbols)
+    source_id = args.source_id or f"finance_{args.market}_rank_candidates"
+    source = _upsert_rank_source(args, source_id=source_id, symbols=symbols)
+    ticks: list[dict[str, Any]] = []
+    iteration = 0
+    interrupted = False
+    try:
+        while args.iterations == 0 or iteration < args.iterations:
+            iteration += 1
+            tick = _run_rank_tick(args, symbols=symbols, source_id=source_id, iteration=iteration)
+            ticks.append(tick)
+            if args.jsonl:
+                print(json.dumps(tick, ensure_ascii=False, sort_keys=True), flush=True)
+            if args.iterations != 0 and iteration >= args.iterations:
+                break
+            time.sleep(max(0.0, float(args.interval_sec)))
+    except KeyboardInterrupt:
+        interrupted = True
+    if args.jsonl:
+        if interrupted:
+            print(json.dumps({"ok": True, "action": "rank-candidates", "interrupted": True, "ticks": len(ticks)}, ensure_ascii=False), flush=True)
+        return 0
+    latest = ticks[-1] if ticks else {"research_candidates": []}
+    payload = {
+        "ok": True,
+        "action": "rank-candidates",
+        "mode": "cli",
+        "recommendation_type": "research_candidate",
+        "market": args.market,
+        "symbols": symbols,
+        "top": max(1, int(args.top)),
+        "source": source,
+        "ticks": ticks,
+        "tick_count": len(ticks),
+        "interrupted": interrupted,
+        "research_candidates": latest.get("research_candidates") or [],
+        "service_integration": _rank_service_integration_payload(source_id=source_id),
+        "disclaimer": "Research candidates only; not investment advice.",
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_rank_report(payload))
+    return 0
+
+
+def _upsert_rank_source(args: argparse.Namespace, *, source_id: str, symbols: list[str]) -> dict[str, Any]:
+    with AgenticStore() as store:
+        return store.upsert_source(
+            {
+                "source_id": source_id,
+                "kind": "external_event",
+                "name": f"finance {args.market} research candidate ranking",
+                "schema_binding": {
+                    "time_field": "event_time",
+                    "type_field": "event_type",
+                    "key_field": "symbol",
+                    "field_mappings": {
+                        "market": "market",
+                        "symbol": "symbol",
+                        "rank": "rank",
+                        "score": "score",
+                        "recommendation_type": "recommendation_type",
+                    },
+                },
+                "metadata": {
+                    "domain": "finance",
+                    "workflow": "rank-candidates",
+                    "market": args.market,
+                    "symbols": symbols,
+                    "history_provider": args.history_provider,
+                    "quote_provider": args.quote_provider,
+                    "news_provider": args.news_provider,
+                },
+            }
+        )
+
+
+def _run_rank_tick(args: argparse.Namespace, *, symbols: list[str], source_id: str, iteration: int) -> dict[str, Any]:
+    quote_rows = fetch_quotes(provider=args.quote_provider, market=args.market, symbols=symbols)
+    quotes = {_quote_symbol_key(row.get("symbol")): row for row in quote_rows}
+    candidates: list[dict[str, Any]] = []
+    for symbol in symbols:
+        history_rows = fetch_history(
+            provider=args.history_provider,
+            market=args.market,
+            symbol=symbol,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            period=args.period,
+            adjust=args.adjust,
+        )
+        news_rows = fetch_news(
+            provider=args.news_provider,
+            market=args.market,
+            symbol=symbol,
+            limit=max(0, int(args.news_limit)),
+        )
+        quote = quotes.get(_quote_symbol_key(symbol)) or {}
+        candidates.append(_build_candidate(symbol=symbol, market=args.market, quote=quote, history_rows=history_rows, news_rows=news_rows))
+    ranked = sorted(candidates, key=lambda item: item["score"], reverse=True)
+    top = ranked[: max(1, int(args.top))]
+    event_time = (top[0].get("event_time") if top else None) or _utc_payload_time()
+    for index, candidate in enumerate(top, start=1):
+        candidate["rank"] = index
+        candidate["event_time"] = event_time
+        candidate["event_type"] = "research_candidate"
+        candidate["source_key"] = candidate["symbol"]
+    with AgenticStore() as store:
+        observations = [store.append_external_event(source_id, candidate) for candidate in top]
+    return {
+        "ok": True,
+        "action": "rank-candidates-tick",
+        "iteration": iteration,
+        "market": args.market,
+        "symbols": symbols,
+        "recommendation_type": "research_candidate",
+        "research_candidates": top,
+        "candidate_count": len(top),
+        "observations": observations,
+        "disclaimer": "Research candidates only; not investment advice.",
+    }
+
+
+def _build_candidate(
+    *,
+    symbol: str,
+    market: str,
+    quote: dict[str, Any],
+    history_rows: list[dict[str, Any]],
+    news_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    history_metrics = _history_metrics(history_rows)
+    news_sentiment = evaluate_news_sentiment(news_rows)
+    score_parts = _candidate_score_parts(quote=quote, history=history_metrics, news_sentiment=news_sentiment, news_rows=news_rows)
+    score = round(sum(score_parts.values()), 6)
+    risk_flags: list[str] = []
+    if quote.get("freshness") not in {"realtime", "near_realtime"}:
+        risk_flags.append("quote_not_exchange_grade_realtime")
+    if not news_rows:
+        risk_flags.append("no_recent_news_rows")
+    if not history_rows:
+        risk_flags.append("no_history_rows")
+    return {
+        "market": market,
+        "symbol": quote.get("symbol") or symbol,
+        "recommendation_type": "research_candidate",
+        "score": score,
+        "score_parts": score_parts,
+        "quote": quote,
+        "history": history_metrics,
+        "news_sentiment": news_sentiment,
+        "news": news_rows,
+        "risk_flags": risk_flags,
+        "evidence": {
+            "quote_provider": quote.get("provider"),
+            "quote_source_url": quote.get("source_url"),
+            "quote_fetched_at": quote.get("fetched_at"),
+            "quote_freshness": quote.get("freshness"),
+            "history_provider": history_rows[0].get("provider") if history_rows else None,
+            "history_source_url": history_rows[0].get("source_url") if history_rows else None,
+            "news_provider": news_rows[0].get("provider") if news_rows else None,
+            "news_source_url": news_rows[0].get("source_url") if news_rows else None,
+        },
+        "summary": (
+            f"{market}:{quote.get('symbol') or symbol} research score={score}; "
+            f"period_return_pct={history_metrics.get('period_return_pct')}; "
+            f"quote_pct_change={quote.get('pct_change')}; "
+            f"news_sentiment={news_sentiment.get('label')}."
+        ),
+        "not_investment_advice": True,
+    }
+
+
+def _history_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    closes = [row.get("close") for row in rows if isinstance(row.get("close"), (int, float))]
+    period_return = None
+    if len(closes) >= 2 and closes[0] not in (None, 0):
+        period_return = round(((closes[-1] - closes[0]) / closes[0]) * 100.0, 6)
+    return {
+        "row_count": len(rows),
+        "first_date": rows[0].get("date") if rows else None,
+        "last_date": rows[-1].get("date") if rows else None,
+        "first_close": closes[0] if closes else None,
+        "last_close": closes[-1] if closes else None,
+        "period_return_pct": period_return,
+    }
+
+
+def _candidate_score_parts(
+    *,
+    quote: dict[str, Any],
+    history: dict[str, Any],
+    news_sentiment: dict[str, Any],
+    news_rows: list[dict[str, Any]],
+) -> dict[str, float]:
+    history_part = _clamp(float(history.get("period_return_pct") or 0.0), -12.0, 12.0)
+    quote_part = _clamp(float(quote.get("pct_change") or 0.0) * 2.0, -8.0, 8.0)
+    volume = float(quote.get("volume") or 0.0)
+    liquidity_part = 0.0 if volume <= 0 else min(4.0, math.log10(volume + 1.0) / 2.0)
+    news_part = _clamp(float(news_sentiment.get("score") or 0.0) * 3.0, -4.0, 4.0) + min(1.0, len(news_rows) * 0.2)
+    freshness_penalty = -0.5 if quote.get("freshness") not in {"realtime", "near_realtime"} else 0.0
+    missing_penalty = 0.0
+    if not history.get("row_count"):
+        missing_penalty -= 2.0
+    if not news_rows:
+        missing_penalty -= 1.0
+    return {
+        "history_momentum": round(history_part, 6),
+        "quote_momentum": round(quote_part, 6),
+        "liquidity": round(liquidity_part, 6),
+        "news_sentiment": round(news_part, 6),
+        "freshness_penalty": round(freshness_penalty, 6),
+        "missing_data_penalty": round(missing_penalty, 6),
+    }
+
+
+def _quote_symbol_key(symbol: Any) -> str:
+    value = str(symbol or "").strip().upper()
+    if "." in value:
+        left, right = value.split(".", 1)
+        value = right if left.isdigit() else left
+    if value.startswith("US"):
+        value = value[2:]
+    return value
 
 
 def _watch_quotes(args: argparse.Namespace) -> int:
@@ -772,6 +1054,31 @@ def _render_pipeline_report(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_rank_report(payload: dict[str, Any]) -> str:
+    lines = [
+        f"Velaria 研究候选排名: {payload.get('market')}",
+        "",
+        "Top research candidates",
+    ]
+    for candidate in payload.get("research_candidates") or []:
+        sentiment = candidate.get("news_sentiment") or {}
+        history = candidate.get("history") or {}
+        quote = candidate.get("quote") or {}
+        lines.append(
+            f"- #{candidate.get('rank')} {candidate.get('symbol')}: score={candidate.get('score')}, "
+            f"price={quote.get('price')}, pct_change={quote.get('pct_change')}, "
+            f"period_return_pct={history.get('period_return_pct')}, news={sentiment.get('label')}"
+        )
+    lines.extend(
+        [
+            "",
+            "声明",
+            "- 这些是研究候选，不是投资建议，不包含买卖指令或收益承诺。",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _default_history_output(market: str, symbol: str, output_format: str) -> pathlib.Path:
     home = pathlib.Path(os.environ.get("VELARIA_HOME", ".velaria"))
     suffix = "jsonl" if output_format == "jsonl" else "parquet"
@@ -791,8 +1098,29 @@ def _service_integration_payload(*, source_id: str, monitor_id: str) -> dict[str
     }
 
 
+def _rank_service_integration_payload(*, source_id: str) -> dict[str, Any]:
+    return {
+        "requires_service": False,
+        "shared_state": "AgenticStore",
+        "note": "Start velaria_service with the same VELARIA_HOME to inspect ranking observations through generic service APIs.",
+        "generic_routes": [
+            "GET /api/v1/external-events/sources",
+        ],
+    }
+
+
 def _display(value: Any) -> str:
     return "unknown" if value is None else str(value)
+
+
+def _utc_payload_time() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
 
 
 def _sql_literal(value: str) -> str:

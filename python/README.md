@@ -132,7 +132,7 @@ uv run --project python --extra finance python python/velaria_cli.py finance sou
 `finance sources` is generated from the provider registry used by the fetch
 commands. It is the authoritative runtime list for provider capabilities,
 supported markets, command support, freshness metadata, and recommended
-history/quote paths.
+history/quote/news paths.
 
 Run the one-command A-share analysis workflow. This fetches a public quote,
 stores it as a Velaria observation, runs a monitor, and prints a readable
@@ -195,6 +195,48 @@ uv run --project python --extra finance python python/velaria_cli.py finance pip
   --format json
 ```
 
+Rank a candidate pool with quote polling, historical momentum, public news RSS,
+and transparent sentiment evidence. This command emits research candidates,
+not trading advice:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance rank-candidates \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --top 3 \
+  --news-limit 5 \
+  --iterations 1 \
+  --format json
+```
+
+Use continuous JSONL mode for a running monitor-style loop:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance rank-candidates \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --top 3 \
+  --news-limit 5 \
+  --iterations 0 \
+  --interval-sec 30 \
+  --jsonl
+```
+
+Fetch public news rows directly when you need to inspect the news provider and
+sentiment evidence:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance fetch-news \
+  --provider google-news \
+  --market us \
+  --symbol AAPL \
+  --limit 5
+```
+
 Fetch A-share historical data through Yahoo chart JSON or AkShare and write a
 Parquet dataset:
 
@@ -239,11 +281,12 @@ subcommand, for example `finance doctor`, `finance sources`, `finance analyze
 30 --iterations 0 --jsonl`; do not include `uv`, `python`, or
 `python/velaria_cli.py` in the tool arguments.
 
-`finance pipeline` does not require a finance-specific service route. It writes
-to the same Velaria `AgenticStore` used by the local service. If
+`finance pipeline` and `finance rank-candidates` do not require a
+finance-specific service route. They write to the same Velaria `AgenticStore`
+used by the local service. If
 `velaria_service` is started with the same `VELARIA_HOME`, the generic
 `external-events`, `monitors`, and `focus-events` service routes can inspect
-the source, monitor, and events created by the CLI.
+the source, monitor, ranking observations, and events created by the CLI.
 
 Run the public-data smoke against real AkShare endpoints:
 

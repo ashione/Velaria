@@ -23,7 +23,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               velaria finance sources
               velaria finance analyze --market cn --symbol 000001
               velaria finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1
+              velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --top 3
               velaria finance fetch-quotes --provider tencent --market cn --symbols 000001,600519
+              velaria finance fetch-news --provider google-news --market us --symbol AAPL --limit 5
               velaria finance fetch-quotes --provider tencent --market us --symbols AAPL
               velaria finance ingest-quotes --provider tencent --market cn --symbols 000001 --source-id finance_cn_quotes
               velaria finance watch --provider tencent --market cn --symbol 000001 --interval-sec 30 --iterations 0
@@ -36,10 +38,13 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               finance sources
               finance analyze --market cn --symbol 000001
               finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1 --format json
+              finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --top 3 --format json
+              finance fetch-news --provider google-news --market us --symbol AAPL --limit 5
               finance fetch-quotes --provider tencent --market cn --symbols 000001
 
             Data-source notes:
               - provider=yahoo supports historical OHLCV through public chart JSON.
+              - provider=google-news supports public RSS news rows for sentiment evidence.
               - provider=akshare supports historical OHLCV and quote rows when upstream endpoints are reachable.
               - provider=tencent supports lightweight public quote rows.
               - Results include provider, source_url, fetched_at, freshness, delay_sec, and license_note.
@@ -118,6 +123,31 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     pipeline.add_argument("--no-analysis-prompt", action="store_true", help="Omit the Velaria Agent research prompt from JSON output.")
     _add_report_format(pipeline)
 
+    rank = finance_subparsers.add_parser(
+        "rank-candidates",
+        help="Rank top research candidates from quotes, history, news, and sentiment.",
+        description=(
+            "Continuously poll quote rows, historical OHLCV, public news RSS, and transparent "
+            "sentiment evidence to emit top research candidates. This does not emit trading advice."
+        ),
+    )
+    rank.add_argument("--market", required=True, choices=["cn", "us"], help="Market: cn for A-share, us for U.S. stocks.")
+    rank.add_argument("--symbols", required=True, help="Comma-separated candidate symbols, e.g. AAPL,MSFT,NVDA.")
+    rank.add_argument("--history-provider", default="yahoo", choices=provider_names_for_operation("fetch_history"), help="Historical OHLCV provider.")
+    rank.add_argument("--quote-provider", default="tencent", choices=provider_names_for_operation("fetch_quotes"), help="Quote provider used for polling.")
+    rank.add_argument("--news-provider", default="google-news", choices=provider_names_for_operation("fetch_news"), help="News provider used for public news and sentiment context.")
+    rank.add_argument("--start-date", required=True, help="YYYYMMDD.")
+    rank.add_argument("--end-date", required=True, help="YYYYMMDD.")
+    rank.add_argument("--period", default="daily", choices=["daily", "weekly", "monthly"])
+    rank.add_argument("--adjust", default="", help="Provider adjustment flag, e.g. qfq/hfq for AkShare.")
+    rank.add_argument("--top", type=int, default=3, help="Number of research candidates to emit.")
+    rank.add_argument("--news-limit", type=int, default=5, help="Maximum news items per symbol per iteration.")
+    rank.add_argument("--source-id", help="Defaults to finance_<market>_rank_candidates.")
+    rank.add_argument("--interval-sec", type=float, default=30.0, help="Seconds between polling iterations.")
+    rank.add_argument("--iterations", type=int, default=1, help="Number of ranking iterations. Use 0 to run until interrupted.")
+    rank.add_argument("--jsonl", action="store_true", help="Emit one JSON object per ranking tick.")
+    _add_report_format(rank)
+
     history = finance_subparsers.add_parser(
         "fetch-history",
         help="Fetch public historical OHLCV data.",
@@ -139,6 +169,18 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     _add_provider_market(quotes, default_provider="tencent")
     quotes.add_argument("--symbols", required=True, help="Comma-separated provider-specific symbols.")
     _add_output(quotes)
+
+    news = finance_subparsers.add_parser(
+        "fetch-news",
+        help="Fetch public news rows and sentiment evidence.",
+        description="Fetch public RSS news rows and emit lightweight, transparent sentiment evidence.",
+    )
+    news.add_argument("--provider", default="google-news", choices=provider_names_for_operation("fetch_news"), help="Public news provider.")
+    news.add_argument("--market", required=True, choices=["cn", "us"], help="Market: cn for A-share, us for U.S. stocks.")
+    news.add_argument("--symbol", required=True, help="Single symbol, e.g. 000001 or AAPL.")
+    news.add_argument("--query", help="Override provider search query. Defaults to a market-aware symbol query.")
+    news.add_argument("--limit", type=int, default=5, help="Maximum news rows to fetch.")
+    _add_output(news)
 
     ingest = finance_subparsers.add_parser(
         "ingest-quotes",
@@ -216,9 +258,14 @@ def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
         "output_format",
         "history_provider",
         "quote_provider",
+        "news_provider",
+        "query",
+        "limit",
         "history_output",
         "history_output_format",
         "preview_rows",
+        "top",
+        "news_limit",
         "source_id",
         "monitor_id",
         "name",

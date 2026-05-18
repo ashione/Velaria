@@ -95,9 +95,9 @@ uv run --project python python python/velaria_cli.py artifacts list --run-id <ru
 
 用途：
 
-- 通过公开 provider 获取 A股 / 美股历史数据或 quote
+- 通过公开 provider 获取 A股 / 美股历史数据、quote 或新闻 RSS
 - 把 quote 写入 Velaria `external_event` source
-- 给 monitor / FocusEvent / Agent 研究链路提供带来源 metadata 的输入
+- 给 monitor / FocusEvent / 候选排名 / Agent 研究链路提供带来源 metadata 的输入
 
 可用子命令：
 
@@ -105,8 +105,10 @@ uv run --project python python python/velaria_cli.py artifacts list --run-id <ru
 - `finance sources`：列出公开 provider、支持市场、freshness 和推荐用法
 - `finance analyze`：面向用户的一条命令分析入口；获取 quote、入库、运行 monitor，并输出可读研究报告或 JSON
 - `finance pipeline`：完整链路入口；获取历史 OHLCV、订阅实时 quote tick、运行 monitor，并输出分析和 service 集成 metadata
+- `finance rank-candidates`：候选池排名入口；持续获取 quote、历史 OHLCV、新闻 RSS 和透明情绪证据，输出 Top N 研究候选
 - `finance fetch-history`：获取历史 OHLCV 行情；优先使用 `provider=yahoo`，也可使用 `provider=akshare`
 - `finance fetch-quotes`：获取 quote 行；可用 `provider=akshare` 或 `provider=tencent`
+- `finance fetch-news`：获取公开新闻 RSS 行和透明情绪 evidence；默认使用 `provider=google-news`
 - `finance ingest-quotes`：获取 quote 并写入 `external_event` source，供 monitor 使用
 - `finance watch`：持续监听一个标的，逐 tick 写入 observation、运行 monitor，并输出事件上下文
 
@@ -152,10 +154,37 @@ uv run --project python --extra finance python python/velaria_cli.py finance pip
   --interval-sec 0 \
   --format json
 
+uv run --project python --extra finance python python/velaria_cli.py finance rank-candidates \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --top 3 \
+  --news-limit 5 \
+  --iterations 1 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance rank-candidates \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --top 3 \
+  --news-limit 5 \
+  --iterations 0 \
+  --interval-sec 30 \
+  --jsonl
+
 uv run --project python --extra finance python python/velaria_cli.py finance fetch-quotes \
   --provider tencent \
   --market cn \
   --symbols 000001,600519
+
+uv run --project python --extra finance python python/velaria_cli.py finance fetch-news \
+  --provider google-news \
+  --market us \
+  --symbol AAPL \
+  --limit 5
 
 uv run --project python --extra finance python python/velaria_cli.py finance ingest-quotes \
   --provider tencent \
@@ -188,7 +217,9 @@ finance doctor
 finance sources
 finance analyze --market cn --symbol 000001 --format json
 finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1 --format json
+finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --top 3 --format json
 finance fetch-quotes --provider tencent --market cn --symbols 000001
+finance fetch-news --provider google-news --market us --symbol AAPL --limit 5
 finance ingest-quotes --provider tencent --market cn --symbols 000001 --source-id finance_cn_quotes
 finance watch --market cn --symbol 000001 --interval-sec 30 --iterations 0 --jsonl
 ```
@@ -197,24 +228,29 @@ finance watch --market cn --symbol 000001 --interval-sec 30 --iterations 0 --jso
 
 - `finance analyze` 默认输出人类可读中文报告；Agent 自动化应传 `--format json`
 - `finance pipeline` 默认输出人类可读中文报告；Agent 自动化应传 `--format json`
+- `finance rank-candidates` 输出 `research_candidates`，不是买卖建议；Agent 自动化应传 `--format json` 或持续模式 `--jsonl`
 - `finance doctor` / `finance sources` 默认输出人类可读文本；Agent 自动化可传 `--format json`
 - `fetch-*`、`ingest-quotes`、`watch` 默认 stdout 是 JSON，失败也是 JSON
+- `fetch-news` 输出 `sentiment`，情绪方法为透明关键词词典，不是不可解释模型判断
 - `finance watch` 默认在有限 `--iterations` 后输出一个 JSON；`--iterations 0` 是持续监听，配合 `--jsonl` 可逐 tick 输出
 - `finance pipeline` 输出包含 `history`、`subscription`、`quote`、`focus_events`、`analysis`、`analysis_prompt` 和 `service_integration`
+- `finance rank-candidates` 输出包含 `score_parts`、`quote`、`history`、`news_sentiment`、`news`、`risk_flags`、`evidence`、`service_integration`
 - provider 失败应读取 `error_type`、`message`、`hint`、`details`
 - 行数据包含 `provider`、`source_url`、`fetched_at`、`freshness`、`delay_sec`、`license_note`
 - watch tick 包含 `quote`、`observations`、`signals`、`focus_events`、`artifacts`、`analysis` 和 `analysis_prompt`
 - `finance sources --format json` 来自实际 provider registry，是 Agent 选择 provider / command 的优先依据
 - `freshness` / `delay_sec` 是研究证据，不要把所有 quote 都当成交易所级实时数据
-- 金融输出只作为研究辅助，不构成投资建议
+- 金融输出只作为研究辅助，不构成投资建议；禁止把 `research_candidates` 改写成买入、卖出、持有指令
 
 Provider 使用建议：
 
 - 普通用户第一步先运行 `finance doctor`，再运行 `finance analyze --market cn --symbol 000001`
 - 需要完整链路时运行 `finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131`
 - 美股完整链路可运行 `finance pipeline --market us --symbol AAPL --start-date 20260501 --end-date 20260518 --iterations 1 --format json`
+- 美股候选池排名可运行 `finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --top 3 --format json`
 - 历史行情优先尝试 `provider=yahoo`；AkShare / Eastmoney 可作为补充 provider
 - 轻量 quote 优先尝试 `provider=tencent`
+- 新闻和舆论证据优先尝试 `provider=google-news`；它是公开 RSS 搜索源，输出 `freshness=near_realtime`
 - Tencent 美股 quote 当前按 provider contract 标记为 `freshness=delayed`，不要描述为交易所级实时
 - AkShare / Eastmoney 上游不可达时，不要 mock 或编造历史数据；把结构化 provider 错误返回给用户，并可用 Tencent quote 做实时监控链路验证
 

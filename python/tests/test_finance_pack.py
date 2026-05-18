@@ -12,10 +12,12 @@ from velaria.agentic_store import AgenticStore
 from velaria.cli import main as velaria_cli_main
 from velaria.finance_pack import (
     build_research_prompt,
+    evaluate_news_sentiment,
     fetch_quotes,
     normalize_history_frame,
     normalize_provider,
     normalize_quote_frame,
+    parse_google_news_rss,
     parse_tencent_quote_payload,
     parse_yahoo_chart_payload,
     provider_catalog,
@@ -27,13 +29,15 @@ from velaria.finance_pack.cli import main as finance_cli_main
 class FinancePackTest(unittest.TestCase):
     def test_provider_registry_exposes_capabilities_and_catalog(self):
         self.assertEqual(provider_names_for_operation("fetch_history"), ["akshare", "yahoo"])
+        self.assertEqual(provider_names_for_operation("fetch_news"), ["google-news"])
         self.assertEqual(provider_names_for_operation("fetch_quotes"), ["akshare", "tencent"])
 
         catalog = provider_catalog()
         providers = {item["provider"]: item for item in catalog}
-        self.assertEqual(set(providers), {"akshare", "tencent", "yahoo"})
+        self.assertEqual(set(providers), {"akshare", "google-news", "tencent", "yahoo"})
         self.assertIn("fetch-history", providers["yahoo"]["commands"])
         self.assertNotIn("fetch-quotes", providers["yahoo"]["commands"])
+        self.assertIn("fetch-news", providers["google-news"]["commands"])
         self.assertIn("fetch-quotes", providers["tencent"]["commands"])
         self.assertNotIn("fetch-history", providers["tencent"]["commands"])
         self.assertEqual(providers["tencent"]["freshness"]["us"], "delayed")
@@ -47,6 +51,145 @@ class FinancePackTest(unittest.TestCase):
         self.assertEqual(error.error_type, "unsupported_provider_operation")
         self.assertEqual(error.details["operation"], "fetch_quotes")
         self.assertEqual(error.details["candidates"], ["akshare", "tencent"])
+
+    def test_parse_google_news_rss_maps_news_rows_and_sentiment(self):
+        rss = """<?xml version="1.0" encoding="UTF-8"?>
+        <rss><channel>
+          <item>
+            <title>Apple stock gains after strong demand report</title>
+            <link>https://news.google.com/rss/articles/example</link>
+            <source url="https://example.com">Example Wire</source>
+            <pubDate>Mon, 18 May 2026 15:00:00 GMT</pubDate>
+            <description>Analysts see resilient iPhone demand and upbeat margins.</description>
+          </item>
+          <item>
+            <title>Apple faces antitrust risk as regulators investigate</title>
+            <link>https://news.google.com/rss/articles/example2</link>
+            <source url="https://example.org">Example Risk</source>
+            <pubDate>Mon, 18 May 2026 15:05:00 GMT</pubDate>
+            <description>Investigation pressure raises legal risk.</description>
+          </item>
+        </channel></rss>"""
+
+        rows = parse_google_news_rss(
+            rss,
+            market="us",
+            symbol="AAPL",
+            query="AAPL stock",
+            fetched_at="2026-05-18T16:00:00Z",
+        )
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["provider"], "google-news")
+        self.assertEqual(rows[0]["symbol"], "AAPL")
+        self.assertEqual(rows[0]["publisher"], "Example Wire")
+        self.assertEqual(rows[0]["publisher_url"], "https://example.com")
+        self.assertEqual(rows[0]["published_at"], "2026-05-18T15:00:00Z")
+        sentiment = evaluate_news_sentiment(rows)
+        self.assertEqual(sentiment["article_count"], 2)
+        self.assertGreater(sentiment["positive_hits"], 0)
+        self.assertGreater(sentiment["negative_hits"], 0)
+        self.assertIn(sentiment["label"], {"mixed", "positive", "negative", "neutral"})
+
+    def test_rank_candidates_cli_outputs_research_candidates_with_news(self):
+        quote_rows = [
+            {
+                "event_time": "2026-05-18T16:00:00Z",
+                "event_type": "quote",
+                "source_key": "AAPL",
+                "symbol": "AAPL",
+                "market": "us",
+                "price": 296.35,
+                "volume": 13519420,
+                "pct_change": 1.2,
+                "provider": "tencent",
+                "freshness": "delayed",
+                "delay_sec": None,
+                "fetched_at": "2026-05-18T16:00:00Z",
+                "source_url": "https://qt.gtimg.cn/q=",
+                "license_note": "public provider metadata",
+            },
+            {
+                "event_time": "2026-05-18T16:00:00Z",
+                "event_type": "quote",
+                "source_key": "MSFT",
+                "symbol": "MSFT",
+                "market": "us",
+                "price": 520.0,
+                "volume": 10000000,
+                "pct_change": -0.5,
+                "provider": "tencent",
+                "freshness": "delayed",
+                "delay_sec": None,
+                "fetched_at": "2026-05-18T16:00:00Z",
+                "source_url": "https://qt.gtimg.cn/q=",
+                "license_note": "public provider metadata",
+            },
+        ]
+        history_by_symbol = {
+            "AAPL": [
+                {"symbol": "AAPL", "date": "2026-05-01", "close": 280.0, "provider": "yahoo", "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/", "freshness": "eod"},
+                {"symbol": "AAPL", "date": "2026-05-18", "close": 296.0, "provider": "yahoo", "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/", "freshness": "eod"},
+            ],
+            "MSFT": [
+                {"symbol": "MSFT", "date": "2026-05-01", "close": 530.0, "provider": "yahoo", "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/", "freshness": "eod"},
+                {"symbol": "MSFT", "date": "2026-05-18", "close": 520.0, "provider": "yahoo", "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/", "freshness": "eod"},
+            ],
+        }
+        news_by_symbol = {
+            "AAPL": [
+                {"symbol": "AAPL", "title": "Apple gains on strong demand", "summary": "upbeat growth", "provider": "google-news", "source_url": "https://news.google.com/rss/search", "publisher": "Wire", "published_at": "2026-05-18T15:00:00Z", "freshness": "near_realtime"}
+            ],
+            "MSFT": [
+                {"symbol": "MSFT", "title": "Microsoft faces risk", "summary": "regulators investigate", "provider": "google-news", "source_url": "https://news.google.com/rss/search", "publisher": "Wire", "published_at": "2026-05-18T15:00:00Z", "freshness": "near_realtime"}
+            ],
+        }
+
+        def fake_history(**kwargs):
+            return history_by_symbol[kwargs["symbol"]]
+
+        def fake_news(**kwargs):
+            return news_by_symbol[kwargs["symbol"]]
+
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-rank-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                with mock.patch("velaria.finance_pack.cli.fetch_quotes", return_value=quote_rows):
+                    with mock.patch("velaria.finance_pack.cli.fetch_history", side_effect=fake_history):
+                        with mock.patch("velaria.finance_pack.cli.fetch_news", side_effect=fake_news):
+                            stdout = StringIO()
+                            with redirect_stdout(stdout):
+                                exit_code = finance_cli_main(
+                                    [
+                                        "rank-candidates",
+                                        "--market",
+                                        "us",
+                                        "--symbols",
+                                        "AAPL,MSFT",
+                                        "--start-date",
+                                        "20260501",
+                                        "--end-date",
+                                        "20260518",
+                                        "--top",
+                                        "1",
+                                        "--iterations",
+                                        "1",
+                                        "--interval-sec",
+                                        "0",
+                                        "--format",
+                                        "json",
+                                    ]
+                                )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["action"], "rank-candidates")
+        self.assertEqual(payload["recommendation_type"], "research_candidate")
+        self.assertEqual(len(payload["ticks"]), 1)
+        self.assertEqual(payload["ticks"][0]["research_candidates"][0]["symbol"], "AAPL")
+        self.assertIn("news_sentiment", payload["ticks"][0]["research_candidates"][0])
+        self.assertIn("not investment advice", payload["disclaimer"])
+        self.assertNotIn("buy", json.dumps(payload).lower())
 
     def test_normalize_akshare_cn_history_keeps_provider_metadata(self):
         raw = pd.DataFrame(

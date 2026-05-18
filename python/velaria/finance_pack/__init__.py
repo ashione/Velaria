@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import importlib
+import html
 import json
 import math
+import re
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
+from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
 import pandas as pd
@@ -15,10 +20,57 @@ from .providers import FinanceProviderAdapter, FinanceProviderRegistry, FinanceP
 AKSHARE_STOCK_DOC_URL = "https://akshare.akfamily.xyz/data/stock/stock.html"
 TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q="
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/"
+GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search"
 DEFAULT_LICENSE_NOTE = (
     "Public market-data provider metadata; validate upstream terms, freshness, "
     "and exchange delay before using for decisions."
 )
+NEWS_LICENSE_NOTE = (
+    "Public news RSS provider metadata; validate publisher, publication time, "
+    "and upstream feed terms before using for decisions."
+)
+POSITIVE_SENTIMENT_TERMS = {
+    "beat",
+    "beats",
+    "benefit",
+    "bullish",
+    "demand",
+    "gain",
+    "gains",
+    "growth",
+    "improve",
+    "improves",
+    "optimistic",
+    "outperform",
+    "positive",
+    "profit",
+    "rally",
+    "record",
+    "resilient",
+    "strong",
+    "surge",
+    "upbeat",
+}
+NEGATIVE_SENTIMENT_TERMS = {
+    "antitrust",
+    "bearish",
+    "decline",
+    "drops",
+    "falls",
+    "fraud",
+    "investigate",
+    "investigation",
+    "lawsuit",
+    "loss",
+    "miss",
+    "negative",
+    "pressure",
+    "probe",
+    "risk",
+    "slump",
+    "weak",
+    "warning",
+}
 
 
 class FinanceProviderError(RuntimeError):
@@ -92,6 +144,27 @@ def provider_names_for_operation(operation: str) -> list[str]:
 
 def provider_catalog() -> list[dict[str, Any]]:
     return _provider_registry().catalog()
+
+
+def fetch_news(
+    *,
+    provider: str,
+    market: str,
+    symbol: str,
+    query: str | None = None,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    provider = normalize_provider(provider)
+    adapter = _provider_registry().get(provider)
+    if adapter is None or adapter.fetch_news is None:
+        candidates = provider_names_for_operation("fetch_news")
+        raise FinanceProviderError(
+            f"provider does not support news: {provider}",
+            error_type="unsupported_provider_operation",
+            hint=f"Use one of these news providers: {', '.join(candidates)}.",
+            details={"provider": provider, "operation": "fetch_news", "candidates": candidates},
+        )
+    return adapter.fetch_news(market=market, symbol=symbol, query=query, limit=limit)
 
 
 def normalize_symbols(symbols: str | Iterable[str]) -> list[str]:
@@ -483,6 +556,96 @@ def parse_yahoo_chart_payload(
     return rows
 
 
+def parse_google_news_rss(
+    payload: str,
+    *,
+    market: str,
+    symbol: str,
+    query: str,
+    fetched_at: str | None = None,
+    source_url: str = GOOGLE_NEWS_RSS_URL,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    market = normalize_market(market)
+    fetched_at = fetched_at or _utc_now()
+    try:
+        root = ET.fromstring(payload)
+    except ET.ParseError as exc:
+        raise FinanceProviderError(
+            "Google News RSS returned invalid XML",
+            error_type="provider_parse_failed",
+            hint="Retry later or inspect the provider RSS payload.",
+            details={"provider": "google-news", "market": market, "symbol": symbol, "query": query},
+        ) from exc
+    items = root.findall(".//item")
+    rows: list[dict[str, Any]] = []
+    for item in items[: max(0, limit) if limit is not None else None]:
+        title = _xml_text(item, "title")
+        link = _xml_text(item, "link")
+        source = item.find("source")
+        summary = _xml_text(item, "description")
+        rows.append(
+            {
+                "event_time": fetched_at,
+                "event_type": "news",
+                "source_key": symbol,
+                "market": market,
+                "symbol": symbol,
+                "title": title,
+                "summary": summary,
+                "url": link,
+                "publisher": _clean_text(source.text) if source is not None and source.text else None,
+                "publisher_url": source.attrib.get("url") if source is not None else None,
+                "published_at": _rss_datetime(_xml_text(item, "pubDate")),
+                "query": query,
+                "provider": "google-news",
+                "source_url": source_url,
+                "fetched_at": fetched_at,
+                "freshness": "near_realtime",
+                "delay_sec": None,
+                "license_note": NEWS_LICENSE_NOTE,
+            }
+        )
+    return rows
+
+
+def evaluate_news_sentiment(news_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    positive_hits = 0
+    negative_hits = 0
+    matched_positive: list[str] = []
+    matched_negative: list[str] = []
+    for row in news_rows:
+        text = f"{row.get('title') or ''} {row.get('summary') or ''}".lower()
+        tokens = {token.strip(".,:;!?()[]{}\"'") for token in text.split()}
+        for term in sorted(POSITIVE_SENTIMENT_TERMS & tokens):
+            positive_hits += 1
+            matched_positive.append(term)
+        for term in sorted(NEGATIVE_SENTIMENT_TERMS & tokens):
+            negative_hits += 1
+            matched_negative.append(term)
+    raw_score = positive_hits - negative_hits
+    article_count = len(news_rows)
+    normalized_score = 0.0 if article_count == 0 else round(raw_score / max(1, article_count), 6)
+    if normalized_score > 0.25:
+        label = "positive"
+    elif normalized_score < -0.25:
+        label = "negative"
+    elif positive_hits or negative_hits:
+        label = "mixed"
+    else:
+        label = "neutral"
+    return {
+        "label": label,
+        "score": normalized_score,
+        "article_count": article_count,
+        "positive_hits": positive_hits,
+        "negative_hits": negative_hits,
+        "matched_positive": sorted(set(matched_positive)),
+        "matched_negative": sorted(set(matched_negative)),
+        "method": "transparent_keyword_lexicon",
+    }
+
+
 def finance_quote_schema_binding() -> dict[str, Any]:
     return {
         "time_field": "event_time",
@@ -593,6 +756,30 @@ def _fetch_yahoo_history(
     return parse_yahoo_chart_payload(payload, market=market, symbol=symbol, yahoo_symbol=provider_symbol)
 
 
+def _fetch_google_news(
+    *,
+    market: str,
+    symbol: str,
+    query: str | None = None,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    market = normalize_market(market)
+    query_text = query or _default_news_query(market, symbol)
+    params = urllib_parse.urlencode({"q": query_text, "hl": "en-US", "gl": "US", "ceid": "US:en"})
+    url = f"{GOOGLE_NEWS_RSS_URL}?{params}"
+    req = urllib_request.Request(url, headers={"User-Agent": "Velaria/finance-pack"})
+    try:
+        with urllib_request.urlopen(req, timeout=15) as response:
+            payload = response.read().decode("utf-8", errors="replace")
+    except Exception as exc:  # pragma: no cover - exercised by network smoke
+        raise FinanceProviderError(
+            f"failed to fetch {market} news from google-news: {exc}",
+            error_type="provider_fetch_failed",
+            details={"provider": "google-news", "market": market, "symbol": symbol, "query": query_text, "source_url": url},
+        ) from exc
+    return parse_google_news_rss(payload, market=market, symbol=symbol, query=query_text, source_url=url, limit=limit)
+
+
 def _provider_registry() -> FinanceProviderRegistry:
     global _PROVIDER_REGISTRY
     if _PROVIDER_REGISTRY is not None:
@@ -612,6 +799,19 @@ def _provider_registry() -> FinanceProviderRegistry:
                 ),
                 fetch_history=_fetch_akshare_history,
                 fetch_quotes=_fetch_akshare_quotes,
+            ),
+            FinanceProviderAdapter(
+                spec=FinanceProviderSpec(
+                    provider="google-news",
+                    markets=("cn", "us"),
+                    commands=("fetch-news", "rank-candidates"),
+                    freshness={"news": "near_realtime"},
+                    recommended_quote_provider=False,
+                    recommended_history_provider=False,
+                    source_url=GOOGLE_NEWS_RSS_URL,
+                    notes="Public Google News RSS search feed used for current news context and lightweight sentiment evidence.",
+                ),
+                fetch_news=_fetch_google_news,
             ),
             FinanceProviderAdapter(
                 spec=FinanceProviderSpec(
@@ -686,6 +886,13 @@ def _yahoo_symbol(market: str, symbol: str) -> str:
     return f"{value}{suffix}"
 
 
+def _default_news_query(market: str, symbol: str) -> str:
+    value = symbol.strip().upper()
+    if market == "us":
+        return f"{value} stock"
+    return f"{value} 股票"
+
+
 def _yyyymmdd_epoch(value: str, *, add_days: int = 0) -> int:
     try:
         dt = datetime.strptime(value, "%Y%m%d").replace(tzinfo=timezone.utc) + timedelta(days=add_days)
@@ -719,6 +926,30 @@ def _pick(row: dict[str, Any], *names: str) -> Any:
         if name in row:
             return row[name]
     return None
+
+
+def _xml_text(item: ET.Element, name: str) -> str | None:
+    child = item.find(name)
+    if child is None or child.text is None:
+        return None
+    return _clean_text(child.text)
+
+
+def _clean_text(value: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", str(value))
+    return " ".join(html.unescape(text).split())
+
+
+def _rss_datetime(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        dt = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _is_missing(value: Any) -> bool:

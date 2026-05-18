@@ -119,6 +119,14 @@ uv run --project python --extra finance python python/velaria_cli.py finance ing
   --symbols 000001 \
   --source-id finance_cn_quotes
 
+uv run --project python --extra finance python python/velaria_cli.py finance watch \
+  --provider tencent \
+  --market cn \
+  --symbol 000001 \
+  --interval-sec 30 \
+  --iterations 0 \
+  --source-id finance_cn_000001_watch
+
 uv run --project python --extra finance python python/velaria_cli.py finance fetch-history \
   --provider akshare \
   --market cn \
@@ -136,13 +144,16 @@ uv run --project python --extra finance python python/velaria_cli.py finance fet
 ```text
 finance fetch-quotes --provider tencent --market cn --symbols 000001
 finance ingest-quotes --provider tencent --market cn --symbols 000001 --source-id finance_cn_quotes
+finance watch --provider tencent --market cn --symbol 000001 --interval-sec 30 --iterations 0
 ```
 
 输出约束：
 
 - stdout 是 JSON，失败也是 JSON
+- `finance watch` 默认在有限 `--iterations` 后输出一个 JSON；`--iterations 0` 是持续监听，配合 `--jsonl` 可逐 tick 输出
 - provider 失败应读取 `error_type`、`message`、`hint`、`details`
 - 行数据包含 `provider`、`source_url`、`fetched_at`、`freshness`、`delay_sec`、`license_note`
+- watch tick 包含 `quote`、`observations`、`signals`、`focus_events`、`artifacts`、`analysis` 和 `analysis_prompt`
 - `freshness` / `delay_sec` 是研究证据，不要把所有 quote 都当成交易所级实时数据
 - 金融输出只作为研究辅助，不构成投资建议
 

@@ -21,6 +21,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               velaria finance fetch-quotes --provider tencent --market cn --symbols 000001,600519
               velaria finance fetch-quotes --provider tencent --market us --symbols AAPL
               velaria finance ingest-quotes --provider tencent --market cn --symbols 000001 --source-id finance_cn_quotes
+              velaria finance watch --provider tencent --market cn --symbol 000001 --interval-sec 30 --iterations 0
               velaria finance fetch-history --provider akshare --market cn --symbol 000001 --start-date 20250101 --end-date 20250131 --adjust qfq
 
             Agent mode:
@@ -74,6 +75,29 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     ingest.add_argument("--source-id", help="Defaults to finance_<market>_quotes.")
     ingest.add_argument("--name", help="Source display name.")
 
+    watch = finance_subparsers.add_parser(
+        "watch",
+        help="Watch one symbol, ingest quotes, run a monitor, and emit analysis context.",
+        description=(
+            "Poll one public quote symbol, append each observation to a Velaria "
+            "external_event source, run a monitor, and return FocusEvent plus "
+            "analysis prompt context."
+        ),
+    )
+    _add_provider_market(watch)
+    watch.add_argument("--symbol", required=True, help="Single symbol to watch, e.g. 000001 or AAPL.")
+    watch.add_argument("--source-id", help="Defaults to finance_<market>_<symbol>_watch.")
+    watch.add_argument("--monitor-id", help="Defaults to monitor_<source_id>.")
+    watch.add_argument("--name", help="Source and monitor display name.")
+    watch.add_argument("--interval-sec", type=float, default=30.0, help="Seconds between polls.")
+    watch.add_argument("--iterations", type=int, default=1, help="Number of polls. Use 0 to run until interrupted.")
+    watch.add_argument("--pct-change-threshold", type=float, help="Only create focus events when ABS(pct_change) is at least this value.")
+    watch.add_argument("--min-price", type=float, help="Only create focus events when price is at least this value.")
+    watch.add_argument("--max-price", type=float, help="Only create focus events when price is at most this value.")
+    watch.add_argument("--cooldown-sec", type=int, default=0, help="FocusEvent suppression cooldown for this watch monitor.")
+    watch.add_argument("--jsonl", action="store_true", help="Emit one JSON object per tick.")
+    watch.add_argument("--no-analysis-prompt", action="store_true", help="Omit the Velaria Agent research prompt.")
+
 
 def _run_finance(args: argparse.Namespace) -> int:
     return finance_pack_main(_to_finance_pack_argv(args))
@@ -97,7 +121,28 @@ def _add_output(parser: argparse.ArgumentParser) -> None:
 
 def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
     argv = [str(args.finance_command)]
-    for name in ("provider", "market", "symbol", "symbols", "start_date", "end_date", "period", "adjust", "output", "output_format", "preview_rows", "source_id", "name"):
+    for name in (
+        "provider",
+        "market",
+        "symbol",
+        "symbols",
+        "start_date",
+        "end_date",
+        "period",
+        "adjust",
+        "output",
+        "output_format",
+        "preview_rows",
+        "source_id",
+        "monitor_id",
+        "name",
+        "interval_sec",
+        "iterations",
+        "pct_change_threshold",
+        "min_price",
+        "max_price",
+        "cooldown_sec",
+    ):
         if not hasattr(args, name):
             continue
         value = getattr(args, name)
@@ -105,4 +150,8 @@ def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
             continue
         flag = f"--{name.replace('_', '-')}"
         argv.extend([flag, str(value)])
+    if getattr(args, "jsonl", False):
+        argv.append("--jsonl")
+    if getattr(args, "no_analysis_prompt", False):
+        argv.append("--no-analysis-prompt")
     return argv

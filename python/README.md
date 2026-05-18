@@ -144,10 +144,26 @@ uv run --project python --extra finance python python/velaria_cli.py finance ing
   --source-id finance_cn_quotes
 ```
 
+Watch one public quote symbol, append each observation to an `external_event`
+source, run a monitor, and return FocusEvent plus analysis context:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance watch \
+  --provider tencent \
+  --market cn \
+  --symbol 000001 \
+  --interval-sec 30 \
+  --iterations 0 \
+  --jsonl \
+  --source-id finance_cn_000001_watch
+```
+
 The same finance commands are available to `velaria_cli.py -i` through the
 registered agent tool `velaria_cli_run`. In agent mode, pass only the Velaria
 subcommand, for example `finance fetch-quotes --provider tencent --market cn
---symbols 000001`; do not include `uv`, `python`, or `python/velaria_cli.py` in
+--symbols 000001` or `finance watch --provider tencent --market cn --symbol
+000001 --interval-sec 30 --iterations 0 --jsonl`; do not include `uv`,
+`python`, or `python/velaria_cli.py` in
 the tool arguments.
 
 Run the public-data smoke against real AkShare endpoints:

@@ -203,6 +203,47 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertEqual(result["schema"], ["region", "total"])
         self.assertEqual(result["row_count"], 1)
 
+    def test_cli_run_tool_can_invoke_finance_commands(self):
+        quote_rows = [
+            {
+                "event_time": "2026-01-02T00:00:00Z",
+                "event_type": "quote",
+                "source_key": "000001",
+                "symbol": "000001",
+                "market": "cn",
+                "price": 12.34,
+                "volume": 1000,
+                "provider": "tencent",
+                "freshness": "realtime",
+                "delay_sec": 0,
+                "fetched_at": "2026-01-02T00:00:00Z",
+                "source_url": "https://qt.gtimg.cn/q=",
+                "license_note": "public provider metadata",
+            }
+        ]
+        with mock.patch("velaria.finance_pack.cli.fetch_quotes", return_value=quote_rows):
+            result = execute_local_function(
+                "velaria_cli_run",
+                {
+                    "argv": [
+                        "finance",
+                        "fetch-quotes",
+                        "--provider",
+                        "tencent",
+                        "--market",
+                        "cn",
+                        "--symbols",
+                        "000001",
+                    ]
+                },
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["function"], "velaria_cli_run")
+        self.assertEqual(result["payload"]["action"], "fetch-quotes")
+        self.assertEqual(result["payload"]["provider"], "tencent")
+        self.assertEqual(result["payload"]["row_count"], 1)
+
     def test_dataset_process_uses_input_table_when_query_references_it(self):
         captured = {}
 

@@ -124,7 +124,7 @@ uv sync --project python --extra finance
 Fetch A-share historical data through AkShare and write a Parquet dataset:
 
 ```bash
-uv run --project python --extra finance python -m velaria.finance_pack.cli fetch-history \
+uv run --project python --extra finance python python/velaria_cli.py finance fetch-history \
   --provider akshare \
   --market cn \
   --symbol 000001 \
@@ -137,12 +137,18 @@ uv run --project python --extra finance python -m velaria.finance_pack.cli fetch
 Fetch public quote rows and ingest them as a Velaria `external_event` source:
 
 ```bash
-uv run --project python --extra finance python -m velaria.finance_pack.cli ingest-quotes \
+uv run --project python --extra finance python python/velaria_cli.py finance ingest-quotes \
   --provider tencent \
   --market cn \
   --symbols 000001,600519 \
   --source-id finance_cn_quotes
 ```
+
+The same finance commands are available to `velaria_cli.py -i` through the
+registered agent tool `velaria_cli_run`. In agent mode, pass only the Velaria
+subcommand, for example `finance fetch-quotes --provider tencent --market cn
+--symbols 000001`; do not include `uv`, `python`, or `python/velaria_cli.py` in
+the tool arguments.
 
 Run the public-data smoke against real AkShare endpoints:
 

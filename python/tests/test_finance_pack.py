@@ -8,6 +8,8 @@ from unittest import mock
 
 import pandas as pd
 
+from velaria.agentic_store import AgenticStore
+from velaria.cli import main as velaria_cli_main
 from velaria.finance_pack import (
     build_research_prompt,
     normalize_history_frame,
@@ -15,7 +17,6 @@ from velaria.finance_pack import (
     parse_tencent_quote_payload,
 )
 from velaria.finance_pack.cli import main as finance_cli_main
-from velaria.agentic_store import AgenticStore
 
 
 class FinancePackTest(unittest.TestCase):
@@ -131,6 +132,47 @@ class FinancePackTest(unittest.TestCase):
                     rows = store.read_external_events("cn_quotes")
                 self.assertEqual(rows[0]["source_key"], "000001")
                 self.assertEqual(rows[0]["price"], 12.34)
+
+    def test_top_level_finance_cli_is_available(self):
+        quote_rows = [
+            {
+                "event_time": "2026-01-02T00:00:00Z",
+                "event_type": "quote",
+                "source_key": "000001",
+                "symbol": "000001",
+                "market": "cn",
+                "price": 12.34,
+                "volume": 1000,
+                "provider": "tencent",
+                "freshness": "realtime",
+                "delay_sec": 0,
+                "fetched_at": "2026-01-02T00:00:00Z",
+                "source_url": "https://qt.gtimg.cn/q=",
+                "license_note": "public provider metadata",
+            }
+        ]
+        with mock.patch("velaria.finance_pack.cli.fetch_quotes", return_value=quote_rows):
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                exit_code = velaria_cli_main(
+                    [
+                        "finance",
+                        "fetch-quotes",
+                        "--provider",
+                        "tencent",
+                        "--market",
+                        "cn",
+                        "--symbols",
+                        "000001",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["action"], "fetch-quotes")
+        self.assertEqual(payload["provider"], "tencent")
+        self.assertEqual(payload["row_count"], 1)
 
     def test_research_prompt_requires_live_sources_and_not_advice(self):
         prompt = build_research_prompt(

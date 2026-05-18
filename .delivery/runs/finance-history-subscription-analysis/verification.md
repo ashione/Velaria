@@ -7,17 +7,24 @@ Status: complete
 | Command | Result | Evidence |
 |---|---|---|
 | `uv run --project python --extra finance python -m unittest python.tests.test_finance_pack` after RED tests | failed as expected | `ImportError: cannot import name 'parse_yahoo_chart_payload'` |
-| `uv run --project python --extra finance python -m unittest python.tests.test_finance_pack` | pass | 16 tests OK |
-| `uv run --project python --extra finance python -m unittest python.tests.test_finance_pack python.tests.test_ai_runtime_agent.AiRuntimeAgentTest.test_cli_run_tool_can_invoke_finance_commands python.tests.test_agentic_service` | pass | 24 tests OK |
-| `uv run --project python --extra finance python -m py_compile python/velaria/finance_pack/__init__.py python/velaria/finance_pack/cli.py python/velaria/cli/finance.py python/examples/finance_public_data_smoke.py python/tests/test_finance_pack.py` | pass | exit code 0 |
+| `uv run --project python --extra finance python -m unittest python.tests.test_finance_pack.FinancePackTest.test_provider_registry_exposes_capabilities_and_catalog python.tests.test_finance_pack.FinancePackTest.test_provider_registry_drives_normalization_and_operation_errors` after RED provider tests | failed as expected | `ImportError: cannot import name 'provider_catalog'` |
+| `uv run --project python --extra finance python -m unittest python.tests.test_finance_pack.FinancePackTest.test_provider_registry_exposes_capabilities_and_catalog python.tests.test_finance_pack.FinancePackTest.test_provider_registry_drives_normalization_and_operation_errors` | pass | 2 tests OK |
+| `uv run --project python --extra finance python -m unittest python.tests.test_finance_pack` | pass | 18 tests OK |
+| `uv run --project python --extra finance python python/velaria_cli.py finance sources --format json` | pass | sources rendered from provider registry with `akshare`, `tencent`, and `yahoo` |
+| `uv run --project python --extra finance python -m unittest python.tests.test_finance_pack python.tests.test_ai_runtime_agent.AiRuntimeAgentTest.test_cli_run_tool_can_invoke_finance_commands python.tests.test_agentic_service` | pass | 26 tests OK |
+| `uv run --project python --extra finance python -m py_compile python/velaria/finance_pack/__init__.py python/velaria/finance_pack/providers.py python/velaria/finance_pack/cli.py python/velaria/cli/finance.py python/examples/finance_public_data_smoke.py python/tests/test_finance_pack.py` | pass | exit code 0 |
 | `uv run --project python --extra finance python python/velaria_cli.py finance fetch-history --provider yahoo --market cn --symbol 000001 --start-date 20250101 --end-date 20250131 --preview-rows 1` | pass | real Yahoo chart data returned 18 rows |
+| `uv run --project python --extra finance python python/velaria_cli.py finance fetch-history --provider yahoo --market us --symbol AAPL --start-date 20260501 --end-date 20260518 --preview-rows 2` | pass | real Yahoo chart data returned 12 U.S. historical rows |
+| `uv run --project python --extra finance python python/velaria_cli.py finance fetch-quotes --provider tencent --market us --symbols AAPL --preview-rows 2` | pass | real Tencent quote returned one AAPL row with `freshness=delayed` |
+| `VELARIA_HOME=/tmp/velaria-us-pipeline-1HiKBJ uv run --project python --extra finance python python/velaria_cli.py finance pipeline --market us --symbol AAPL --start-date 20260501 --end-date 20260518 --iterations 1 --interval-sec 0 --preview-rows 1 --no-analysis-prompt --format json` | pass | history row_count 12, subscription tick_count 1, one FocusEvent, quote freshness delayed |
+| service compatibility script using `VelariaService` and same U.S. pipeline `VELARIA_HOME` | pass | service saw source, monitor, and one focus event |
 | `VELARIA_HOME=<tmp> uv run --project python --extra finance python python/velaria_cli.py finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1 --interval-sec 0 --format json` | pass | real pipeline returned history row_count 18 and one FocusEvent |
 | `VELARIA_HOME=<tmp> uv run --project python --extra finance python python/velaria_cli.py finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1 --interval-sec 0` | pass | text report rendered |
 | service compatibility script using `VelariaService` and same `VELARIA_HOME` | pass | service saw source, monitor, and one focus event |
 | `uv run --project python --extra finance python python/examples/finance_public_data_smoke.py` | pass | CN history 18 rows, CN quote 1 row, US history 20 rows, US quote 1 row |
 | `bazel test --cache_test_results=no //:python_ecosystem_regression` | pass | 14/14 tests passed |
 | `git diff --check` | pass | exit code 0 |
-| focused fallback secret scan over changed files | pass | no matches |
+| focused fallback secret scan over changed files | pass | no credential-shaped values matched; broad keyword scan only found documented placeholders and existing guidance |
 
 ## Baseline Findings
 

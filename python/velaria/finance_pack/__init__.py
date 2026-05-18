@@ -9,6 +9,8 @@ from urllib import request as urllib_request
 
 import pandas as pd
 
+from .providers import FinanceProviderAdapter, FinanceProviderRegistry, FinanceProviderSpec
+
 
 AKSHARE_STOCK_DOC_URL = "https://akshare.akfamily.xyz/data/stock/stock.html"
 TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q="
@@ -65,16 +67,31 @@ def normalize_market(market: str) -> str:
     return aliases[normalized]
 
 
+_PROVIDER_REGISTRY: FinanceProviderRegistry | None = None
+
+
 def normalize_provider(provider: str) -> str:
     normalized = provider.strip().lower()
-    if normalized not in {"akshare", "tencent", "yahoo"}:
+    registry = _provider_registry()
+    if registry.get(normalized) is None:
         raise FinanceProviderError(
             f"unsupported finance provider: {provider}",
             error_type="unsupported_provider",
-            hint="Use provider 'yahoo' or 'akshare' for history, and 'tencent' for public quote rows.",
-            details={"provider": provider},
+            hint=(
+                "Use one of the provider names from `finance sources`, or choose a provider that "
+                "supports the requested operation."
+            ),
+            details={"provider": provider, "candidates": registry.names()},
         )
     return normalized
+
+
+def provider_names_for_operation(operation: str) -> list[str]:
+    return _provider_registry().names_for_operation(operation)
+
+
+def provider_catalog() -> list[dict[str, Any]]:
+    return _provider_registry().catalog()
 
 
 def normalize_symbols(symbols: str | Iterable[str]) -> list[str]:
@@ -190,21 +207,35 @@ def fetch_history(
     adjust: str = "",
 ) -> list[dict[str, Any]]:
     provider = normalize_provider(provider)
-    if provider == "yahoo":
-        return _fetch_yahoo_history(
-            market=market,
-            symbol=symbol,
-            start_date=start_date,
-            end_date=end_date,
-            period=period,
-        )
-    if provider != "akshare":
+    adapter = _provider_registry().get(provider)
+    if adapter is None or adapter.fetch_history is None:
+        candidates = provider_names_for_operation("fetch_history")
         raise FinanceProviderError(
             f"provider does not support history: {provider}",
             error_type="unsupported_provider_operation",
-            hint="Use provider 'yahoo' or 'akshare' for historical OHLCV data.",
-            details={"provider": provider, "operation": "fetch_history"},
+            hint=f"Use one of these history providers: {', '.join(candidates)}.",
+            details={"provider": provider, "operation": "fetch_history", "candidates": candidates},
         )
+    return adapter.fetch_history(
+        market=market,
+        symbol=symbol,
+        start_date=start_date,
+        end_date=end_date,
+        period=period,
+        adjust=adjust,
+    )
+
+
+def _fetch_akshare_history(
+    *,
+    market: str,
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    period: str = "daily",
+    adjust: str = "",
+) -> list[dict[str, Any]]:
+    provider = "akshare"
     market = normalize_market(market)
     ak = _load_akshare()
     try:
@@ -249,15 +280,24 @@ def fetch_quotes(
     provider = normalize_provider(provider)
     market = normalize_market(market)
     symbol_list = normalize_symbols(symbols)
-    if provider == "tencent":
-        return _fetch_tencent_quotes(market=market, symbols=symbol_list)
-    if provider != "akshare":
+    adapter = _provider_registry().get(provider)
+    if adapter is None or adapter.fetch_quotes is None:
+        candidates = provider_names_for_operation("fetch_quotes")
         raise FinanceProviderError(
             f"provider does not support quotes: {provider}",
             error_type="unsupported_provider_operation",
-            hint="Use provider 'tencent' for lightweight public quote rows or 'akshare' when upstream endpoints are reachable.",
-            details={"provider": provider, "operation": "fetch_quotes"},
+            hint=f"Use one of these quote providers: {', '.join(candidates)}.",
+            details={"provider": provider, "operation": "fetch_quotes", "candidates": candidates},
         )
+    return adapter.fetch_quotes(market=market, symbols=symbol_list)
+
+
+def _fetch_akshare_quotes(
+    *,
+    market: str,
+    symbols: list[str],
+) -> list[dict[str, Any]]:
+    provider = "akshare"
     ak = _load_akshare()
     try:
         frame = ak.stock_zh_a_spot_em() if market == "cn" else ak.stock_us_spot_em()
@@ -265,12 +305,12 @@ def fetch_quotes(
         raise FinanceProviderError(
             f"failed to fetch {market} quotes from {provider}: {exc}",
             error_type="provider_fetch_failed",
-            details={"provider": provider, "market": market, "symbols": symbol_list},
+            details={"provider": provider, "market": market, "symbols": symbols},
         ) from exc
     rows = normalize_quote_frame(
         frame,
         market=market,
-        symbols=symbol_list,
+        symbols=symbols,
         provider=provider,
         source_url=AKSHARE_STOCK_DOC_URL,
         freshness="realtime" if market == "cn" else "delayed",
@@ -281,7 +321,7 @@ def fetch_quotes(
             "provider returned no matching quote rows",
             error_type="symbol_not_found",
             hint="For U.S. stocks, inspect akshare stock_us_spot_em() codes and pass the provider-specific code such as '105.AAPL'.",
-            details={"provider": provider, "market": market, "symbols": symbol_list},
+            details={"provider": provider, "market": market, "symbols": symbols},
         )
     return rows
 
@@ -515,7 +555,15 @@ def _fetch_tencent_quotes(*, market: str, symbols: list[str]) -> list[dict[str, 
     return parse_tencent_quote_payload(payload, market=market, symbols=symbols)
 
 
-def _fetch_yahoo_history(*, market: str, symbol: str, start_date: str, end_date: str, period: str) -> list[dict[str, Any]]:
+def _fetch_yahoo_history(
+    *,
+    market: str,
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    period: str,
+    adjust: str = "",
+) -> list[dict[str, Any]]:
     market = normalize_market(market)
     interval = {"daily": "1d", "weekly": "1wk", "monthly": "1mo"}.get(period)
     if interval is None:
@@ -543,6 +591,57 @@ def _fetch_yahoo_history(*, market: str, symbol: str, start_date: str, end_date:
             details={"provider": "yahoo", "market": market, "symbol": symbol, "provider_symbol": provider_symbol, "source_url": url},
         ) from exc
     return parse_yahoo_chart_payload(payload, market=market, symbol=symbol, yahoo_symbol=provider_symbol)
+
+
+def _provider_registry() -> FinanceProviderRegistry:
+    global _PROVIDER_REGISTRY
+    if _PROVIDER_REGISTRY is not None:
+        return _PROVIDER_REGISTRY
+    _PROVIDER_REGISTRY = FinanceProviderRegistry(
+        [
+            FinanceProviderAdapter(
+                spec=FinanceProviderSpec(
+                    provider="akshare",
+                    markets=("cn", "us"),
+                    commands=("fetch-history", "fetch-quotes"),
+                    freshness={"history": "eod", "quotes": "provider-dependent"},
+                    recommended_quote_provider=False,
+                    recommended_history_provider=True,
+                    source_url=AKSHARE_STOCK_DOC_URL,
+                    notes="Public Python data package; upstream Eastmoney endpoints may be blocked by local network policy.",
+                ),
+                fetch_history=_fetch_akshare_history,
+                fetch_quotes=_fetch_akshare_quotes,
+            ),
+            FinanceProviderAdapter(
+                spec=FinanceProviderSpec(
+                    provider="tencent",
+                    markets=("cn", "us"),
+                    commands=("fetch-quotes", "ingest-quotes", "analyze", "watch"),
+                    freshness={"cn": "realtime", "us": "delayed"},
+                    recommended_quote_provider=True,
+                    recommended_history_provider=False,
+                    source_url=TENCENT_QUOTE_URL,
+                    notes="Lightweight public quote endpoint. Use for first-run analyze/watch validation.",
+                ),
+                fetch_quotes=_fetch_tencent_quotes,
+            ),
+            FinanceProviderAdapter(
+                spec=FinanceProviderSpec(
+                    provider="yahoo",
+                    markets=("cn", "us"),
+                    commands=("fetch-history", "pipeline"),
+                    freshness={"history": "eod"},
+                    recommended_quote_provider=False,
+                    recommended_history_provider=True,
+                    source_url=YAHOO_CHART_URL,
+                    notes="Public chart JSON endpoint verified for A-share Yahoo symbols such as 000001.SZ and U.S. symbols such as AAPL.",
+                ),
+                fetch_history=_fetch_yahoo_history,
+            ),
+        ]
+    )
+    return _PROVIDER_REGISTRY
 
 
 def _tencent_code(market: str, symbol: str) -> str:

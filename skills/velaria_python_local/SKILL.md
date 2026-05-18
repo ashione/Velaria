@@ -143,6 +143,15 @@ uv run --project python --extra finance python python/velaria_cli.py finance pip
   --interval-sec 0 \
   --format json
 
+uv run --project python --extra finance python python/velaria_cli.py finance pipeline \
+  --market us \
+  --symbol AAPL \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --iterations 1 \
+  --interval-sec 0 \
+  --format json
+
 uv run --project python --extra finance python python/velaria_cli.py finance fetch-quotes \
   --provider tencent \
   --market cn \
@@ -195,6 +204,7 @@ finance watch --market cn --symbol 000001 --interval-sec 30 --iterations 0 --jso
 - provider 失败应读取 `error_type`、`message`、`hint`、`details`
 - 行数据包含 `provider`、`source_url`、`fetched_at`、`freshness`、`delay_sec`、`license_note`
 - watch tick 包含 `quote`、`observations`、`signals`、`focus_events`、`artifacts`、`analysis` 和 `analysis_prompt`
+- `finance sources --format json` 来自实际 provider registry，是 Agent 选择 provider / command 的优先依据
 - `freshness` / `delay_sec` 是研究证据，不要把所有 quote 都当成交易所级实时数据
 - 金融输出只作为研究辅助，不构成投资建议
 
@@ -202,8 +212,10 @@ Provider 使用建议：
 
 - 普通用户第一步先运行 `finance doctor`，再运行 `finance analyze --market cn --symbol 000001`
 - 需要完整链路时运行 `finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131`
+- 美股完整链路可运行 `finance pipeline --market us --symbol AAPL --start-date 20260501 --end-date 20260518 --iterations 1 --format json`
 - 历史行情优先尝试 `provider=yahoo`；AkShare / Eastmoney 可作为补充 provider
 - 轻量 quote 优先尝试 `provider=tencent`
+- Tencent 美股 quote 当前按 provider contract 标记为 `freshness=delayed`，不要描述为交易所级实时
 - AkShare / Eastmoney 上游不可达时，不要 mock 或编造历史数据；把结构化 provider 错误返回给用户，并可用 Tencent quote 做实时监控链路验证
 
 Service 集成：

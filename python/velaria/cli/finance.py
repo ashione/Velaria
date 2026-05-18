@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import textwrap
 
+from velaria.finance_pack import provider_names_for_operation
 from velaria.finance_pack.cli import main as finance_pack_main
 
 
@@ -96,8 +97,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
     pipeline.add_argument("--market", required=True, choices=["cn", "us"], help="Market: cn for A-share, us for U.S. stocks.")
     pipeline.add_argument("--symbol", required=True, help="Single symbol, e.g. 000001 or AAPL.")
-    pipeline.add_argument("--history-provider", default="yahoo", choices=["yahoo", "akshare"], help="Historical OHLCV provider.")
-    pipeline.add_argument("--quote-provider", default="tencent", choices=["tencent", "akshare"], help="Quote provider used for live subscription ticks.")
+    pipeline.add_argument("--history-provider", default="yahoo", choices=provider_names_for_operation("fetch_history"), help="Historical OHLCV provider.")
+    pipeline.add_argument("--quote-provider", default="tencent", choices=provider_names_for_operation("fetch_quotes"), help="Quote provider used for live subscription ticks.")
     pipeline.add_argument("--start-date", required=True, help="YYYYMMDD.")
     pipeline.add_argument("--end-date", required=True, help="YYYYMMDD.")
     pipeline.add_argument("--period", default="daily", choices=["daily", "weekly", "monthly"])
@@ -122,7 +123,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Fetch public historical OHLCV data.",
         description="Fetch historical OHLCV rows from a public provider and optionally write Parquet or JSONL.",
     )
-    _add_provider_market(history, default_provider="yahoo", choices=["yahoo", "akshare"])
+    _add_provider_market(history, default_provider="yahoo", choices=provider_names_for_operation("fetch_history"))
     history.add_argument("--symbol", required=True, help="Provider-specific symbol, e.g. 000001 or 105.AAPL.")
     history.add_argument("--start-date", required=True, help="YYYYMMDD.")
     history.add_argument("--end-date", required=True, help="YYYYMMDD.")

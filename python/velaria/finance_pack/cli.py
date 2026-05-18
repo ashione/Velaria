@@ -22,6 +22,8 @@ from . import (
     fetch_history,
     fetch_quotes,
     finance_quote_schema_binding,
+    provider_catalog,
+    provider_names_for_operation,
 )
 
 
@@ -155,8 +157,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     pipeline.add_argument("--market", required=True, choices=["cn", "us"])
     pipeline.add_argument("--symbol", required=True, help="Single symbol, e.g. 000001 or AAPL.")
-    pipeline.add_argument("--history-provider", default="yahoo", choices=["yahoo", "akshare"], help="Historical OHLCV provider.")
-    pipeline.add_argument("--quote-provider", default="tencent", choices=["tencent", "akshare"], help="Quote provider used for live subscription ticks.")
+    pipeline.add_argument("--history-provider", default="yahoo", choices=provider_names_for_operation("fetch_history"), help="Historical OHLCV provider.")
+    pipeline.add_argument("--quote-provider", default="tencent", choices=provider_names_for_operation("fetch_quotes"), help="Quote provider used for live subscription ticks.")
     pipeline.add_argument("--start-date", required=True, help="YYYYMMDD.")
     pipeline.add_argument("--end-date", required=True, help="YYYYMMDD.")
     pipeline.add_argument("--period", default="daily", choices=["daily", "weekly", "monthly"])
@@ -177,7 +179,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_report_format(pipeline)
 
     history = subparsers.add_parser("fetch-history", help="Fetch public historical OHLCV data.")
-    _add_provider_market(history, default_provider="yahoo", choices=["yahoo", "akshare"])
+    _add_provider_market(history, default_provider="yahoo", choices=provider_names_for_operation("fetch_history"))
     history.add_argument("--symbol", required=True, help="Provider-specific symbol, e.g. 000001 or 105.AAPL.")
     history.add_argument("--start-date", required=True, help="YYYYMMDD.")
     history.add_argument("--end-date", required=True, help="YYYYMMDD.")
@@ -236,7 +238,7 @@ def _run_sources(args: argparse.Namespace) -> int:
     payload = {
         "ok": True,
         "action": "sources",
-        "sources": _public_source_catalog(),
+        "sources": provider_catalog(),
         "next_steps": [
             "finance doctor",
             "finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131",
@@ -663,41 +665,6 @@ def _pipeline_analysis(history_rows: list[dict[str, Any]], quote: dict[str, Any]
         },
         "next_step": "Use analysis_prompt with Velaria Agent to combine historical trend, live quote events, news, filings, and uncertainty checks.",
     }
-
-
-def _public_source_catalog() -> list[dict[str, Any]]:
-    return [
-        {
-            "provider": "tencent",
-            "markets": ["cn", "us"],
-            "commands": ["fetch-quotes", "ingest-quotes", "analyze", "watch"],
-            "freshness": {"cn": "realtime", "us": "delayed"},
-            "recommended_quote_provider": True,
-            "recommended_history_provider": False,
-            "source_url": "https://qt.gtimg.cn/q=",
-            "notes": "Lightweight public quote endpoint. Use for first-run analyze/watch validation.",
-        },
-        {
-            "provider": "yahoo",
-            "markets": ["cn", "us"],
-            "commands": ["fetch-history", "pipeline"],
-            "freshness": {"history": "eod"},
-            "recommended_quote_provider": False,
-            "recommended_history_provider": True,
-            "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/",
-            "notes": "Public chart JSON endpoint verified for A-share Yahoo symbols such as 000001.SZ and U.S. symbols such as AAPL.",
-        },
-        {
-            "provider": "akshare",
-            "markets": ["cn", "us"],
-            "commands": ["fetch-history", "fetch-quotes"],
-            "freshness": {"history": "eod", "quotes": "provider-dependent"},
-            "recommended_quote_provider": False,
-            "recommended_history_provider": True,
-            "source_url": "https://akshare.akfamily.xyz/data/stock/stock.html",
-            "notes": "Public Python data package; upstream Eastmoney endpoints may be blocked by local network policy.",
-        },
-    ]
 
 
 def _render_sources(payload: dict[str, Any]) -> str:

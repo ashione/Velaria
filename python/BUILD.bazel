@@ -49,6 +49,7 @@ py_library(
         "velaria/embedding.py",
         "velaria/finance_pack/__init__.py",
         "velaria/finance_pack/cli.py",
+        "velaria/finance_pack/providers.py",
         "velaria/keyword_index.py",
         "velaria/ai_runtime/__init__.py",
         "velaria/ai_runtime/_runtime_common.py",

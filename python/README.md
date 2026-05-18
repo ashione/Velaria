@@ -129,6 +129,11 @@ uv run --project python --extra finance python python/velaria_cli.py finance doc
 uv run --project python --extra finance python python/velaria_cli.py finance sources
 ```
 
+`finance sources` is generated from the provider registry used by the fetch
+commands. It is the authoritative runtime list for provider capabilities,
+supported markets, command support, freshness metadata, and recommended
+history/quote paths.
+
 Run the one-command A-share analysis workflow. This fetches a public quote,
 stores it as a Velaria observation, runs a monitor, and prints a readable
 research report with source evidence:
@@ -170,6 +175,21 @@ uv run --project python --extra finance python python/velaria_cli.py finance pip
   --symbol 000001 \
   --start-date 20250101 \
   --end-date 20250131 \
+  --iterations 1 \
+  --interval-sec 0 \
+  --format json
+```
+
+Run the same complete chain for a U.S. stock. The default path uses Yahoo for
+historical OHLCV and Tencent for quote ticks; Tencent U.S. quote rows are
+reported as `freshness=delayed` by the provider contract.
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance pipeline \
+  --market us \
+  --symbol AAPL \
+  --start-date 20260501 \
+  --end-date 20260518 \
   --iterations 1 \
   --interval-sec 0 \
   --format json

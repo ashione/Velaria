@@ -12,15 +12,42 @@ from velaria.agentic_store import AgenticStore
 from velaria.cli import main as velaria_cli_main
 from velaria.finance_pack import (
     build_research_prompt,
+    fetch_quotes,
     normalize_history_frame,
+    normalize_provider,
     normalize_quote_frame,
     parse_tencent_quote_payload,
     parse_yahoo_chart_payload,
+    provider_catalog,
+    provider_names_for_operation,
 )
 from velaria.finance_pack.cli import main as finance_cli_main
 
 
 class FinancePackTest(unittest.TestCase):
+    def test_provider_registry_exposes_capabilities_and_catalog(self):
+        self.assertEqual(provider_names_for_operation("fetch_history"), ["akshare", "yahoo"])
+        self.assertEqual(provider_names_for_operation("fetch_quotes"), ["akshare", "tencent"])
+
+        catalog = provider_catalog()
+        providers = {item["provider"]: item for item in catalog}
+        self.assertEqual(set(providers), {"akshare", "tencent", "yahoo"})
+        self.assertIn("fetch-history", providers["yahoo"]["commands"])
+        self.assertNotIn("fetch-quotes", providers["yahoo"]["commands"])
+        self.assertIn("fetch-quotes", providers["tencent"]["commands"])
+        self.assertNotIn("fetch-history", providers["tencent"]["commands"])
+        self.assertEqual(providers["tencent"]["freshness"]["us"], "delayed")
+
+    def test_provider_registry_drives_normalization_and_operation_errors(self):
+        self.assertEqual(normalize_provider(" Yahoo "), "yahoo")
+        with self.assertRaisesRegex(Exception, "provider does not support quotes") as ctx:
+            fetch_quotes(provider="yahoo", market="us", symbols=["AAPL"])
+
+        error = ctx.exception
+        self.assertEqual(error.error_type, "unsupported_provider_operation")
+        self.assertEqual(error.details["operation"], "fetch_quotes")
+        self.assertEqual(error.details["candidates"], ["akshare", "tencent"])
+
     def test_normalize_akshare_cn_history_keeps_provider_metadata(self):
         raw = pd.DataFrame(
             [

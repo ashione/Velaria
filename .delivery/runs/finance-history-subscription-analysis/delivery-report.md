@@ -6,9 +6,16 @@ Status: active
 
 Implemented a complete CLI-owned finance chain for historical data retrieval, live quote subscription, monitor execution, and analysis output. The implementation intentionally keeps the local service domain-neutral: the CLI writes into Velaria's shared `AgenticStore`, and the existing service generic routes can inspect the generated sources, monitors, and focus events when launched with the same `VELARIA_HOME`.
 
+Provider selection is now routed through a finance provider registry and adapter
+contract. CLI choices, `finance sources`, operation support errors, and provider
+metadata all come from that registry instead of duplicated hardcoded provider
+lists.
+
 ## Implementation Summary
 
 - Added `provider=yahoo` for historical OHLCV through public Yahoo chart JSON.
+- Added `finance_pack.providers` with provider specs, adapters, and operation
+  capability lookup for history and quote workflows.
 - Added `finance pipeline` for the full chain:
   - fetch historical rows,
   - write a history artifact,
@@ -23,7 +30,9 @@ Implemented a complete CLI-owned finance chain for historical data retrieval, li
 
 - `python/velaria/finance_pack/__init__.py`
 - `python/velaria/finance_pack/cli.py`
+- `python/velaria/finance_pack/providers.py`
 - `python/velaria/cli/finance.py`
+- `python/BUILD.bazel`
 - `python/tests/test_finance_pack.py`
 - `python/examples/finance_public_data_smoke.py`
 - `python/README.md`
@@ -34,9 +43,15 @@ Implemented a complete CLI-owned finance chain for historical data retrieval, li
 
 Local validation passed:
 
-- Focused finance and service tests: 24 tests OK.
+- Focused finance and service tests: 26 tests OK.
 - Syntax compilation: passed.
 - Real Yahoo historical fetch: `cn:000001` returned 18 rows.
+- Real Yahoo historical fetch: `us:AAPL` returned 12 rows for
+  `20260501`-`20260518`.
+- Real Tencent quote fetch: `us:AAPL` returned one quote row with
+  `freshness=delayed`.
+- Real U.S. full pipeline: `us:AAPL` returned history row_count 12,
+  subscription tick_count 1, one FocusEvent, and service-visible source/monitor/event state.
 - Real full pipeline: history + Tencent live quote + monitor + FocusEvent passed.
 - Service compatibility: service saw the pipeline-created source, monitor, and focus event.
 - Public data smoke: CN/US history and quote checks passed.

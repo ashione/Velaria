@@ -104,7 +104,8 @@ uv run --project python python python/velaria_cli.py artifacts list --run-id <ru
 - `finance doctor`：检查 finance 依赖和公开 quote provider 是否可达
 - `finance sources`：列出公开 provider、支持市场、freshness 和推荐用法
 - `finance analyze`：面向用户的一条命令分析入口；获取 quote、入库、运行 monitor，并输出可读研究报告或 JSON
-- `finance fetch-history`：获取历史 OHLCV 行情；当前使用 `provider=akshare`
+- `finance pipeline`：完整链路入口；获取历史 OHLCV、订阅实时 quote tick、运行 monitor，并输出分析和 service 集成 metadata
+- `finance fetch-history`：获取历史 OHLCV 行情；优先使用 `provider=yahoo`，也可使用 `provider=akshare`
 - `finance fetch-quotes`：获取 quote 行；可用 `provider=akshare` 或 `provider=tencent`
 - `finance ingest-quotes`：获取 quote 并写入 `external_event` source，供 monitor 使用
 - `finance watch`：持续监听一个标的，逐 tick 写入 observation、运行 monitor，并输出事件上下文
@@ -123,6 +124,23 @@ uv run --project python --extra finance python python/velaria_cli.py finance ana
 uv run --project python --extra finance python python/velaria_cli.py finance analyze \
   --market cn \
   --symbol 000001 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance pipeline \
+  --market cn \
+  --symbol 000001 \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --iterations 1 \
+  --interval-sec 0
+
+uv run --project python --extra finance python python/velaria_cli.py finance pipeline \
+  --market cn \
+  --symbol 000001 \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --iterations 1 \
+  --interval-sec 0 \
   --format json
 
 uv run --project python --extra finance python python/velaria_cli.py finance fetch-quotes \
@@ -144,12 +162,11 @@ uv run --project python --extra finance python python/velaria_cli.py finance wat
   --jsonl
 
 uv run --project python --extra finance python python/velaria_cli.py finance fetch-history \
-  --provider akshare \
+  --provider yahoo \
   --market cn \
   --symbol 000001 \
   --start-date 20250101 \
   --end-date 20250131 \
-  --adjust qfq \
   --output /tmp/velaria-cn-history.parquet
 ```
 
@@ -161,6 +178,7 @@ uv run --project python --extra finance python python/velaria_cli.py finance fet
 finance doctor
 finance sources
 finance analyze --market cn --symbol 000001 --format json
+finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1 --format json
 finance fetch-quotes --provider tencent --market cn --symbols 000001
 finance ingest-quotes --provider tencent --market cn --symbols 000001 --source-id finance_cn_quotes
 finance watch --market cn --symbol 000001 --interval-sec 30 --iterations 0 --jsonl
@@ -169,9 +187,11 @@ finance watch --market cn --symbol 000001 --interval-sec 30 --iterations 0 --jso
 输出约束：
 
 - `finance analyze` 默认输出人类可读中文报告；Agent 自动化应传 `--format json`
+- `finance pipeline` 默认输出人类可读中文报告；Agent 自动化应传 `--format json`
 - `finance doctor` / `finance sources` 默认输出人类可读文本；Agent 自动化可传 `--format json`
 - `fetch-*`、`ingest-quotes`、`watch` 默认 stdout 是 JSON，失败也是 JSON
 - `finance watch` 默认在有限 `--iterations` 后输出一个 JSON；`--iterations 0` 是持续监听，配合 `--jsonl` 可逐 tick 输出
+- `finance pipeline` 输出包含 `history`、`subscription`、`quote`、`focus_events`、`analysis`、`analysis_prompt` 和 `service_integration`
 - provider 失败应读取 `error_type`、`message`、`hint`、`details`
 - 行数据包含 `provider`、`source_url`、`fetched_at`、`freshness`、`delay_sec`、`license_note`
 - watch tick 包含 `quote`、`observations`、`signals`、`focus_events`、`artifacts`、`analysis` 和 `analysis_prompt`
@@ -181,9 +201,16 @@ finance watch --market cn --symbol 000001 --interval-sec 30 --iterations 0 --jso
 Provider 使用建议：
 
 - 普通用户第一步先运行 `finance doctor`，再运行 `finance analyze --market cn --symbol 000001`
-- 历史行情优先尝试 `provider=akshare`
+- 需要完整链路时运行 `finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131`
+- 历史行情优先尝试 `provider=yahoo`；AkShare / Eastmoney 可作为补充 provider
 - 轻量 quote 优先尝试 `provider=tencent`
 - AkShare / Eastmoney 上游不可达时，不要 mock 或编造历史数据；把结构化 provider 错误返回给用户，并可用 Tencent quote 做实时监控链路验证
+
+Service 集成：
+
+- 不要假设存在 finance-specific service route
+- `finance pipeline` 使用 CLI 写入 Velaria `AgenticStore`
+- 如果本地 `velaria_service` 使用相同 `VELARIA_HOME`，可通过通用 service routes 查看 CLI 创建的 source、monitor 和 focus-events
 
 ## 3.2 当前 SQL v1 边界
 

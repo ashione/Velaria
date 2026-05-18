@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 from urllib import request as urllib_request
 
@@ -12,6 +12,7 @@ import pandas as pd
 
 AKSHARE_STOCK_DOC_URL = "https://akshare.akfamily.xyz/data/stock/stock.html"
 TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q="
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/"
 DEFAULT_LICENSE_NOTE = (
     "Public market-data provider metadata; validate upstream terms, freshness, "
     "and exchange delay before using for decisions."
@@ -66,11 +67,11 @@ def normalize_market(market: str) -> str:
 
 def normalize_provider(provider: str) -> str:
     normalized = provider.strip().lower()
-    if normalized not in {"akshare", "tencent"}:
+    if normalized not in {"akshare", "tencent", "yahoo"}:
         raise FinanceProviderError(
             f"unsupported finance provider: {provider}",
             error_type="unsupported_provider",
-            hint="Use provider 'akshare' for history or 'tencent' for public quote rows.",
+            hint="Use provider 'yahoo' or 'akshare' for history, and 'tencent' for public quote rows.",
             details={"provider": provider},
         )
     return normalized
@@ -189,11 +190,19 @@ def fetch_history(
     adjust: str = "",
 ) -> list[dict[str, Any]]:
     provider = normalize_provider(provider)
+    if provider == "yahoo":
+        return _fetch_yahoo_history(
+            market=market,
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            period=period,
+        )
     if provider != "akshare":
         raise FinanceProviderError(
             f"provider does not support history: {provider}",
             error_type="unsupported_provider_operation",
-            hint="Use provider 'akshare' for historical OHLCV data.",
+            hint="Use provider 'yahoo' or 'akshare' for historical OHLCV data.",
             details={"provider": provider, "operation": "fetch_history"},
         )
     market = normalize_market(market)
@@ -242,6 +251,13 @@ def fetch_quotes(
     symbol_list = normalize_symbols(symbols)
     if provider == "tencent":
         return _fetch_tencent_quotes(market=market, symbols=symbol_list)
+    if provider != "akshare":
+        raise FinanceProviderError(
+            f"provider does not support quotes: {provider}",
+            error_type="unsupported_provider_operation",
+            hint="Use provider 'tencent' for lightweight public quote rows or 'akshare' when upstream endpoints are reachable.",
+            details={"provider": provider, "operation": "fetch_quotes"},
+        )
     ak = _load_akshare()
     try:
         frame = ak.stock_zh_a_spot_em() if market == "cn" else ak.stock_us_spot_em()
@@ -357,6 +373,76 @@ def parse_tencent_quote_payload(
     return rows
 
 
+def parse_yahoo_chart_payload(
+    payload: dict[str, Any],
+    *,
+    market: str,
+    symbol: str,
+    yahoo_symbol: str,
+    fetched_at: str | None = None,
+) -> list[dict[str, Any]]:
+    market = normalize_market(market)
+    fetched_at = fetched_at or _utc_now()
+    chart = payload.get("chart") or {}
+    if chart.get("error"):
+        raise FinanceProviderError(
+            f"Yahoo chart returned error: {chart['error']}",
+            error_type="provider_fetch_failed",
+            details={"provider": "yahoo", "market": market, "symbol": symbol, "provider_symbol": yahoo_symbol},
+        )
+    results = chart.get("result") or []
+    if not results:
+        raise FinanceProviderError(
+            "Yahoo chart returned no results",
+            error_type="symbol_not_found",
+            hint="Use U.S. tickers such as AAPL or A-share symbols such as 000001, 000001.SZ, or 600519.SS.",
+            details={"provider": "yahoo", "market": market, "symbol": symbol, "provider_symbol": yahoo_symbol},
+        )
+    result = results[0]
+    timestamps = result.get("timestamp") or []
+    quote_items = ((result.get("indicators") or {}).get("quote") or [])
+    quote = quote_items[0] if quote_items else {}
+    rows: list[dict[str, Any]] = []
+    previous_close: float | None = None
+    for index, timestamp in enumerate(timestamps):
+        close = _list_number(quote.get("close"), index)
+        pct_change = None
+        if close is not None and previous_close not in (None, 0):
+            pct_change = round(((close - previous_close) / previous_close) * 100.0, 6)
+        if close is not None:
+            previous_close = close
+        rows.append(
+            {
+                "market": market,
+                "symbol": symbol,
+                "provider_symbol": yahoo_symbol,
+                "date": datetime.fromtimestamp(int(timestamp), timezone.utc).strftime("%Y-%m-%d"),
+                "open": _list_number(quote.get("open"), index),
+                "high": _list_number(quote.get("high"), index),
+                "low": _list_number(quote.get("low"), index),
+                "close": close,
+                "volume": _list_integer(quote.get("volume"), index),
+                "amount": None,
+                "pct_change": pct_change,
+                "provider": "yahoo",
+                "source_url": YAHOO_CHART_URL,
+                "fetched_at": fetched_at,
+                "freshness": "eod",
+                "delay_sec": None,
+                "license_note": DEFAULT_LICENSE_NOTE,
+            }
+        )
+    rows = [row for row in rows if row["open"] is not None or row["close"] is not None or row["volume"] is not None]
+    if not rows:
+        raise FinanceProviderError(
+            "Yahoo chart returned no OHLCV rows",
+            error_type="symbol_not_found",
+            hint="Check the Yahoo provider symbol and date range.",
+            details={"provider": "yahoo", "market": market, "symbol": symbol, "provider_symbol": yahoo_symbol},
+        )
+    return rows
+
+
 def finance_quote_schema_binding() -> dict[str, Any]:
     return {
         "time_field": "event_time",
@@ -429,6 +515,36 @@ def _fetch_tencent_quotes(*, market: str, symbols: list[str]) -> list[dict[str, 
     return parse_tencent_quote_payload(payload, market=market, symbols=symbols)
 
 
+def _fetch_yahoo_history(*, market: str, symbol: str, start_date: str, end_date: str, period: str) -> list[dict[str, Any]]:
+    market = normalize_market(market)
+    interval = {"daily": "1d", "weekly": "1wk", "monthly": "1mo"}.get(period)
+    if interval is None:
+        raise FinanceProviderError(
+            f"unsupported Yahoo history period: {period}",
+            error_type="unsupported_period",
+            hint="Use period daily, weekly, or monthly.",
+            details={"provider": "yahoo", "period": period},
+        )
+    provider_symbol = _yahoo_symbol(market, symbol)
+    period1 = _yyyymmdd_epoch(start_date)
+    period2 = _yyyymmdd_epoch(end_date, add_days=1)
+    url = (
+        f"{YAHOO_CHART_URL}{provider_symbol}"
+        f"?period1={period1}&period2={period2}&interval={interval}&events=history"
+    )
+    req = urllib_request.Request(url, headers={"User-Agent": "Velaria/finance-pack"})
+    try:
+        with urllib_request.urlopen(req, timeout=20) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:  # pragma: no cover - exercised by network smoke
+        raise FinanceProviderError(
+            f"failed to fetch {market} history from yahoo: {exc}",
+            error_type="provider_fetch_failed",
+            details={"provider": "yahoo", "market": market, "symbol": symbol, "provider_symbol": provider_symbol, "source_url": url},
+        ) from exc
+    return parse_yahoo_chart_payload(payload, market=market, symbol=symbol, yahoo_symbol=provider_symbol)
+
+
 def _tencent_code(market: str, symbol: str) -> str:
     value = symbol.strip()
     if market == "us":
@@ -450,6 +566,49 @@ def _normalize_us_tencent_symbol(symbol: str) -> str:
         left, right = value.split(".", 1)
         value = right if left.isdigit() else left
     return value
+
+
+def _yahoo_symbol(market: str, symbol: str) -> str:
+    value = symbol.strip().upper()
+    if market == "us":
+        if "." in value:
+            left, right = value.split(".", 1)
+            value = right if left.isdigit() else left
+        if value.startswith("US"):
+            value = value[2:]
+        return value
+    if value.endswith((".SZ", ".SS")):
+        return value
+    if value.startswith("SZ"):
+        return f"{value[2:]}.SZ"
+    if value.startswith("SH"):
+        return f"{value[2:]}.SS"
+    suffix = ".SS" if value.startswith("6") else ".SZ"
+    return f"{value}{suffix}"
+
+
+def _yyyymmdd_epoch(value: str, *, add_days: int = 0) -> int:
+    try:
+        dt = datetime.strptime(value, "%Y%m%d").replace(tzinfo=timezone.utc) + timedelta(days=add_days)
+    except ValueError as exc:
+        raise FinanceProviderError(
+            f"invalid date: {value}",
+            error_type="invalid_date",
+            hint="Use YYYYMMDD date format, for example 20250131.",
+            details={"date": value},
+        ) from exc
+    return int(dt.timestamp())
+
+
+def _list_number(values: Any, index: int) -> float | None:
+    if not isinstance(values, list) or index >= len(values):
+        return None
+    return _number(values[index])
+
+
+def _list_integer(values: Any, index: int) -> int | None:
+    number = _list_number(values, index)
+    return None if number is None else int(number)
 
 
 def _utc_now() -> str:

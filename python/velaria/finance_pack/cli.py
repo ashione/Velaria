@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import pathlib
 import sys
 import time
@@ -34,6 +35,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_doctor(args)
         if args.command == "analyze":
             return _analyze_symbol(args)
+        if args.command == "pipeline":
+            return _run_pipeline(args)
         if args.command == "fetch-history":
             rows = fetch_history(
                 provider=args.provider,
@@ -146,8 +149,35 @@ def _build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--no-analysis-prompt", action="store_true", help="Omit the Velaria Agent research prompt from JSON output.")
     _add_report_format(analyze)
 
+    pipeline = subparsers.add_parser(
+        "pipeline",
+        help="Fetch history, subscribe to live quotes, run a monitor, and emit a complete analysis chain.",
+    )
+    pipeline.add_argument("--market", required=True, choices=["cn", "us"])
+    pipeline.add_argument("--symbol", required=True, help="Single symbol, e.g. 000001 or AAPL.")
+    pipeline.add_argument("--history-provider", default="yahoo", choices=["yahoo", "akshare"], help="Historical OHLCV provider.")
+    pipeline.add_argument("--quote-provider", default="tencent", choices=["tencent", "akshare"], help="Quote provider used for live subscription ticks.")
+    pipeline.add_argument("--start-date", required=True, help="YYYYMMDD.")
+    pipeline.add_argument("--end-date", required=True, help="YYYYMMDD.")
+    pipeline.add_argument("--period", default="daily", choices=["daily", "weekly", "monthly"])
+    pipeline.add_argument("--adjust", default="", help="Provider adjustment flag, e.g. qfq/hfq for AkShare.")
+    pipeline.add_argument("--history-output", help="Defaults to $VELARIA_HOME/finance/history/<market>_<symbol>.parquet.")
+    pipeline.add_argument("--history-output-format", default="parquet", choices=["parquet", "jsonl"])
+    pipeline.add_argument("--preview-rows", type=int, default=5)
+    pipeline.add_argument("--source-id", help="Defaults to finance_<market>_<symbol>_pipeline.")
+    pipeline.add_argument("--monitor-id", help="Defaults to monitor_<source_id>.")
+    pipeline.add_argument("--name", help="Source and monitor display name.")
+    pipeline.add_argument("--interval-sec", type=float, default=30.0, help="Seconds between quote polls.")
+    pipeline.add_argument("--iterations", type=int, default=1, help="Number of quote polling iterations. Use 0 to run until interrupted.")
+    pipeline.add_argument("--pct-change-threshold", type=float, help="Only create focus events when ABS(pct_change) is at least this value.")
+    pipeline.add_argument("--min-price", type=float, help="Only create focus events when price is at least this value.")
+    pipeline.add_argument("--max-price", type=float, help="Only create focus events when price is at most this value.")
+    pipeline.add_argument("--cooldown-sec", type=int, default=0, help="FocusEvent suppression cooldown for this pipeline monitor.")
+    pipeline.add_argument("--no-analysis-prompt", action="store_true", help="Omit the Velaria Agent research prompt from JSON output.")
+    _add_report_format(pipeline)
+
     history = subparsers.add_parser("fetch-history", help="Fetch public historical OHLCV data.")
-    _add_provider_market(history, default_provider="akshare")
+    _add_provider_market(history, default_provider="yahoo", choices=["yahoo", "akshare"])
     history.add_argument("--symbol", required=True, help="Provider-specific symbol, e.g. 000001 or 105.AAPL.")
     history.add_argument("--start-date", required=True, help="YYYYMMDD.")
     history.add_argument("--end-date", required=True, help="YYYYMMDD.")
@@ -187,8 +217,8 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _add_provider_market(parser: argparse.ArgumentParser, *, default_provider: str) -> None:
-    parser.add_argument("--provider", default=default_provider, choices=["akshare", "tencent"])
+def _add_provider_market(parser: argparse.ArgumentParser, *, default_provider: str, choices: list[str] | None = None) -> None:
+    parser.add_argument("--provider", default=default_provider, choices=choices or ["akshare", "tencent"])
     parser.add_argument("--market", required=True, choices=["cn", "us"])
 
 
@@ -209,6 +239,7 @@ def _run_sources(args: argparse.Namespace) -> int:
         "sources": _public_source_catalog(),
         "next_steps": [
             "finance doctor",
+            "finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131",
             "finance analyze --market cn --symbol 000001",
             "finance watch --market cn --symbol 000001 --iterations 0 --jsonl",
         ],
@@ -281,6 +312,7 @@ def _run_doctor(args: argparse.Namespace) -> int:
         "checks": checks,
         "next_steps": [
             "finance sources",
+            "finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131",
             "finance analyze --market cn --symbol 000001",
             "finance watch --market cn --symbol 000001 --iterations 0 --jsonl",
         ],
@@ -340,6 +372,78 @@ def _analyze_symbol(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_pipeline(args: argparse.Namespace) -> int:
+    symbol = str(args.symbol).strip()
+    history_rows = fetch_history(
+        provider=args.history_provider,
+        market=args.market,
+        symbol=symbol,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        period=args.period,
+        adjust=args.adjust,
+    )
+    history_output = pathlib.Path(args.history_output) if args.history_output else _default_history_output(args.market, symbol, args.history_output_format)
+    _write_rows(history_output, history_rows, args.history_output_format)
+    history_artifact = {
+        "type": "file",
+        "path": str(history_output),
+        "format": args.history_output_format,
+        "row_count": len(history_rows),
+        "provider": args.history_provider,
+        "market": args.market,
+        "symbol": symbol,
+        "start_date": args.start_date,
+        "end_date": args.end_date,
+        "preview": history_rows[: args.preview_rows],
+    }
+    quote_args = argparse.Namespace(**vars(args))
+    quote_args.provider = args.quote_provider
+    quote_args.no_analysis_prompt = True
+    source_id = args.source_id or f"finance_{args.market}_{_id_part(symbol)}_pipeline"
+    monitor_id = args.monitor_id or f"monitor_{source_id}"
+    display_name = args.name or f"finance {args.market} {symbol} pipeline"
+    source, monitor = _upsert_watch_source_and_monitor(quote_args, source_id=source_id, monitor_id=monitor_id, display_name=display_name)
+    ticks, interrupted = _collect_watch_ticks(quote_args, source_id=source_id, monitor_id=monitor_id)
+    latest_tick = ticks[-1] if ticks else {}
+    latest_quote = latest_tick.get("quote") or {}
+    focus_events = [event for tick in ticks for event in tick.get("focus_events", [])]
+    tick_artifacts = [artifact for tick in ticks for artifact in tick.get("artifacts", [])]
+    datasets = [history_artifact, *tick_artifacts]
+    prompt = "" if args.no_analysis_prompt else build_research_prompt(
+        focus_events=focus_events,
+        datasets=datasets,
+        user_question=f"结合历史行情和实时监听事件，分析 {args.market} 市场标的 {symbol}。",
+    )
+    payload = {
+        "ok": True,
+        "action": "pipeline",
+        "mode": "cli",
+        "market": args.market,
+        "symbol": latest_quote.get("symbol") or symbol,
+        "history": history_artifact,
+        "source": source,
+        "monitor": monitor,
+        "subscription": {
+            "provider": args.quote_provider,
+            "ticks": ticks,
+            "tick_count": len(ticks),
+            "interrupted": interrupted,
+        },
+        "quote": latest_quote,
+        "signals": [signal for tick in ticks for signal in tick.get("signals", [])],
+        "focus_events": focus_events,
+        "artifacts": datasets,
+        "analysis": _pipeline_analysis(history_rows, latest_quote, focus_events=focus_events),
+        "service_integration": _service_integration_payload(source_id=source_id, monitor_id=monitor_id),
+        **({"analysis_prompt": prompt} if prompt else {}),
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_pipeline_report(payload))
+    return 0
+
+
 def _watch_quotes(args: argparse.Namespace) -> int:
     symbol = str(args.symbol).strip()
     source_id = args.source_id or f"finance_{args.market}_{_id_part(symbol)}_watch"
@@ -347,21 +451,7 @@ def _watch_quotes(args: argparse.Namespace) -> int:
     display_name = args.name or f"finance {args.market} {symbol} watch"
     source, monitor = _upsert_watch_source_and_monitor(args, source_id=source_id, monitor_id=monitor_id, display_name=display_name)
 
-    ticks: list[dict[str, Any]] = []
-    iteration = 0
-    interrupted = False
-    try:
-        while args.iterations == 0 or iteration < args.iterations:
-            iteration += 1
-            tick = _run_watch_tick(args, source_id=source_id, monitor_id=monitor_id, iteration=iteration)
-            ticks.append(tick)
-            if args.jsonl:
-                print(json.dumps(tick, ensure_ascii=False, sort_keys=True), flush=True)
-            if args.iterations != 0 and iteration >= args.iterations:
-                break
-            time.sleep(max(0.0, float(args.interval_sec)))
-    except KeyboardInterrupt:
-        interrupted = True
+    ticks, interrupted = _collect_watch_ticks(args, source_id=source_id, monitor_id=monitor_id, emit_jsonl=bool(args.jsonl))
 
     if args.jsonl:
         if interrupted:
@@ -381,6 +471,31 @@ def _watch_quotes(args: argparse.Namespace) -> int:
             "interrupted": interrupted,
         }
     )
+
+
+def _collect_watch_ticks(
+    args: argparse.Namespace,
+    *,
+    source_id: str,
+    monitor_id: str,
+    emit_jsonl: bool = False,
+) -> tuple[list[dict[str, Any]], bool]:
+    ticks: list[dict[str, Any]] = []
+    iteration = 0
+    interrupted = False
+    try:
+        while args.iterations == 0 or iteration < args.iterations:
+            iteration += 1
+            tick = _run_watch_tick(args, source_id=source_id, monitor_id=monitor_id, iteration=iteration)
+            ticks.append(tick)
+            if emit_jsonl:
+                print(json.dumps(tick, ensure_ascii=False, sort_keys=True), flush=True)
+            if args.iterations != 0 and iteration >= args.iterations:
+                break
+            time.sleep(max(0.0, float(args.interval_sec)))
+    except KeyboardInterrupt:
+        interrupted = True
+    return ticks, interrupted
 
 
 def _upsert_watch_source_and_monitor(
@@ -526,6 +641,30 @@ def _quote_analysis(row: dict[str, Any], *, focus_events: list[dict[str, Any]]) 
     }
 
 
+def _pipeline_analysis(history_rows: list[dict[str, Any]], quote: dict[str, Any], *, focus_events: list[dict[str, Any]]) -> dict[str, Any]:
+    closes = [row.get("close") for row in history_rows if isinstance(row.get("close"), (int, float))]
+    history_return = None
+    if len(closes) >= 2 and closes[0] not in (None, 0):
+        history_return = round(((closes[-1] - closes[0]) / closes[0]) * 100.0, 6)
+    quote_analysis = _quote_analysis(quote, focus_events=focus_events)
+    return {
+        **quote_analysis,
+        "summary": (
+            f"{quote.get('market')}:{quote.get('symbol')} pipeline used {len(history_rows)} historical rows "
+            f"and {len(focus_events)} focus events; latest price={quote.get('price')}, pct_change={quote.get('pct_change')}."
+        ),
+        "history": {
+            "row_count": len(history_rows),
+            "first_date": history_rows[0].get("date") if history_rows else None,
+            "last_date": history_rows[-1].get("date") if history_rows else None,
+            "first_close": closes[0] if closes else None,
+            "last_close": closes[-1] if closes else None,
+            "period_return_pct": history_return,
+        },
+        "next_step": "Use analysis_prompt with Velaria Agent to combine historical trend, live quote events, news, filings, and uncertainty checks.",
+    }
+
+
 def _public_source_catalog() -> list[dict[str, Any]]:
     return [
         {
@@ -537,6 +676,16 @@ def _public_source_catalog() -> list[dict[str, Any]]:
             "recommended_history_provider": False,
             "source_url": "https://qt.gtimg.cn/q=",
             "notes": "Lightweight public quote endpoint. Use for first-run analyze/watch validation.",
+        },
+        {
+            "provider": "yahoo",
+            "markets": ["cn", "us"],
+            "commands": ["fetch-history", "pipeline"],
+            "freshness": {"history": "eod"},
+            "recommended_quote_provider": False,
+            "recommended_history_provider": True,
+            "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/",
+            "notes": "Public chart JSON endpoint verified for A-share Yahoo symbols such as 000001.SZ and U.S. symbols such as AAPL.",
         },
         {
             "provider": "akshare",
@@ -620,6 +769,59 @@ def _render_analysis_report(payload: dict[str, Any]) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _render_pipeline_report(payload: dict[str, Any]) -> str:
+    quote = payload.get("quote") or {}
+    history = payload.get("history") or {}
+    subscription = payload.get("subscription") or {}
+    analysis = payload.get("analysis") or {}
+    history_analysis = analysis.get("history") or {}
+    lines = [
+        f"Velaria 金融完整链路: {payload.get('market')}:{payload.get('symbol')}",
+        "",
+        "历史数据",
+        f"- provider: {_display(history.get('provider'))}",
+        f"- rows: {_display(history.get('row_count'))}",
+        f"- path: {_display(history.get('path'))}",
+        f"- range: {_display(history.get('start_date'))} -> {_display(history.get('end_date'))}",
+        f"- period_return_pct: {_display(history_analysis.get('period_return_pct'))}",
+        "",
+        "实时订阅",
+        f"- provider: {_display(subscription.get('provider'))}",
+        f"- ticks: {_display(subscription.get('tick_count'))}",
+        f"- latest: {_display(quote.get('market'))}:{_display(quote.get('symbol'))} price={_display(quote.get('price'))}, pct_change={_display(quote.get('pct_change'))}",
+        "",
+        "分析",
+        f"- {analysis.get('summary')}",
+        f"- FocusEvent 数量: {len(payload.get('focus_events') or [])}",
+        "",
+        "Service 集成",
+        "- CLI 写入 Velaria AgenticStore；同一个 VELARIA_HOME 下，现有 service generic routes 可读取 source、monitor 和 focus-events。",
+        "",
+        "声明",
+        "- 这是研究辅助，不是投资建议，不包含买卖指令或收益承诺。",
+    ]
+    return "\n".join(lines)
+
+
+def _default_history_output(market: str, symbol: str, output_format: str) -> pathlib.Path:
+    home = pathlib.Path(os.environ.get("VELARIA_HOME", ".velaria"))
+    suffix = "jsonl" if output_format == "jsonl" else "parquet"
+    return home / "finance" / "history" / f"{market}_{_id_part(symbol)}_history.{suffix}"
+
+
+def _service_integration_payload(*, source_id: str, monitor_id: str) -> dict[str, Any]:
+    return {
+        "requires_service": False,
+        "shared_state": "AgenticStore",
+        "note": "Start velaria_service with the same VELARIA_HOME to inspect this CLI-created finance chain through generic service APIs.",
+        "generic_routes": [
+            "GET /api/v1/external-events/sources",
+            f"GET /api/v1/monitors/{monitor_id}",
+            "GET /api/v1/focus-events",
+        ],
+    }
 
 
 def _display(value: Any) -> str:

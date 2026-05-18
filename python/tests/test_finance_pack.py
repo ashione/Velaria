@@ -15,6 +15,7 @@ from velaria.finance_pack import (
     normalize_history_frame,
     normalize_quote_frame,
     parse_tencent_quote_payload,
+    parse_yahoo_chart_payload,
 )
 from velaria.finance_pack.cli import main as finance_cli_main
 
@@ -283,10 +284,138 @@ class FinancePackTest(unittest.TestCase):
         provider_ids = {item["provider"] for item in payload["sources"]}
         self.assertIn("tencent", provider_ids)
         self.assertIn("akshare", provider_ids)
+        self.assertIn("yahoo", provider_ids)
         tencent = next(item for item in payload["sources"] if item["provider"] == "tencent")
         self.assertIn("fetch-quotes", tencent["commands"])
         self.assertEqual(tencent["recommended_quote_provider"], True)
         self.assertIn("cn", tencent["markets"])
+        yahoo = next(item for item in payload["sources"] if item["provider"] == "yahoo")
+        self.assertIn("pipeline", yahoo["commands"])
+        self.assertEqual(yahoo["recommended_history_provider"], True)
+
+    def test_parse_yahoo_chart_payload_maps_history_rows(self):
+        payload = {
+            "chart": {
+                "result": [
+                    {
+                        "timestamp": [1735776000, 1735862400],
+                        "indicators": {
+                            "quote": [
+                                {
+                                    "open": [10.0, 10.5],
+                                    "high": [11.0, 10.8],
+                                    "low": [9.8, 10.1],
+                                    "close": [10.5, 10.2],
+                                    "volume": [1000, 2000],
+                                }
+                            ]
+                        },
+                    }
+                ],
+                "error": None,
+            }
+        }
+
+        rows = parse_yahoo_chart_payload(
+            payload,
+            market="cn",
+            symbol="000001",
+            yahoo_symbol="000001.SZ",
+            fetched_at="2026-05-18T00:00:00Z",
+        )
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["provider"], "yahoo")
+        self.assertEqual(rows[0]["market"], "cn")
+        self.assertEqual(rows[0]["symbol"], "000001")
+        self.assertEqual(rows[0]["provider_symbol"], "000001.SZ")
+        self.assertEqual(rows[0]["date"], "2025-01-02")
+        self.assertEqual(rows[0]["close"], 10.5)
+        self.assertEqual(rows[0]["volume"], 1000)
+        self.assertEqual(rows[0]["freshness"], "eod")
+
+    def test_pipeline_cli_fetches_history_subscribes_and_analyzes(self):
+        history_rows = [
+            {
+                "market": "cn",
+                "symbol": "000001",
+                "provider_symbol": "000001.SZ",
+                "date": "2025-01-02",
+                "open": 10.0,
+                "high": 11.0,
+                "low": 9.8,
+                "close": 10.5,
+                "volume": 1000,
+                "amount": None,
+                "pct_change": None,
+                "provider": "yahoo",
+                "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/",
+                "fetched_at": "2026-05-18T00:00:00Z",
+                "freshness": "eod",
+                "delay_sec": None,
+                "license_note": "public provider metadata",
+            }
+        ]
+        quote_rows = [
+            {
+                "event_time": "2026-01-02T00:00:00Z",
+                "event_type": "quote",
+                "source_key": "000001",
+                "symbol": "000001",
+                "market": "cn",
+                "name": "平安银行",
+                "price": 12.34,
+                "volume": 1000,
+                "pct_change": 1.2,
+                "provider": "tencent",
+                "freshness": "realtime",
+                "delay_sec": 0,
+                "fetched_at": "2026-01-02T00:00:00Z",
+                "source_url": "https://qt.gtimg.cn/q=",
+                "license_note": "public provider metadata",
+            }
+        ]
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-pipeline-") as tmp:
+            history_output = os.path.join(tmp, "history.parquet")
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                with mock.patch("velaria.finance_pack.cli.fetch_history", return_value=history_rows):
+                    with mock.patch("velaria.finance_pack.cli.fetch_quotes", return_value=quote_rows):
+                        stdout = StringIO()
+                        with redirect_stdout(stdout):
+                            exit_code = finance_cli_main(
+                                [
+                                    "pipeline",
+                                    "--market",
+                                    "cn",
+                                    "--symbol",
+                                    "000001",
+                                    "--start-date",
+                                    "20250101",
+                                    "--end-date",
+                                    "20250131",
+                                    "--history-output",
+                                    history_output,
+                                    "--iterations",
+                                    "1",
+                                    "--interval-sec",
+                                    "0",
+                                    "--format",
+                                    "json",
+                                ]
+                            )
+                        self.assertTrue(os.path.exists(history_output))
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["action"], "pipeline")
+        self.assertEqual(payload["history"]["row_count"], 1)
+        self.assertEqual(payload["history"]["provider"], "yahoo")
+        self.assertEqual(payload["subscription"]["tick_count"], 1)
+        self.assertEqual(payload["quote"]["symbol"], "000001")
+        self.assertGreaterEqual(len(payload["focus_events"]), 1)
+        self.assertIn("service_integration", payload)
+        self.assertIn("external-events", payload["service_integration"]["generic_routes"][0])
 
     def test_doctor_cli_reports_dependency_and_provider_probe(self):
         quote_rows = [
@@ -418,6 +547,7 @@ class FinancePackTest(unittest.TestCase):
         self.assertIn("finance doctor", output)
         self.assertIn("finance sources", output)
         self.assertIn("finance analyze --market cn --symbol 000001", output)
+        self.assertIn("finance pipeline --market cn --symbol 000001", output)
         self.assertIn("finance watch --provider tencent --market cn --symbol 000001", output)
         self.assertIn("finance fetch-quotes --provider tencent --market cn --symbols 000001", output)
         self.assertIn("freshness", output)

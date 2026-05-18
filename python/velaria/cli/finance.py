@@ -21,6 +21,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               velaria finance doctor
               velaria finance sources
               velaria finance analyze --market cn --symbol 000001
+              velaria finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1
               velaria finance fetch-quotes --provider tencent --market cn --symbols 000001,600519
               velaria finance fetch-quotes --provider tencent --market us --symbols AAPL
               velaria finance ingest-quotes --provider tencent --market cn --symbols 000001 --source-id finance_cn_quotes
@@ -33,9 +34,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               finance doctor
               finance sources
               finance analyze --market cn --symbol 000001
+              finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1 --format json
               finance fetch-quotes --provider tencent --market cn --symbols 000001
 
             Data-source notes:
+              - provider=yahoo supports historical OHLCV through public chart JSON.
               - provider=akshare supports historical OHLCV and quote rows when upstream endpoints are reachable.
               - provider=tencent supports lightweight public quote rows.
               - Results include provider, source_url, fetched_at, freshness, delay_sec, and license_note.
@@ -83,12 +86,43 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     analyze.add_argument("--no-analysis-prompt", action="store_true", help="Omit the Velaria Agent research prompt from JSON output.")
     _add_report_format(analyze)
 
+    pipeline = finance_subparsers.add_parser(
+        "pipeline",
+        help="Fetch history, subscribe to live quotes, run a monitor, and emit a complete analysis chain.",
+        description=(
+            "Complete finance chain for users: fetch historical OHLCV, store a history artifact, "
+            "poll live quote rows, run a monitor, and return analysis plus service integration metadata."
+        ),
+    )
+    pipeline.add_argument("--market", required=True, choices=["cn", "us"], help="Market: cn for A-share, us for U.S. stocks.")
+    pipeline.add_argument("--symbol", required=True, help="Single symbol, e.g. 000001 or AAPL.")
+    pipeline.add_argument("--history-provider", default="yahoo", choices=["yahoo", "akshare"], help="Historical OHLCV provider.")
+    pipeline.add_argument("--quote-provider", default="tencent", choices=["tencent", "akshare"], help="Quote provider used for live subscription ticks.")
+    pipeline.add_argument("--start-date", required=True, help="YYYYMMDD.")
+    pipeline.add_argument("--end-date", required=True, help="YYYYMMDD.")
+    pipeline.add_argument("--period", default="daily", choices=["daily", "weekly", "monthly"])
+    pipeline.add_argument("--adjust", default="", help="Provider adjustment flag, e.g. qfq/hfq for AkShare.")
+    pipeline.add_argument("--history-output", help="Defaults to $VELARIA_HOME/finance/history/<market>_<symbol>.parquet.")
+    pipeline.add_argument("--history-output-format", default="parquet", choices=["parquet", "jsonl"])
+    pipeline.add_argument("--preview-rows", type=int, default=5)
+    pipeline.add_argument("--source-id", help="Defaults to finance_<market>_<symbol>_pipeline.")
+    pipeline.add_argument("--monitor-id", help="Defaults to monitor_<source_id>.")
+    pipeline.add_argument("--name", help="Source and monitor display name.")
+    pipeline.add_argument("--interval-sec", type=float, default=30.0, help="Seconds between quote polls.")
+    pipeline.add_argument("--iterations", type=int, default=1, help="Number of quote polling iterations. Use 0 to run until interrupted.")
+    pipeline.add_argument("--pct-change-threshold", type=float, help="Only create focus events when ABS(pct_change) is at least this value.")
+    pipeline.add_argument("--min-price", type=float, help="Only create focus events when price is at least this value.")
+    pipeline.add_argument("--max-price", type=float, help="Only create focus events when price is at most this value.")
+    pipeline.add_argument("--cooldown-sec", type=int, default=0, help="FocusEvent suppression cooldown for this pipeline monitor.")
+    pipeline.add_argument("--no-analysis-prompt", action="store_true", help="Omit the Velaria Agent research prompt from JSON output.")
+    _add_report_format(pipeline)
+
     history = finance_subparsers.add_parser(
         "fetch-history",
         help="Fetch public historical OHLCV data.",
         description="Fetch historical OHLCV rows from a public provider and optionally write Parquet or JSONL.",
     )
-    _add_provider_market(history, default_provider="akshare")
+    _add_provider_market(history, default_provider="yahoo", choices=["yahoo", "akshare"])
     history.add_argument("--symbol", required=True, help="Provider-specific symbol, e.g. 000001 or 105.AAPL.")
     history.add_argument("--start-date", required=True, help="YYYYMMDD.")
     history.add_argument("--end-date", required=True, help="YYYYMMDD.")
@@ -146,11 +180,11 @@ def _run_finance(args: argparse.Namespace) -> int:
     return finance_pack_main(_to_finance_pack_argv(args))
 
 
-def _add_provider_market(parser: argparse.ArgumentParser, *, default_provider: str) -> None:
+def _add_provider_market(parser: argparse.ArgumentParser, *, default_provider: str, choices: list[str] | None = None) -> None:
     parser.add_argument(
         "--provider",
         default=default_provider,
-        choices=["akshare", "tencent"],
+        choices=choices or ["akshare", "tencent"],
         help="Public data provider. Use akshare for history; tencent is a lightweight quote provider.",
     )
     parser.add_argument("--market", required=True, choices=["cn", "us"], help="Market: cn for A-share, us for U.S. stocks.")
@@ -179,6 +213,10 @@ def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
         "adjust",
         "output",
         "output_format",
+        "history_provider",
+        "quote_provider",
+        "history_output",
+        "history_output_format",
         "preview_rows",
         "source_id",
         "monitor_id",

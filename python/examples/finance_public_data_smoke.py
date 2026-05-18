@@ -13,6 +13,7 @@ from velaria.finance_pack import (
     AKSHARE_STOCK_DOC_URL,
     FinanceProviderError,
     TENCENT_QUOTE_URL,
+    YAHOO_CHART_URL,
     fetch_history,
     fetch_quotes,
     normalize_quote_frame,
@@ -21,7 +22,7 @@ from velaria.finance_pack import (
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Smoke test public finance data providers.")
-    parser.add_argument("--provider", default="akshare", choices=["akshare"], help="Historical data provider.")
+    parser.add_argument("--provider", default="yahoo", choices=["akshare", "yahoo"], help="Historical data provider.")
     parser.add_argument("--quote-provider", default="tencent", choices=["akshare", "tencent"])
     parser.add_argument("--cn-symbol", default="000001")
     parser.add_argument("--us-symbol", help="AkShare provider-specific U.S. code, e.g. 105.AAPL. Defaults to discovery from spot data.")
@@ -50,7 +51,7 @@ def main() -> int:
             "history_provider": args.provider,
             "quote_provider": args.quote_provider,
             "output_dir": str(output_dir),
-            "sources": [AKSHARE_STOCK_DOC_URL, TENCENT_QUOTE_URL],
+            "sources": [YAHOO_CHART_URL, AKSHARE_STOCK_DOC_URL, TENCENT_QUOTE_URL],
             "checks": [_write_check(output_dir, "cn_quotes", cn_quotes)],
         }
         if not args.quotes_only:

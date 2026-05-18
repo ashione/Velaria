@@ -148,16 +148,43 @@ uv run --project python --extra finance python python/velaria_cli.py finance ana
   --format json
 ```
 
-Fetch A-share historical data through AkShare and write a Parquet dataset:
+Run the complete CLI chain: fetch historical OHLCV, persist a history artifact,
+subscribe to live quote ticks, run a monitor, and emit analysis plus service
+integration metadata:
 
 ```bash
-uv run --project python --extra finance python python/velaria_cli.py finance fetch-history \
-  --provider akshare \
+uv run --project python --extra finance python python/velaria_cli.py finance pipeline \
   --market cn \
   --symbol 000001 \
   --start-date 20250101 \
   --end-date 20250131 \
-  --adjust qfq \
+  --iterations 1 \
+  --interval-sec 0
+```
+
+Use JSON output for the complete chain:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance pipeline \
+  --market cn \
+  --symbol 000001 \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --iterations 1 \
+  --interval-sec 0 \
+  --format json
+```
+
+Fetch A-share historical data through Yahoo chart JSON or AkShare and write a
+Parquet dataset:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance fetch-history \
+  --provider yahoo \
+  --market cn \
+  --symbol 000001 \
+  --start-date 20250101 \
+  --end-date 20250131 \
   --output /tmp/velaria-cn-history.parquet
 ```
 
@@ -186,9 +213,17 @@ uv run --project python --extra finance python python/velaria_cli.py finance wat
 The same finance commands are available to `velaria_cli.py -i` through the
 registered agent tool `velaria_cli_run`. In agent mode, pass only the Velaria
 subcommand, for example `finance doctor`, `finance sources`, `finance analyze
---market cn --symbol 000001 --format json`, or `finance watch --market cn
---symbol 000001 --interval-sec 30 --iterations 0 --jsonl`; do not include
-`uv`, `python`, or `python/velaria_cli.py` in the tool arguments.
+--market cn --symbol 000001 --format json`, `finance pipeline --market cn
+--symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1
+--format json`, or `finance watch --market cn --symbol 000001 --interval-sec
+30 --iterations 0 --jsonl`; do not include `uv`, `python`, or
+`python/velaria_cli.py` in the tool arguments.
+
+`finance pipeline` does not require a finance-specific service route. It writes
+to the same Velaria `AgenticStore` used by the local service. If
+`velaria_service` is started with the same `VELARIA_HOME`, the generic
+`external-events`, `monitors`, and `focus-events` service routes can inspect
+the source, monitor, and events created by the CLI.
 
 Run the public-data smoke against real AkShare endpoints:
 

@@ -28,6 +28,7 @@
 #include "src/dataflow/core/contract/api/dataframe.h"
 #include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/csv.h"
+#include "src/dataflow/core/execution/runtime/executor.h"
 #include "src/dataflow/experimental/stream/actor_stream_runtime.h"
 
 namespace dataflow {
@@ -43,67 +44,6 @@ std::string makeStateKey(const Row& row, const std::vector<size_t>& keyIdx,
     if (idx < row.size()) key += row[idx].toString();
   }
   return key;
-}
-
-RowSelection intersectStreamSelections(const RowSelection& lhs, const RowSelection& rhs) {
-  if (lhs.input_row_count != rhs.input_row_count) {
-    throw std::runtime_error("stream predicate selection input size mismatch");
-  }
-  RowSelection out;
-  out.input_row_count = lhs.input_row_count;
-  out.selected.assign(out.input_row_count, 0);
-  out.indices.reserve(std::min(lhs.selected_count, rhs.selected_count));
-  for (std::size_t i = 0; i < out.input_row_count; ++i) {
-    if (lhs.selected[i] != 0 && rhs.selected[i] != 0) {
-      out.selected[i] = 1;
-      out.indices.push_back(i);
-    }
-  }
-  out.selected_count = out.indices.size();
-  return out;
-}
-
-RowSelection unionStreamSelections(const RowSelection& lhs, const RowSelection& rhs) {
-  if (lhs.input_row_count != rhs.input_row_count) {
-    throw std::runtime_error("stream predicate selection input size mismatch");
-  }
-  RowSelection out;
-  out.input_row_count = lhs.input_row_count;
-  out.selected.assign(out.input_row_count, 0);
-  out.indices.reserve(lhs.selected_count + rhs.selected_count);
-  for (std::size_t i = 0; i < out.input_row_count; ++i) {
-    if (lhs.selected[i] != 0 || rhs.selected[i] != 0) {
-      out.selected[i] = 1;
-      out.indices.push_back(i);
-    }
-  }
-  out.selected_count = out.indices.size();
-  return out;
-}
-
-RowSelection evaluateStreamPredicateExpr(const Table& input,
-                                         const std::shared_ptr<StreamPredicateExpr>& expr) {
-  if (!expr) {
-    RowSelection out;
-    out.input_row_count = input.rowCount();
-    out.selected.assign(out.input_row_count, 1);
-    out.indices.reserve(out.input_row_count);
-    for (std::size_t i = 0; i < out.input_row_count; ++i) {
-      out.indices.push_back(i);
-    }
-    out.selected_count = out.input_row_count;
-    return out;
-  }
-  if (expr->kind == StreamPredicateExprKind::Comparison) {
-    const auto input_column = viewValueColumn(input, input.schema.indexOf(expr->comparison.column));
-    return vectorizedFilterSelection(input_column, expr->comparison.value, expr->comparison.op);
-  }
-  const auto left = evaluateStreamPredicateExpr(input, expr->left);
-  const auto right = evaluateStreamPredicateExpr(input, expr->right);
-  if (expr->kind == StreamPredicateExprKind::And) {
-    return intersectStreamSelections(left, right);
-  }
-  return unionStreamSelections(left, right);
 }
 
 #if DATAFLOW_HAS_ROCKSDB_BACKEND
@@ -1882,20 +1822,25 @@ StreamingDataFrame StreamingDataFrame::filter(const std::string& column, const s
   auto t = transforms_;
   t.emplace_back(
       [column, op, value](const Table& input, const StreamingQueryOptions&) {
-        const auto input_column = viewValueColumn(input, input.schema.indexOf(column));
-        const auto selection = vectorizedFilterSelection(input_column, value, op);
-        return filterTable(input, selection, false);
+        auto predicate = std::make_shared<PlanPredicateExpr>();
+        predicate->kind = PlanPredicateExprKind::Comparison;
+        predicate->comparison.column_index = input.schema.indexOf(column);
+        predicate->comparison.op = op;
+        predicate->comparison.value = value;
+        return filterTable(input, evaluatePlanPredicateExpr(input, predicate), false);
       },
       StreamTransformMode::PartitionLocal, false, "filter");
   return StreamingDataFrame(source_, std::move(t), state_);
 }
 
 StreamingDataFrame StreamingDataFrame::filterPredicate(
-    std::shared_ptr<StreamPredicateExpr> predicate) const {
+    StreamPredicateBinder predicate_binder) const {
   auto t = transforms_;
   t.emplace_back(
-      [predicate = std::move(predicate)](const Table& input, const StreamingQueryOptions&) {
-        return filterTable(input, evaluateStreamPredicateExpr(input, predicate), false);
+      [predicate_binder = std::move(predicate_binder)](const Table& input,
+                                                       const StreamingQueryOptions&) {
+        return filterTable(input, evaluatePlanPredicateExpr(input, predicate_binder(input.schema)),
+                           false);
       },
       StreamTransformMode::PartitionLocal, false, "predicate-filter");
   return StreamingDataFrame(source_, std::move(t), state_);

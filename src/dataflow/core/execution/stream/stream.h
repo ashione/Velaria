@@ -167,20 +167,7 @@ struct StreamingQueryOptions {
   }
 };
 
-enum class StreamPredicateExprKind { Comparison, And, Or };
-
-struct StreamPredicateComparison {
-  std::string column;
-  std::string op;
-  Value value;
-};
-
-struct StreamPredicateExpr {
-  StreamPredicateExprKind kind = StreamPredicateExprKind::Comparison;
-  StreamPredicateComparison comparison;
-  std::shared_ptr<StreamPredicateExpr> left;
-  std::shared_ptr<StreamPredicateExpr> right;
-};
+using StreamPredicateBinder = std::function<std::shared_ptr<PlanPredicateExpr>(const Schema&)>;
 
 struct StreamPullContext {
   std::string query_id;
@@ -532,7 +519,7 @@ class StreamingDataFrame {
   StreamingDataFrame select(const std::vector<std::string>& columns) const;
   StreamingDataFrame filter(const std::string& column, const std::string& op,
                             const Value& value) const;
-  StreamingDataFrame filterPredicate(std::shared_ptr<StreamPredicateExpr> predicate) const;
+  StreamingDataFrame filterPredicate(StreamPredicateBinder predicate_binder) const;
   StreamingDataFrame withColumn(const std::string& name, const std::string& sourceColumn) const;
   StreamingDataFrame withColumn(const std::string& name, ComputedColumnKind function,
                                const std::vector<ComputedColumnArg>& args) const;

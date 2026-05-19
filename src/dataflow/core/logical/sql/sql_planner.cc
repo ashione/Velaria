@@ -297,10 +297,9 @@ std::shared_ptr<::dataflow::PlanPredicateExpr> toPlanPredicateExpr(
   return out;
 }
 
-std::shared_ptr<::dataflow::StreamPredicateExpr> toStreamPredicateExpr(
-    const std::shared_ptr<PredicateExpr>& expr, const FromItem& from) {
-  if (!expr) return nullptr;
-  auto out = std::make_shared<::dataflow::StreamPredicateExpr>();
+::dataflow::StreamPredicateBinder toStreamPredicateBinder(const std::shared_ptr<PredicateExpr>& expr,
+                                                          const FromItem& from) {
+  if (!expr) return {};
   if (expr->kind == PredicateExprKind::Comparison) {
     if (expr->predicate.lhs_is_aggregate) {
       throw SQLSemanticError("WHERE does not support aggregate expressions");
@@ -308,18 +307,29 @@ std::shared_ptr<::dataflow::StreamPredicateExpr> toStreamPredicateExpr(
     if (expr->predicate.rhs_is_column_candidate) {
       throwUnsupportedSqlV1("stream SQL WHERE does not support column-to-column predicates");
     }
-    out->kind = ::dataflow::StreamPredicateExprKind::Comparison;
-    out->comparison.column = resolveStreamColumnName(expr->predicate.lhs, from);
-    out->comparison.op = opToString(expr->predicate.op);
-    out->comparison.value = expr->predicate.rhs;
-    return out;
+    const auto column = resolveStreamColumnName(expr->predicate.lhs, from);
+    const auto op = opToString(expr->predicate.op);
+    const auto value = expr->predicate.rhs;
+    return [column, op, value](const Schema& schema) {
+      auto out = std::make_shared<::dataflow::PlanPredicateExpr>();
+      out->kind = ::dataflow::PlanPredicateExprKind::Comparison;
+      out->comparison.column_index = schema.indexOf(column);
+      out->comparison.op = op;
+      out->comparison.value = value;
+      return out;
+    };
   }
-  out->kind = expr->kind == PredicateExprKind::And
-                  ? ::dataflow::StreamPredicateExprKind::And
-                  : ::dataflow::StreamPredicateExprKind::Or;
-  out->left = toStreamPredicateExpr(expr->left, from);
-  out->right = toStreamPredicateExpr(expr->right, from);
-  return out;
+  auto left = toStreamPredicateBinder(expr->left, from);
+  auto right = toStreamPredicateBinder(expr->right, from);
+  const auto kind = expr->kind == PredicateExprKind::And ? ::dataflow::PlanPredicateExprKind::And
+                                                        : ::dataflow::PlanPredicateExprKind::Or;
+  return [left = std::move(left), right = std::move(right), kind](const Schema& schema) {
+    auto out = std::make_shared<::dataflow::PlanPredicateExpr>();
+    out->kind = kind;
+    out->left = left ? left(schema) : nullptr;
+    out->right = right ? right(schema) : nullptr;
+    return out;
+  };
 }
 
 VectorDistanceMetric parseHybridMetric(const std::string& metric) {
@@ -1845,7 +1855,7 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query,
       filter.op = opToString(predicate.op);
       filter.value = predicate.rhs;
     } else {
-      filter.predicate_expr = toStreamPredicateExpr(query.where, query.from);
+      filter.predicate_expr = toStreamPredicateBinder(query.where, query.from);
     }
     logical.nodes.push_back(filter);
   }

@@ -493,6 +493,84 @@ class FinancePackTest(unittest.TestCase):
                         self.assertGreaterEqual(command_payload["summary"]["market_context_count"], 1)
                         self.assertGreaterEqual(command_payload["summary"]["fundamental_count"], 1)
 
+    def test_watch_session_async_start_records_runtime_and_controls_process(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-watch-session-async-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                fake_process = mock.Mock()
+                fake_process.pid = 4321
+                with mock.patch("velaria.finance_pack.cli.subprocess.Popen", return_value=fake_process) as popen:
+                    stdout = StringIO()
+                    with redirect_stdout(stdout):
+                        exit_code = finance_cli_main(
+                            [
+                                "watch-session",
+                                "start",
+                                "--session-id",
+                                "session_async",
+                                "--market",
+                                "us",
+                                "--symbols",
+                                "AAPL,MSFT,NVDA",
+                                "--start-date",
+                                "20260501",
+                                "--end-date",
+                                "20260518",
+                                "--iterations",
+                                "2",
+                                "--interval-sec",
+                                "1",
+                                "--async-run",
+                                "--format",
+                                "json",
+                            ]
+                        )
+
+                self.assertEqual(exit_code, 0)
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(payload["action"], "watch-session-async-start")
+                self.assertEqual(payload["watch_session_id"], "session_async")
+                self.assertEqual(payload["run"]["pid"], 4321)
+                self.assertTrue(payload["run"]["log_path"].endswith("session_async.jsonl"))
+                self.assertIn("-m", popen.call_args.args[0])
+                self.assertIn("velaria.finance_pack.cli", popen.call_args.args[0])
+                self.assertIn("--jsonl", popen.call_args.args[0])
+                self.assertIn("core_runtime", payload["run"])
+                self.assertIn("ai_cli_runtime", payload["run"])
+
+                with AgenticStore() as store:
+                    rows = store.read_external_events("finance_watch_session_runs")
+                    self.assertEqual(rows[-1]["session_id"], "session_async")
+                    self.assertEqual(rows[-1]["pid"], 4321)
+
+                stdout = StringIO()
+                with mock.patch("velaria.finance_pack.cli.os.kill") as kill:
+                    with redirect_stdout(stdout):
+                        exit_code = finance_cli_main(["watch-session", "status", "--session-id", "session_async", "--format", "json"])
+                self.assertEqual(exit_code, 0)
+                status_payload = json.loads(stdout.getvalue())
+                self.assertTrue(status_payload["process_running"])
+                kill.assert_called_once_with(4321, 0)
+
+                log_path = payload["run"]["log_path"]
+                with open(log_path, "w", encoding="utf-8") as handle:
+                    handle.write('{"tick": 1}\n{"tick": 2}\n')
+                stdout = StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = finance_cli_main(["watch-session", "logs", "--session-id", "session_async", "--limit", "1", "--format", "json"])
+                self.assertEqual(exit_code, 0)
+                log_payload = json.loads(stdout.getvalue())
+                self.assertEqual(log_payload["line_count"], 1)
+                self.assertEqual(log_payload["lines"], ['{"tick": 2}'])
+
+                stdout = StringIO()
+                with mock.patch("velaria.finance_pack.cli.os.kill") as kill:
+                    with redirect_stdout(stdout):
+                        exit_code = finance_cli_main(["watch-session", "stop", "--session-id", "session_async", "--format", "json"])
+                self.assertEqual(exit_code, 0)
+                stop_payload = json.loads(stdout.getvalue())
+                self.assertEqual(stop_payload["action"], "watch-session-stop")
+                self.assertEqual(kill.call_args_list[-1].args[1].name, "SIGTERM")
+
     def test_normalize_akshare_cn_history_keeps_provider_metadata(self):
         raw = pd.DataFrame(
             [

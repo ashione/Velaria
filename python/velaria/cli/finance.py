@@ -26,6 +26,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --top 3
               velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --native-stream --ingest-raw --iterations 0
               velaria finance watch-session start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0
+              velaria finance watch-session start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --async-run --format json
+              velaria finance watch-session status --session-id finance_us_watch_20260519T133000Z --format json
+              velaria finance watch-session logs --session-id finance_us_watch_20260519T133000Z --limit 20 --format json
               velaria finance watch-session summarize --session-id finance_us_watch_20260519T133000Z --format json
               velaria finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00
@@ -46,6 +49,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --top 3 --format json
               finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --native-stream --ingest-raw --iterations 0 --format json
               finance watch-session start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --format json
+              finance watch-session start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --async-run --format json
+              finance watch-session status --session-id finance_us_watch_20260519T133000Z --format json
+              finance watch-session logs --session-id finance_us_watch_20260519T133000Z --limit 20 --format json
               finance watch-session summarize --session-id finance_us_watch_20260519T133000Z --format json
               finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00 --format json
@@ -215,14 +221,15 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     watch_start.add_argument("--iterations", type=int, default=1)
     watch_start.add_argument("--until-time", help="Run until this RFC3339 timestamp.")
     watch_start.add_argument("--jsonl", action="store_true")
+    watch_start.add_argument("--async-run", action="store_true")
     _add_report_format(watch_start)
-    for command in ("list", "show", "events", "signals", "summarize"):
+    for command in ("list", "show", "events", "signals", "summarize", "status", "logs", "stop"):
         sub = watch_session_subparsers.add_parser(command, help=f"{command} durable watch-session data.")
         if command != "list":
             sub.add_argument("--session-id", required=True)
         if command == "events":
             sub.add_argument("--feed", choices=["all", "quotes", "history", "news", "candidates", "market_context", "fundamentals", "native_stream_signals"], default="all")
-        if command in {"events", "signals"}:
+        if command in {"events", "signals", "logs"}:
             sub.add_argument("--limit", type=int, default=100)
         _add_report_format(sub)
 
@@ -382,6 +389,8 @@ def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
         argv.append("--skip-network")
     if getattr(args, "jsonl", False):
         argv.append("--jsonl")
+    if getattr(args, "async_run", False):
+        argv.append("--async-run")
     if getattr(args, "stream_monitor", False):
         argv.append("--stream-monitor")
     if getattr(args, "native_stream", False):

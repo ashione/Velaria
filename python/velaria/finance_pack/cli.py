@@ -6,6 +6,8 @@ import json
 import math
 import os
 import pathlib
+import signal
+import subprocess
 import sys
 import threading
 import time
@@ -283,15 +285,16 @@ def _build_parser() -> argparse.ArgumentParser:
     watch_start.add_argument("--iterations", type=int, default=1, help="Use 0 to run until interrupted.")
     watch_start.add_argument("--until-time", help="Run until this RFC3339 timestamp.")
     watch_start.add_argument("--jsonl", action="store_true", help="Emit one JSON object per watch tick.")
+    watch_start.add_argument("--async-run", action="store_true", help="Start the watch session in a background CLI process and return immediately.")
     _add_report_format(watch_start)
 
-    for command in ("list", "show", "events", "signals", "summarize"):
+    for command in ("list", "show", "events", "signals", "summarize", "status", "logs", "stop"):
         sub = watch_session_subparsers.add_parser(command, help=f"{command} durable watch-session data.")
         if command != "list":
             sub.add_argument("--session-id", required=True)
         if command == "events":
             sub.add_argument("--feed", choices=["all", "quotes", "history", "news", "candidates", "market_context", "fundamentals", "native_stream_signals"], default="all")
-        if command in {"events", "signals"}:
+        if command in {"events", "signals", "logs"}:
             sub.add_argument("--limit", type=int, default=100)
         _add_report_format(sub)
 
@@ -426,10 +429,18 @@ def _watch_session(args: argparse.Namespace) -> int:
         return _watch_session_signals(args)
     if command == "summarize":
         return _watch_session_summarize(args)
+    if command == "status":
+        return _watch_session_status(args)
+    if command == "logs":
+        return _watch_session_logs(args)
+    if command == "stop":
+        return _watch_session_stop(args)
     raise AssertionError(f"unhandled watch-session command: {command}")
 
 
 def _watch_session_start(args: argparse.Namespace) -> int:
+    if getattr(args, "async_run", False):
+        return _watch_session_start_async(args)
     symbols = _split_symbols(args.symbols)
     session_id = args.session_id or _make_watch_session_id(args.market)
     args.watch_session_id = session_id
@@ -501,6 +512,149 @@ def _watch_session_start(args: argparse.Namespace) -> int:
     return 0
 
 
+def _watch_session_start_async(args: argparse.Namespace) -> int:
+    session_id = args.session_id or _make_watch_session_id(args.market)
+    args.watch_session_id = session_id
+    log_dir = get_finance_watch_session_run_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{session_id}.jsonl"
+    child_argv = _watch_session_child_argv(args, session_id=session_id)
+    env = os.environ.copy()
+    with log_path.open("ab") as log_handle:
+        process = subprocess.Popen(
+            child_argv,
+            cwd=str(pathlib.Path.cwd()),
+            env=env,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    run = {
+        "session_id": session_id,
+        "status": "running",
+        "pid": int(process.pid),
+        "log_path": str(log_path),
+        "argv": child_argv,
+        "started_at": _utc_payload_time(),
+        "updated_at": _utc_payload_time(),
+        "runner": "velaria.finance_pack.cli",
+        "core_runtime": "velaria_native_realtime_stream",
+        "ai_cli_runtime": "velaria_cli_run",
+        "event_time": _utc_payload_time(),
+        "event_type": "watch_session_async_start",
+        "source_key": session_id,
+    }
+    _append_watch_session_run_event(run)
+    payload = {
+        "ok": True,
+        "action": "watch-session-async-start",
+        "watch_session_id": session_id,
+        "run": run,
+        "next_steps": [
+            f"finance watch-session status --session-id {session_id} --format json",
+            f"finance watch-session logs --session-id {session_id} --limit 20 --format json",
+            f"finance watch-session signals --session-id {session_id} --format json",
+            f"finance watch-session summarize --session-id {session_id} --format json",
+        ],
+        "disclaimer": "Research candidates and realtime signals only; not investment advice.",
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_watch_session_async_start_report(payload))
+    return 0
+
+
+def _watch_session_child_argv(args: argparse.Namespace, *, session_id: str) -> list[str]:
+    argv = [
+        sys.executable,
+        "-m",
+        "velaria.finance_pack.cli",
+        "watch-session",
+        "start",
+        "--session-id",
+        session_id,
+        "--market",
+        str(args.market),
+        "--symbols",
+        str(args.symbols),
+        "--history-provider",
+        str(args.history_provider),
+        "--quote-provider",
+        str(args.quote_provider),
+        "--news-provider",
+        str(args.news_provider),
+        "--fundamentals-provider",
+        str(args.fundamentals_provider),
+        "--start-date",
+        str(args.start_date),
+        "--end-date",
+        str(args.end_date),
+        "--period",
+        str(args.period),
+        "--adjust",
+        str(args.adjust),
+        "--top",
+        str(args.top),
+        "--news-limit",
+        str(args.news_limit),
+        "--entry-score-threshold",
+        str(args.entry_score_threshold),
+        "--entry-return-threshold",
+        str(args.entry_return_threshold),
+        "--exit-score-threshold",
+        str(args.exit_score_threshold),
+        "--exit-quote-pct-threshold",
+        str(args.exit_quote_pct_threshold),
+        "--native-stream-poll-timeout-sec",
+        str(args.native_stream_poll_timeout_sec),
+        "--interval-sec",
+        str(args.interval_sec),
+        "--iterations",
+        str(args.iterations),
+        "--format",
+        "json",
+        "--jsonl",
+    ]
+    if args.market_symbols:
+        argv.extend(["--market-symbols", str(args.market_symbols)])
+    if args.until_time:
+        argv.extend(["--until-time", str(args.until_time)])
+    return argv
+
+
+def get_finance_watch_session_run_dir() -> pathlib.Path:
+    from velaria.workspace.paths import get_velaria_home
+
+    return get_velaria_home() / "agentic" / "finance_watch_sessions"
+
+
+def _watch_session_run_source_binding() -> dict[str, Any]:
+    return {
+        "time_field": "event_time",
+        "type_field": "event_type",
+        "key_field": "session_id",
+        "field_mappings": {
+            "session_id": "session_id",
+            "status": "status",
+            "pid": "pid",
+        },
+    }
+
+
+def _append_watch_session_run_event(payload: dict[str, Any]) -> dict[str, Any]:
+    with AgenticStore() as store:
+        store.upsert_source(
+            {
+                "source_id": "finance_watch_session_runs",
+                "kind": "external_event",
+                "name": "finance watch session runtime processes",
+                "schema_binding": _watch_session_run_source_binding(),
+                "metadata": {"domain": "finance", "workflow": "watch-session", "runtime": "async-cli"},
+            }
+        )
+        return store.append_external_event("finance_watch_session_runs", payload)
+
+
 def _watch_session_list(args: argparse.Namespace) -> int:
     sessions = _list_watch_sessions()
     payload = {"ok": True, "action": "watch-session-list", "sessions": sessions, "session_count": len(sessions)}
@@ -546,6 +700,81 @@ def _watch_session_summarize(args: argparse.Namespace) -> int:
     if args.report_format == "json":
         return _emit_json(payload)
     print(_render_watch_session_summary_report(payload))
+    return 0
+
+
+def _watch_session_status(args: argparse.Namespace) -> int:
+    run = _get_watch_session_run_or_raise(args.session_id)
+    session = _get_watch_session_or_none(args.session_id)
+    process_running = _is_process_running(int(run.get("pid") or 0))
+    payload = {
+        "ok": True,
+        "action": "watch-session-status",
+        "watch_session_id": args.session_id,
+        "run": run,
+        "watch_session": session,
+        "process_running": process_running,
+        "effective_status": "running" if process_running else str((session or {}).get("status") or run.get("status") or "exited"),
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_watch_session_status_report(payload))
+    return 0
+
+
+def _watch_session_logs(args: argparse.Namespace) -> int:
+    run = _get_watch_session_run_or_raise(args.session_id)
+    limit = max(0, int(args.limit))
+    log_path = pathlib.Path(str(run.get("log_path") or ""))
+    lines: list[str] = []
+    if log_path.exists():
+        with log_path.open("r", encoding="utf-8", errors="replace") as handle:
+            lines = [line.rstrip("\n") for line in handle if line.rstrip("\n")]
+    if limit:
+        lines = lines[-limit:]
+    payload = {
+        "ok": True,
+        "action": "watch-session-logs",
+        "watch_session_id": args.session_id,
+        "run": run,
+        "log_path": str(log_path),
+        "line_count": len(lines),
+        "lines": lines,
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_watch_session_logs_report(payload))
+    return 0
+
+
+def _watch_session_stop(args: argparse.Namespace) -> int:
+    run = _get_watch_session_run_or_raise(args.session_id)
+    pid = int(run.get("pid") or 0)
+    signal_sent = False
+    process_running = _is_process_running(pid)
+    if process_running:
+        os.kill(pid, signal.SIGTERM)
+        signal_sent = True
+    stopped = {
+        **run,
+        "status": "stop_requested" if signal_sent else "not_running",
+        "updated_at": _utc_payload_time(),
+        "event_time": _utc_payload_time(),
+        "event_type": "watch_session_stop_requested" if signal_sent else "watch_session_stop_not_running",
+        "source_key": args.session_id,
+    }
+    _append_watch_session_run_event(stopped)
+    payload = {
+        "ok": True,
+        "action": "watch-session-stop",
+        "watch_session_id": args.session_id,
+        "run": stopped,
+        "process_running": process_running,
+        "signal_sent": signal_sent,
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_watch_session_status_report(payload))
     return 0
 
 
@@ -645,6 +874,52 @@ def _get_watch_session_or_raise(session_id: str) -> dict[str, Any]:
         hint="Run finance watch-session list --format json to inspect available sessions.",
         details={"session_id": session_id},
     )
+
+
+def _get_watch_session_or_none(session_id: str) -> dict[str, Any] | None:
+    try:
+        return _get_watch_session_or_raise(session_id)
+    except FinanceProviderError:
+        return None
+
+
+def _list_watch_session_runs() -> list[dict[str, Any]]:
+    with AgenticStore() as store:
+        if store.get_source("finance_watch_session_runs") is None:
+            return []
+        rows = store.read_external_events("finance_watch_session_runs")
+    latest: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        payload = dict(row.get("payload_json") or {})
+        session_id = str(payload.get("session_id") or row.get("session_id") or "")
+        if not session_id:
+            continue
+        latest[session_id] = payload
+    return sorted(latest.values(), key=lambda item: str(item.get("updated_at") or item.get("started_at") or ""), reverse=True)
+
+
+def _get_watch_session_run_or_raise(session_id: str) -> dict[str, Any]:
+    for run in _list_watch_session_runs():
+        if run.get("session_id") == session_id:
+            return run
+    raise FinanceProviderError(
+        f"Finance watch session runtime not found: {session_id}",
+        error_type="watch_session_runtime_not_found",
+        hint="Start the session with finance watch-session start --async-run, or inspect durable data with finance watch-session show.",
+        details={"session_id": session_id},
+    )
+
+
+def _is_process_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _read_watch_session_events(session: dict[str, Any], *, feed: str, limit: int) -> list[dict[str, Any]]:
@@ -2205,6 +2480,21 @@ def _render_watch_session_start_report(payload: dict[str, Any]) -> str:
     )
 
 
+def _render_watch_session_async_start_report(payload: dict[str, Any]) -> str:
+    run = payload.get("run") or {}
+    lines = [
+        "# Finance Watch Session Async Run",
+        "",
+        f"- session_id: {payload.get('watch_session_id')}",
+        f"- pid: {run.get('pid')}",
+        f"- log_path: {run.get('log_path')}",
+        f"- core_runtime: {run.get('core_runtime')}",
+        f"- ai_cli_runtime: {run.get('ai_cli_runtime')}",
+        "- disclaimer: Research signals only; not investment advice.",
+    ]
+    return "\n".join(lines)
+
+
 def _render_watch_session_list_report(payload: dict[str, Any]) -> str:
     lines = ["# Finance Watch Sessions", "", f"- sessions: {payload.get('session_count', len(payload.get('sessions') or []))}"]
     for session in payload.get("sessions") or []:
@@ -2233,6 +2523,26 @@ def _render_watch_session_summary_report(payload: dict[str, Any]) -> str:
         f"- fundamental_count: {summary.get('fundamental_count')}",
         f"- note: {summary.get('review_note')}",
     ]
+    return "\n".join(lines)
+
+
+def _render_watch_session_status_report(payload: dict[str, Any]) -> str:
+    run = payload.get("run") or {}
+    lines = [
+        "# Finance Watch Session Status",
+        "",
+        f"- session_id: {payload.get('watch_session_id')}",
+        f"- pid: {run.get('pid')}",
+        f"- process_running: {payload.get('process_running')}",
+        f"- status: {payload.get('effective_status') or run.get('status')}",
+        f"- log_path: {run.get('log_path')}",
+    ]
+    return "\n".join(lines)
+
+
+def _render_watch_session_logs_report(payload: dict[str, Any]) -> str:
+    lines = ["# Finance Watch Session Logs", "", f"- session_id: {payload.get('watch_session_id')}", f"- lines: {payload.get('line_count')}"]
+    lines.extend(str(line) for line in payload.get("lines") or [])
     return "\n".join(lines)
 
 

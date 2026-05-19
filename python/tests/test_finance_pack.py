@@ -26,7 +26,7 @@ from velaria.finance_pack import (
     provider_catalog,
     provider_names_for_operation,
 )
-from velaria.finance_pack.cli import _intelligence_report_payload, _rank_native_stream_view_name, main as finance_cli_main
+from velaria.finance_pack.cli import _intelligence_report_payload, _rank_native_stream_row, _rank_native_stream_view_name, main as finance_cli_main
 
 
 class FinancePackTest(unittest.TestCase):
@@ -1069,6 +1069,75 @@ class FinancePackTest(unittest.TestCase):
 
         self.assertEqual(report["scorecard"][0]["symbol"], "NVDA")
         self.assertEqual(report["scorecard"][0]["score"], 9.0)
+
+    def test_intelligence_search_uses_hybrid_evidence_and_persists_query(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-intelligence-search-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                self._seed_watch_session_rows("session_search")
+
+                stdout = StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = finance_cli_main(
+                        [
+                            "intelligence",
+                            "search",
+                            "--intelligence-id",
+                            "intel_search",
+                            "--session-id",
+                            "session_search",
+                            "--query",
+                            "AAPL fundamental unavailable risk",
+                            "--top-k",
+                            "3",
+                            "--format",
+                            "json",
+                        ]
+                    )
+
+                self.assertEqual(exit_code, 0)
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(payload["action"], "intelligence-search")
+                self.assertEqual(payload["search"]["retrieval"]["fusion"], "rrf")
+                self.assertGreaterEqual(len(payload["search"]["hits"]), 1)
+                self.assertIn(payload["search"]["hits"][0]["match_reason"], {"keyword_match", "embedding_match", "hybrid_match"})
+
+                with AgenticStore() as store:
+                    rows = store.read_external_events("finance_intelligence_searches")
+                self.assertEqual(rows[-1]["intelligence_id"], "intel_search")
+                self.assertEqual(rows[-1]["query_text"], "AAPL fundamental unavailable risk")
+
+    def test_signal_policy_drives_native_stream_flags(self):
+        args = mock.Mock()
+        args.market = "us"
+        args.entry_score_threshold = 99.0
+        args.entry_return_threshold = 99.0
+        args.exit_score_threshold = -99.0
+        args.exit_quote_pct_threshold = -99.0
+        args.signal_policy_preset = "balanced"
+        args.signal_policy = json.dumps(
+            {
+                "entry": {"all": [{"field": "momentum_state", "op": "=", "value": "bullish"}]},
+                "exit": {"any": [{"field": "quote_pct_change", "op": "<=", "value": -1.0}]},
+            }
+        )
+        candidate = {
+            "event_time": "2026-05-20T14:00:00Z",
+            "market": "us",
+            "symbol": "NVDA",
+            "rank": 1,
+            "score": 1.0,
+            "period_return_pct": 0.0,
+            "quote_pct_change": 0.1,
+            "quote_freshness": "delayed",
+            "news_sentiment_label": "neutral",
+            "feature_snapshot": {"momentum_state": "bullish"},
+        }
+
+        row = _rank_native_stream_row(args, candidate)
+
+        self.assertEqual(row["entry_signal"], 1)
+        self.assertEqual(row["exit_signal"], 0)
+        self.assertEqual(row["signal_policy"]["source"], "custom")
 
     def test_normalize_akshare_cn_history_keeps_provider_metadata(self):
         raw = pd.DataFrame(

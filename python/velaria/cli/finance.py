@@ -36,6 +36,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               velaria finance intelligence review --session-id finance_us_watch_20260519T133000Z --format json
               velaria finance intelligence replay --session-id finance_us_watch_20260519T133000Z --format json
               velaria finance intelligence report --session-id finance_us_watch_20260519T133000Z --format json
+              velaria finance intelligence search --session-id finance_us_watch_20260519T133000Z --query "NVDA momentum risk news fundamentals" --format json
               velaria finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00
               velaria finance fetch-quotes --provider tencent --market cn --symbols 000001,600519
@@ -66,6 +67,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               finance intelligence review --session-id finance_us_watch_20260519T133000Z --format json
               finance intelligence replay --session-id finance_us_watch_20260519T133000Z --format json
               finance intelligence report --session-id finance_us_watch_20260519T133000Z --format json
+              finance intelligence search --session-id finance_us_watch_20260519T133000Z --query "NVDA momentum risk news fundamentals" --format json
               finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00 --format json
               finance fetch-news --provider google-news --market us --symbol AAPL --limit 5
@@ -186,6 +188,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     rank.add_argument("--entry-return-threshold", type=float, default=5.0, help="Entry research signal period-return threshold.")
     rank.add_argument("--exit-score-threshold", type=float, default=0.0, help="Exit risk signal score threshold.")
     rank.add_argument("--exit-quote-pct-threshold", type=float, default=-3.0, help="Exit risk signal quote pct_change threshold.")
+    rank.add_argument("--signal-policy-preset", default="balanced", choices=["balanced", "momentum", "defensive"], help="Signal policy preset used to compute native-stream entry/exit flags.")
+    rank.add_argument("--signal-policy", help="JSON signal policy override. Supports entry.all/exit.any condition lists with field/op/value.")
     rank.add_argument("--cooldown-sec", type=int, default=300, help="FocusEvent suppression cooldown for stream monitor signals.")
     rank.add_argument("--until-time", help="Run until this RFC3339 timestamp, e.g. 2026-05-18T16:00:00-04:00.")
     rank.add_argument("--interval-sec", type=float, default=30.0, help="Seconds between polling iterations.")
@@ -232,6 +236,17 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     intelligence_report.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
     intelligence_report.add_argument("--session-id", required=True, help="Durable watch-session id to report.")
     _add_report_format(intelligence_report)
+    intelligence_search = intelligence_subparsers.add_parser("search", help="Hybrid-search persisted finance evidence for a watch session.")
+    intelligence_search.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
+    intelligence_search.add_argument("--session-id", required=True, help="Durable watch-session id to search.")
+    intelligence_search.add_argument("--query", required=True, help="Evidence query text, e.g. NVDA momentum risk news fundamentals.")
+    intelligence_search.add_argument("--top-k", type=int, default=5, help="Number of fused evidence hits.")
+    intelligence_search.add_argument(
+        "--feed",
+        choices=["all", "quotes", "history", "news", "features", "candidates", "market_context", "fundamentals", "native_stream_signals"],
+        default="all",
+    )
+    _add_report_format(intelligence_search)
     intelligence_supervise = intelligence_subparsers.add_parser("supervise", help="Continuously review and persist intelligence notes.")
     intelligence_supervise.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
     intelligence_supervise.add_argument("--session-id", required=True, help="Durable watch-session id to supervise.")
@@ -380,6 +395,8 @@ def _add_watch_session_start_args(parser: argparse.ArgumentParser, *, include_in
     parser.add_argument("--entry-return-threshold", type=float, default=5.0)
     parser.add_argument("--exit-score-threshold", type=float, default=0.0)
     parser.add_argument("--exit-quote-pct-threshold", type=float, default=-3.0)
+    parser.add_argument("--signal-policy-preset", default="balanced", choices=["balanced", "momentum", "defensive"])
+    parser.add_argument("--signal-policy", help="JSON signal policy override. Supports entry.all/exit.any condition lists with field/op/value.")
     parser.add_argument("--native-stream-poll-timeout-sec", type=float, default=2.0)
     parser.add_argument("--interval-sec", type=float, default=30.0)
     parser.add_argument("--iterations", type=int, default=1)
@@ -433,6 +450,7 @@ def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
         "history_output_format",
         "preview_rows",
         "top",
+        "top_k",
         "news_limit",
         "source_id",
         "monitor_id_prefix",
@@ -442,6 +460,8 @@ def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
         "entry_return_threshold",
         "exit_score_threshold",
         "exit_quote_pct_threshold",
+        "signal_policy_preset",
+        "signal_policy",
         "until_time",
         "monitor_id",
         "name",

@@ -106,6 +106,7 @@ uv run --project python python python/velaria_cli.py artifacts list --run-id <ru
 - `finance analyze`：面向用户的一条命令分析入口；获取 quote、入库、运行 monitor，并输出可读研究报告或 JSON
 - `finance pipeline`：完整链路入口；获取历史 OHLCV、订阅实时 quote tick、运行 monitor，并输出分析和 service 集成 metadata
 - `finance rank-candidates`：候选池排名入口；持续获取 quote、历史 OHLCV、新闻 RSS 和透明情绪证据，输出 Top N 研究候选
+- `finance intelligence search`：对同一 watch-session 已沉淀的 quote/history/news/features/candidates/fundamentals/native stream signal 做 hybrid search，返回可复盘 evidence hit
 - `finance fetch-history`：获取历史 OHLCV 行情；优先使用 `provider=yahoo`，也可使用 `provider=akshare`
 - `finance fetch-quotes`：获取 quote 行；可用 `provider=akshare`、`provider=tencent` 或 `provider=yahoo`
 - `finance fetch-news`：获取公开新闻 RSS 行和透明情绪 evidence；默认使用 `provider=google-news`
@@ -190,8 +191,21 @@ uv run --project python --extra finance python python/velaria_cli.py finance ran
   --entry-return-threshold 5 \
   --exit-score-threshold 0 \
   --exit-quote-pct-threshold -3 \
+  --signal-policy-preset balanced \
   --iterations 0 \
   --interval-sec 300 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance rank-candidates \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --native-stream \
+  --ingest-raw \
+  --signal-policy '{"entry":{"all":[{"field":"momentum_state","op":"!=","value":"bearish"},{"field":"score","op":">=","value":0}]},"exit":{"any":[{"field":"news_sentiment_label","op":"=","value":"negative"},{"field":"quote_pct_change","op":"<=","value":-2}]}}' \
+  --iterations 1 \
+  --interval-sec 0 \
   --format json
 
 uv run --project python --extra finance python python/velaria_cli.py finance watch-session start \
@@ -207,6 +221,7 @@ uv run --project python --extra finance python python/velaria_cli.py finance wat
   --entry-return-threshold 5 \
   --exit-score-threshold 0 \
   --exit-quote-pct-threshold -3 \
+  --signal-policy-preset balanced \
   --iterations 0 \
   --interval-sec 300 \
   --format json
@@ -232,6 +247,12 @@ uv run --project python --extra finance python python/velaria_cli.py finance int
 
 uv run --project python --extra finance python python/velaria_cli.py finance intelligence report \
   --session-id us_watch_20260519 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence search \
+  --session-id us_watch_20260519 \
+  --query "NVDA momentum risk news fundamentals" \
+  --top-k 5 \
   --format json
 
 uv run --project python --extra finance python python/velaria_cli.py finance watch-session start \
@@ -336,6 +357,7 @@ finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 202605
 finance intelligence start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --format json
 finance intelligence review --session-id us_watch_async_20260519 --format json
 finance intelligence replay --session-id us_watch_async_20260519 --format json
+finance intelligence search --session-id us_watch_async_20260519 --query "NVDA momentum risk news fundamentals" --format json
 finance intelligence report --session-id us_watch_async_20260519 --format json
 finance watch-session start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --format json
 finance watch-session start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --async-run --format json
@@ -357,8 +379,9 @@ finance watch --market cn --symbol 000001 --interval-sec 30 --iterations 0 --jso
 - `finance analyze` 默认输出人类可读中文报告；Agent 自动化应传 `--format json`
 - `finance pipeline` 默认输出人类可读中文报告；Agent 自动化应传 `--format json`
 - `finance rank-candidates` 输出 `research_candidates`，不是买卖建议；Agent 自动化应传 `--format json`、持续模式 `--jsonl`，native stream 模式 `--native-stream --ingest-raw`，或 agentic stream monitor 模式 `--stream-monitor --until-time <RFC3339>`
+- `finance rank-candidates --signal-policy-preset balanced|momentum|defensive` 先用可解释 policy 计算 `entry_signal` / `exit_signal`，再交给 native stream SQL 的 `WHERE entry_signal >= 1 OR exit_signal >= 1` 过滤；如果需要自定义，传 `--signal-policy` JSON，格式为 `entry.all` / `entry.any` / `exit.all` / `exit.any` 条件列表
 - `finance intelligence start` 是产品化主入口，复用 watch-session 的 public provider、raw ingestion 和 Velaria native realtime stream 链路，并额外写入 `finance_intelligence_sessions` 和 `finance_intelligence_ai_notes`
-- `finance intelligence review` 读取同一个 watch-session 的进程、日志、feed 计数和信号摘要，沉淀 agent-readable AI note；`finance intelligence replay` 只从已持久化的实时 feed 读取，不重新请求 provider；`finance intelligence report` 生成并持久化最终 scorecard、supervisor checks 和 replayable research summary
+- `finance intelligence review` 读取同一个 watch-session 的进程、日志、feed 计数和信号摘要，沉淀 agent-readable AI note；`finance intelligence replay` 只从已持久化的实时 feed 读取，不重新请求 provider；`finance intelligence search` 用 BM25 keyword index、hash embedding cosine、结构化金融特征、recency 和 RRF fusion 检索已沉淀证据并写入 `finance_intelligence_searches`；`finance intelligence report` 生成并持久化最终 scorecard、supervisor checks 和 replayable research summary
 - `finance intelligence supervise --iterations 0` 在 CLI 内持续运行 review loop，适合 agent 通过 `velaria_cli_run` 长时间观察、调试和复盘；输出仍是研究证据，不是投资建议
 - `finance watch-session start` 输出完整盯盘会话 JSON，包含 `watch_session`、`raw_sources`、`native_stream`、`ticks`、`research_candidates`、`stream_signals`；它会默认启用 native stream 和 raw ingestion
 - `finance watch-session start --async-run` 会在后台 CLI 进程中运行同一条 core native stream 链路，前台返回 `pid`、`log_path` 和后续命令；Agent 自动化应随后调用 `status/logs/signals/summarize/stop`
@@ -372,6 +395,7 @@ finance watch --market cn --symbol 000001 --interval-sec 30 --iterations 0 --jso
 - `finance watch` 默认在有限 `--iterations` 后输出一个 JSON；`--iterations 0` 是持续监听，配合 `--jsonl` 可逐 tick 输出
 - `finance pipeline` 输出包含 `history`、`subscription`、`quote`、`focus_events`、`analysis`、`analysis_prompt` 和 `service_integration`
 - `finance rank-candidates` 输出包含 `score_parts`、`quote`、`history`、`news_sentiment`、`news`、`feature_snapshot`、`risk_flags`、`evidence`、`service_integration`；开启 `--native-stream` 时还包含 `native_stream`、`native_stream_signals`，并把 native stream sink 输出写入 `finance_<market>_rank_candidates_native_stream_signals`；开启 `--ingest-raw` 时会把 quote/history/news/features/candidate 写入 Velaria external_event sources；开启 `--stream-monitor` 时还包含 `stream_monitors`、`stream_monitor_runs`、`focus_events`
+- `finance intelligence search` 输出包含 `retrieval.mode`、`retrieval.fusion=rrf`、`hits[].score_breakdown`、`hits[].source_ref` 和 `hits[].row`；Agent 应优先根据这些 evidence 再生成复盘问题或下一步命令
 - provider 失败应读取 `error_type`、`message`、`hint`、`details`
 - 行数据包含 `provider`、`source_url`、`fetched_at`、`freshness`、`delay_sec`、`license_note`
 - watch tick 包含 `quote`、`observations`、`signals`、`focus_events`、`artifacts`、`analysis` 和 `analysis_prompt`

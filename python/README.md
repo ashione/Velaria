@@ -249,8 +249,28 @@ uv run --project python --extra finance python python/velaria_cli.py finance ran
   --entry-return-threshold 5 \
   --exit-score-threshold 0 \
   --exit-quote-pct-threshold -3 \
+  --signal-policy-preset balanced \
   --iterations 0 \
   --interval-sec 300 \
+  --format json
+```
+
+Native stream signal flags are computed by a signal policy before they enter
+the generic stream SQL predicate `WHERE entry_signal >= 1 OR exit_signal >= 1`.
+Use `--signal-policy-preset balanced|momentum|defensive` for built-in policies,
+or pass `--signal-policy` JSON to make the condition tree explicit:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance rank-candidates \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --native-stream \
+  --ingest-raw \
+  --signal-policy '{"entry":{"all":[{"field":"momentum_state","op":"!=","value":"bearish"},{"field":"score","op":">=","value":0}]},"exit":{"any":[{"field":"news_sentiment_label","op":"=","value":"negative"},{"field":"quote_pct_change","op":"<=","value":-2}]}}' \
+  --iterations 1 \
+  --interval-sec 0 \
   --format json
 ```
 
@@ -296,13 +316,22 @@ uv run --project python --extra finance python python/velaria_cli.py finance int
 uv run --project python --extra finance python python/velaria_cli.py finance intelligence report \
   --session-id us_watch_20260519 \
   --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence search \
+  --session-id us_watch_20260519 \
+  --query "NVDA momentum risk news fundamentals" \
+  --top-k 5 \
+  --format json
 ```
 
 `intelligence start` writes `finance_intelligence_sessions` and
 `finance_intelligence_ai_notes`, while all quote/history/news/feature/market/
 fundamental and native stream rows remain under the watch-session feed sources.
 `replay` reads those persisted realtime rows back as historical evidence and
-writes `finance_intelligence_replays`. `report` writes
+writes `finance_intelligence_replays`. `search` hybrid-searches the persisted
+watch-session evidence with BM25 keyword retrieval, hash embedding cosine
+similarity, structured finance signals, recency, and reciprocal rank fusion,
+then writes `finance_intelligence_searches`. `report` writes
 `finance_intelligence_reports` with a final scorecard, supervisor checks,
 provider quality diagnostics, and a replayable research summary. The
 `ai_plane.agent_prompt` is designed for `velaria_cli_run` and does not
@@ -329,6 +358,7 @@ uv run --project python --extra finance python python/velaria_cli.py finance wat
   --entry-return-threshold 5 \
   --exit-score-threshold 0 \
   --exit-quote-pct-threshold -3 \
+  --signal-policy-preset balanced \
   --iterations 0 \
   --interval-sec 300 \
   --format json
@@ -495,8 +525,10 @@ AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0
 us_watch_20260519 --format json`, `finance watch-session review --session-id
 us_watch_20260519 --format json`, `finance watch-session supervise --session-id
 us_watch_20260519 --interval-sec 60 --format json`, `finance intelligence
-report --session-id us_watch_20260519 --format json`, `finance
-fetch-fundamentals --provider sec-companyfacts --market us --symbols
+search --session-id us_watch_20260519 --query "NVDA momentum risk news
+fundamentals" --format json`, `finance intelligence report --session-id
+us_watch_20260519 --format json`, `finance fetch-fundamentals
+--provider sec-companyfacts --market us --symbols
 AAPL,MSFT,NVDA`, or `finance watch --market cn --symbol 000001
 --interval-sec 30 --iterations 0 --jsonl`; do not include `uv`, `python`, or
 `python/velaria_cli.py` in the tool arguments.

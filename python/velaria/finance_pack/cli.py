@@ -10,6 +10,7 @@ import pathlib
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -22,6 +23,8 @@ import velaria
 from velaria.agentic_dsl import compile_rule_spec
 from velaria.agentic_runtime import execute_monitor_once
 from velaria.agentic_store import AgenticStore
+from velaria.embedding import HashEmbeddingProvider
+from velaria.keyword_index import build_keyword_index, search_keyword_index
 
 from . import (
     FinanceProviderError,
@@ -260,6 +263,8 @@ def _build_parser() -> argparse.ArgumentParser:
     rank.add_argument("--entry-return-threshold", type=float, default=5.0, help="Entry research signal period-return threshold.")
     rank.add_argument("--exit-score-threshold", type=float, default=0.0, help="Exit risk signal score threshold.")
     rank.add_argument("--exit-quote-pct-threshold", type=float, default=-3.0, help="Exit risk signal quote pct_change threshold.")
+    rank.add_argument("--signal-policy-preset", default="balanced", choices=["balanced", "momentum", "defensive"], help="Signal policy preset used to compute native-stream entry/exit flags.")
+    rank.add_argument("--signal-policy", help="JSON signal policy override. Supports entry.all/exit.any condition lists with field/op/value.")
     rank.add_argument("--cooldown-sec", type=int, default=300, help="FocusEvent suppression cooldown for stream monitor signals.")
     rank.add_argument("--until-time", help="Run until this RFC3339 timestamp, e.g. 2026-05-18T16:00:00-04:00.")
     rank.add_argument("--interval-sec", type=float, default=30.0, help="Seconds between polling iterations.")
@@ -298,6 +303,13 @@ def _build_parser() -> argparse.ArgumentParser:
     intelligence_report.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
     intelligence_report.add_argument("--session-id", required=True, help="Durable watch-session id to report.")
     _add_report_format(intelligence_report)
+    intelligence_search = intelligence_subparsers.add_parser("search", help="Hybrid-search persisted finance evidence for a watch session.")
+    intelligence_search.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
+    intelligence_search.add_argument("--session-id", required=True, help="Durable watch-session id to search.")
+    intelligence_search.add_argument("--query", required=True, help="Evidence query text, e.g. NVDA momentum risk news fundamentals.")
+    intelligence_search.add_argument("--top-k", type=int, default=5, help="Number of fused evidence hits.")
+    intelligence_search.add_argument("--feed", choices=["all", "quotes", "history", "news", "features", "candidates", "market_context", "fundamentals", "native_stream_signals"], default="all")
+    _add_report_format(intelligence_search)
     intelligence_supervise = intelligence_subparsers.add_parser("supervise", help="Continuously review and persist intelligence notes inside the CLI process.")
     intelligence_supervise.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
     intelligence_supervise.add_argument("--session-id", required=True, help="Durable watch-session id to supervise.")
@@ -421,6 +433,8 @@ def _add_watch_session_start_args(parser: argparse.ArgumentParser, *, include_in
     parser.add_argument("--entry-return-threshold", type=float, default=5.0)
     parser.add_argument("--exit-score-threshold", type=float, default=0.0)
     parser.add_argument("--exit-quote-pct-threshold", type=float, default=-3.0)
+    parser.add_argument("--signal-policy-preset", default="balanced", choices=["balanced", "momentum", "defensive"], help="Signal policy preset used to compute entry_signal/exit_signal before native stream filtering.")
+    parser.add_argument("--signal-policy", help="JSON signal policy override. Supports entry.all/exit.any condition lists with field/op/value.")
     parser.add_argument("--native-stream-poll-timeout-sec", type=float, default=2.0)
     parser.add_argument("--interval-sec", type=float, default=30.0)
     parser.add_argument("--iterations", type=int, default=1, help="Use 0 to run until interrupted.")
@@ -532,6 +546,8 @@ def _intelligence(args: argparse.Namespace) -> int:
         return _intelligence_replay(args)
     if command == "report":
         return _intelligence_report(args)
+    if command == "search":
+        return _intelligence_search(args)
     if command == "supervise":
         return _intelligence_supervise(args)
     raise AssertionError(f"unhandled intelligence command: {command}")
@@ -818,6 +834,8 @@ def _watch_session_child_argv(args: argparse.Namespace, *, session_id: str) -> l
         str(args.exit_score_threshold),
         "--exit-quote-pct-threshold",
         str(args.exit_quote_pct_threshold),
+        "--signal-policy-preset",
+        str(args.signal_policy_preset),
         "--native-stream-poll-timeout-sec",
         str(args.native_stream_poll_timeout_sec),
         "--interval-sec",
@@ -832,6 +850,8 @@ def _watch_session_child_argv(args: argparse.Namespace, *, session_id: str) -> l
         argv.extend(["--market-symbols", str(args.market_symbols)])
     if args.until_time:
         argv.extend(["--until-time", str(args.until_time)])
+    if getattr(args, "signal_policy", None):
+        argv.extend(["--signal-policy", str(args.signal_policy)])
     return argv
 
 
@@ -1612,6 +1632,37 @@ def _intelligence_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _intelligence_search(args: argparse.Namespace) -> int:
+    intelligence_id = args.intelligence_id or _make_intelligence_id(args.session_id)
+    session = _get_watch_session_or_raise(args.session_id)
+    rows = _read_watch_session_events(session, feed=str(args.feed), limit=0)
+    summary = _compact_watch_session_summary(_summarize_watch_session(session))
+    search = _intelligence_search_payload(
+        intelligence_id=intelligence_id,
+        watch_session_id=args.session_id,
+        query_text=str(args.query),
+        rows=rows,
+        top_k=max(1, int(args.top_k)),
+        feed=str(args.feed),
+    )
+    persisted = _append_intelligence_search_event(search)
+    payload = {
+        "ok": True,
+        "action": "intelligence-search",
+        "intelligence_id": intelligence_id,
+        "watch_session_id": args.session_id,
+        "search": search,
+        "persisted_search": persisted,
+        "data_plane": _intelligence_data_plane(dict(session.get("sources") or {}), summary),
+        "ai_plane": _intelligence_ai_plane(intelligence_id=intelligence_id, watch_session_id=args.session_id, summary=summary),
+        "disclaimer": "Research evidence search only; not investment advice.",
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_intelligence_report(payload))
+    return 0
+
+
 def _intelligence_supervise(args: argparse.Namespace) -> int:
     intelligence_id = args.intelligence_id or _make_intelligence_id(args.session_id)
     reviews: list[dict[str, Any]] = []
@@ -1756,6 +1807,22 @@ def _intelligence_report_source_binding() -> dict[str, Any]:
     }
 
 
+def _intelligence_search_source_binding() -> dict[str, Any]:
+    return {
+        "time_field": "event_time",
+        "type_field": "event_type",
+        "key_field": "intelligence_id",
+        "field_mappings": {
+            "intelligence_id": "intelligence_id",
+            "watch_session_id": "watch_session_id",
+            "query_text": "query_text",
+            "hit_count": "hit_count",
+            "top_target_kind": "top_target_kind",
+            "top_symbol": "top_symbol",
+        },
+    }
+
+
 def _append_intelligence_session_event(payload: dict[str, Any]) -> dict[str, Any]:
     with AgenticStore() as store:
         if store.get_source("finance_intelligence_sessions") is None:
@@ -1816,6 +1883,21 @@ def _append_intelligence_report_event(payload: dict[str, Any]) -> dict[str, Any]
         return store.append_external_event("finance_intelligence_reports", payload)
 
 
+def _append_intelligence_search_event(payload: dict[str, Any]) -> dict[str, Any]:
+    with AgenticStore() as store:
+        if store.get_source("finance_intelligence_searches") is None:
+            store.upsert_source(
+                {
+                    "source_id": "finance_intelligence_searches",
+                    "kind": "external_event",
+                    "name": "finance intelligence evidence searches",
+                    "schema_binding": _intelligence_search_source_binding(),
+                    "metadata": {"domain": "finance", "workflow": "finance-intelligence", "retrieval": "hybrid-rrf"},
+                }
+            )
+        return store.append_external_event("finance_intelligence_searches", payload)
+
+
 def _intelligence_runtime_plane(watch_payload: dict[str, Any]) -> dict[str, Any]:
     native_stream = watch_payload.get("native_stream") or {}
     run = watch_payload.get("run") or {}
@@ -1859,6 +1941,7 @@ def _intelligence_ai_plane(
             f"finance intelligence review --session-id {watch_session_id} --format json",
             f"finance intelligence replay --session-id {watch_session_id} --format json",
             f"finance intelligence report --session-id {watch_session_id} --format json",
+            f"finance intelligence search --session-id {watch_session_id} --query '{_top_symbol_from_summary(summary) or 'market'} risk momentum news fundamentals' --format json",
             f"finance watch-session signals --session-id {watch_session_id} --format json",
         ],
     }
@@ -1964,6 +2047,213 @@ def _intelligence_report_payload(
         },
         "disclaimer": "Research candidates and realtime signals only; not investment advice.",
     }
+
+
+def _intelligence_search_payload(
+    *,
+    intelligence_id: str,
+    watch_session_id: str,
+    query_text: str,
+    rows: list[dict[str, Any]],
+    top_k: int,
+    feed: str,
+) -> dict[str, Any]:
+    hits = _hybrid_search_finance_rows(rows=rows, query_text=query_text, top_k=top_k)
+    top = hits[0] if hits else {}
+    return {
+        "intelligence_id": intelligence_id,
+        "watch_session_id": watch_session_id,
+        "event_time": _utc_payload_time(),
+        "event_type": "intelligence_search",
+        "source_key": intelligence_id,
+        "query_text": query_text,
+        "feed": feed,
+        "hit_count": len(hits),
+        "top_target_kind": top.get("target_kind"),
+        "top_symbol": (top.get("source_ref") or {}).get("symbol"),
+        "retrieval": {
+            "mode": "finance_evidence_hybrid_search",
+            "keyword": "bm25_keyword_index",
+            "semantic": "hash_embedding_cosine",
+            "fusion": "rrf",
+            "rank_constant": 60,
+            "structured_features": ["feed_priority", "symbol_match", "signal_priority", "recency"],
+        },
+        "hits": hits,
+        "disclaimer": "Research evidence search only; not investment advice.",
+    }
+
+
+def _hybrid_search_finance_rows(*, rows: list[dict[str, Any]], query_text: str, top_k: int) -> list[dict[str, Any]]:
+    docs = _finance_evidence_docs(rows)
+    if not docs:
+        return []
+    top_k = max(1, int(top_k))
+    window = min(len(docs), max(top_k * 4, top_k))
+    keyword_scores: dict[str, float] = {}
+    keyword_rank: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="velaria-finance-evidence-index-") as tmp:
+        table = pa.Table.from_pylist(docs)
+        build_keyword_index([table], output_dir=tmp, text_columns=["title", "summary", "body"], analyzer="builtin", doc_id_field="doc_id")
+        keyword_table = search_keyword_index(tmp, query_text=query_text, top_k=window)
+        for row in keyword_table.to_pylist():
+            doc_id = str(row.get("doc_id"))
+            keyword_rank.append(doc_id)
+            keyword_scores[doc_id] = float(row.get("keyword_score") or 0.0)
+    provider = HashEmbeddingProvider(dimension=32)
+    query_vector = provider.embed([query_text], model="hash-finance-evidence")[0]
+    doc_vectors = provider.embed([doc["search_text"] for doc in docs], model="hash-finance-evidence")
+    semantic_scores = {doc["doc_id"]: max(0.0, _cosine_similarity(query_vector, doc_vectors[index])) for index, doc in enumerate(docs)}
+    semantic_rank = [doc_id for doc_id, score in sorted(semantic_scores.items(), key=lambda item: (-item[1], item[0]))[:window] if score > 0.0]
+    recency_rank = [doc["doc_id"] for doc in sorted(docs, key=lambda doc: str(doc.get("event_time") or ""), reverse=True)[:window]]
+    structured_scores = {doc["doc_id"]: _finance_structured_evidence_score(doc, query_text=query_text) for doc in docs}
+    structured_rank = [doc_id for doc_id, score in sorted(structured_scores.items(), key=lambda item: (-item[1], item[0]))[:window] if score > 0.0]
+    rank_lists = {
+        "keyword": keyword_rank,
+        "semantic": semantic_rank,
+        "recency": recency_rank,
+        "structured": structured_rank,
+    }
+    rank_maps = {
+        name: {doc_id: rank for rank, doc_id in enumerate(rank_list, start=1)}
+        for name, rank_list in rank_lists.items()
+    }
+    fused: list[dict[str, Any]] = []
+    for doc in docs:
+        doc_id = doc["doc_id"]
+        rrf_score = 0.0
+        rank_details: dict[str, int] = {}
+        for name, rank_map in rank_maps.items():
+            rank = rank_map.get(doc_id)
+            if rank is None:
+                continue
+            rank_details[name] = rank
+            rrf_score += 1.0 / (60.0 + rank)
+        if rrf_score <= 0.0:
+            continue
+        keyword_score = keyword_scores.get(doc_id, 0.0)
+        semantic_score = semantic_scores.get(doc_id, 0.0)
+        structured_score = structured_scores.get(doc_id, 0.0)
+        if keyword_score > 0.0 and semantic_score > 0.0:
+            reason = "hybrid_match"
+        elif keyword_score > 0.0:
+            reason = "keyword_match"
+        else:
+            reason = "embedding_match"
+        fused.append(
+            {
+                "target_kind": doc["target_kind"],
+                "target_id": doc_id,
+                "title": doc["title"],
+                "score": round(rrf_score + (structured_score * 0.005), 6),
+                "score_breakdown": {
+                    "rrf_score": round(rrf_score, 6),
+                    "keyword_score": round(keyword_score, 6),
+                    "embedding_score": round(semantic_score, 6),
+                    "structured_score": round(structured_score, 6),
+                    "ranks": rank_details,
+                },
+                "match_reason": reason,
+                "matched_fields": ["title", "summary", "body"],
+                "source_ref": doc["source_ref"],
+                "snippet": doc["summary"] or doc["body"][:220],
+                "row": doc["row"],
+            }
+        )
+    fused.sort(key=lambda item: (-float(item["score"]), str(item["target_id"])))
+    return fused[:top_k]
+
+
+def _finance_evidence_docs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    docs: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        payload = _watch_row_payload(row)
+        feed = str(row.get("feed") or payload.get("feed") or "unknown")
+        symbol = str(payload.get("symbol") or payload.get("source_key") or "")
+        event_type = str(payload.get("event_type") or row.get("event_type") or feed)
+        title = str(payload.get("title") or payload.get("summary") or f"{feed} {symbol} {event_type}").strip()
+        summary = str(payload.get("summary") or payload.get("message") or payload.get("signal_type") or "").strip()
+        body = json.dumps(_compact_finance_evidence_payload(payload), ensure_ascii=False, sort_keys=True)
+        doc_id = f"{feed}:{payload.get('event_id') or row.get('event_id') or index}"
+        docs.append(
+            {
+                "doc_id": doc_id,
+                "target_kind": feed,
+                "title": title,
+                "summary": summary,
+                "body": body,
+                "search_text": f"{feed}\n{symbol}\n{event_type}\n{title}\n{summary}\n{body}",
+                "event_time": payload.get("event_time") or row.get("event_time"),
+                "source_ref": {
+                    "feed": feed,
+                    "source_id": row.get("source_id"),
+                    "symbol": symbol or None,
+                    "event_type": event_type,
+                    "event_time": payload.get("event_time") or row.get("event_time"),
+                },
+                "row": _compact_finance_evidence_payload(payload),
+            }
+        )
+    return docs
+
+
+def _compact_finance_evidence_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "watch_session_id",
+        "event_time",
+        "event_type",
+        "market",
+        "symbol",
+        "rank",
+        "score",
+        "period_return_pct",
+        "quote_pct_change",
+        "news_sentiment_label",
+        "momentum_state",
+        "signal_type",
+        "provider",
+        "freshness",
+        "error_type",
+        "message",
+        "title",
+        "summary",
+        "publisher",
+        "published_at",
+        "fiscal_period_end",
+        "revenue",
+        "net_income",
+    ]
+    return {key: payload.get(key) for key in keys if payload.get(key) is not None}
+
+
+def _finance_structured_evidence_score(doc: dict[str, Any], *, query_text: str) -> float:
+    source_ref = doc.get("source_ref") or {}
+    row = doc.get("row") or {}
+    query = query_text.lower()
+    score = 0.0
+    feed = str(source_ref.get("feed") or "")
+    score += {"native_stream_signals": 5.0, "candidates": 4.0, "features": 3.0, "news": 2.5, "fundamentals": 2.5}.get(feed, 1.0)
+    symbol = str(source_ref.get("symbol") or "").lower()
+    if symbol and symbol in query:
+        score += 4.0
+    if row.get("signal_type"):
+        score += 3.0
+    if row.get("error_type"):
+        score += 2.0
+    if row.get("news_sentiment_label") in {"negative", "positive"}:
+        score += 1.0
+    return score
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right:
+        return 0.0
+    dot = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(a * a for a in left))
+    right_norm = math.sqrt(sum(b * b for b in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    return dot / (left_norm * right_norm)
 
 
 def _intelligence_candidate_scorecard(*, rows: list[dict[str, Any]], summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3027,6 +3317,11 @@ def _rank_native_stream_schema() -> list[str]:
         "exit_signal",
         "quote_freshness",
         "news_sentiment_label",
+        "momentum_state",
+        "liquidity_score",
+        "provider_quality_score",
+        "signal_policy_source",
+        "signal_policy_preset",
     ]
 
 
@@ -3047,6 +3342,11 @@ def _rank_native_stream_signal_schema_binding() -> dict[str, Any]:
             "quote_pct_change": "quote_pct_change",
             "quote_freshness": "quote_freshness",
             "news_sentiment_label": "news_sentiment_label",
+            "momentum_state": "momentum_state",
+            "liquidity_score": "liquidity_score",
+            "provider_quality_score": "provider_quality_score",
+            "signal_policy_source": "signal_policy_source",
+            "signal_policy_preset": "signal_policy_preset",
             "iteration": "iteration",
         },
     }
@@ -3129,7 +3429,8 @@ def _rank_native_stream_view_name(args: argparse.Namespace) -> str:
 def _rank_native_stream_sql(view_name: str = "finance_rank_candidate_stream") -> str:
     return (
         "SELECT event_time, market, symbol, rank, score, period_return_pct, quote_pct_change, "
-        "entry_signal, exit_signal, quote_freshness, news_sentiment_label "
+        "entry_signal, exit_signal, quote_freshness, news_sentiment_label, momentum_state, liquidity_score, "
+        "provider_quality_score, signal_policy_source, signal_policy_preset "
         f"FROM {view_name} "
         "WHERE entry_signal >= 1 OR exit_signal >= 1"
     )
@@ -3169,6 +3470,7 @@ def _start_rank_native_stream(args: argparse.Namespace) -> dict[str, Any]:
         "query": query,
         "worker": worker,
         "max_batches": max_batches,
+        "signal_policy": _resolve_signal_policy(args),
         "started_at": _utc_payload_time(),
     }
 
@@ -3206,6 +3508,7 @@ def _rank_native_stream_public_payload(native_stream: dict[str, Any]) -> dict[st
         "schema": native_stream["schema"],
         "sql": native_stream["sql"],
         "max_batches": native_stream.get("max_batches"),
+        "signal_policy": native_stream.get("signal_policy"),
         "started_at": native_stream["started_at"],
         **({"stopped_at": native_stream["stopped_at"]} if native_stream.get("stopped_at") else {}),
     }
@@ -3224,7 +3527,7 @@ def _push_and_poll_rank_native_stream(
     rows = [_rank_native_stream_row(args, candidate) for candidate in candidates]
     if not rows:
         return []
-    native_stream["source"].push_rows(rows)
+    native_stream["source"].push_rows([_rank_native_stream_source_row(row) for row in rows])
     signals: list[dict[str, Any]] = []
     deadline = time.monotonic() + max(0.0, float(args.native_stream_poll_timeout_sec))
     while time.monotonic() <= deadline:
@@ -3278,29 +3581,197 @@ def _rank_native_stream_row(args: argparse.Namespace, candidate: dict[str, Any])
     period_return_pct = _float_or_zero(candidate.get("period_return_pct"))
     quote_pct_change = _float_or_zero(candidate.get("quote_pct_change"))
     news_label = str(candidate.get("news_sentiment_label") or "unknown")
-    entry_signal = int(
-        score >= float(args.entry_score_threshold)
-        and period_return_pct >= float(args.entry_return_threshold)
-        and news_label != "negative"
-    )
-    exit_signal = int(
-        score <= float(args.exit_score_threshold)
-        or quote_pct_change <= float(args.exit_quote_pct_threshold)
-        or news_label == "negative"
-    )
+    feature = candidate.get("feature_snapshot") if isinstance(candidate.get("feature_snapshot"), dict) else {}
+    policy = _resolve_signal_policy(args)
+    values = {
+        "score": score,
+        "period_return_pct": period_return_pct,
+        "quote_pct_change": quote_pct_change,
+        "news_sentiment_label": news_label,
+        "quote_freshness": str(candidate.get("quote_freshness") or "unknown"),
+        "momentum_state": str(feature.get("momentum_state") or candidate.get("momentum_state") or "unknown"),
+        "liquidity_score": _float_or_zero(feature.get("liquidity_score", candidate.get("liquidity_score"))),
+        "provider_quality_score": _float_or_zero(feature.get("provider_quality_score", candidate.get("provider_quality_score"))),
+        "rank": int(candidate.get("rank") or 0),
+    }
+    entry_signal = int(_evaluate_signal_group(policy.get("entry"), values))
+    exit_signal = int(_evaluate_signal_group(policy.get("exit"), values))
     return {
         "event_time": str(candidate.get("event_time") or _utc_payload_time()),
         "market": str(candidate.get("market") or args.market),
         "symbol": str(candidate.get("symbol") or ""),
-        "rank": int(candidate.get("rank") or 0),
+        "rank": values["rank"],
         "score": score,
         "period_return_pct": period_return_pct,
         "quote_pct_change": quote_pct_change,
         "entry_signal": entry_signal,
         "exit_signal": exit_signal,
-        "quote_freshness": str(candidate.get("quote_freshness") or "unknown"),
+        "quote_freshness": values["quote_freshness"],
         "news_sentiment_label": news_label,
+        "momentum_state": values["momentum_state"],
+        "liquidity_score": values["liquidity_score"],
+        "provider_quality_score": values["provider_quality_score"],
+        "signal_policy_source": str(policy.get("source") or "preset"),
+        "signal_policy_preset": str(policy.get("preset") or ""),
+        "signal_policy": policy,
     }
+
+
+def _rank_native_stream_source_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {field: row.get(field) for field in _rank_native_stream_schema()}
+
+
+def _resolve_signal_policy(args: argparse.Namespace) -> dict[str, Any]:
+    preset = str(getattr(args, "signal_policy_preset", None) or "balanced")
+    raw_policy = getattr(args, "signal_policy", None)
+    if raw_policy:
+        try:
+            parsed = json.loads(str(raw_policy))
+        except json.JSONDecodeError as exc:
+            raise FinanceProviderError(
+                "invalid finance signal policy JSON",
+                error_type="invalid_signal_policy",
+                hint="Pass valid JSON with optional entry.all/entry.any/exit.all/exit.any condition lists.",
+                details={"reason": str(exc)},
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise FinanceProviderError(
+                "finance signal policy must be a JSON object",
+                error_type="invalid_signal_policy",
+                hint="Use an object such as {\"entry\":{\"all\":[...]},\"exit\":{\"any\":[...]}}.",
+            )
+        return {
+            "source": "custom",
+            "preset": preset,
+            "entry": _normalize_signal_group(parsed.get("entry")),
+            "exit": _normalize_signal_group(parsed.get("exit")),
+        }
+    return {
+        "source": "preset",
+        "preset": preset,
+        **_signal_policy_preset(preset, args),
+    }
+
+
+def _signal_policy_preset(preset: str, args: argparse.Namespace) -> dict[str, Any]:
+    thresholds = {
+        "entry_score_threshold": float(getattr(args, "entry_score_threshold", 8.0)),
+        "entry_return_threshold": float(getattr(args, "entry_return_threshold", 5.0)),
+        "exit_score_threshold": float(getattr(args, "exit_score_threshold", 0.0)),
+        "exit_quote_pct_threshold": float(getattr(args, "exit_quote_pct_threshold", -3.0)),
+    }
+    if preset == "momentum":
+        return {
+            "entry": {
+                "all": [
+                    {"field": "score", "op": ">=", "value": thresholds["entry_score_threshold"]},
+                    {"field": "momentum_state", "op": "=", "value": "bullish"},
+                    {"field": "news_sentiment_label", "op": "!=", "value": "negative"},
+                ]
+            },
+            "exit": {
+                "any": [
+                    {"field": "quote_pct_change", "op": "<=", "value": thresholds["exit_quote_pct_threshold"]},
+                    {"field": "momentum_state", "op": "=", "value": "bearish"},
+                    {"field": "news_sentiment_label", "op": "=", "value": "negative"},
+                ]
+            },
+        }
+    if preset == "defensive":
+        return {
+            "entry": {
+                "all": [
+                    {"field": "score", "op": ">=", "value": thresholds["entry_score_threshold"]},
+                    {"field": "period_return_pct", "op": ">=", "value": thresholds["entry_return_threshold"]},
+                    {"field": "provider_quality_score", "op": ">=", "value": 1.0},
+                    {"field": "news_sentiment_label", "op": "!=", "value": "negative"},
+                ]
+            },
+            "exit": {
+                "any": [
+                    {"field": "score", "op": "<=", "value": thresholds["exit_score_threshold"]},
+                    {"field": "quote_pct_change", "op": "<=", "value": thresholds["exit_quote_pct_threshold"]},
+                    {"field": "provider_quality_score", "op": "<", "value": 0.5},
+                    {"field": "news_sentiment_label", "op": "=", "value": "negative"},
+                ]
+            },
+        }
+    return {
+        "entry": {
+            "all": [
+                {"field": "score", "op": ">=", "value": thresholds["entry_score_threshold"]},
+                {"field": "period_return_pct", "op": ">=", "value": thresholds["entry_return_threshold"]},
+                {"field": "news_sentiment_label", "op": "!=", "value": "negative"},
+                {"field": "momentum_state", "op": "!=", "value": "bearish"},
+            ]
+        },
+        "exit": {
+            "any": [
+                {"field": "score", "op": "<=", "value": thresholds["exit_score_threshold"]},
+                {"field": "quote_pct_change", "op": "<=", "value": thresholds["exit_quote_pct_threshold"]},
+                {"field": "news_sentiment_label", "op": "=", "value": "negative"},
+                {"field": "momentum_state", "op": "=", "value": "bearish"},
+            ]
+        },
+    }
+
+
+def _normalize_signal_group(group: Any) -> dict[str, list[dict[str, Any]]]:
+    if not isinstance(group, dict):
+        return {"all": [], "any": []}
+    return {
+        "all": [item for item in group.get("all", []) if isinstance(item, dict)],
+        "any": [item for item in group.get("any", []) if isinstance(item, dict)],
+    }
+
+
+def _evaluate_signal_group(group: Any, values: dict[str, Any]) -> bool:
+    normalized = _normalize_signal_group(group)
+    all_conditions = normalized["all"]
+    any_conditions = normalized["any"]
+    all_ok = all(_evaluate_signal_condition(condition, values) for condition in all_conditions) if all_conditions else True
+    any_ok = any(_evaluate_signal_condition(condition, values) for condition in any_conditions) if any_conditions else True
+    return (bool(all_conditions) or bool(any_conditions)) and all_ok and any_ok
+
+
+def _evaluate_signal_condition(condition: dict[str, Any], values: dict[str, Any]) -> bool:
+    field = str(condition.get("field") or "")
+    op = str(condition.get("op") or "=").lower()
+    expected = condition.get("value")
+    actual = values.get(field)
+    if op in {"=", "=="}:
+        return _signal_value_equal(actual, expected)
+    if op in {"!=", "<>"}:
+        return not _signal_value_equal(actual, expected)
+    if op in {">", ">=", "<", "<="}:
+        actual_number = _float_or_zero(actual)
+        expected_number = _float_or_zero(expected)
+        if op == ">":
+            return actual_number > expected_number
+        if op == ">=":
+            return actual_number >= expected_number
+        if op == "<":
+            return actual_number < expected_number
+        return actual_number <= expected_number
+    if op == "in":
+        return any(_signal_value_equal(actual, item) for item in _signal_sequence(expected))
+    if op in {"not_in", "not in"}:
+        return not any(_signal_value_equal(actual, item) for item in _signal_sequence(expected))
+    return False
+
+
+def _signal_value_equal(actual: Any, expected: Any) -> bool:
+    if isinstance(actual, (int, float)) or isinstance(expected, (int, float)):
+        return math.isclose(_float_or_zero(actual), _float_or_zero(expected), rel_tol=1e-9, abs_tol=1e-9)
+    return str(actual).lower() == str(expected).lower()
+
+
+def _signal_sequence(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
 
 
 def _rank_native_signal_rows(row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3321,6 +3792,11 @@ def _rank_native_signal_rows(row: dict[str, Any]) -> list[dict[str, Any]]:
                 "quote_pct_change": row.get("quote_pct_change"),
                 "quote_freshness": row.get("quote_freshness"),
                 "news_sentiment_label": row.get("news_sentiment_label"),
+                "momentum_state": row.get("momentum_state"),
+                "liquidity_score": row.get("liquidity_score"),
+                "provider_quality_score": row.get("provider_quality_score"),
+                "signal_policy_source": row.get("signal_policy_source"),
+                "signal_policy_preset": row.get("signal_policy_preset"),
             }
         )
     return signals

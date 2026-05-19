@@ -24,6 +24,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               velaria finance analyze --market cn --symbol 000001
               velaria finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1
               velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --top 3
+              velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --native-stream --ingest-raw --iterations 0
               velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00
               velaria finance fetch-quotes --provider tencent --market cn --symbols 000001,600519
               velaria finance fetch-news --provider google-news --market us --symbol AAPL --limit 5
@@ -40,6 +41,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               finance analyze --market cn --symbol 000001
               finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1 --format json
               finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --top 3 --format json
+              finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --native-stream --ingest-raw --iterations 0 --format json
               finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00 --format json
               finance fetch-news --provider google-news --market us --symbol AAPL --limit 5
               finance fetch-quotes --provider tencent --market cn --symbols 000001
@@ -147,6 +149,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     rank.add_argument("--source-id", help="Defaults to finance_<market>_rank_candidates.")
     rank.add_argument("--monitor-id-prefix", help="Defaults to monitor_<source_id> when --stream-monitor is set.")
     rank.add_argument("--stream-monitor", action="store_true", help="Create and execute Velaria stream monitors for entry and exit research signals.")
+    rank.add_argument("--native-stream", action="store_true", help="Run candidate signal detection through Velaria native realtime stream SQL.")
+    rank.add_argument("--native-stream-poll-timeout-sec", type=float, default=2.0, help="Seconds to wait for native stream sink output per ranking tick.")
+    rank.add_argument("--ingest-raw", action="store_true", help="Persist quote, history, news, and candidate rows into Velaria external_event sources.")
     rank.add_argument("--stream-window-size", default="60s", help="Processing-time stream window size for rank-candidate monitors.")
     rank.add_argument("--entry-score-threshold", type=float, default=8.0, help="Entry research signal score threshold.")
     rank.add_argument("--entry-return-threshold", type=float, default=5.0, help="Entry research signal period-return threshold.")
@@ -279,6 +284,7 @@ def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
         "news_limit",
         "source_id",
         "monitor_id_prefix",
+        "native_stream_poll_timeout_sec",
         "stream_window_size",
         "entry_score_threshold",
         "entry_return_threshold",
@@ -309,6 +315,10 @@ def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
         argv.append("--jsonl")
     if getattr(args, "stream_monitor", False):
         argv.append("--stream-monitor")
+    if getattr(args, "native_stream", False):
+        argv.append("--native-stream")
+    if getattr(args, "ingest_raw", False):
+        argv.append("--ingest-raw")
     if getattr(args, "no_analysis_prompt", False):
         argv.append("--no-analysis-prompt")
     return argv

@@ -270,6 +270,82 @@ class FinancePackTest(unittest.TestCase):
                     self.assertIsNotNone(monitor)
                     self.assertEqual(monitor["execution_mode"], "stream")
 
+    def test_rank_candidates_native_stream_ingests_raw_data_and_emits_signals(self):
+        quote_rows = [
+            {
+                "event_time": "2026-05-18T16:00:00Z",
+                "event_type": "quote",
+                "source_key": "NVDA",
+                "symbol": "NVDA",
+                "market": "us",
+                "price": 222.0,
+                "volume": 50000000,
+                "pct_change": 0.4,
+                "provider": "tencent",
+                "freshness": "delayed",
+                "delay_sec": None,
+                "fetched_at": "2026-05-18T16:00:00Z",
+                "source_url": "https://qt.gtimg.cn/q=",
+                "license_note": "public provider metadata",
+            }
+        ]
+        history_rows = [
+            {"symbol": "NVDA", "market": "us", "date": "2026-05-01", "close": 190.0, "provider": "yahoo", "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/", "freshness": "eod"},
+            {"symbol": "NVDA", "market": "us", "date": "2026-05-18", "close": 222.0, "provider": "yahoo", "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/", "freshness": "eod"},
+        ]
+        news_rows = [
+            {"symbol": "NVDA", "market": "us", "title": "Nvidia gains on strong demand", "summary": "upbeat growth", "provider": "google-news", "source_url": "https://news.google.com/rss/search", "publisher": "Wire", "published_at": "2026-05-18T15:00:00Z", "freshness": "near_realtime"}
+        ]
+
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-native-stream-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                with mock.patch("velaria.finance_pack.cli.fetch_quotes", return_value=quote_rows):
+                    with mock.patch("velaria.finance_pack.cli.fetch_history", return_value=history_rows):
+                        with mock.patch("velaria.finance_pack.cli.fetch_news", return_value=news_rows):
+                            stdout = StringIO()
+                            with redirect_stdout(stdout):
+                                exit_code = finance_cli_main(
+                                    [
+                                        "rank-candidates",
+                                        "--market",
+                                        "us",
+                                        "--symbols",
+                                        "NVDA",
+                                        "--start-date",
+                                        "20260501",
+                                        "--end-date",
+                                        "20260518",
+                                        "--top",
+                                        "1",
+                                        "--iterations",
+                                        "1",
+                                        "--interval-sec",
+                                        "0",
+                                        "--native-stream",
+                                        "--ingest-raw",
+                                        "--entry-score-threshold",
+                                        "8",
+                                        "--entry-return-threshold",
+                                        "5",
+                                        "--format",
+                                        "json",
+                                    ]
+                                )
+
+                self.assertEqual(exit_code, 0)
+                payload = json.loads(stdout.getvalue())
+                self.assertTrue(payload["native_stream"]["enabled"])
+                self.assertEqual(payload["native_stream"]["engine"], "velaria_native_realtime_stream")
+                self.assertEqual(set(payload["raw_sources"]), {"quotes", "history", "news", "candidates"})
+                tick = payload["ticks"][0]
+                self.assertEqual(tick["native_stream_signals"][0]["signal_type"], "entry_research_signal")
+                self.assertEqual(tick["native_stream_signals"][0]["symbol"], "NVDA")
+
+                with AgenticStore() as store:
+                    for key, source in payload["raw_sources"].items():
+                        rows = store.read_external_events(source["source_id"])
+                        self.assertGreaterEqual(len(rows), 1, key)
+
     def test_normalize_akshare_cn_history_keeps_provider_metadata(self):
         raw = pd.DataFrame(
             [

@@ -262,12 +262,49 @@ uv run --project python --extra finance python python/velaria_cli.py finance str
   --format json
 ```
 
-Use `watch-session` when the goal is an end-to-end market watch that persists
-every feed for later replay and review. It combines candidate ranking, native
-stream signal generation, raw quote/history/news storage, market context
-snapshots, and fundamental provider snapshots under one durable `session_id`.
-If a public provider cannot supply a requested feed, the row is persisted as a
-structured unavailable event instead of being mocked:
+Use `intelligence` as the productized entrypoint when the goal is the full
+finance loop: public data ingestion, Velaria native realtime stream signals,
+durable event storage, agent-readable AI briefs, and replay from persisted
+rows. It reuses the same watch-session runtime instead of creating a separate
+finance engine:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence start \
+  --intelligence-id us_intel_20260519 \
+  --session-id us_watch_20260519 \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --market-symbols SPY,QQQ,DIA \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --top 3 \
+  --news-limit 5 \
+  --iterations 0 \
+  --interval-sec 300 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence review \
+  --session-id us_watch_20260519 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence replay \
+  --session-id us_watch_20260519 \
+  --format json
+```
+
+`intelligence start` writes `finance_intelligence_sessions` and
+`finance_intelligence_ai_notes`, while all quote/history/news/market/fundamental
+and native stream rows remain under the watch-session feed sources. `replay`
+reads those persisted realtime rows back as historical evidence and writes
+`finance_intelligence_replays`. The `ai_plane.agent_prompt` is designed for
+`velaria_cli_run` and does not fabricate model output.
+
+Use `watch-session` when you need the lower-level durable market watch and
+diagnostic surface. It combines candidate ranking, native stream signal
+generation, raw quote/history/news storage, market context snapshots, and
+fundamental provider snapshots under one durable `session_id`. If a public
+provider cannot supply a requested feed, the row is persisted as a structured
+unavailable event instead of being mocked:
 
 ```bash
 uv run --project python --extra finance python python/velaria_cli.py finance watch-session start \

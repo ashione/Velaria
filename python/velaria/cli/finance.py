@@ -32,6 +32,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               velaria finance watch-session review --session-id finance_us_watch_20260519T133000Z --log-limit 20 --format json
               velaria finance watch-session supervise --session-id finance_us_watch_20260519T133000Z --interval-sec 60 --format json
               velaria finance watch-session summarize --session-id finance_us_watch_20260519T133000Z --format json
+              velaria finance intelligence start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --format json
+              velaria finance intelligence review --session-id finance_us_watch_20260519T133000Z --format json
+              velaria finance intelligence replay --session-id finance_us_watch_20260519T133000Z --format json
               velaria finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00
               velaria finance fetch-quotes --provider tencent --market cn --symbols 000001,600519
@@ -57,6 +60,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               finance watch-session review --session-id finance_us_watch_20260519T133000Z --log-limit 20 --format json
               finance watch-session supervise --session-id finance_us_watch_20260519T133000Z --interval-sec 60 --format json
               finance watch-session summarize --session-id finance_us_watch_20260519T133000Z --format json
+              finance intelligence start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --format json
+              finance intelligence review --session-id finance_us_watch_20260519T133000Z --format json
+              finance intelligence replay --session-id finance_us_watch_20260519T133000Z --format json
               finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00 --format json
               finance fetch-news --provider google-news --market us --symbol AAPL --limit 5
@@ -195,6 +201,35 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     stream_history.add_argument("--limit", type=int, default=50, help="Return the last N matching stream rows.")
     _add_report_format(stream_history)
 
+    intelligence = finance_subparsers.add_parser(
+        "intelligence",
+        help="Run the full finance intelligence chain.",
+        description=(
+            "Productized finance intelligence workflow: public data providers, native realtime stream signals, "
+            "Velaria external_event persistence, replay, and agent-readable AI briefs."
+        ),
+    )
+    intelligence_subparsers = intelligence.add_subparsers(dest="intelligence_command", required=True)
+    intelligence_start = intelligence_subparsers.add_parser("start", help="Start the full finance intelligence chain.")
+    _add_watch_session_start_args(intelligence_start, include_intelligence_id=True)
+    intelligence_review = intelligence_subparsers.add_parser("review", help="Persist an agent-readable intelligence review.")
+    intelligence_review.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
+    intelligence_review.add_argument("--session-id", required=True, help="Durable watch-session id to review.")
+    intelligence_review.add_argument("--log-limit", type=int, default=20, help="Number of runtime log lines to include.")
+    _add_report_format(intelligence_review)
+    intelligence_replay = intelligence_subparsers.add_parser("replay", help="Replay persisted realtime watch data.")
+    intelligence_replay.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
+    intelligence_replay.add_argument("--session-id", required=True, help="Durable watch-session id to replay.")
+    _add_report_format(intelligence_replay)
+    intelligence_supervise = intelligence_subparsers.add_parser("supervise", help="Continuously review and persist intelligence notes.")
+    intelligence_supervise.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
+    intelligence_supervise.add_argument("--session-id", required=True, help="Durable watch-session id to supervise.")
+    intelligence_supervise.add_argument("--log-limit", type=int, default=20, help="Number of runtime log lines to include in each review.")
+    intelligence_supervise.add_argument("--iterations", type=int, default=0, help="Number of review cycles. Use 0 to run until interrupted.")
+    intelligence_supervise.add_argument("--interval-sec", type=float, default=60.0, help="Seconds between review cycles.")
+    intelligence_supervise.add_argument("--jsonl", action="store_true", help="Emit one JSON intelligence review per cycle.")
+    _add_report_format(intelligence_supervise)
+
     watch_session = finance_subparsers.add_parser(
         "watch-session",
         help="Run or inspect durable finance watch sessions.",
@@ -202,31 +237,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
     watch_session_subparsers = watch_session.add_subparsers(dest="watch_session_command", required=True)
     watch_start = watch_session_subparsers.add_parser("start", help="Start a durable watch session.")
-    watch_start.add_argument("--session-id", help="Defaults to finance_<market>_watch_<UTC timestamp>.")
-    watch_start.add_argument("--market", required=True, choices=["cn", "us"])
-    watch_start.add_argument("--symbols", required=True, help="Comma-separated candidate symbols.")
-    watch_start.add_argument("--market-symbols", help="Comma-separated market context symbols.")
-    watch_start.add_argument("--history-provider", default="yahoo", choices=provider_names_for_operation("fetch_history"))
-    watch_start.add_argument("--quote-provider", default="tencent", choices=provider_names_for_operation("fetch_quotes"))
-    watch_start.add_argument("--news-provider", default="google-news", choices=provider_names_for_operation("fetch_news"))
-    watch_start.add_argument("--fundamentals-provider", default="public-unavailable")
-    watch_start.add_argument("--start-date", required=True, help="YYYYMMDD.")
-    watch_start.add_argument("--end-date", required=True, help="YYYYMMDD.")
-    watch_start.add_argument("--period", default="daily", choices=["daily", "weekly", "monthly"])
-    watch_start.add_argument("--adjust", default="")
-    watch_start.add_argument("--top", type=int, default=3)
-    watch_start.add_argument("--news-limit", type=int, default=5)
-    watch_start.add_argument("--entry-score-threshold", type=float, default=8.0)
-    watch_start.add_argument("--entry-return-threshold", type=float, default=5.0)
-    watch_start.add_argument("--exit-score-threshold", type=float, default=0.0)
-    watch_start.add_argument("--exit-quote-pct-threshold", type=float, default=-3.0)
-    watch_start.add_argument("--native-stream-poll-timeout-sec", type=float, default=2.0)
-    watch_start.add_argument("--interval-sec", type=float, default=30.0)
-    watch_start.add_argument("--iterations", type=int, default=1)
-    watch_start.add_argument("--until-time", help="Run until this RFC3339 timestamp.")
-    watch_start.add_argument("--jsonl", action="store_true")
-    watch_start.add_argument("--async-run", action="store_true")
-    _add_report_format(watch_start)
+    _add_watch_session_start_args(watch_start)
     for command in ("list", "show", "events", "signals", "summarize", "status", "logs", "review", "supervise", "stop"):
         sub = watch_session_subparsers.add_parser(command, help=f"{command} durable watch-session data.")
         if command != "list":
@@ -328,6 +339,36 @@ def _add_provider_market(parser: argparse.ArgumentParser, *, default_provider: s
     parser.add_argument("--market", required=True, choices=["cn", "us"], help="Market: cn for A-share, us for U.S. stocks.")
 
 
+def _add_watch_session_start_args(parser: argparse.ArgumentParser, *, include_intelligence_id: bool = False) -> None:
+    if include_intelligence_id:
+        parser.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
+    parser.add_argument("--session-id", help="Defaults to finance_<market>_watch_<UTC timestamp>.")
+    parser.add_argument("--market", required=True, choices=["cn", "us"])
+    parser.add_argument("--symbols", required=True, help="Comma-separated candidate symbols.")
+    parser.add_argument("--market-symbols", help="Comma-separated market context symbols.")
+    parser.add_argument("--history-provider", default="yahoo", choices=provider_names_for_operation("fetch_history"))
+    parser.add_argument("--quote-provider", default="tencent", choices=provider_names_for_operation("fetch_quotes"))
+    parser.add_argument("--news-provider", default="google-news", choices=provider_names_for_operation("fetch_news"))
+    parser.add_argument("--fundamentals-provider", default="public-unavailable")
+    parser.add_argument("--start-date", required=True, help="YYYYMMDD.")
+    parser.add_argument("--end-date", required=True, help="YYYYMMDD.")
+    parser.add_argument("--period", default="daily", choices=["daily", "weekly", "monthly"])
+    parser.add_argument("--adjust", default="")
+    parser.add_argument("--top", type=int, default=3)
+    parser.add_argument("--news-limit", type=int, default=5)
+    parser.add_argument("--entry-score-threshold", type=float, default=8.0)
+    parser.add_argument("--entry-return-threshold", type=float, default=5.0)
+    parser.add_argument("--exit-score-threshold", type=float, default=0.0)
+    parser.add_argument("--exit-quote-pct-threshold", type=float, default=-3.0)
+    parser.add_argument("--native-stream-poll-timeout-sec", type=float, default=2.0)
+    parser.add_argument("--interval-sec", type=float, default=30.0)
+    parser.add_argument("--iterations", type=int, default=1)
+    parser.add_argument("--until-time", help="Run until this RFC3339 timestamp.")
+    parser.add_argument("--jsonl", action="store_true")
+    parser.add_argument("--async-run", action="store_true")
+    _add_report_format(parser)
+
+
 def _add_output(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output", help="Optional output path for fetched rows.")
     parser.add_argument("--output-format", default="parquet", choices=["parquet", "jsonl"], help="Output format when --output is set.")
@@ -342,8 +383,11 @@ def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
     argv = [str(args.finance_command)]
     if args.finance_command == "watch-session":
         argv.append(str(args.watch_session_command))
+    if args.finance_command == "intelligence":
+        argv.append(str(args.intelligence_command))
     for name in (
         "provider",
+        "intelligence_id",
         "session_id",
         "market",
         "symbol",

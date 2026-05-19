@@ -777,6 +777,152 @@ class FinancePackTest(unittest.TestCase):
                 self.assertEqual(len(rows), 2)
                 self.assertEqual(rows[-1]["session_id"], "session_supervise")
 
+    def test_intelligence_start_fuses_stream_data_and_ai_notes(self):
+        quote_rows = [
+            {
+                "event_time": "2026-05-20T14:00:00Z",
+                "event_type": "quote",
+                "source_key": "NVDA",
+                "symbol": "NVDA",
+                "market": "us",
+                "price": 210.0,
+                "pct_change": 2.1,
+                "provider": "tencent",
+                "source_url": "https://qt.gtimg.cn/",
+                "freshness": "delayed",
+                "license_note": "public provider metadata",
+            }
+        ]
+        history_rows = [
+            {"symbol": "NVDA", "market": "us", "date": "2026-05-01", "close": 190.0, "provider": "yahoo", "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/", "freshness": "eod"},
+            {"symbol": "NVDA", "market": "us", "date": "2026-05-18", "close": 222.0, "provider": "yahoo", "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/", "freshness": "eod"},
+        ]
+        news_rows = [
+            {"symbol": "NVDA", "market": "us", "title": "Nvidia gains on strong demand", "summary": "upbeat growth", "provider": "google-news", "source_url": "https://news.google.com/rss/search", "publisher": "Wire", "published_at": "2026-05-18T15:00:00Z", "freshness": "near_realtime"}
+        ]
+        market_rows = [
+            {
+                "event_time": "2026-05-20T14:00:00Z",
+                "event_type": "market_context",
+                "source_key": "SPY",
+                "symbol": "SPY",
+                "market": "us",
+                "price": 600.0,
+                "pct_change": 0.2,
+                "provider": "tencent",
+                "freshness": "delayed",
+            }
+        ]
+        fundamental_rows = [
+            {
+                "event_time": "2026-05-20T14:00:00Z",
+                "event_type": "fundamental_unavailable",
+                "source_key": "NVDA",
+                "symbol": "NVDA",
+                "market": "us",
+                "provider": "public-unavailable",
+                "freshness": "unavailable",
+                "error_type": "provider_unavailable",
+                "not_mocked": True,
+            }
+        ]
+
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-intelligence-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                with mock.patch("velaria.finance_pack.cli.fetch_quotes", return_value=quote_rows):
+                    with mock.patch("velaria.finance_pack.cli.fetch_history", return_value=history_rows):
+                        with mock.patch("velaria.finance_pack.cli.fetch_news", return_value=news_rows):
+                            with mock.patch("velaria.finance_pack.cli._fetch_market_context_rows", return_value=market_rows):
+                                with mock.patch("velaria.finance_pack.cli._fetch_fundamental_rows", return_value=fundamental_rows):
+                                    stdout = StringIO()
+                                    with redirect_stdout(stdout):
+                                        exit_code = finance_cli_main(
+                                            [
+                                                "intelligence",
+                                                "start",
+                                                "--intelligence-id",
+                                                "intel_test",
+                                                "--session-id",
+                                                "session_intel",
+                                                "--market",
+                                                "us",
+                                                "--symbols",
+                                                "NVDA",
+                                                "--start-date",
+                                                "20260501",
+                                                "--end-date",
+                                                "20260518",
+                                                "--top",
+                                                "1",
+                                                "--iterations",
+                                                "1",
+                                                "--interval-sec",
+                                                "0",
+                                                "--entry-score-threshold",
+                                                "8",
+                                                "--entry-return-threshold",
+                                                "5",
+                                                "--format",
+                                                "json",
+                                            ]
+                                        )
+
+                self.assertEqual(exit_code, 0)
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(payload["action"], "intelligence-start")
+                self.assertEqual(payload["intelligence_id"], "intel_test")
+                self.assertEqual(payload["watch_session"]["session_id"], "session_intel")
+                self.assertEqual(payload["watch_session"]["tick_count"], 1)
+                self.assertEqual(payload["runtime_plane"]["core_runtime"], "velaria_native_realtime_stream")
+                self.assertEqual(payload["ai_plane"]["ai_runtime"], "velaria_cli_run")
+                self.assertIn("velaria_cli_run", payload["ai_plane"]["agent_prompt"])
+                self.assertEqual(
+                    set(payload["data_plane"]["sources"]),
+                    {"quotes", "history", "news", "candidates", "market_context", "fundamentals", "native_stream_signals"},
+                )
+
+                with AgenticStore() as store:
+                    sessions = store.read_external_events("finance_intelligence_sessions")
+                    notes = store.read_external_events("finance_intelligence_ai_notes")
+                self.assertEqual(sessions[-1]["intelligence_id"], "intel_test")
+                self.assertEqual(sessions[-1]["watch_session_id"], "session_intel")
+                self.assertEqual(notes[-1]["intelligence_id"], "intel_test")
+                self.assertEqual(notes[-1]["top_symbol"], "NVDA")
+
+    def test_intelligence_replay_uses_persisted_watch_data(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-intelligence-replay-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                self._seed_watch_session_rows("session_replay")
+
+                stdout = StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = finance_cli_main(
+                        [
+                            "intelligence",
+                            "replay",
+                            "--intelligence-id",
+                            "intel_replay",
+                            "--session-id",
+                            "session_replay",
+                            "--format",
+                            "json",
+                        ]
+                    )
+
+                self.assertEqual(exit_code, 0)
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(payload["action"], "intelligence-replay")
+                self.assertEqual(payload["watch_session_id"], "session_replay")
+                self.assertEqual(payload["replay"]["event_count"], 7)
+                self.assertEqual(payload["replay"]["signal_count"], 1)
+                self.assertEqual(payload["replay"]["top_symbol"], "AAPL")
+                self.assertIn("velaria_cli_run", payload["ai_plane"]["agent_prompt"])
+
+                with AgenticStore() as store:
+                    rows = store.read_external_events("finance_intelligence_replays")
+                self.assertEqual(rows[-1]["intelligence_id"], "intel_replay")
+                self.assertEqual(rows[-1]["watch_session_id"], "session_replay")
+
     def test_normalize_akshare_cn_history_keeps_provider_metadata(self):
         raw = pd.DataFrame(
             [

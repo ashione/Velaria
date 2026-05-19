@@ -54,6 +54,8 @@ def main(argv: list[str] | None = None) -> int:
             return _stream_history(args)
         if args.command == "watch-session":
             return _watch_session(args)
+        if args.command == "intelligence":
+            return _intelligence(args)
         if args.command == "fetch-history":
             rows = fetch_history(
                 provider=args.provider,
@@ -257,37 +259,38 @@ def _build_parser() -> argparse.ArgumentParser:
     stream_history.add_argument("--limit", type=int, default=50, help="Return the last N matching stream rows.")
     _add_report_format(stream_history)
 
+    intelligence = subparsers.add_parser(
+        "intelligence",
+        help="Run a productized finance intelligence loop over public data, native stream, persistence, replay, and agent briefs.",
+    )
+    intelligence_subparsers = intelligence.add_subparsers(dest="intelligence_command", required=True)
+    intelligence_start = intelligence_subparsers.add_parser("start", help="Start the full finance intelligence chain.")
+    _add_watch_session_start_args(intelligence_start, include_intelligence_id=True)
+    intelligence_review = intelligence_subparsers.add_parser("review", help="Persist an agent-readable intelligence review for a watch session.")
+    intelligence_review.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
+    intelligence_review.add_argument("--session-id", required=True, help="Durable watch-session id to review.")
+    intelligence_review.add_argument("--log-limit", type=int, default=20, help="Number of runtime log lines to include.")
+    _add_report_format(intelligence_review)
+    intelligence_replay = intelligence_subparsers.add_parser("replay", help="Replay persisted realtime watch data as historical research evidence.")
+    intelligence_replay.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
+    intelligence_replay.add_argument("--session-id", required=True, help="Durable watch-session id to replay.")
+    _add_report_format(intelligence_replay)
+    intelligence_supervise = intelligence_subparsers.add_parser("supervise", help="Continuously review and persist intelligence notes inside the CLI process.")
+    intelligence_supervise.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
+    intelligence_supervise.add_argument("--session-id", required=True, help="Durable watch-session id to supervise.")
+    intelligence_supervise.add_argument("--log-limit", type=int, default=20, help="Number of runtime log lines to include in each review.")
+    intelligence_supervise.add_argument("--iterations", type=int, default=0, help="Number of review cycles. Use 0 to run until interrupted.")
+    intelligence_supervise.add_argument("--interval-sec", type=float, default=60.0, help="Seconds between review cycles.")
+    intelligence_supervise.add_argument("--jsonl", action="store_true", help="Emit one JSON intelligence review per cycle.")
+    _add_report_format(intelligence_supervise)
+
     watch_session = subparsers.add_parser(
         "watch-session",
         help="Run or inspect a durable finance watch session with market context, fundamentals, news, and stream signals.",
     )
     watch_session_subparsers = watch_session.add_subparsers(dest="watch_session_command", required=True)
     watch_start = watch_session_subparsers.add_parser("start", help="Start a durable watch session.")
-    watch_start.add_argument("--session-id", help="Defaults to finance_<market>_watch_<UTC timestamp>.")
-    watch_start.add_argument("--market", required=True, choices=["cn", "us"])
-    watch_start.add_argument("--symbols", required=True, help="Comma-separated candidate symbols.")
-    watch_start.add_argument("--market-symbols", help="Comma-separated market context symbols. Defaults to broad market proxies.")
-    watch_start.add_argument("--history-provider", default="yahoo", choices=provider_names_for_operation("fetch_history"))
-    watch_start.add_argument("--quote-provider", default="tencent", choices=provider_names_for_operation("fetch_quotes"))
-    watch_start.add_argument("--news-provider", default="google-news", choices=provider_names_for_operation("fetch_news"))
-    watch_start.add_argument("--fundamentals-provider", default="public-unavailable", help="Fundamentals provider name; unavailable providers are recorded as evidence, not mocked.")
-    watch_start.add_argument("--start-date", required=True, help="YYYYMMDD.")
-    watch_start.add_argument("--end-date", required=True, help="YYYYMMDD.")
-    watch_start.add_argument("--period", default="daily", choices=["daily", "weekly", "monthly"])
-    watch_start.add_argument("--adjust", default="")
-    watch_start.add_argument("--top", type=int, default=3)
-    watch_start.add_argument("--news-limit", type=int, default=5)
-    watch_start.add_argument("--entry-score-threshold", type=float, default=8.0)
-    watch_start.add_argument("--entry-return-threshold", type=float, default=5.0)
-    watch_start.add_argument("--exit-score-threshold", type=float, default=0.0)
-    watch_start.add_argument("--exit-quote-pct-threshold", type=float, default=-3.0)
-    watch_start.add_argument("--native-stream-poll-timeout-sec", type=float, default=2.0)
-    watch_start.add_argument("--interval-sec", type=float, default=30.0)
-    watch_start.add_argument("--iterations", type=int, default=1, help="Use 0 to run until interrupted.")
-    watch_start.add_argument("--until-time", help="Run until this RFC3339 timestamp.")
-    watch_start.add_argument("--jsonl", action="store_true", help="Emit one JSON object per watch tick.")
-    watch_start.add_argument("--async-run", action="store_true", help="Start the watch session in a background CLI process and return immediately.")
-    _add_report_format(watch_start)
+    _add_watch_session_start_args(watch_start)
 
     for command in ("list", "show", "events", "signals", "summarize", "status", "logs", "review", "supervise", "stop"):
         sub = watch_session_subparsers.add_parser(command, help=f"{command} durable watch-session data.")
@@ -357,6 +360,36 @@ def _build_parser() -> argparse.ArgumentParser:
 def _add_provider_market(parser: argparse.ArgumentParser, *, default_provider: str, choices: list[str] | None = None) -> None:
     parser.add_argument("--provider", default=default_provider, choices=choices or ["akshare", "tencent"])
     parser.add_argument("--market", required=True, choices=["cn", "us"])
+
+
+def _add_watch_session_start_args(parser: argparse.ArgumentParser, *, include_intelligence_id: bool = False) -> None:
+    if include_intelligence_id:
+        parser.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
+    parser.add_argument("--session-id", help="Defaults to finance_<market>_watch_<UTC timestamp>.")
+    parser.add_argument("--market", required=True, choices=["cn", "us"])
+    parser.add_argument("--symbols", required=True, help="Comma-separated candidate symbols.")
+    parser.add_argument("--market-symbols", help="Comma-separated market context symbols. Defaults to broad market proxies.")
+    parser.add_argument("--history-provider", default="yahoo", choices=provider_names_for_operation("fetch_history"))
+    parser.add_argument("--quote-provider", default="tencent", choices=provider_names_for_operation("fetch_quotes"))
+    parser.add_argument("--news-provider", default="google-news", choices=provider_names_for_operation("fetch_news"))
+    parser.add_argument("--fundamentals-provider", default="public-unavailable", help="Fundamentals provider name; unavailable providers are recorded as evidence, not mocked.")
+    parser.add_argument("--start-date", required=True, help="YYYYMMDD.")
+    parser.add_argument("--end-date", required=True, help="YYYYMMDD.")
+    parser.add_argument("--period", default="daily", choices=["daily", "weekly", "monthly"])
+    parser.add_argument("--adjust", default="")
+    parser.add_argument("--top", type=int, default=3)
+    parser.add_argument("--news-limit", type=int, default=5)
+    parser.add_argument("--entry-score-threshold", type=float, default=8.0)
+    parser.add_argument("--entry-return-threshold", type=float, default=5.0)
+    parser.add_argument("--exit-score-threshold", type=float, default=0.0)
+    parser.add_argument("--exit-quote-pct-threshold", type=float, default=-3.0)
+    parser.add_argument("--native-stream-poll-timeout-sec", type=float, default=2.0)
+    parser.add_argument("--interval-sec", type=float, default=30.0)
+    parser.add_argument("--iterations", type=int, default=1, help="Use 0 to run until interrupted.")
+    parser.add_argument("--until-time", help="Run until this RFC3339 timestamp.")
+    parser.add_argument("--jsonl", action="store_true", help="Emit one JSON object per watch tick.")
+    parser.add_argument("--async-run", action="store_true", help="Start the watch session in a background CLI process and return immediately.")
+    _add_report_format(parser)
 
 
 def _add_output(parser: argparse.ArgumentParser) -> None:
@@ -449,9 +482,138 @@ def _watch_session(args: argparse.Namespace) -> int:
     raise AssertionError(f"unhandled watch-session command: {command}")
 
 
+def _intelligence(args: argparse.Namespace) -> int:
+    command = args.intelligence_command
+    if command == "start":
+        return _intelligence_start(args)
+    if command == "review":
+        return _intelligence_review(args)
+    if command == "replay":
+        return _intelligence_replay(args)
+    if command == "supervise":
+        return _intelligence_supervise(args)
+    raise AssertionError(f"unhandled intelligence command: {command}")
+
+
+def _intelligence_start(args: argparse.Namespace) -> int:
+    if getattr(args, "async_run", False):
+        watch_payload = _watch_session_start_async_payload(args)
+        session_id = str(watch_payload["watch_session_id"])
+        intelligence_id = args.intelligence_id or _make_intelligence_id(session_id)
+        intelligence_session = _append_intelligence_session_event(
+            _intelligence_session_payload(
+                intelligence_id=intelligence_id,
+                watch_session_id=session_id,
+                status="running",
+                market=args.market,
+                symbols=_split_symbols(args.symbols),
+                raw_sources={},
+                tick_count=0,
+            )
+        )
+        payload = {
+            "ok": True,
+            "action": "intelligence-async-start",
+            "intelligence_id": intelligence_id,
+            "watch_session_id": session_id,
+            "watch_runtime": watch_payload,
+            "intelligence_session": intelligence_session,
+            "runtime_plane": _intelligence_runtime_plane(watch_payload),
+            "data_plane": _intelligence_data_plane({}, _empty_watch_session_summary(session_id=session_id)),
+            "ai_plane": _intelligence_ai_plane(
+                intelligence_id=intelligence_id,
+                watch_session_id=session_id,
+                summary=_empty_watch_session_summary(session_id=session_id),
+            ),
+            "next_steps": [
+                f"finance intelligence review --session-id {session_id} --format json",
+                f"finance intelligence replay --session-id {session_id} --format json",
+                f"finance intelligence supervise --session-id {session_id} --interval-sec 60 --format json",
+            ],
+            "disclaimer": "Research candidates and realtime signals only; not investment advice.",
+        }
+        if args.report_format == "json":
+            return _emit_json(payload)
+        print(_render_intelligence_report(payload))
+        return 0
+
+    watch_payload = _watch_session_start_payload(args, emit_jsonl=bool(args.jsonl))
+    watch_session = watch_payload["watch_session"]
+    session_id = str(watch_session["session_id"])
+    intelligence_id = args.intelligence_id or _make_intelligence_id(session_id)
+    summary = _compact_watch_session_summary(_summarize_watch_session(watch_session))
+    intelligence_session = _append_intelligence_session_event(
+        _intelligence_session_payload(
+            intelligence_id=intelligence_id,
+            watch_session_id=session_id,
+            status=str(watch_session.get("status") or "completed"),
+            market=str(watch_session.get("market") or args.market),
+            symbols=list(watch_session.get("symbols") or _split_symbols(args.symbols)),
+            raw_sources=dict(watch_payload.get("raw_sources") or {}),
+            tick_count=int(watch_payload.get("tick_count") or 0),
+        )
+    )
+    ai_note = _append_intelligence_ai_note_event(
+        _intelligence_ai_note_payload(
+            intelligence_id=intelligence_id,
+            watch_session_id=session_id,
+            summary=summary,
+            diagnostics=[],
+        )
+    )
+    payload = {
+        "ok": True,
+        "action": "intelligence-start",
+        "intelligence_id": intelligence_id,
+        "watch_session": watch_session,
+        "intelligence_session": intelligence_session,
+        "runtime_plane": _intelligence_runtime_plane(watch_payload),
+        "data_plane": _intelligence_data_plane(dict(watch_payload.get("raw_sources") or {}), summary),
+        "ai_plane": _intelligence_ai_plane(intelligence_id=intelligence_id, watch_session_id=session_id, summary=summary, ai_note=ai_note),
+        "research_candidates": watch_payload.get("research_candidates") or [],
+        "stream_signals": watch_payload.get("stream_signals") or [],
+        "next_steps": [
+            f"finance intelligence review --session-id {session_id} --format json",
+            f"finance intelligence replay --session-id {session_id} --format json",
+            f"finance watch-session events --session-id {session_id} --feed all --format json",
+        ],
+        "disclaimer": "Research candidates and realtime signals only; not investment advice.",
+    }
+    if args.jsonl:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
+        return 0
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_intelligence_report(payload))
+    return 0
+
+
 def _watch_session_start(args: argparse.Namespace) -> int:
     if getattr(args, "async_run", False):
         return _watch_session_start_async(args)
+    payload = _watch_session_start_payload(args, emit_jsonl=bool(args.jsonl))
+    if args.jsonl:
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "action": "watch-session-start",
+                    "watch_session_id": payload["watch_session"]["session_id"],
+                    "interrupted": payload["interrupted"],
+                    "ticks": payload["tick_count"],
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+        return 0
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_watch_session_start_report(payload))
+    return 0
+
+
+def _watch_session_start_payload(args: argparse.Namespace, *, emit_jsonl: bool = False) -> dict[str, Any]:
     symbols = _split_symbols(args.symbols)
     session_id = args.session_id or _make_watch_session_id(args.market)
     args.watch_session_id = session_id
@@ -483,7 +645,7 @@ def _watch_session_start(args: argparse.Namespace) -> int:
                 iteration=iteration,
             )
             ticks.append(tick)
-            if args.jsonl:
+            if emit_jsonl:
                 print(json.dumps({"watch_session_id": session_id, **tick}, ensure_ascii=False, sort_keys=True), flush=True)
             if not _should_continue_rank_loop(args, iteration):
                 break
@@ -500,11 +662,8 @@ def _watch_session_start(args: argparse.Namespace) -> int:
                 raw_sources=raw_sources,
                 tick_count=len(ticks),
             )
-    if args.jsonl:
-        print(json.dumps({"ok": True, "action": "watch-session-start", "watch_session_id": session_id, "interrupted": interrupted, "ticks": len(ticks)}, ensure_ascii=False), flush=True)
-        return 0
     latest = ticks[-1] if ticks else {"research_candidates": []}
-    payload = {
+    return {
         "ok": True,
         "action": "watch-session-start",
         "watch_session": _watch_session_payload(args, session_id=session_id, status="interrupted" if interrupted else "completed", raw_sources=raw_sources, tick_count=len(ticks)),
@@ -517,13 +676,17 @@ def _watch_session_start(args: argparse.Namespace) -> int:
         "stream_signals": [signal for tick in ticks for signal in tick.get("native_stream_signals", [])],
         "disclaimer": "Research candidates and realtime signals only; not investment advice.",
     }
-    if args.report_format == "json":
-        return _emit_json(payload)
-    print(_render_watch_session_start_report(payload))
-    return 0
 
 
 def _watch_session_start_async(args: argparse.Namespace) -> int:
+    payload = _watch_session_start_async_payload(args)
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_watch_session_async_start_report(payload))
+    return 0
+
+
+def _watch_session_start_async_payload(args: argparse.Namespace) -> dict[str, Any]:
     session_id = args.session_id or _make_watch_session_id(args.market)
     args.watch_session_id = session_id
     log_dir = get_finance_watch_session_run_dir()
@@ -569,10 +732,7 @@ def _watch_session_start_async(args: argparse.Namespace) -> int:
         ],
         "disclaimer": "Research candidates and realtime signals only; not investment advice.",
     }
-    if args.report_format == "json":
-        return _emit_json(payload)
-    print(_render_watch_session_async_start_report(payload))
-    return 0
+    return payload
 
 
 def _watch_session_child_argv(args: argparse.Namespace, *, session_id: str) -> list[str]:
@@ -1324,6 +1484,367 @@ def _review_event_payload(review: dict[str, Any]) -> dict[str, Any]:
         "next_actions": review.get("next_actions"),
         "agent_prompt": review.get("agent_prompt"),
     }
+
+
+def _intelligence_review(args: argparse.Namespace) -> int:
+    intelligence_id = args.intelligence_id or _make_intelligence_id(args.session_id)
+    review = _build_watch_session_review(args.session_id, log_limit=max(0, int(args.log_limit)))
+    _append_watch_session_review_event(_review_event_payload(review))
+    note = _append_intelligence_ai_note_event(
+        _intelligence_ai_note_payload(
+            intelligence_id=intelligence_id,
+            watch_session_id=args.session_id,
+            summary=review["summary"],
+            diagnostics=review["diagnostics"],
+        )
+    )
+    payload = {
+        "ok": True,
+        "action": "intelligence-review",
+        "intelligence_id": intelligence_id,
+        "watch_session_id": args.session_id,
+        "review": review,
+        "ai_plane": _intelligence_ai_plane(intelligence_id=intelligence_id, watch_session_id=args.session_id, summary=review["summary"], ai_note=note),
+        "disclaimer": "Research candidates and realtime signals only; not investment advice.",
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_intelligence_report(payload))
+    return 0
+
+
+def _intelligence_replay(args: argparse.Namespace) -> int:
+    intelligence_id = args.intelligence_id or _make_intelligence_id(args.session_id)
+    session = _get_watch_session_or_raise(args.session_id)
+    rows = _read_watch_session_events(session, feed="all", limit=0)
+    summary = _compact_watch_session_summary(_summarize_watch_session(session))
+    replay = _intelligence_replay_payload(intelligence_id=intelligence_id, watch_session_id=args.session_id, rows=rows, summary=summary)
+    persisted = _append_intelligence_replay_event(replay)
+    payload = {
+        "ok": True,
+        "action": "intelligence-replay",
+        "intelligence_id": intelligence_id,
+        "watch_session_id": args.session_id,
+        "replay": replay,
+        "persisted_replay": persisted,
+        "data_plane": _intelligence_data_plane(dict(session.get("sources") or {}), summary),
+        "ai_plane": _intelligence_ai_plane(intelligence_id=intelligence_id, watch_session_id=args.session_id, summary=summary),
+        "disclaimer": "Research candidates and realtime signals only; not investment advice.",
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_intelligence_report(payload))
+    return 0
+
+
+def _intelligence_supervise(args: argparse.Namespace) -> int:
+    intelligence_id = args.intelligence_id or _make_intelligence_id(args.session_id)
+    reviews: list[dict[str, Any]] = []
+    iteration = 0
+    interrupted = False
+    try:
+        while int(args.iterations) == 0 or iteration < int(args.iterations):
+            iteration += 1
+            review = _build_watch_session_review(args.session_id, log_limit=max(0, int(args.log_limit)))
+            review["supervisor_iteration"] = iteration
+            _append_watch_session_review_event(_review_event_payload(review))
+            note = _append_intelligence_ai_note_event(
+                _intelligence_ai_note_payload(
+                    intelligence_id=intelligence_id,
+                    watch_session_id=args.session_id,
+                    summary=review["summary"],
+                    diagnostics=review["diagnostics"],
+                    note_type="agent_supervisor_brief",
+                )
+            )
+            review["ai_note"] = note
+            reviews.append(review)
+            if args.jsonl:
+                print(json.dumps({"ok": True, "action": "intelligence-supervise-review", "review": review}, ensure_ascii=False, sort_keys=True), flush=True)
+            if int(args.iterations) != 0 and iteration >= int(args.iterations):
+                break
+            time.sleep(max(0.0, float(args.interval_sec)))
+    except KeyboardInterrupt:
+        interrupted = True
+    payload = {
+        "ok": True,
+        "action": "intelligence-supervise",
+        "intelligence_id": intelligence_id,
+        "watch_session_id": args.session_id,
+        "review_count": len(reviews),
+        "latest_review": reviews[-1] if reviews else None,
+        "interrupted": interrupted,
+        "disclaimer": "Research candidates and realtime signals only; not investment advice.",
+    }
+    if args.jsonl:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
+        return 0
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_intelligence_report(payload))
+    return 0
+
+
+def _make_intelligence_id(watch_session_id: str) -> str:
+    return f"intelligence_{_id_part(watch_session_id)}"
+
+
+def _intelligence_session_payload(
+    *,
+    intelligence_id: str,
+    watch_session_id: str,
+    status: str,
+    market: str,
+    symbols: list[str],
+    raw_sources: dict[str, Any],
+    tick_count: int,
+) -> dict[str, Any]:
+    return {
+        "intelligence_id": intelligence_id,
+        "watch_session_id": watch_session_id,
+        "event_time": _utc_payload_time(),
+        "event_type": "intelligence_session",
+        "source_key": intelligence_id,
+        "status": status,
+        "market": market,
+        "symbols": symbols,
+        "tick_count": tick_count,
+        "sources": {key: (value.get("source_id") if isinstance(value, dict) else value) for key, value in raw_sources.items()},
+        "core_runtime": "velaria_native_realtime_stream",
+        "data_runtime": "velaria_agentic_store",
+        "ai_runtime": "velaria_cli_run",
+        "workflow": "finance-intelligence",
+    }
+
+
+def _intelligence_session_source_binding() -> dict[str, Any]:
+    return {
+        "time_field": "event_time",
+        "type_field": "event_type",
+        "key_field": "intelligence_id",
+        "field_mappings": {
+            "intelligence_id": "intelligence_id",
+            "watch_session_id": "watch_session_id",
+            "status": "status",
+            "market": "market",
+            "tick_count": "tick_count",
+        },
+    }
+
+
+def _intelligence_note_source_binding() -> dict[str, Any]:
+    return {
+        "time_field": "event_time",
+        "type_field": "event_type",
+        "key_field": "intelligence_id",
+        "field_mappings": {
+            "intelligence_id": "intelligence_id",
+            "watch_session_id": "watch_session_id",
+            "note_type": "note_type",
+            "top_symbol": "top_symbol",
+            "signal_count": "signal_count",
+            "event_count": "event_count",
+        },
+    }
+
+
+def _intelligence_replay_source_binding() -> dict[str, Any]:
+    return {
+        "time_field": "event_time",
+        "type_field": "event_type",
+        "key_field": "intelligence_id",
+        "field_mappings": {
+            "intelligence_id": "intelligence_id",
+            "watch_session_id": "watch_session_id",
+            "event_count": "event_count",
+            "signal_count": "signal_count",
+            "candidate_count": "candidate_count",
+            "top_symbol": "top_symbol",
+        },
+    }
+
+
+def _append_intelligence_session_event(payload: dict[str, Any]) -> dict[str, Any]:
+    with AgenticStore() as store:
+        if store.get_source("finance_intelligence_sessions") is None:
+            store.upsert_source(
+                {
+                    "source_id": "finance_intelligence_sessions",
+                    "kind": "external_event",
+                    "name": "finance intelligence sessions",
+                    "schema_binding": _intelligence_session_source_binding(),
+                    "metadata": {"domain": "finance", "workflow": "finance-intelligence"},
+                }
+            )
+        return store.append_external_event("finance_intelligence_sessions", payload)
+
+
+def _append_intelligence_ai_note_event(payload: dict[str, Any]) -> dict[str, Any]:
+    with AgenticStore() as store:
+        if store.get_source("finance_intelligence_ai_notes") is None:
+            store.upsert_source(
+                {
+                    "source_id": "finance_intelligence_ai_notes",
+                    "kind": "external_event",
+                    "name": "finance intelligence AI notes",
+                    "schema_binding": _intelligence_note_source_binding(),
+                    "metadata": {"domain": "finance", "workflow": "finance-intelligence"},
+                }
+            )
+        return store.append_external_event("finance_intelligence_ai_notes", payload)
+
+
+def _append_intelligence_replay_event(payload: dict[str, Any]) -> dict[str, Any]:
+    with AgenticStore() as store:
+        if store.get_source("finance_intelligence_replays") is None:
+            store.upsert_source(
+                {
+                    "source_id": "finance_intelligence_replays",
+                    "kind": "external_event",
+                    "name": "finance intelligence replays",
+                    "schema_binding": _intelligence_replay_source_binding(),
+                    "metadata": {"domain": "finance", "workflow": "finance-intelligence"},
+                }
+            )
+        return store.append_external_event("finance_intelligence_replays", payload)
+
+
+def _intelligence_runtime_plane(watch_payload: dict[str, Any]) -> dict[str, Any]:
+    native_stream = watch_payload.get("native_stream") or {}
+    run = watch_payload.get("run") or {}
+    return {
+        "core_runtime": "velaria_native_realtime_stream",
+        "core_engine": native_stream.get("engine") or run.get("core_runtime") or "velaria_native_realtime_stream",
+        "data_runtime": "velaria_agentic_store",
+        "ai_runtime": "velaria_cli_run",
+        "stream_sql": native_stream.get("sql"),
+        "async_pid": run.get("pid"),
+        "log_path": run.get("log_path"),
+    }
+
+
+def _intelligence_data_plane(raw_sources: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
+    sources = {key: (value.get("source_id") if isinstance(value, dict) else value) for key, value in raw_sources.items()}
+    return {
+        "data_runtime": "velaria_agentic_store",
+        "sources": sources,
+        "counts_by_feed": summary.get("counts_by_feed") or {},
+        "event_count": summary.get("event_count") or 0,
+        "signal_count": summary.get("signal_count") or 0,
+        "replayable": True,
+    }
+
+
+def _intelligence_ai_plane(
+    *,
+    intelligence_id: str,
+    watch_session_id: str,
+    summary: dict[str, Any],
+    ai_note: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    prompt = _intelligence_agent_prompt(intelligence_id=intelligence_id, watch_session_id=watch_session_id, summary=summary)
+    return {
+        "ai_runtime": "velaria_cli_run",
+        "agent_prompt": prompt,
+        "note_source_id": "finance_intelligence_ai_notes",
+        "latest_note": ai_note,
+        "next_commands": [
+            f"finance intelligence review --session-id {watch_session_id} --format json",
+            f"finance intelligence replay --session-id {watch_session_id} --format json",
+            f"finance watch-session signals --session-id {watch_session_id} --format json",
+        ],
+    }
+
+
+def _intelligence_ai_note_payload(
+    *,
+    intelligence_id: str,
+    watch_session_id: str,
+    summary: dict[str, Any],
+    diagnostics: list[dict[str, Any]],
+    note_type: str = "agent_research_brief",
+) -> dict[str, Any]:
+    top_symbol = _top_symbol_from_summary(summary)
+    return {
+        "intelligence_id": intelligence_id,
+        "watch_session_id": watch_session_id,
+        "event_time": _utc_payload_time(),
+        "event_type": "intelligence_ai_note",
+        "source_key": intelligence_id,
+        "note_type": note_type,
+        "top_symbol": top_symbol,
+        "event_count": summary.get("event_count") or 0,
+        "signal_count": summary.get("signal_count") or 0,
+        "candidate_count": len(summary.get("latest_candidates") or []),
+        "diagnostic_count": len(diagnostics),
+        "summary": summary,
+        "diagnostics": diagnostics,
+        "agent_prompt": _intelligence_agent_prompt(intelligence_id=intelligence_id, watch_session_id=watch_session_id, summary=summary),
+        "runtime_contract": {
+            "core_runtime": "velaria_native_realtime_stream",
+            "data_runtime": "velaria_agentic_store",
+            "ai_runtime": "velaria_cli_run",
+        },
+        "disclaimer": "Research candidates and realtime signals only; not investment advice.",
+    }
+
+
+def _intelligence_replay_payload(
+    *,
+    intelligence_id: str,
+    watch_session_id: str,
+    rows: list[dict[str, Any]],
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    candidate_rows = [row for row in rows if row.get("feed") == "candidates"]
+    signal_rows = [row for row in rows if row.get("feed") == "native_stream_signals"]
+    return {
+        "intelligence_id": intelligence_id,
+        "watch_session_id": watch_session_id,
+        "event_time": _utc_payload_time(),
+        "event_type": "intelligence_replay",
+        "source_key": intelligence_id,
+        "event_count": len(rows),
+        "candidate_count": len(candidate_rows),
+        "signal_count": len(signal_rows),
+        "top_symbol": _top_symbol_from_summary(summary),
+        "counts_by_feed": summary.get("counts_by_feed") or {},
+        "latest_signal": summary.get("latest_signal"),
+        "latest_candidates": summary.get("latest_candidates") or [],
+        "replay_note": "Realtime watch rows were read from persisted Velaria external_event sources.",
+    }
+
+
+def _top_symbol_from_summary(summary: dict[str, Any]) -> str | None:
+    candidates = [row for row in (summary.get("latest_candidates") or []) if isinstance(row, dict)]
+    if candidates:
+        ranked = sorted(
+            candidates,
+            key=lambda row: (
+                int(row.get("rank") or 999999),
+                -float(row.get("score") or 0.0),
+                str(row.get("symbol") or ""),
+            ),
+        )
+        symbol = ranked[0].get("symbol")
+        return str(symbol) if symbol is not None else None
+    signal = summary.get("latest_signal")
+    if isinstance(signal, dict) and signal.get("symbol") is not None:
+        return str(signal.get("symbol"))
+    return None
+
+
+def _intelligence_agent_prompt(*, intelligence_id: str, watch_session_id: str, summary: dict[str, Any]) -> str:
+    counts = summary.get("counts_by_feed") or {}
+    top_symbol = _top_symbol_from_summary(summary) or "none"
+    return (
+        "Use velaria_cli_run to continue the finance intelligence workflow "
+        f"{intelligence_id} on watch_session={watch_session_id}. "
+        f"Inspect persisted feed_counts={counts}, top_symbol={top_symbol}, "
+        "then call finance intelligence review/replay and finance watch-session signals as needed. "
+        "All realtime rows are already persisted in Velaria external_event sources and can be treated as replayable historical evidence. "
+        "Treat outputs as research evidence, not investment advice."
+    )
 
 
 def _run_doctor(args: argparse.Namespace) -> int:
@@ -2946,6 +3467,27 @@ def _render_watch_session_supervise_report(payload: dict[str, Any]) -> str:
             "- disclaimer: Research signals only; not investment advice.",
         ]
     )
+
+
+def _render_intelligence_report(payload: dict[str, Any]) -> str:
+    data_plane = payload.get("data_plane") or {}
+    runtime_plane = payload.get("runtime_plane") or {}
+    ai_plane = payload.get("ai_plane") or {}
+    replay = payload.get("replay") or {}
+    lines = [
+        "# Finance Intelligence",
+        "",
+        f"- action: {payload.get('action')}",
+        f"- intelligence_id: {payload.get('intelligence_id')}",
+        f"- watch_session_id: {payload.get('watch_session_id') or (payload.get('watch_session') or {}).get('session_id')}",
+        f"- core_runtime: {runtime_plane.get('core_runtime')}",
+        f"- data_runtime: {data_plane.get('data_runtime')}",
+        f"- ai_runtime: {ai_plane.get('ai_runtime')}",
+        f"- event_count: {data_plane.get('event_count') or replay.get('event_count')}",
+        f"- signal_count: {data_plane.get('signal_count') or replay.get('signal_count')}",
+        "- disclaimer: Research signals only; not investment advice.",
+    ]
+    return "\n".join(lines)
 
 
 def _render_doctor(payload: dict[str, Any]) -> str:

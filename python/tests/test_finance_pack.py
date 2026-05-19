@@ -323,6 +323,8 @@ class FinancePackTest(unittest.TestCase):
                                         "0",
                                         "--native-stream",
                                         "--ingest-raw",
+                                        "--until-time",
+                                        "2026-01-01T00:00:00+08:00",
                                         "--entry-score-threshold",
                                         "8",
                                         "--entry-return-threshold",
@@ -336,6 +338,7 @@ class FinancePackTest(unittest.TestCase):
                 payload = json.loads(stdout.getvalue())
                 self.assertTrue(payload["native_stream"]["enabled"])
                 self.assertEqual(payload["native_stream"]["engine"], "velaria_native_realtime_stream")
+                self.assertIsNone(payload["native_stream"]["max_batches"])
                 self.assertEqual(set(payload["raw_sources"]), {"quotes", "history", "news", "candidates"})
                 tick = payload["ticks"][0]
                 self.assertEqual(tick["native_stream_signals"][0]["signal_type"], "entry_research_signal")

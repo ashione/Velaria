@@ -1013,7 +1013,7 @@ def _start_rank_native_stream(args: argparse.Namespace) -> dict[str, Any]:
         query_df = session.stream_sql(_rank_native_stream_sql())
         query = query_df.write_stream_queue_sink(sink, trigger_interval_ms=0)
         query.start()
-        max_batches = None if int(args.iterations) == 0 else max(1, int(args.iterations))
+        max_batches = None if args.until_time or int(args.iterations) == 0 else max(1, int(args.iterations))
         worker = threading.Thread(target=lambda: _await_rank_native_stream(query, max_batches=max_batches), daemon=True)
         worker.start()
     except Exception as exc:
@@ -1070,6 +1070,7 @@ def _rank_native_stream_public_payload(native_stream: dict[str, Any]) -> dict[st
         "engine": native_stream["engine"],
         "schema": native_stream["schema"],
         "sql": native_stream["sql"],
+        "max_batches": native_stream.get("max_batches"),
         "started_at": native_stream["started_at"],
         **({"stopped_at": native_stream["stopped_at"]} if native_stream.get("stopped_at") else {}),
     }

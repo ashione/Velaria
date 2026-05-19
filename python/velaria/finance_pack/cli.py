@@ -47,6 +47,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_pipeline(args)
         if args.command == "rank-candidates":
             return _rank_candidates(args)
+        if args.command == "stream-history":
+            return _stream_history(args)
         if args.command == "fetch-history":
             rows = fetch_history(
                 provider=args.provider,
@@ -239,6 +241,17 @@ def _build_parser() -> argparse.ArgumentParser:
     rank.add_argument("--jsonl", action="store_true", help="Emit one JSON object per ranking tick.")
     _add_report_format(rank)
 
+    stream_history = subparsers.add_parser(
+        "stream-history",
+        help="Query durable finance stream output history stored by native stream runs.",
+    )
+    stream_history.add_argument("--market", default="cn", choices=["cn", "us"], help="Market used for the default source id.")
+    stream_history.add_argument("--source-id", help="Defaults to finance_<market>_rank_candidates_native_stream_signals.")
+    stream_history.add_argument("--start-time", help="Inclusive RFC3339 event_time lower bound.")
+    stream_history.add_argument("--end-time", help="Exclusive RFC3339 event_time upper bound.")
+    stream_history.add_argument("--limit", type=int, default=50, help="Return the last N matching stream rows.")
+    _add_report_format(stream_history)
+
     history = subparsers.add_parser("fetch-history", help="Fetch public historical OHLCV data.")
     _add_provider_market(history, default_provider="yahoo", choices=provider_names_for_operation("fetch_history"))
     history.add_argument("--symbol", required=True, help="Provider-specific symbol, e.g. 000001 or 105.AAPL.")
@@ -320,6 +333,39 @@ def _run_sources(args: argparse.Namespace) -> int:
     if args.report_format == "json":
         return _emit_json(payload)
     print(_render_sources(payload))
+    return 0
+
+
+def _stream_history(args: argparse.Namespace) -> int:
+    source_id = args.source_id or f"finance_{args.market}_rank_candidates_native_stream_signals"
+    with AgenticStore() as store:
+        source = store.get_source(source_id)
+        if source is None:
+            raise FinanceProviderError(
+                f"Finance stream history source not found: {source_id}",
+                error_type="stream_history_not_found",
+                hint="Run finance rank-candidates with --native-stream first, or pass --source-id for an existing stream output source.",
+                details={"source_id": source_id},
+            )
+        rows = store.read_external_events(
+            source_id,
+            start_time=args.start_time,
+            end_time=args.end_time,
+            limit=max(0, int(args.limit)),
+        )
+    payload = {
+        "ok": True,
+        "action": "stream-history",
+        "source": source,
+        "row_count": len(rows),
+        "rows": rows,
+        "start_time": args.start_time,
+        "end_time": args.end_time,
+        "limit": max(0, int(args.limit)),
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_stream_history_report(payload))
     return 0
 
 
@@ -717,12 +763,34 @@ def _upsert_rank_raw_sources(
                 },
             }
         )
-    return {
+        native_stream_signal_source = None
+        if args.native_stream:
+            native_stream_signal_source = store.upsert_source(
+                {
+                    "source_id": f"{source_id}_native_stream_signals",
+                    "kind": "external_event",
+                    "name": f"finance {args.market} native stream signal rows",
+                    "schema_binding": _rank_native_stream_signal_schema_binding(),
+                    "metadata": {
+                        "domain": "finance",
+                        "workflow": "rank-candidates",
+                        "raw_feed": "native_stream_signals",
+                        "market": args.market,
+                        "symbols": symbols,
+                        "engine": "velaria_native_realtime_stream",
+                        "sql": _rank_native_stream_sql(),
+                    },
+                }
+            )
+    sources = {
         "quotes": quote_source,
         "history": history_source,
         "news": news_source,
         "candidates": candidate_source,
     }
+    if native_stream_signal_source is not None:
+        sources["native_stream_signals"] = native_stream_signal_source
+    return sources
 
 
 def _upsert_rank_stream_monitors(args: argparse.Namespace, *, source_id: str) -> list[dict[str, Any]]:
@@ -892,7 +960,13 @@ def _run_rank_tick(
             news_rows_by_symbol=news_rows_by_symbol,
         )
         observations = [store.append_external_event(source_id, candidate) for candidate in top]
-    native_stream_signals = _push_and_poll_rank_native_stream(args, native_stream=native_stream, candidates=top)
+    native_stream_signals = _push_and_poll_rank_native_stream(
+        args,
+        native_stream=native_stream,
+        candidates=top,
+        raw_sources=raw_sources,
+        iteration=iteration,
+    )
     stream_monitor_runs: list[dict[str, Any]] = []
     focus_events: list[dict[str, Any]] = []
     for monitor in stream_monitors:
@@ -995,6 +1069,27 @@ def _rank_native_stream_schema() -> list[str]:
     ]
 
 
+def _rank_native_stream_signal_schema_binding() -> dict[str, Any]:
+    return {
+        "time_field": "event_time",
+        "type_field": "event_type",
+        "key_field": "source_key",
+        "field_mappings": {
+            "signal_type": "signal_type",
+            "engine": "engine",
+            "market": "market",
+            "symbol": "symbol",
+            "rank": "rank",
+            "score": "score",
+            "period_return_pct": "period_return_pct",
+            "quote_pct_change": "quote_pct_change",
+            "quote_freshness": "quote_freshness",
+            "news_sentiment_label": "news_sentiment_label",
+            "iteration": "iteration",
+        },
+    }
+
+
 def _rank_native_stream_sql() -> str:
     return (
         "SELECT event_time, market, symbol, rank, score, period_return_pct, quote_pct_change, "
@@ -1082,6 +1177,8 @@ def _push_and_poll_rank_native_stream(
     *,
     native_stream: dict[str, Any],
     candidates: list[dict[str, Any]],
+    raw_sources: dict[str, dict[str, Any]],
+    iteration: int,
 ) -> list[dict[str, Any]]:
     if not native_stream:
         return []
@@ -1097,9 +1194,35 @@ def _push_and_poll_rank_native_stream(
             for row in batch.to_pylist():
                 signals.extend(_rank_native_signal_rows(row))
             if signals:
+                _append_rank_native_stream_signal_rows(raw_sources, signals, iteration=iteration)
                 return signals
         time.sleep(0.05)
     return signals
+
+
+def _append_rank_native_stream_signal_rows(
+    raw_sources: dict[str, dict[str, Any]],
+    signals: list[dict[str, Any]],
+    *,
+    iteration: int,
+) -> None:
+    signal_source = raw_sources.get("native_stream_signals")
+    if not signal_source or not signals:
+        return
+    source_id = str(signal_source["source_id"])
+    with AgenticStore() as store:
+        for signal in signals:
+            store.append_external_event(
+                source_id,
+                {
+                    **signal,
+                    "event_type": "native_stream_signal",
+                    "source_key": str(signal.get("symbol") or ""),
+                    "iteration": iteration,
+                    "stream_sql": _rank_native_stream_sql(),
+                    "not_investment_advice": True,
+                },
+            )
 
 
 def _rank_native_stream_row(args: argparse.Namespace, candidate: dict[str, Any]) -> dict[str, Any]:
@@ -1506,6 +1629,28 @@ def _render_sources(payload: dict[str, Any]) -> str:
         lines.append(f"- {step}")
     lines.append("")
     lines.append(payload["disclaimer"])
+    return "\n".join(lines)
+
+
+def _render_stream_history_report(payload: dict[str, Any]) -> str:
+    source = payload.get("source") or {}
+    lines = [
+        "# Finance Stream History",
+        "",
+        f"- source_id: {source.get('source_id')}",
+        f"- rows: {payload.get('row_count')}",
+    ]
+    for row in payload.get("rows") or []:
+        lines.append(
+            "- {event_time} {signal_type} {market}:{symbol} score={score} quote_pct_change={quote_pct_change}".format(
+                event_time=row.get("event_time"),
+                signal_type=row.get("signal_type") or row.get("event_type"),
+                market=row.get("market"),
+                symbol=row.get("symbol"),
+                score=row.get("score"),
+                quote_pct_change=row.get("quote_pct_change"),
+            )
+        )
     return "\n".join(lines)
 
 

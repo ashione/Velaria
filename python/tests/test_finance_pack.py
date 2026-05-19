@@ -340,7 +340,7 @@ class FinancePackTest(unittest.TestCase):
                 self.assertEqual(payload["native_stream"]["engine"], "velaria_native_realtime_stream")
                 self.assertIsNone(payload["native_stream"]["max_batches"])
                 self.assertIn("WHERE entry_signal >= 1 OR exit_signal >= 1", payload["native_stream"]["sql"])
-                self.assertEqual(set(payload["raw_sources"]), {"quotes", "history", "news", "candidates"})
+                self.assertEqual(set(payload["raw_sources"]), {"quotes", "history", "news", "candidates", "native_stream_signals"})
                 tick = payload["ticks"][0]
                 self.assertEqual(tick["native_stream_signals"][0]["signal_type"], "entry_research_signal")
                 self.assertEqual(tick["native_stream_signals"][0]["symbol"], "NVDA")
@@ -349,6 +349,27 @@ class FinancePackTest(unittest.TestCase):
                     for key, source in payload["raw_sources"].items():
                         rows = store.read_external_events(source["source_id"])
                         self.assertGreaterEqual(len(rows), 1, key)
+                    signal_rows = store.read_external_events(payload["raw_sources"]["native_stream_signals"]["source_id"])
+                    self.assertEqual(signal_rows[0]["event_type"], "native_stream_signal")
+                    self.assertEqual(signal_rows[0]["signal_type"], "entry_research_signal")
+
+                    stdout = StringIO()
+                    with redirect_stdout(stdout):
+                        exit_code = finance_cli_main(
+                            [
+                                "stream-history",
+                                "--market",
+                                "us",
+                                "--source-id",
+                                payload["raw_sources"]["native_stream_signals"]["source_id"],
+                                "--format",
+                                "json",
+                            ]
+                        )
+                    self.assertEqual(exit_code, 0)
+                    history_payload = json.loads(stdout.getvalue())
+                    self.assertEqual(history_payload["row_count"], 1)
+                    self.assertEqual(history_payload["rows"][0]["symbol"], "NVDA")
 
     def test_normalize_akshare_cn_history_keeps_provider_metadata(self):
         raw = pd.DataFrame(

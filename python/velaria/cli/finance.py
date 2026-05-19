@@ -25,6 +25,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               velaria finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1
               velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --top 3
               velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --native-stream --ingest-raw --iterations 0
+              velaria finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00
               velaria finance fetch-quotes --provider tencent --market cn --symbols 000001,600519
               velaria finance fetch-news --provider google-news --market us --symbol AAPL --limit 5
@@ -42,6 +43,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1 --format json
               finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --top 3 --format json
               finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --native-stream --ingest-raw --iterations 0 --format json
+              finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00 --format json
               finance fetch-news --provider google-news --market us --symbol AAPL --limit 5
               finance fetch-quotes --provider tencent --market cn --symbols 000001
@@ -164,6 +166,21 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     rank.add_argument("--jsonl", action="store_true", help="Emit one JSON object per ranking tick.")
     _add_report_format(rank)
 
+    stream_history = finance_subparsers.add_parser(
+        "stream-history",
+        help="Query durable finance stream output history.",
+        description=(
+            "Read native stream sink output that was persisted as Velaria external_event history. "
+            "Use this after rank-candidates --native-stream to inspect historical signal rows."
+        ),
+    )
+    stream_history.add_argument("--market", default="cn", choices=["cn", "us"], help="Market used for the default source id.")
+    stream_history.add_argument("--source-id", help="Defaults to finance_<market>_rank_candidates_native_stream_signals.")
+    stream_history.add_argument("--start-time", help="Inclusive RFC3339 event_time lower bound.")
+    stream_history.add_argument("--end-time", help="Exclusive RFC3339 event_time upper bound.")
+    stream_history.add_argument("--limit", type=int, default=50, help="Return the last N matching stream rows.")
+    _add_report_format(stream_history)
+
     history = finance_subparsers.add_parser(
         "fetch-history",
         help="Fetch public historical OHLCV data.",
@@ -277,6 +294,8 @@ def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
         "news_provider",
         "query",
         "limit",
+        "start_time",
+        "end_time",
         "history_output",
         "history_output_format",
         "preview_rows",

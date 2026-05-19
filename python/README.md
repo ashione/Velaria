@@ -229,7 +229,9 @@ uv run --project python --extra finance python python/velaria_cli.py finance ran
 Use native stream mode when the ranking loop should push normalized candidate
 events through Velaria's native realtime stream source/sink APIs. Add
 `--ingest-raw` when quote, history, news, and candidate rows should all be
-persisted as Velaria external_event sources for later inspection:
+persisted as Velaria external_event sources for later inspection. Native stream
+sink output is also persisted as a durable stream history source named
+`finance_<market>_rank_candidates_native_stream_signals`:
 
 ```bash
 uv run --project python --extra finance python python/velaria_cli.py finance rank-candidates \
@@ -247,6 +249,16 @@ uv run --project python --extra finance python python/velaria_cli.py finance ran
   --exit-quote-pct-threshold -3 \
   --iterations 0 \
   --interval-sec 300 \
+  --format json
+```
+
+Query stored stream output later with:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance stream-history \
+  --market us \
+  --source-id finance_us_rank_candidates_native_stream_signals \
+  --limit 50 \
   --format json
 ```
 

@@ -15,6 +15,7 @@ src/dataflow/runner/dashboard/*.js.map
 .DS_Store
 .claude/
 dist/
+.delivery/
 
 # Python local artifacts
 .venv/

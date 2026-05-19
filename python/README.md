@@ -304,6 +304,40 @@ uv run --project python --extra finance python python/velaria_cli.py finance wat
   --format json
 ```
 
+For long-running market watches, run the same session asynchronously. The
+background process still uses Velaria native realtime stream SQL for signal
+selection and writes all feeds to the same `AgenticStore`; the foreground CLI
+returns a `pid`, `log_path`, and model-readable follow-up commands:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session start \
+  --session-id us_watch_20260519 \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --market-symbols SPY,QQQ,DIA \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --top 3 \
+  --news-limit 5 \
+  --iterations 0 \
+  --interval-sec 300 \
+  --async-run \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session status \
+  --session-id us_watch_20260519 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session logs \
+  --session-id us_watch_20260519 \
+  --limit 20 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session stop \
+  --session-id us_watch_20260519 \
+  --format json
+```
+
 Use agentic stream monitor mode when the ranking loop should create Velaria
 `execution_mode=stream` monitors and emit FocusEvents from the persisted
 ranking event stream. `--until-time` runs inside the CLI until the RFC3339
@@ -381,7 +415,8 @@ subcommand, for example `finance doctor`, `finance sources`, `finance analyze
 --symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1
 --format json`, `finance watch-session start --market us --symbols
 AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0
---format json`, or `finance watch --market cn --symbol 000001 --interval-sec
+--async-run --format json`, `finance watch-session status --session-id
+us_watch_20260519 --format json`, or `finance watch --market cn --symbol 000001 --interval-sec
 30 --iterations 0 --jsonl`; do not include `uv`, `python`, or
 `python/velaria_cli.py` in the tool arguments.
 

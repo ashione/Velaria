@@ -24,6 +24,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               velaria finance analyze --market cn --symbol 000001
               velaria finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1
               velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --top 3
+              velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00
               velaria finance fetch-quotes --provider tencent --market cn --symbols 000001,600519
               velaria finance fetch-news --provider google-news --market us --symbol AAPL --limit 5
               velaria finance fetch-quotes --provider tencent --market us --symbols AAPL
@@ -39,6 +40,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               finance analyze --market cn --symbol 000001
               finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1 --format json
               finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --top 3 --format json
+              finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00 --format json
               finance fetch-news --provider google-news --market us --symbol AAPL --limit 5
               finance fetch-quotes --provider tencent --market cn --symbols 000001
 
@@ -143,6 +145,15 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     rank.add_argument("--top", type=int, default=3, help="Number of research candidates to emit.")
     rank.add_argument("--news-limit", type=int, default=5, help="Maximum news items per symbol per iteration.")
     rank.add_argument("--source-id", help="Defaults to finance_<market>_rank_candidates.")
+    rank.add_argument("--monitor-id-prefix", help="Defaults to monitor_<source_id> when --stream-monitor is set.")
+    rank.add_argument("--stream-monitor", action="store_true", help="Create and execute Velaria stream monitors for entry and exit research signals.")
+    rank.add_argument("--stream-window-size", default="60s", help="Processing-time stream window size for rank-candidate monitors.")
+    rank.add_argument("--entry-score-threshold", type=float, default=8.0, help="Entry research signal score threshold.")
+    rank.add_argument("--entry-return-threshold", type=float, default=5.0, help="Entry research signal period-return threshold.")
+    rank.add_argument("--exit-score-threshold", type=float, default=0.0, help="Exit risk signal score threshold.")
+    rank.add_argument("--exit-quote-pct-threshold", type=float, default=-3.0, help="Exit risk signal quote pct_change threshold.")
+    rank.add_argument("--cooldown-sec", type=int, default=300, help="FocusEvent suppression cooldown for stream monitor signals.")
+    rank.add_argument("--until-time", help="Run until this RFC3339 timestamp, e.g. 2026-05-18T16:00:00-04:00.")
     rank.add_argument("--interval-sec", type=float, default=30.0, help="Seconds between polling iterations.")
     rank.add_argument("--iterations", type=int, default=1, help="Number of ranking iterations. Use 0 to run until interrupted.")
     rank.add_argument("--jsonl", action="store_true", help="Emit one JSON object per ranking tick.")
@@ -267,6 +278,13 @@ def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
         "top",
         "news_limit",
         "source_id",
+        "monitor_id_prefix",
+        "stream_window_size",
+        "entry_score_threshold",
+        "entry_return_threshold",
+        "exit_score_threshold",
+        "exit_quote_pct_threshold",
+        "until_time",
         "monitor_id",
         "name",
         "interval_sec",
@@ -289,6 +307,8 @@ def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
         argv.append("--skip-network")
     if getattr(args, "jsonl", False):
         argv.append("--jsonl")
+    if getattr(args, "stream_monitor", False):
+        argv.append("--stream-monitor")
     if getattr(args, "no_analysis_prompt", False):
         argv.append("--no-analysis-prompt")
     return argv

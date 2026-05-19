@@ -8,6 +8,7 @@ import os
 import pathlib
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import pyarrow as pa
@@ -219,6 +220,15 @@ def _build_parser() -> argparse.ArgumentParser:
     rank.add_argument("--top", type=int, default=3, help="Number of research candidates to emit.")
     rank.add_argument("--news-limit", type=int, default=5, help="Maximum news items per symbol per iteration.")
     rank.add_argument("--source-id", help="Defaults to finance_<market>_rank_candidates.")
+    rank.add_argument("--monitor-id-prefix", help="Defaults to monitor_<source_id> when --stream-monitor is set.")
+    rank.add_argument("--stream-monitor", action="store_true", help="Create and execute Velaria stream monitors for entry and exit research signals.")
+    rank.add_argument("--stream-window-size", default="60s", help="Processing-time stream window size for rank-candidate monitors.")
+    rank.add_argument("--entry-score-threshold", type=float, default=8.0, help="Entry research signal score threshold.")
+    rank.add_argument("--entry-return-threshold", type=float, default=5.0, help="Entry research signal period-return threshold.")
+    rank.add_argument("--exit-score-threshold", type=float, default=0.0, help="Exit risk signal score threshold.")
+    rank.add_argument("--exit-quote-pct-threshold", type=float, default=-3.0, help="Exit risk signal quote pct_change threshold.")
+    rank.add_argument("--cooldown-sec", type=int, default=300, help="FocusEvent suppression cooldown for stream monitor signals.")
+    rank.add_argument("--until-time", help="Run until this RFC3339 timestamp, e.g. 2026-05-18T16:00:00-04:00.")
     rank.add_argument("--interval-sec", type=float, default=30.0, help="Seconds between polling iterations.")
     rank.add_argument("--iterations", type=int, default=1, help="Number of ranking iterations. Use 0 to run until interrupted.")
     rank.add_argument("--jsonl", action="store_true", help="Emit one JSON object per ranking tick.")
@@ -505,17 +515,18 @@ def _rank_candidates(args: argparse.Namespace) -> int:
     symbols = _split_symbols(args.symbols)
     source_id = args.source_id or f"finance_{args.market}_rank_candidates"
     source = _upsert_rank_source(args, source_id=source_id, symbols=symbols)
+    stream_monitors = _upsert_rank_stream_monitors(args, source_id=source_id) if args.stream_monitor else []
     ticks: list[dict[str, Any]] = []
     iteration = 0
     interrupted = False
     try:
-        while args.iterations == 0 or iteration < args.iterations:
+        while _should_continue_rank_loop(args, iteration):
             iteration += 1
-            tick = _run_rank_tick(args, symbols=symbols, source_id=source_id, iteration=iteration)
+            tick = _run_rank_tick(args, symbols=symbols, source_id=source_id, stream_monitors=stream_monitors, iteration=iteration)
             ticks.append(tick)
             if args.jsonl:
                 print(json.dumps(tick, ensure_ascii=False, sort_keys=True), flush=True)
-            if args.iterations != 0 and iteration >= args.iterations:
+            if not _should_continue_rank_loop(args, iteration):
                 break
             time.sleep(max(0.0, float(args.interval_sec)))
     except KeyboardInterrupt:
@@ -534,17 +545,30 @@ def _rank_candidates(args: argparse.Namespace) -> int:
         "symbols": symbols,
         "top": max(1, int(args.top)),
         "source": source,
+        "stream_monitors": stream_monitors,
         "ticks": ticks,
         "tick_count": len(ticks),
         "interrupted": interrupted,
         "research_candidates": latest.get("research_candidates") or [],
-        "service_integration": _rank_service_integration_payload(source_id=source_id),
+        "focus_events": latest.get("focus_events") or [],
+        "service_integration": _rank_service_integration_payload(source_id=source_id, stream_monitors=stream_monitors),
         "disclaimer": "Research candidates only; not investment advice.",
     }
     if args.report_format == "json":
         return _emit_json(payload)
     print(_render_rank_report(payload))
     return 0
+
+
+def _should_continue_rank_loop(args: argparse.Namespace, completed_iterations: int) -> bool:
+    if args.until_time:
+        deadline = datetime.fromisoformat(str(args.until_time).replace("Z", "+00:00")).astimezone(timezone.utc)
+        if completed_iterations > 0 and datetime.now(timezone.utc) >= deadline:
+            return False
+        return True
+    if args.iterations != 0 and completed_iterations >= int(args.iterations):
+        return False
+    return True
 
 
 def _upsert_rank_source(args: argparse.Namespace, *, source_id: str, symbols: list[str]) -> dict[str, Any]:
@@ -564,6 +588,10 @@ def _upsert_rank_source(args: argparse.Namespace, *, source_id: str, symbols: li
                         "rank": "rank",
                         "score": "score",
                         "recommendation_type": "recommendation_type",
+                        "period_return_pct": "period_return_pct",
+                        "quote_pct_change": "quote_pct_change",
+                        "news_sentiment_label": "news_sentiment_label",
+                        "quote_freshness": "quote_freshness",
                     },
                 },
                 "metadata": {
@@ -579,7 +607,128 @@ def _upsert_rank_source(args: argparse.Namespace, *, source_id: str, symbols: li
         )
 
 
-def _run_rank_tick(args: argparse.Namespace, *, symbols: list[str], source_id: str, iteration: int) -> dict[str, Any]:
+def _upsert_rank_stream_monitors(args: argparse.Namespace, *, source_id: str) -> list[dict[str, Any]]:
+    prefix = args.monitor_id_prefix or f"monitor_{source_id}"
+    specs = [
+        (
+            "entry_research_signal",
+            f"{prefix}_entry",
+            _rank_entry_rule_spec(args, source_id=source_id),
+        ),
+        (
+            "exit_risk_signal",
+            f"{prefix}_exit",
+            _rank_exit_rule_spec(args, source_id=source_id),
+        ),
+    ]
+    monitors: list[dict[str, Any]] = []
+    with AgenticStore() as store:
+        for signal_type, monitor_id, rule_spec in specs:
+            compiled = compile_rule_spec(rule_spec)
+            monitor = store.upsert_monitor(
+                {
+                    "monitor_id": monitor_id,
+                    "name": rule_spec["name"],
+                    "intent_text": f"stream finance rank candidate {signal_type} for {args.market}",
+                    "source": {"kind": "external_event", "source_id": source_id, "binding": source_id},
+                    "compiled_rules": compiled["compiled_rules"],
+                    "execution_mode": compiled["execution_mode"],
+                    "rule_spec": compiled["rule_spec"],
+                    "validation": {
+                        "status": "valid",
+                        "execution_spec": compiled["execution_spec"],
+                        "promotion_rule": compiled["promotion_rule"],
+                        "event_extraction": compiled["event_extraction"],
+                        "suppression_rule": compiled["suppression_rule"],
+                    },
+                    "enabled": True,
+                    "cooldown_sec": max(0, int(args.cooldown_sec)),
+                    "tags": ["finance", "rank-candidates", "stream", signal_type, str(args.market)],
+                }
+            )
+            monitors.append(
+                {
+                    "monitor_id": monitor["monitor_id"],
+                    "name": monitor["name"],
+                    "execution_mode": monitor["execution_mode"],
+                    "signal_type": signal_type,
+                    "enabled": monitor["enabled"],
+                    "cooldown_sec": monitor["cooldown_sec"],
+                }
+            )
+    return monitors
+
+
+def _rank_entry_rule_spec(args: argparse.Namespace, *, source_id: str) -> dict[str, Any]:
+    return {
+        "version": "v1",
+        "name": f"finance {args.market} rank entry research signal",
+        "source": {"kind": "external_event", "binding": source_id},
+        "execution": {
+            "mode": "stream",
+            "window": {"kind": "tumbling", "time_semantics": "processing_time", "size": str(args.stream_window_size)},
+        },
+        "signal": {
+            "sql": (
+                "SELECT symbol, market, rank, score, period_return_pct, quote_pct_change, news_sentiment_label, "
+                "recommendation_type, quote_freshness, ingested_at "
+                "FROM input_table "
+                f"WHERE recommendation_type = 'research_candidate' AND score >= {float(args.entry_score_threshold)} "
+                f"AND period_return_pct >= {float(args.entry_return_threshold)} "
+                "AND news_sentiment_label != 'negative'"
+            )
+        },
+        "promote": {"when": {"min_rows": 1}},
+        "event": {
+            "title": "{market}:{symbol} entry research signal",
+            "summary": "score={score}, period_return_pct={period_return_pct}, quote_pct_change={quote_pct_change}, news={news_sentiment_label}",
+            "severity": {"default": "info", "rules": []},
+            "key_fields": ["symbol", "score", "period_return_pct", "news_sentiment_label"],
+            "sample_rows": max(1, int(args.top)),
+        },
+        "suppress": {"cooldown": f"{max(0, int(args.cooldown_sec))}s", "dedupe_by": ["symbol"]},
+    }
+
+
+def _rank_exit_rule_spec(args: argparse.Namespace, *, source_id: str) -> dict[str, Any]:
+    return {
+        "version": "v1",
+        "name": f"finance {args.market} rank exit risk signal",
+        "source": {"kind": "external_event", "binding": source_id},
+        "execution": {
+            "mode": "stream",
+            "window": {"kind": "tumbling", "time_semantics": "processing_time", "size": str(args.stream_window_size)},
+        },
+        "signal": {
+            "sql": (
+                "SELECT symbol, market, rank, score, period_return_pct, quote_pct_change, news_sentiment_label, "
+                "recommendation_type, quote_freshness, ingested_at "
+                "FROM input_table "
+                f"WHERE recommendation_type = 'research_candidate' AND (score <= {float(args.exit_score_threshold)} "
+                f"OR quote_pct_change <= {float(args.exit_quote_pct_threshold)} "
+                "OR news_sentiment_label = 'negative')"
+            )
+        },
+        "promote": {"when": {"min_rows": 1}},
+        "event": {
+            "title": "{market}:{symbol} exit risk signal",
+            "summary": "score={score}, period_return_pct={period_return_pct}, quote_pct_change={quote_pct_change}, news={news_sentiment_label}",
+            "severity": {"default": "warning", "rules": []},
+            "key_fields": ["symbol", "score", "quote_pct_change", "news_sentiment_label"],
+            "sample_rows": max(1, int(args.top)),
+        },
+        "suppress": {"cooldown": f"{max(0, int(args.cooldown_sec))}s", "dedupe_by": ["symbol"]},
+    }
+
+
+def _run_rank_tick(
+    args: argparse.Namespace,
+    *,
+    symbols: list[str],
+    source_id: str,
+    stream_monitors: list[dict[str, Any]],
+    iteration: int,
+) -> dict[str, Any]:
     quote_rows = fetch_quotes(provider=args.quote_provider, market=args.market, symbols=symbols)
     quotes = {_quote_symbol_key(row.get("symbol")): row for row in quote_rows}
     candidates: list[dict[str, Any]] = []
@@ -611,6 +760,22 @@ def _run_rank_tick(args: argparse.Namespace, *, symbols: list[str], source_id: s
         candidate["source_key"] = candidate["symbol"]
     with AgenticStore() as store:
         observations = [store.append_external_event(source_id, candidate) for candidate in top]
+    stream_monitor_runs: list[dict[str, Any]] = []
+    focus_events: list[dict[str, Any]] = []
+    for monitor in stream_monitors:
+        with AgenticStore() as store:
+            result = execute_monitor_once(store, monitor["monitor_id"])
+        events = result.get("focus_events") or []
+        focus_events.extend(events)
+        stream_monitor_runs.append(
+            {
+                "monitor_id": monitor["monitor_id"],
+                "signal_type": monitor["signal_type"],
+                "run_id": result.get("run_id"),
+                "signal_count": len(result.get("signals") or []),
+                "focus_event_count": len(events),
+            }
+        )
     return {
         "ok": True,
         "action": "rank-candidates-tick",
@@ -621,6 +786,8 @@ def _run_rank_tick(args: argparse.Namespace, *, symbols: list[str], source_id: s
         "research_candidates": top,
         "candidate_count": len(top),
         "observations": observations,
+        "stream_monitor_runs": stream_monitor_runs,
+        "focus_events": focus_events,
         "disclaimer": "Research candidates only; not investment advice.",
     }
 
@@ -649,6 +816,10 @@ def _build_candidate(
         "symbol": quote.get("symbol") or symbol,
         "recommendation_type": "research_candidate",
         "score": score,
+        "period_return_pct": history_metrics.get("period_return_pct"),
+        "quote_pct_change": quote.get("pct_change"),
+        "news_sentiment_label": news_sentiment.get("label"),
+        "quote_freshness": quote.get("freshness"),
         "score_parts": score_parts,
         "quote": quote,
         "history": history_metrics,
@@ -1098,14 +1269,18 @@ def _service_integration_payload(*, source_id: str, monitor_id: str) -> dict[str
     }
 
 
-def _rank_service_integration_payload(*, source_id: str) -> dict[str, Any]:
+def _rank_service_integration_payload(*, source_id: str, stream_monitors: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    monitor_ids = [monitor["monitor_id"] for monitor in stream_monitors or []]
     return {
         "requires_service": False,
         "shared_state": "AgenticStore",
-        "note": "Start velaria_service with the same VELARIA_HOME to inspect ranking observations through generic service APIs.",
+        "note": "Start velaria_service with the same VELARIA_HOME to inspect ranking observations, stream monitors, and focus events through generic service APIs.",
         "generic_routes": [
             "GET /api/v1/external-events/sources",
+            *[f"GET /api/v1/monitors/{monitor_id}" for monitor_id in monitor_ids],
+            "POST /api/v1/focus-events/poll",
         ],
+        "stream_monitor_ids": monitor_ids,
     }
 
 

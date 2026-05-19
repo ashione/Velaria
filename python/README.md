@@ -226,6 +226,29 @@ uv run --project python --extra finance python python/velaria_cli.py finance ran
   --jsonl
 ```
 
+Use native stream monitor mode when the ranking loop should create Velaria
+`execution_mode=stream` monitors and emit FocusEvents from the ranking event
+stream. `--until-time` runs inside the CLI until the RFC3339 deadline; no
+external driver script is required:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance rank-candidates \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --top 3 \
+  --news-limit 5 \
+  --stream-monitor \
+  --entry-score-threshold 8 \
+  --entry-return-threshold 5 \
+  --exit-score-threshold 0 \
+  --exit-quote-pct-threshold -3 \
+  --until-time 2026-05-18T16:00:00-04:00 \
+  --interval-sec 300 \
+  --format json
+```
+
 Fetch public news rows directly when you need to inspect the news provider and
 sentiment evidence:
 
@@ -283,7 +306,9 @@ subcommand, for example `finance doctor`, `finance sources`, `finance analyze
 
 `finance pipeline` and `finance rank-candidates` do not require a
 finance-specific service route. They write to the same Velaria `AgenticStore`
-used by the local service. If
+used by the local service. When `finance rank-candidates --stream-monitor` is
+used, the command also creates entry/exit `execution_mode=stream` monitors and
+executes them for each candidate ranking tick. If
 `velaria_service` is started with the same `VELARIA_HOME`, the generic
 `external-events`, `monitors`, and `focus-events` service routes can inspect
 the source, monitor, ranking observations, and events created by the CLI.

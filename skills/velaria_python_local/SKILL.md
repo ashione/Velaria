@@ -175,6 +175,22 @@ uv run --project python --extra finance python python/velaria_cli.py finance ran
   --interval-sec 30 \
   --jsonl
 
+uv run --project python --extra finance python python/velaria_cli.py finance rank-candidates \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --top 3 \
+  --news-limit 5 \
+  --stream-monitor \
+  --entry-score-threshold 8 \
+  --entry-return-threshold 5 \
+  --exit-score-threshold 0 \
+  --exit-quote-pct-threshold -3 \
+  --until-time 2026-05-18T16:00:00-04:00 \
+  --interval-sec 300 \
+  --format json
+
 uv run --project python --extra finance python python/velaria_cli.py finance fetch-quotes \
   --provider tencent \
   --market cn \
@@ -228,13 +244,13 @@ finance watch --market cn --symbol 000001 --interval-sec 30 --iterations 0 --jso
 
 - `finance analyze` 默认输出人类可读中文报告；Agent 自动化应传 `--format json`
 - `finance pipeline` 默认输出人类可读中文报告；Agent 自动化应传 `--format json`
-- `finance rank-candidates` 输出 `research_candidates`，不是买卖建议；Agent 自动化应传 `--format json` 或持续模式 `--jsonl`
+- `finance rank-candidates` 输出 `research_candidates`，不是买卖建议；Agent 自动化应传 `--format json`、持续模式 `--jsonl`，或产品化 stream 模式 `--stream-monitor --until-time <RFC3339>`
 - `finance doctor` / `finance sources` 默认输出人类可读文本；Agent 自动化可传 `--format json`
 - `fetch-*`、`ingest-quotes`、`watch` 默认 stdout 是 JSON，失败也是 JSON
 - `fetch-news` 输出 `sentiment`，情绪方法为透明关键词词典，不是不可解释模型判断
 - `finance watch` 默认在有限 `--iterations` 后输出一个 JSON；`--iterations 0` 是持续监听，配合 `--jsonl` 可逐 tick 输出
 - `finance pipeline` 输出包含 `history`、`subscription`、`quote`、`focus_events`、`analysis`、`analysis_prompt` 和 `service_integration`
-- `finance rank-candidates` 输出包含 `score_parts`、`quote`、`history`、`news_sentiment`、`news`、`risk_flags`、`evidence`、`service_integration`
+- `finance rank-candidates` 输出包含 `score_parts`、`quote`、`history`、`news_sentiment`、`news`、`risk_flags`、`evidence`、`service_integration`；开启 `--stream-monitor` 时还包含 `stream_monitors`、`stream_monitor_runs`、`focus_events`
 - provider 失败应读取 `error_type`、`message`、`hint`、`details`
 - 行数据包含 `provider`、`source_url`、`fetched_at`、`freshness`、`delay_sec`、`license_note`
 - watch tick 包含 `quote`、`observations`、`signals`、`focus_events`、`artifacts`、`analysis` 和 `analysis_prompt`
@@ -258,6 +274,7 @@ Service 集成：
 
 - 不要假设存在 finance-specific service route
 - `finance pipeline` 使用 CLI 写入 Velaria `AgenticStore`
+- `finance rank-candidates --stream-monitor` 会创建 entry / exit `execution_mode=stream` monitors，并在每个 ranking tick 后由 Velaria monitor 链路产生 FocusEvent
 - 如果本地 `velaria_service` 使用相同 `VELARIA_HOME`，可通过通用 service routes 查看 CLI 创建的 source、monitor 和 focus-events
 
 ## 3.2 当前 SQL v1 边界

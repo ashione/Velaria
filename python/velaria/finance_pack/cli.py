@@ -49,6 +49,8 @@ def main(argv: list[str] | None = None) -> int:
             return _rank_candidates(args)
         if args.command == "stream-history":
             return _stream_history(args)
+        if args.command == "watch-session":
+            return _watch_session(args)
         if args.command == "fetch-history":
             rows = fetch_history(
                 provider=args.provider,
@@ -252,6 +254,47 @@ def _build_parser() -> argparse.ArgumentParser:
     stream_history.add_argument("--limit", type=int, default=50, help="Return the last N matching stream rows.")
     _add_report_format(stream_history)
 
+    watch_session = subparsers.add_parser(
+        "watch-session",
+        help="Run or inspect a durable finance watch session with market context, fundamentals, news, and stream signals.",
+    )
+    watch_session_subparsers = watch_session.add_subparsers(dest="watch_session_command", required=True)
+    watch_start = watch_session_subparsers.add_parser("start", help="Start a durable watch session.")
+    watch_start.add_argument("--session-id", help="Defaults to finance_<market>_watch_<UTC timestamp>.")
+    watch_start.add_argument("--market", required=True, choices=["cn", "us"])
+    watch_start.add_argument("--symbols", required=True, help="Comma-separated candidate symbols.")
+    watch_start.add_argument("--market-symbols", help="Comma-separated market context symbols. Defaults to broad market proxies.")
+    watch_start.add_argument("--history-provider", default="yahoo", choices=provider_names_for_operation("fetch_history"))
+    watch_start.add_argument("--quote-provider", default="tencent", choices=provider_names_for_operation("fetch_quotes"))
+    watch_start.add_argument("--news-provider", default="google-news", choices=provider_names_for_operation("fetch_news"))
+    watch_start.add_argument("--fundamentals-provider", default="public-unavailable", help="Fundamentals provider name; unavailable providers are recorded as evidence, not mocked.")
+    watch_start.add_argument("--start-date", required=True, help="YYYYMMDD.")
+    watch_start.add_argument("--end-date", required=True, help="YYYYMMDD.")
+    watch_start.add_argument("--period", default="daily", choices=["daily", "weekly", "monthly"])
+    watch_start.add_argument("--adjust", default="")
+    watch_start.add_argument("--top", type=int, default=3)
+    watch_start.add_argument("--news-limit", type=int, default=5)
+    watch_start.add_argument("--entry-score-threshold", type=float, default=8.0)
+    watch_start.add_argument("--entry-return-threshold", type=float, default=5.0)
+    watch_start.add_argument("--exit-score-threshold", type=float, default=0.0)
+    watch_start.add_argument("--exit-quote-pct-threshold", type=float, default=-3.0)
+    watch_start.add_argument("--native-stream-poll-timeout-sec", type=float, default=2.0)
+    watch_start.add_argument("--interval-sec", type=float, default=30.0)
+    watch_start.add_argument("--iterations", type=int, default=1, help="Use 0 to run until interrupted.")
+    watch_start.add_argument("--until-time", help="Run until this RFC3339 timestamp.")
+    watch_start.add_argument("--jsonl", action="store_true", help="Emit one JSON object per watch tick.")
+    _add_report_format(watch_start)
+
+    for command in ("list", "show", "events", "signals", "summarize"):
+        sub = watch_session_subparsers.add_parser(command, help=f"{command} durable watch-session data.")
+        if command != "list":
+            sub.add_argument("--session-id", required=True)
+        if command == "events":
+            sub.add_argument("--feed", choices=["all", "quotes", "history", "news", "candidates", "market_context", "fundamentals", "native_stream_signals"], default="all")
+        if command in {"events", "signals"}:
+            sub.add_argument("--limit", type=int, default=100)
+        _add_report_format(sub)
+
     history = subparsers.add_parser("fetch-history", help="Fetch public historical OHLCV data.")
     _add_provider_market(history, default_provider="yahoo", choices=provider_names_for_operation("fetch_history"))
     history.add_argument("--symbol", required=True, help="Provider-specific symbol, e.g. 000001 or 105.AAPL.")
@@ -367,6 +410,282 @@ def _stream_history(args: argparse.Namespace) -> int:
         return _emit_json(payload)
     print(_render_stream_history_report(payload))
     return 0
+
+
+def _watch_session(args: argparse.Namespace) -> int:
+    command = args.watch_session_command
+    if command == "start":
+        return _watch_session_start(args)
+    if command == "list":
+        return _watch_session_list(args)
+    if command == "show":
+        return _watch_session_show(args)
+    if command == "events":
+        return _watch_session_events(args)
+    if command == "signals":
+        return _watch_session_signals(args)
+    if command == "summarize":
+        return _watch_session_summarize(args)
+    raise AssertionError(f"unhandled watch-session command: {command}")
+
+
+def _watch_session_start(args: argparse.Namespace) -> int:
+    symbols = _split_symbols(args.symbols)
+    session_id = args.session_id or _make_watch_session_id(args.market)
+    args.watch_session_id = session_id
+    args.source_id = f"{session_id}_candidates"
+    args.native_stream = True
+    args.ingest_raw = True
+    args.stream_monitor = False
+    args.monitor_id_prefix = None
+    args.cooldown_sec = 0
+    raw_sources: dict[str, dict[str, Any]] = {}
+    native_stream: dict[str, Any] = {}
+    ticks: list[dict[str, Any]] = []
+    interrupted = False
+    source = _upsert_rank_source(args, source_id=args.source_id, symbols=symbols)
+    try:
+        raw_sources = _upsert_rank_raw_sources(args, source_id=args.source_id, symbols=symbols, candidate_source=source)
+        _append_watch_session_event(args, session_id=session_id, status="running", raw_sources=raw_sources, tick_count=0)
+        native_stream = _start_rank_native_stream(args)
+        iteration = 0
+        while _should_continue_rank_loop(args, iteration):
+            iteration += 1
+            tick = _run_rank_tick(
+                args,
+                symbols=symbols,
+                source_id=args.source_id,
+                raw_sources=raw_sources,
+                stream_monitors=[],
+                native_stream=native_stream,
+                iteration=iteration,
+            )
+            ticks.append(tick)
+            if args.jsonl:
+                print(json.dumps({"watch_session_id": session_id, **tick}, ensure_ascii=False, sort_keys=True), flush=True)
+            if not _should_continue_rank_loop(args, iteration):
+                break
+            time.sleep(max(0.0, float(args.interval_sec)))
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        _stop_rank_native_stream(native_stream)
+        if raw_sources:
+            _append_watch_session_event(
+                args,
+                session_id=session_id,
+                status="interrupted" if interrupted else "completed",
+                raw_sources=raw_sources,
+                tick_count=len(ticks),
+            )
+    if args.jsonl:
+        print(json.dumps({"ok": True, "action": "watch-session-start", "watch_session_id": session_id, "interrupted": interrupted, "ticks": len(ticks)}, ensure_ascii=False), flush=True)
+        return 0
+    latest = ticks[-1] if ticks else {"research_candidates": []}
+    payload = {
+        "ok": True,
+        "action": "watch-session-start",
+        "watch_session": _watch_session_payload(args, session_id=session_id, status="interrupted" if interrupted else "completed", raw_sources=raw_sources, tick_count=len(ticks)),
+        "raw_sources": raw_sources,
+        "native_stream": _rank_native_stream_public_payload(native_stream),
+        "ticks": ticks,
+        "tick_count": len(ticks),
+        "interrupted": interrupted,
+        "research_candidates": latest.get("research_candidates") or [],
+        "stream_signals": [signal for tick in ticks for signal in tick.get("native_stream_signals", [])],
+        "disclaimer": "Research candidates and realtime signals only; not investment advice.",
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_watch_session_start_report(payload))
+    return 0
+
+
+def _watch_session_list(args: argparse.Namespace) -> int:
+    sessions = _list_watch_sessions()
+    payload = {"ok": True, "action": "watch-session-list", "sessions": sessions, "session_count": len(sessions)}
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_watch_session_list_report(payload))
+    return 0
+
+
+def _watch_session_show(args: argparse.Namespace) -> int:
+    session = _get_watch_session_or_raise(args.session_id)
+    payload = {"ok": True, "action": "watch-session-show", "watch_session": session}
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_watch_session_list_report({"sessions": [session], "session_count": 1}))
+    return 0
+
+
+def _watch_session_events(args: argparse.Namespace) -> int:
+    session = _get_watch_session_or_raise(args.session_id)
+    rows = _read_watch_session_events(session, feed=args.feed, limit=max(0, int(args.limit)))
+    payload = {"ok": True, "action": "watch-session-events", "watch_session": session, "feed": args.feed, "row_count": len(rows), "rows": rows}
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_watch_session_rows_report(payload))
+    return 0
+
+
+def _watch_session_signals(args: argparse.Namespace) -> int:
+    session = _get_watch_session_or_raise(args.session_id)
+    rows = _read_watch_session_events(session, feed="native_stream_signals", limit=max(0, int(args.limit)))
+    payload = {"ok": True, "action": "watch-session-signals", "watch_session": session, "row_count": len(rows), "rows": rows}
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_watch_session_rows_report(payload))
+    return 0
+
+
+def _watch_session_summarize(args: argparse.Namespace) -> int:
+    session = _get_watch_session_or_raise(args.session_id)
+    summary = _summarize_watch_session(session)
+    payload = {"ok": True, "action": "watch-session-summarize", "watch_session": session, "summary": summary}
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_watch_session_summary_report(payload))
+    return 0
+
+
+def _make_watch_session_id(market: str) -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"finance_{market}_watch_{stamp}"
+
+
+def _watch_session_source_binding() -> dict[str, Any]:
+    return {
+        "time_field": "event_time",
+        "type_field": "event_type",
+        "key_field": "session_id",
+        "field_mappings": {
+            "session_id": "session_id",
+            "status": "status",
+            "market": "market",
+            "tick_count": "tick_count",
+        },
+    }
+
+
+def _watch_session_payload(
+    args: argparse.Namespace,
+    *,
+    session_id: str,
+    status: str,
+    raw_sources: dict[str, dict[str, Any]],
+    tick_count: int,
+) -> dict[str, Any]:
+    return {
+        "session_id": session_id,
+        "status": status,
+        "market": args.market,
+        "symbols": _split_symbols(args.symbols),
+        "market_symbols": _market_context_symbols(args),
+        "history_provider": args.history_provider,
+        "quote_provider": args.quote_provider,
+        "news_provider": args.news_provider,
+        "fundamentals_provider": args.fundamentals_provider,
+        "started_at": getattr(args, "watch_session_started_at", None) or _utc_payload_time(),
+        "updated_at": _utc_payload_time(),
+        "tick_count": tick_count,
+        "sources": {key: value.get("source_id") for key, value in raw_sources.items()},
+    }
+
+
+def _append_watch_session_event(
+    args: argparse.Namespace,
+    *,
+    session_id: str,
+    status: str,
+    raw_sources: dict[str, dict[str, Any]],
+    tick_count: int,
+) -> dict[str, Any]:
+    if not getattr(args, "watch_session_started_at", None):
+        args.watch_session_started_at = _utc_payload_time()
+    payload = _watch_session_payload(args, session_id=session_id, status=status, raw_sources=raw_sources, tick_count=tick_count)
+    payload["event_time"] = _utc_payload_time()
+    payload["event_type"] = f"watch_session_{status}"
+    payload["source_key"] = session_id
+    with AgenticStore() as store:
+        store.upsert_source(
+            {
+                "source_id": "finance_watch_sessions",
+                "kind": "external_event",
+                "name": "finance watch sessions",
+                "schema_binding": _watch_session_source_binding(),
+                "metadata": {"domain": "finance", "workflow": "watch-session"},
+            }
+        )
+        return store.append_external_event("finance_watch_sessions", payload)
+
+
+def _list_watch_sessions() -> list[dict[str, Any]]:
+    with AgenticStore() as store:
+        if store.get_source("finance_watch_sessions") is None:
+            return []
+        rows = store.read_external_events("finance_watch_sessions")
+    latest: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        payload = dict(row.get("payload_json") or {})
+        session_id = str(payload.get("session_id") or row.get("session_id") or "")
+        if not session_id:
+            continue
+        latest[session_id] = payload
+    return sorted(latest.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+
+
+def _get_watch_session_or_raise(session_id: str) -> dict[str, Any]:
+    for session in _list_watch_sessions():
+        if session.get("session_id") == session_id:
+            return session
+    raise FinanceProviderError(
+        f"Finance watch session not found: {session_id}",
+        error_type="watch_session_not_found",
+        hint="Run finance watch-session list --format json to inspect available sessions.",
+        details={"session_id": session_id},
+    )
+
+
+def _read_watch_session_events(session: dict[str, Any], *, feed: str, limit: int) -> list[dict[str, Any]]:
+    source_ids = dict(session.get("sources") or {})
+    keys = [feed] if feed != "all" else sorted(source_ids)
+    rows: list[dict[str, Any]] = []
+    with AgenticStore() as store:
+        for key in keys:
+            source_id = source_ids.get(key)
+            if not source_id:
+                continue
+            for row in store.read_external_events(str(source_id)):
+                payload = row.get("payload_json") if isinstance(row.get("payload_json"), dict) else {}
+                row_session = row.get("watch_session_id") or payload.get("watch_session_id")
+                if row_session == session.get("session_id"):
+                    rows.append({"feed": key, **row})
+    rows.sort(key=lambda item: str(item.get("ingested_at") or item.get("event_time") or ""))
+    return rows[-limit:] if limit else rows
+
+
+def _summarize_watch_session(session: dict[str, Any]) -> dict[str, Any]:
+    all_rows = _read_watch_session_events(session, feed="all", limit=0)
+    by_feed: dict[str, int] = {}
+    for row in all_rows:
+        by_feed[str(row.get("feed") or "unknown")] = by_feed.get(str(row.get("feed") or "unknown"), 0) + 1
+    signals = [row for row in all_rows if row.get("feed") == "native_stream_signals"]
+    candidates = [row for row in all_rows if row.get("feed") == "candidates"]
+    latest_signal = signals[-1] if signals else None
+    latest_candidates = candidates[-5:]
+    return {
+        "session_id": session.get("session_id"),
+        "status": session.get("status"),
+        "event_count": len(all_rows),
+        "counts_by_feed": by_feed,
+        "signal_count": len(signals),
+        "market_context_count": by_feed.get("market_context", 0),
+        "fundamental_count": by_feed.get("fundamentals", 0),
+        "latest_signal": latest_signal,
+        "latest_candidates": latest_candidates,
+        "review_note": "Research summary only; not investment advice.",
+    }
 
 
 def _run_doctor(args: argparse.Namespace) -> int:
@@ -637,6 +956,18 @@ def _should_continue_rank_loop(args: argparse.Namespace, completed_iterations: i
 
 
 def _upsert_rank_source(args: argparse.Namespace, *, source_id: str, symbols: list[str]) -> dict[str, Any]:
+    metadata = {
+        "domain": "finance",
+        "workflow": "rank-candidates",
+        "market": args.market,
+        "symbols": symbols,
+        "history_provider": args.history_provider,
+        "quote_provider": args.quote_provider,
+        "news_provider": args.news_provider,
+    }
+    if getattr(args, "watch_session_id", None):
+        metadata["workflow"] = "watch-session"
+        metadata["watch_session_id"] = args.watch_session_id
     with AgenticStore() as store:
         return store.upsert_source(
             {
@@ -659,15 +990,7 @@ def _upsert_rank_source(args: argparse.Namespace, *, source_id: str, symbols: li
                         "quote_freshness": "quote_freshness",
                     },
                 },
-                "metadata": {
-                    "domain": "finance",
-                    "workflow": "rank-candidates",
-                    "market": args.market,
-                    "symbols": symbols,
-                    "history_provider": args.history_provider,
-                    "quote_provider": args.quote_provider,
-                    "news_provider": args.news_provider,
-                },
+                "metadata": metadata,
             }
         )
 
@@ -682,6 +1005,8 @@ def _upsert_rank_raw_sources(
     quote_source_id = f"{source_id}_quotes"
     history_source_id = f"{source_id}_history"
     news_source_id = f"{source_id}_news"
+    watch_session_id = getattr(args, "watch_session_id", None)
+    workflow = "watch-session" if watch_session_id else "rank-candidates"
     with AgenticStore() as store:
         quote_source = store.upsert_source(
             {
@@ -691,11 +1016,12 @@ def _upsert_rank_raw_sources(
                 "schema_binding": finance_quote_schema_binding(),
                 "metadata": {
                     "domain": "finance",
-                    "workflow": "rank-candidates",
+                    "workflow": workflow,
                     "raw_feed": "quotes",
                     "market": args.market,
                     "symbols": symbols,
                     "provider": args.quote_provider,
+                    **({"watch_session_id": watch_session_id} if watch_session_id else {}),
                 },
             }
         )
@@ -723,7 +1049,7 @@ def _upsert_rank_raw_sources(
                 },
                 "metadata": {
                     "domain": "finance",
-                    "workflow": "rank-candidates",
+                    "workflow": workflow,
                     "raw_feed": "history",
                     "market": args.market,
                     "symbols": symbols,
@@ -731,6 +1057,7 @@ def _upsert_rank_raw_sources(
                     "start_date": args.start_date,
                     "end_date": args.end_date,
                     "period": args.period,
+                    **({"watch_session_id": watch_session_id} if watch_session_id else {}),
                 },
             }
         )
@@ -755,14 +1082,52 @@ def _upsert_rank_raw_sources(
                 },
                 "metadata": {
                     "domain": "finance",
-                    "workflow": "rank-candidates",
+                    "workflow": workflow,
                     "raw_feed": "news",
                     "market": args.market,
                     "symbols": symbols,
                     "provider": args.news_provider,
+                    **({"watch_session_id": watch_session_id} if watch_session_id else {}),
                 },
             }
         )
+        market_context_source = None
+        fundamental_source = None
+        if watch_session_id:
+            market_context_source = store.upsert_source(
+                {
+                    "source_id": f"{source_id}_market_context",
+                    "kind": "external_event",
+                    "name": f"finance {args.market} watch market context rows",
+                    "schema_binding": _market_context_schema_binding(),
+                    "metadata": {
+                        "domain": "finance",
+                        "workflow": workflow,
+                        "raw_feed": "market_context",
+                        "market": args.market,
+                        "symbols": _market_context_symbols(args),
+                        "provider": args.quote_provider,
+                        "watch_session_id": watch_session_id,
+                    },
+                }
+            )
+            fundamental_source = store.upsert_source(
+                {
+                    "source_id": f"{source_id}_fundamentals",
+                    "kind": "external_event",
+                    "name": f"finance {args.market} watch fundamental rows",
+                    "schema_binding": _fundamental_schema_binding(),
+                    "metadata": {
+                        "domain": "finance",
+                        "workflow": workflow,
+                        "raw_feed": "fundamentals",
+                        "market": args.market,
+                        "symbols": symbols,
+                        "provider": args.fundamentals_provider,
+                        "watch_session_id": watch_session_id,
+                    },
+                }
+            )
         native_stream_signal_source = None
         if args.native_stream:
             native_stream_signal_source = store.upsert_source(
@@ -773,12 +1138,13 @@ def _upsert_rank_raw_sources(
                     "schema_binding": _rank_native_stream_signal_schema_binding(),
                     "metadata": {
                         "domain": "finance",
-                        "workflow": "rank-candidates",
+                        "workflow": workflow,
                         "raw_feed": "native_stream_signals",
                         "market": args.market,
                         "symbols": symbols,
                         "engine": "velaria_native_realtime_stream",
                         "sql": _rank_native_stream_sql(),
+                        **({"watch_session_id": watch_session_id} if watch_session_id else {}),
                     },
                 }
             )
@@ -790,6 +1156,10 @@ def _upsert_rank_raw_sources(
     }
     if native_stream_signal_source is not None:
         sources["native_stream_signals"] = native_stream_signal_source
+    if market_context_source is not None:
+        sources["market_context"] = market_context_source
+    if fundamental_source is not None:
+        sources["fundamentals"] = fundamental_source
     return sources
 
 
@@ -918,6 +1288,8 @@ def _run_rank_tick(
     iteration: int,
 ) -> dict[str, Any]:
     quote_rows = fetch_quotes(provider=args.quote_provider, market=args.market, symbols=symbols)
+    market_context_rows = _fetch_market_context_rows(args) if "market_context" in raw_sources else []
+    fundamental_rows = _fetch_fundamental_rows(args, symbols=symbols) if "fundamentals" in raw_sources else []
     quotes = {_quote_symbol_key(row.get("symbol")): row for row in quote_rows}
     history_rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
     news_rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
@@ -950,6 +1322,8 @@ def _run_rank_tick(
         candidate["event_time"] = event_time
         candidate["event_type"] = "research_candidate"
         candidate["source_key"] = candidate["symbol"]
+        if getattr(args, "watch_session_id", None):
+            candidate["watch_session_id"] = args.watch_session_id
     with AgenticStore() as store:
         _append_rank_raw_rows(
             store,
@@ -958,6 +1332,20 @@ def _run_rank_tick(
             quote_rows=quote_rows,
             history_rows_by_symbol=history_rows_by_symbol,
             news_rows_by_symbol=news_rows_by_symbol,
+        )
+        _append_watch_session_rows(
+            store,
+            raw_sources=raw_sources,
+            feed="market_context",
+            rows=market_context_rows,
+            watch_session_id=getattr(args, "watch_session_id", None),
+        )
+        _append_watch_session_rows(
+            store,
+            raw_sources=raw_sources,
+            feed="fundamentals",
+            rows=fundamental_rows,
+            watch_session_id=getattr(args, "watch_session_id", None),
         )
         observations = [store.append_external_event(source_id, candidate) for candidate in top]
     native_stream_signals = _push_and_poll_rank_native_stream(
@@ -992,6 +1380,8 @@ def _run_rank_tick(
         "recommendation_type": "research_candidate",
         "research_candidates": top,
         "candidate_count": len(top),
+        "market_context": market_context_rows,
+        "fundamentals": fundamental_rows,
         "observations": observations,
         "raw_ingestion": _rank_raw_ingestion_payload(raw_sources),
         "native_stream_signals": native_stream_signals,
@@ -1012,14 +1402,36 @@ def _append_rank_raw_rows(
 ) -> None:
     if not raw_sources:
         return
+    watch_session_id = getattr(args, "watch_session_id", None)
     for row in quote_rows:
-        store.append_external_event(raw_sources["quotes"]["source_id"], row)
+        store.append_external_event(raw_sources["quotes"]["source_id"], _with_watch_session(row, watch_session_id))
     for symbol, rows in history_rows_by_symbol.items():
         for row in rows:
-            store.append_external_event(raw_sources["history"]["source_id"], _rank_history_event(row, market=args.market, symbol=symbol))
+            store.append_external_event(raw_sources["history"]["source_id"], _with_watch_session(_rank_history_event(row, market=args.market, symbol=symbol), watch_session_id))
     for symbol, rows in news_rows_by_symbol.items():
         for row in rows:
-            store.append_external_event(raw_sources["news"]["source_id"], _rank_news_event(row, market=args.market, symbol=symbol))
+            store.append_external_event(raw_sources["news"]["source_id"], _with_watch_session(_rank_news_event(row, market=args.market, symbol=symbol), watch_session_id))
+
+
+def _append_watch_session_rows(
+    store: AgenticStore,
+    *,
+    raw_sources: dict[str, dict[str, Any]],
+    feed: str,
+    rows: list[dict[str, Any]],
+    watch_session_id: str | None,
+) -> None:
+    source = raw_sources.get(feed)
+    if not source:
+        return
+    for row in rows:
+        store.append_external_event(source["source_id"], _with_watch_session(row, watch_session_id))
+
+
+def _with_watch_session(row: dict[str, Any], watch_session_id: str | None) -> dict[str, Any]:
+    if not watch_session_id:
+        return row
+    return {**row, "watch_session_id": watch_session_id}
 
 
 def _rank_history_event(row: dict[str, Any], *, market: str, symbol: str) -> dict[str, Any]:
@@ -1044,6 +1456,73 @@ def _rank_news_event(row: dict[str, Any], *, market: str, symbol: str) -> dict[s
         "market": row.get("market") or market,
         "symbol": row.get("symbol") or symbol,
     }
+
+
+def _market_context_symbols(args: argparse.Namespace) -> list[str]:
+    explicit = getattr(args, "market_symbols", None)
+    if explicit:
+        return _split_symbols(str(explicit))
+    if args.market == "us":
+        return ["SPY", "QQQ", "DIA"]
+    return ["sh000001", "sz399001"]
+
+
+def _fetch_market_context_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
+    symbols = _market_context_symbols(args)
+    if args.market == "cn":
+        return _fetch_cn_tencent_market_context(symbols=symbols)
+    rows = fetch_quotes(provider=args.quote_provider, market=args.market, symbols=symbols)
+    return [{**row, "event_type": "market_context", "source_key": row.get("symbol")} for row in rows]
+
+
+def _fetch_cn_tencent_market_context(*, symbols: list[str]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    fetched_at = _utc_payload_time()
+    for symbol in symbols:
+        code = symbol if symbol.startswith(("sh", "sz")) else ("sh" + symbol if symbol.startswith("0") else symbol)
+        try:
+            quote = fetch_quotes(provider="tencent", market="cn", symbols=[code])
+        except FinanceProviderError:
+            quote = []
+        if quote:
+            rows.extend({**row, "event_type": "market_context", "source_key": code, "symbol": code} for row in quote)
+            continue
+        rows.append(
+            {
+                "event_time": fetched_at,
+                "event_type": "market_context_unavailable",
+                "source_key": code,
+                "market": "cn",
+                "symbol": code,
+                "provider": "tencent",
+                "freshness": "unavailable",
+                "error_type": "provider_symbol_not_supported",
+                "message": "Tencent market context index quote could not be normalized by the quote provider.",
+                "not_mocked": True,
+            }
+        )
+    return rows
+
+
+def _fetch_fundamental_rows(args: argparse.Namespace, *, symbols: list[str]) -> list[dict[str, Any]]:
+    fetched_at = _utc_payload_time()
+    rows: list[dict[str, Any]] = []
+    for symbol in symbols:
+        rows.append(
+            {
+                "event_time": fetched_at,
+                "event_type": "fundamental_unavailable",
+                "source_key": symbol,
+                "market": args.market,
+                "symbol": symbol,
+                "provider": args.fundamentals_provider,
+                "freshness": "unavailable",
+                "error_type": "provider_unavailable",
+                "message": "No configured public fundamentals provider is available without credentials; this event records absence instead of mock data.",
+                "not_mocked": True,
+            }
+        )
+    return rows
 
 
 def _rank_raw_ingestion_payload(raw_sources: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -1075,6 +1554,7 @@ def _rank_native_stream_signal_schema_binding() -> dict[str, Any]:
         "type_field": "event_type",
         "key_field": "source_key",
         "field_mappings": {
+            "watch_session_id": "watch_session_id",
             "signal_type": "signal_type",
             "engine": "engine",
             "market": "market",
@@ -1090,11 +1570,55 @@ def _rank_native_stream_signal_schema_binding() -> dict[str, Any]:
     }
 
 
-def _rank_native_stream_sql() -> str:
+def _market_context_schema_binding() -> dict[str, Any]:
+    return {
+        "time_field": "event_time",
+        "type_field": "event_type",
+        "key_field": "source_key",
+        "field_mappings": {
+            "watch_session_id": "watch_session_id",
+            "market": "market",
+            "symbol": "symbol",
+            "price": "price",
+            "pct_change": "pct_change",
+            "provider": "provider",
+            "freshness": "freshness",
+        },
+    }
+
+
+def _fundamental_schema_binding() -> dict[str, Any]:
+    return {
+        "time_field": "event_time",
+        "type_field": "event_type",
+        "key_field": "source_key",
+        "field_mappings": {
+            "watch_session_id": "watch_session_id",
+            "market": "market",
+            "symbol": "symbol",
+            "provider": "provider",
+            "freshness": "freshness",
+            "error_type": "error_type",
+            "market_cap": "market_cap",
+        },
+    }
+
+
+def _sql_identifier_suffix(value: str) -> str:
+    suffix = "".join(ch if ch.isalnum() else "_" for ch in value.lower()).strip("_")
+    return suffix or "default"
+
+
+def _rank_native_stream_view_name(args: argparse.Namespace) -> str:
+    source_id = str(getattr(args, "source_id", "") or f"finance_{args.market}_rank_candidates")
+    return f"finance_rank_candidate_stream_{_sql_identifier_suffix(source_id)}"
+
+
+def _rank_native_stream_sql(view_name: str = "finance_rank_candidate_stream") -> str:
     return (
         "SELECT event_time, market, symbol, rank, score, period_return_pct, quote_pct_change, "
         "entry_signal, exit_signal, quote_freshness, news_sentiment_label "
-        "FROM finance_rank_candidate_stream "
+        f"FROM {view_name} "
         "WHERE entry_signal >= 1 OR exit_signal >= 1"
     )
 
@@ -1104,9 +1628,11 @@ def _start_rank_native_stream(args: argparse.Namespace) -> dict[str, Any]:
         session = velaria.Session()
         source = session.create_realtime_stream_source(_rank_native_stream_schema())
         stream_df = session.read_realtime_stream_source(source)
-        session.create_temp_view("finance_rank_candidate_stream", stream_df)
+        view_name = _rank_native_stream_view_name(args)
+        session.create_temp_view(view_name, stream_df)
         sink = session.create_realtime_stream_sink()
-        query_df = session.stream_sql(_rank_native_stream_sql())
+        sql = _rank_native_stream_sql(view_name)
+        query_df = session.stream_sql(sql)
         query = query_df.write_stream_queue_sink(sink, trigger_interval_ms=0)
         query.start()
         max_batches = None if args.until_time or int(args.iterations) == 0 else max(1, int(args.iterations))
@@ -1123,7 +1649,8 @@ def _start_rank_native_stream(args: argparse.Namespace) -> dict[str, Any]:
         "enabled": True,
         "engine": "velaria_native_realtime_stream",
         "schema": _rank_native_stream_schema(),
-        "sql": _rank_native_stream_sql(),
+        "sql": sql,
+        "view_name": view_name,
         "session": session,
         "source": source,
         "sink": sink,
@@ -1194,7 +1721,13 @@ def _push_and_poll_rank_native_stream(
             for row in batch.to_pylist():
                 signals.extend(_rank_native_signal_rows(row))
             if signals:
-                _append_rank_native_stream_signal_rows(raw_sources, signals, iteration=iteration)
+                _append_rank_native_stream_signal_rows(
+                    raw_sources,
+                    signals,
+                    iteration=iteration,
+                    watch_session_id=getattr(args, "watch_session_id", None),
+                    stream_sql=str(native_stream.get("sql") or _rank_native_stream_sql()),
+                )
                 return signals
         time.sleep(0.05)
     return signals
@@ -1205,6 +1738,8 @@ def _append_rank_native_stream_signal_rows(
     signals: list[dict[str, Any]],
     *,
     iteration: int,
+    watch_session_id: str | None = None,
+    stream_sql: str | None = None,
 ) -> None:
     signal_source = raw_sources.get("native_stream_signals")
     if not signal_source or not signals:
@@ -1219,8 +1754,9 @@ def _append_rank_native_stream_signal_rows(
                     "event_type": "native_stream_signal",
                     "source_key": str(signal.get("symbol") or ""),
                     "iteration": iteration,
-                    "stream_sql": _rank_native_stream_sql(),
+                    "stream_sql": stream_sql or _rank_native_stream_sql(),
                     "not_investment_advice": True,
+                    **({"watch_session_id": watch_session_id} if watch_session_id else {}),
                 },
             )
 
@@ -1651,6 +2187,52 @@ def _render_stream_history_report(payload: dict[str, Any]) -> str:
                 quote_pct_change=row.get("quote_pct_change"),
             )
         )
+    return "\n".join(lines)
+
+
+def _render_watch_session_start_report(payload: dict[str, Any]) -> str:
+    session = payload.get("watch_session") or {}
+    return "\n".join(
+        [
+            "# Finance Watch Session",
+            "",
+            f"- session_id: {session.get('session_id')}",
+            f"- status: {session.get('status')}",
+            f"- ticks: {payload.get('tick_count')}",
+            f"- signals: {len(payload.get('stream_signals') or [])}",
+            "- disclaimer: Research signals only; not investment advice.",
+        ]
+    )
+
+
+def _render_watch_session_list_report(payload: dict[str, Any]) -> str:
+    lines = ["# Finance Watch Sessions", "", f"- sessions: {payload.get('session_count', len(payload.get('sessions') or []))}"]
+    for session in payload.get("sessions") or []:
+        lines.append(f"- {session.get('session_id')} status={session.get('status')} market={session.get('market')} ticks={session.get('tick_count')}")
+    return "\n".join(lines)
+
+
+def _render_watch_session_rows_report(payload: dict[str, Any]) -> str:
+    session = payload.get("watch_session") or {}
+    lines = ["# Finance Watch Session Rows", "", f"- session_id: {session.get('session_id')}", f"- rows: {payload.get('row_count')}"]
+    for row in payload.get("rows") or []:
+        lines.append(f"- {row.get('feed')} {row.get('event_time')} {row.get('event_type')} {row.get('market')}:{row.get('symbol') or row.get('source_key')}")
+    return "\n".join(lines)
+
+
+def _render_watch_session_summary_report(payload: dict[str, Any]) -> str:
+    summary = payload.get("summary") or {}
+    lines = [
+        "# Finance Watch Session Summary",
+        "",
+        f"- session_id: {summary.get('session_id')}",
+        f"- status: {summary.get('status')}",
+        f"- event_count: {summary.get('event_count')}",
+        f"- signal_count: {summary.get('signal_count')}",
+        f"- market_context_count: {summary.get('market_context_count')}",
+        f"- fundamental_count: {summary.get('fundamental_count')}",
+        f"- note: {summary.get('review_note')}",
+    ]
     return "\n".join(lines)
 
 

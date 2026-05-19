@@ -371,6 +371,128 @@ class FinancePackTest(unittest.TestCase):
                     self.assertEqual(history_payload["row_count"], 1)
                     self.assertEqual(history_payload["rows"][0]["symbol"], "NVDA")
 
+    def test_watch_session_persists_market_fundamental_signals_and_summary(self):
+        quote_rows = [
+            {
+                "event_time": "2026-05-18T16:00:00Z",
+                "event_type": "quote",
+                "source_key": "NVDA",
+                "symbol": "NVDA",
+                "market": "us",
+                "price": 222.0,
+                "volume": 50000000,
+                "pct_change": 0.4,
+                "provider": "tencent",
+                "freshness": "delayed",
+                "delay_sec": None,
+                "fetched_at": "2026-05-18T16:00:00Z",
+                "source_url": "https://qt.gtimg.cn/q=",
+                "license_note": "public provider metadata",
+            }
+        ]
+        history_rows = [
+            {"symbol": "NVDA", "market": "us", "date": "2026-05-01", "close": 190.0, "provider": "yahoo", "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/", "freshness": "eod"},
+            {"symbol": "NVDA", "market": "us", "date": "2026-05-18", "close": 222.0, "provider": "yahoo", "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/", "freshness": "eod"},
+        ]
+        news_rows = [
+            {"symbol": "NVDA", "market": "us", "title": "Nvidia gains on strong demand", "summary": "upbeat growth", "provider": "google-news", "source_url": "https://news.google.com/rss/search", "publisher": "Wire", "published_at": "2026-05-18T15:00:00Z", "freshness": "near_realtime"}
+        ]
+        market_rows = [
+            {
+                "event_time": "2026-05-18T16:00:00Z",
+                "event_type": "market_context",
+                "source_key": "SPY",
+                "symbol": "SPY",
+                "market": "us",
+                "price": 600.0,
+                "pct_change": 0.2,
+                "provider": "tencent",
+                "freshness": "delayed",
+            }
+        ]
+        fundamental_rows = [
+            {
+                "event_time": "2026-05-18T16:00:00Z",
+                "event_type": "fundamental_snapshot",
+                "source_key": "NVDA",
+                "symbol": "NVDA",
+                "market": "us",
+                "provider": "test-fundamentals",
+                "freshness": "snapshot",
+                "market_cap": 1000.0,
+            }
+        ]
+
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-watch-session-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                with mock.patch("velaria.finance_pack.cli.fetch_quotes", return_value=quote_rows):
+                    with mock.patch("velaria.finance_pack.cli.fetch_history", return_value=history_rows):
+                        with mock.patch("velaria.finance_pack.cli.fetch_news", return_value=news_rows):
+                            with mock.patch("velaria.finance_pack.cli._fetch_market_context_rows", return_value=market_rows):
+                                with mock.patch("velaria.finance_pack.cli._fetch_fundamental_rows", return_value=fundamental_rows):
+                                    stdout = StringIO()
+                                    with redirect_stdout(stdout):
+                                        exit_code = finance_cli_main(
+                                            [
+                                                "watch-session",
+                                                "start",
+                                                "--session-id",
+                                                "session_test",
+                                                "--market",
+                                                "us",
+                                                "--symbols",
+                                                "NVDA",
+                                                "--start-date",
+                                                "20260501",
+                                                "--end-date",
+                                                "20260518",
+                                                "--top",
+                                                "1",
+                                                "--iterations",
+                                                "1",
+                                                "--interval-sec",
+                                                "0",
+                                                "--entry-score-threshold",
+                                                "8",
+                                                "--entry-return-threshold",
+                                                "5",
+                                                "--format",
+                                                "json",
+                                            ]
+                                        )
+
+                self.assertEqual(exit_code, 0)
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(payload["action"], "watch-session-start")
+                self.assertEqual(payload["watch_session"]["session_id"], "session_test")
+                self.assertEqual(payload["tick_count"], 1)
+                self.assertIn("market_context", payload["raw_sources"])
+                self.assertIn("fundamentals", payload["raw_sources"])
+                self.assertIn("native_stream_signals", payload["raw_sources"])
+
+                with AgenticStore() as store:
+                    market_events = store.read_external_events(payload["raw_sources"]["market_context"]["source_id"])
+                    fundamental_events = store.read_external_events(payload["raw_sources"]["fundamentals"]["source_id"])
+                    signal_events = store.read_external_events(payload["raw_sources"]["native_stream_signals"]["source_id"])
+                    self.assertEqual(market_events[0]["watch_session_id"], "session_test")
+                    self.assertEqual(fundamental_events[0]["watch_session_id"], "session_test")
+                    self.assertEqual(signal_events[0]["watch_session_id"], "session_test")
+
+                for command in ("list", "show", "events", "signals", "summarize"):
+                    stdout = StringIO()
+                    argv = ["watch-session", command, "--format", "json"]
+                    if command != "list":
+                        argv.extend(["--session-id", "session_test"])
+                    with redirect_stdout(stdout):
+                        exit_code = finance_cli_main(argv)
+                    self.assertEqual(exit_code, 0, command)
+                    command_payload = json.loads(stdout.getvalue())
+                    self.assertTrue(command_payload["ok"], command)
+                    if command == "summarize":
+                        self.assertGreaterEqual(command_payload["summary"]["signal_count"], 1)
+                        self.assertGreaterEqual(command_payload["summary"]["market_context_count"], 1)
+                        self.assertGreaterEqual(command_payload["summary"]["fundamental_count"], 1)
+
     def test_normalize_akshare_cn_history_keeps_provider_metadata(self):
         raw = pd.DataFrame(
             [

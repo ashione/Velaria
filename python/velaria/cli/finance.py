@@ -25,6 +25,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               velaria finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1
               velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --top 3
               velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --native-stream --ingest-raw --iterations 0
+              velaria finance watch-session start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0
+              velaria finance watch-session summarize --session-id finance_us_watch_20260519T133000Z --format json
               velaria finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00
               velaria finance fetch-quotes --provider tencent --market cn --symbols 000001,600519
@@ -43,6 +45,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1 --format json
               finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --top 3 --format json
               finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --native-stream --ingest-raw --iterations 0 --format json
+              finance watch-session start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --format json
+              finance watch-session summarize --session-id finance_us_watch_20260519T133000Z --format json
               finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00 --format json
               finance fetch-news --provider google-news --market us --symbol AAPL --limit 5
@@ -181,6 +185,47 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     stream_history.add_argument("--limit", type=int, default=50, help="Return the last N matching stream rows.")
     _add_report_format(stream_history)
 
+    watch_session = finance_subparsers.add_parser(
+        "watch-session",
+        help="Run or inspect durable finance watch sessions.",
+        description="Create and query watch sessions that persist market context, fundamentals, news, realtime stream signals, and review data.",
+    )
+    watch_session_subparsers = watch_session.add_subparsers(dest="watch_session_command", required=True)
+    watch_start = watch_session_subparsers.add_parser("start", help="Start a durable watch session.")
+    watch_start.add_argument("--session-id", help="Defaults to finance_<market>_watch_<UTC timestamp>.")
+    watch_start.add_argument("--market", required=True, choices=["cn", "us"])
+    watch_start.add_argument("--symbols", required=True, help="Comma-separated candidate symbols.")
+    watch_start.add_argument("--market-symbols", help="Comma-separated market context symbols.")
+    watch_start.add_argument("--history-provider", default="yahoo", choices=provider_names_for_operation("fetch_history"))
+    watch_start.add_argument("--quote-provider", default="tencent", choices=provider_names_for_operation("fetch_quotes"))
+    watch_start.add_argument("--news-provider", default="google-news", choices=provider_names_for_operation("fetch_news"))
+    watch_start.add_argument("--fundamentals-provider", default="public-unavailable")
+    watch_start.add_argument("--start-date", required=True, help="YYYYMMDD.")
+    watch_start.add_argument("--end-date", required=True, help="YYYYMMDD.")
+    watch_start.add_argument("--period", default="daily", choices=["daily", "weekly", "monthly"])
+    watch_start.add_argument("--adjust", default="")
+    watch_start.add_argument("--top", type=int, default=3)
+    watch_start.add_argument("--news-limit", type=int, default=5)
+    watch_start.add_argument("--entry-score-threshold", type=float, default=8.0)
+    watch_start.add_argument("--entry-return-threshold", type=float, default=5.0)
+    watch_start.add_argument("--exit-score-threshold", type=float, default=0.0)
+    watch_start.add_argument("--exit-quote-pct-threshold", type=float, default=-3.0)
+    watch_start.add_argument("--native-stream-poll-timeout-sec", type=float, default=2.0)
+    watch_start.add_argument("--interval-sec", type=float, default=30.0)
+    watch_start.add_argument("--iterations", type=int, default=1)
+    watch_start.add_argument("--until-time", help="Run until this RFC3339 timestamp.")
+    watch_start.add_argument("--jsonl", action="store_true")
+    _add_report_format(watch_start)
+    for command in ("list", "show", "events", "signals", "summarize"):
+        sub = watch_session_subparsers.add_parser(command, help=f"{command} durable watch-session data.")
+        if command != "list":
+            sub.add_argument("--session-id", required=True)
+        if command == "events":
+            sub.add_argument("--feed", choices=["all", "quotes", "history", "news", "candidates", "market_context", "fundamentals", "native_stream_signals"], default="all")
+        if command in {"events", "signals"}:
+            sub.add_argument("--limit", type=int, default=100)
+        _add_report_format(sub)
+
     history = finance_subparsers.add_parser(
         "fetch-history",
         help="Fetch public historical OHLCV data.",
@@ -278,11 +323,15 @@ def _add_report_format(parser: argparse.ArgumentParser) -> None:
 
 def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
     argv = [str(args.finance_command)]
+    if args.finance_command == "watch-session":
+        argv.append(str(args.watch_session_command))
     for name in (
         "provider",
+        "session_id",
         "market",
         "symbol",
         "symbols",
+        "market_symbols",
         "start_date",
         "end_date",
         "period",
@@ -292,6 +341,7 @@ def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
         "history_provider",
         "quote_provider",
         "news_provider",
+        "fundamentals_provider",
         "query",
         "limit",
         "start_time",

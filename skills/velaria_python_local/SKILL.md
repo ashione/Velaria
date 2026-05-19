@@ -111,6 +111,7 @@ uv run --project python python python/velaria_cli.py artifacts list --run-id <ru
 - `finance fetch-news`：获取公开新闻 RSS 行和透明情绪 evidence；默认使用 `provider=google-news`
 - `finance ingest-quotes`：获取 quote 并写入 `external_event` source，供 monitor 使用
 - `finance watch`：持续监听一个标的，逐 tick 写入 observation、运行 monitor，并输出事件上下文
+- `finance watch-session`：完整盯盘会话入口；把候选排名、native stream 信号、quote/history/news、大盘上下文、基本面 provider 快照落到同一个 `session_id`，并支持复盘查询和总结
 
 源码入口示例：
 
@@ -192,6 +193,27 @@ uv run --project python --extra finance python python/velaria_cli.py finance ran
   --interval-sec 300 \
   --format json
 
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session start \
+  --session-id us_watch_20260519 \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --market-symbols SPY,QQQ,DIA \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --top 3 \
+  --news-limit 5 \
+  --entry-score-threshold 8 \
+  --entry-return-threshold 5 \
+  --exit-score-threshold 0 \
+  --exit-quote-pct-threshold -3 \
+  --iterations 0 \
+  --interval-sec 300 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session summarize \
+  --session-id us_watch_20260519 \
+  --format json
+
 uv run --project python --extra finance python python/velaria_cli.py finance rank-candidates \
   --market us \
   --symbols AAPL,MSFT,NVDA \
@@ -252,6 +274,8 @@ finance sources
 finance analyze --market cn --symbol 000001 --format json
 finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1 --format json
 finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --top 3 --format json
+finance watch-session start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --format json
+finance watch-session summarize --session-id us_watch_20260519 --format json
 finance fetch-quotes --provider tencent --market cn --symbols 000001
 finance fetch-news --provider google-news --market us --symbol AAPL --limit 5
 finance ingest-quotes --provider tencent --market cn --symbols 000001 --source-id finance_cn_quotes
@@ -263,6 +287,8 @@ finance watch --market cn --symbol 000001 --interval-sec 30 --iterations 0 --jso
 - `finance analyze` 默认输出人类可读中文报告；Agent 自动化应传 `--format json`
 - `finance pipeline` 默认输出人类可读中文报告；Agent 自动化应传 `--format json`
 - `finance rank-candidates` 输出 `research_candidates`，不是买卖建议；Agent 自动化应传 `--format json`、持续模式 `--jsonl`，native stream 模式 `--native-stream --ingest-raw`，或 agentic stream monitor 模式 `--stream-monitor --until-time <RFC3339>`
+- `finance watch-session start` 输出完整盯盘会话 JSON，包含 `watch_session`、`raw_sources`、`native_stream`、`ticks`、`research_candidates`、`stream_signals`；它会默认启用 native stream 和 raw ingestion
+- `finance watch-session list/show/events/signals/summarize` 用于复盘同一 `session_id` 下沉淀的实时数据；Agent 自动化应传 `--format json`
 - `finance doctor` / `finance sources` 默认输出人类可读文本；Agent 自动化可传 `--format json`
 - `finance stream-history` 查询 native stream sink 的持久化历史；Agent 自动化应传 `--format json`，并可传 `--source-id finance_<market>_rank_candidates_native_stream_signals`
 - `fetch-*`、`ingest-quotes`、`watch` 默认 stdout 是 JSON，失败也是 JSON
@@ -283,6 +309,7 @@ Provider 使用建议：
 - 需要完整链路时运行 `finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131`
 - 美股完整链路可运行 `finance pipeline --market us --symbol AAPL --start-date 20260501 --end-date 20260518 --iterations 1 --format json`
 - 美股候选池排名可运行 `finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --top 3 --format json`
+- 需要产品化盯盘与复盘时优先运行 `finance watch-session start`，然后用 `finance watch-session summarize/events/signals` 查询同一会话
 - 历史行情优先尝试 `provider=yahoo`；AkShare / Eastmoney 可作为补充 provider
 - 轻量 quote 优先尝试 `provider=tencent`
 - 新闻和舆论证据优先尝试 `provider=google-news`；它是公开 RSS 搜索源，输出 `freshness=near_realtime`
@@ -294,6 +321,7 @@ Service 集成：
 - 不要假设存在 finance-specific service route
 - `finance pipeline` 使用 CLI 写入 Velaria `AgenticStore`
 - `finance rank-candidates --native-stream --ingest-raw` 会创建 Velaria native realtime stream source/sink，把 candidate event 推入 native stream SQL，同时把 quote/history/news/candidate 和 native stream sink signal 全部落入 Velaria external_event sources
+- `finance watch-session start` 复用同一条 ranking/native stream/raw ingestion 链路，并额外写入 `finance_watch_sessions`、大盘上下文 source 和基本面 source；provider 不可用时写入结构化 unavailable 事件，不 mock 数据
 - `finance rank-candidates --stream-monitor` 会创建 entry / exit `execution_mode=stream` monitors，并在每个 ranking tick 后由 Velaria monitor 链路产生 FocusEvent
 - 如果本地 `velaria_service` 使用相同 `VELARIA_HOME`，可通过通用 service routes 查看 CLI 创建的 source、monitor 和 focus-events
 

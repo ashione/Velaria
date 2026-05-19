@@ -262,6 +262,48 @@ uv run --project python --extra finance python python/velaria_cli.py finance str
   --format json
 ```
 
+Use `watch-session` when the goal is an end-to-end market watch that persists
+every feed for later replay and review. It combines candidate ranking, native
+stream signal generation, raw quote/history/news storage, market context
+snapshots, and fundamental provider snapshots under one durable `session_id`.
+If a public provider cannot supply a requested feed, the row is persisted as a
+structured unavailable event instead of being mocked:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session start \
+  --session-id us_watch_20260519 \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --market-symbols SPY,QQQ,DIA \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --top 3 \
+  --news-limit 5 \
+  --entry-score-threshold 8 \
+  --entry-return-threshold 5 \
+  --exit-score-threshold 0 \
+  --exit-quote-pct-threshold -3 \
+  --iterations 0 \
+  --interval-sec 300 \
+  --format json
+```
+
+Inspect the durable session and produce the closing review from the same data:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session list --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session events \
+  --session-id us_watch_20260519 \
+  --feed all \
+  --limit 200 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session summarize \
+  --session-id us_watch_20260519 \
+  --format json
+```
+
 Use agentic stream monitor mode when the ranking loop should create Velaria
 `execution_mode=stream` monitors and emit FocusEvents from the persisted
 ranking event stream. `--until-time` runs inside the CLI until the RFC3339
@@ -337,6 +379,8 @@ registered agent tool `velaria_cli_run`. In agent mode, pass only the Velaria
 subcommand, for example `finance doctor`, `finance sources`, `finance analyze
 --market cn --symbol 000001 --format json`, `finance pipeline --market cn
 --symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1
+--format json`, `finance watch-session start --market us --symbols
+AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0
 --format json`, or `finance watch --market cn --symbol 000001 --interval-sec
 30 --iterations 0 --jsonl`; do not include `uv`, `python`, or
 `python/velaria_cli.py` in the tool arguments.

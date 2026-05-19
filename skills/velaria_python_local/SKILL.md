@@ -237,6 +237,17 @@ uv run --project python --extra finance python python/velaria_cli.py finance wat
   --limit 20 \
   --format json
 
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session review \
+  --session-id us_watch_async_20260519 \
+  --log-limit 20 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session supervise \
+  --session-id us_watch_async_20260519 \
+  --interval-sec 60 \
+  --log-limit 20 \
+  --format json
+
 uv run --project python --extra finance python python/velaria_cli.py finance rank-candidates \
   --market us \
   --symbols AAPL,MSFT,NVDA \
@@ -301,6 +312,8 @@ finance watch-session start --market us --symbols AAPL,MSFT,NVDA --start-date 20
 finance watch-session start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --async-run --format json
 finance watch-session status --session-id us_watch_async_20260519 --format json
 finance watch-session logs --session-id us_watch_async_20260519 --limit 20 --format json
+finance watch-session review --session-id us_watch_async_20260519 --format json
+finance watch-session supervise --session-id us_watch_async_20260519 --interval-sec 60 --format json
 finance watch-session stop --session-id us_watch_async_20260519 --format json
 finance watch-session summarize --session-id us_watch_20260519 --format json
 finance fetch-quotes --provider tencent --market cn --symbols 000001
@@ -316,7 +329,9 @@ finance watch --market cn --symbol 000001 --interval-sec 30 --iterations 0 --jso
 - `finance rank-candidates` 输出 `research_candidates`，不是买卖建议；Agent 自动化应传 `--format json`、持续模式 `--jsonl`，native stream 模式 `--native-stream --ingest-raw`，或 agentic stream monitor 模式 `--stream-monitor --until-time <RFC3339>`
 - `finance watch-session start` 输出完整盯盘会话 JSON，包含 `watch_session`、`raw_sources`、`native_stream`、`ticks`、`research_candidates`、`stream_signals`；它会默认启用 native stream 和 raw ingestion
 - `finance watch-session start --async-run` 会在后台 CLI 进程中运行同一条 core native stream 链路，前台返回 `pid`、`log_path` 和后续命令；Agent 自动化应随后调用 `status/logs/signals/summarize/stop`
-- `finance watch-session list/show/events/signals/summarize/status/logs/stop` 用于观察、调试、停止和复盘同一 `session_id` 下沉淀的实时数据；Agent 自动化应传 `--format json`
+- `finance watch-session list/show/events/signals/summarize/status/logs/review/supervise/stop` 用于观察、调试、停止和复盘同一 `session_id` 下沉淀的实时数据；Agent 自动化应传 `--format json`
+- `finance watch-session review` 会读取 async runtime、进程状态、日志尾部、feed 计数、latest signals 和 provider-unavailable 证据，并把 review 事件写入 `finance_watch_session_reviews`
+- `finance watch-session supervise` 在 CLI 内持续运行同一 review 循环；`--iterations 0` 表示持续运行，`--interval-sec` 控制检查周期，适合通过 `velaria_cli_run` 保持观察和改进闭环
 - `finance doctor` / `finance sources` 默认输出人类可读文本；Agent 自动化可传 `--format json`
 - `finance stream-history` 查询 native stream sink 的持久化历史；Agent 自动化应传 `--format json`，并可传 `--source-id finance_<market>_rank_candidates_native_stream_signals`
 - `fetch-*`、`ingest-quotes`、`watch` 默认 stdout 是 JSON，失败也是 JSON
@@ -351,6 +366,7 @@ Service 集成：
 - `finance rank-candidates --native-stream --ingest-raw` 会创建 Velaria native realtime stream source/sink，把 candidate event 推入 native stream SQL，同时把 quote/history/news/candidate 和 native stream sink signal 全部落入 Velaria external_event sources
 - `finance watch-session start` 复用同一条 ranking/native stream/raw ingestion 链路，并额外写入 `finance_watch_sessions`、大盘上下文 source 和基本面 source；provider 不可用时写入结构化 unavailable 事件，不 mock 数据
 - `finance watch-session start --async-run` 额外写入 `finance_watch_session_runs`，记录 `pid`、`log_path`、`core_runtime=velaria_native_realtime_stream`、`ai_cli_runtime=velaria_cli_run`，使 Agent 可以边观察边调试
+- `finance watch-session review/supervise` 额外写入 `finance_watch_session_reviews`，把持续运行诊断、下一步命令和 agent_prompt 沉淀为可复盘事件
 - `finance rank-candidates --stream-monitor` 会创建 entry / exit `execution_mode=stream` monitors，并在每个 ranking tick 后由 Velaria monitor 链路产生 FocusEvent
 - 如果本地 `velaria_service` 使用相同 `VELARIA_HOME`，可通过通用 service routes 查看 CLI 创建的 source、monitor 和 focus-events
 

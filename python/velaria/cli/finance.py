@@ -29,6 +29,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               velaria finance watch-session start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --async-run --format json
               velaria finance watch-session status --session-id finance_us_watch_20260519T133000Z --format json
               velaria finance watch-session logs --session-id finance_us_watch_20260519T133000Z --limit 20 --format json
+              velaria finance watch-session review --session-id finance_us_watch_20260519T133000Z --log-limit 20 --format json
+              velaria finance watch-session supervise --session-id finance_us_watch_20260519T133000Z --interval-sec 60 --format json
               velaria finance watch-session summarize --session-id finance_us_watch_20260519T133000Z --format json
               velaria finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00
@@ -52,6 +54,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               finance watch-session start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --async-run --format json
               finance watch-session status --session-id finance_us_watch_20260519T133000Z --format json
               finance watch-session logs --session-id finance_us_watch_20260519T133000Z --limit 20 --format json
+              finance watch-session review --session-id finance_us_watch_20260519T133000Z --log-limit 20 --format json
+              finance watch-session supervise --session-id finance_us_watch_20260519T133000Z --interval-sec 60 --format json
               finance watch-session summarize --session-id finance_us_watch_20260519T133000Z --format json
               finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00 --format json
@@ -223,7 +227,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     watch_start.add_argument("--jsonl", action="store_true")
     watch_start.add_argument("--async-run", action="store_true")
     _add_report_format(watch_start)
-    for command in ("list", "show", "events", "signals", "summarize", "status", "logs", "stop"):
+    for command in ("list", "show", "events", "signals", "summarize", "status", "logs", "review", "supervise", "stop"):
         sub = watch_session_subparsers.add_parser(command, help=f"{command} durable watch-session data.")
         if command != "list":
             sub.add_argument("--session-id", required=True)
@@ -231,6 +235,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             sub.add_argument("--feed", choices=["all", "quotes", "history", "news", "candidates", "market_context", "fundamentals", "native_stream_signals"], default="all")
         if command in {"events", "signals", "logs"}:
             sub.add_argument("--limit", type=int, default=100)
+        if command in {"review", "supervise"}:
+            sub.add_argument("--log-limit", type=int, default=20, help="Number of runtime log lines to include in each review.")
+        if command == "supervise":
+            sub.add_argument("--iterations", type=int, default=0, help="Number of review cycles. Use 0 to run until interrupted.")
+            sub.add_argument("--interval-sec", type=float, default=60.0, help="Seconds between review cycles.")
+            sub.add_argument("--jsonl", action="store_true", help="Emit one JSON review per cycle.")
         _add_report_format(sub)
 
     history = finance_subparsers.add_parser(
@@ -351,6 +361,7 @@ def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
         "fundamentals_provider",
         "query",
         "limit",
+        "log_limit",
         "start_time",
         "end_time",
         "history_output",

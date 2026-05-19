@@ -23,10 +23,90 @@ from velaria.finance_pack import (
     provider_catalog,
     provider_names_for_operation,
 )
-from velaria.finance_pack.cli import main as finance_cli_main
+from velaria.finance_pack.cli import _rank_native_stream_view_name, main as finance_cli_main
 
 
 class FinancePackTest(unittest.TestCase):
+    def _seed_watch_session_rows(self, session_id: str = "session_review") -> None:
+        source_ids = {
+            "quotes": f"{session_id}_quotes",
+            "history": f"{session_id}_history",
+            "news": f"{session_id}_news",
+            "candidates": f"{session_id}_candidates",
+            "market_context": f"{session_id}_market_context",
+            "fundamentals": f"{session_id}_fundamentals",
+            "native_stream_signals": f"{session_id}_native_stream_signals",
+        }
+        binding = {
+            "time_field": "event_time",
+            "type_field": "event_type",
+            "key_field": "source_key",
+            "field_mappings": {"watch_session_id": "watch_session_id"},
+        }
+        with AgenticStore() as store:
+            store.upsert_source(
+                {
+                    "source_id": "finance_watch_sessions",
+                    "kind": "external_event",
+                    "name": "finance watch sessions",
+                    "schema_binding": {
+                        "time_field": "event_time",
+                        "type_field": "event_type",
+                        "key_field": "session_id",
+                        "field_mappings": {"session_id": "session_id", "status": "status"},
+                    },
+                    "metadata": {"domain": "finance", "workflow": "watch-session"},
+                }
+            )
+            store.append_external_event(
+                "finance_watch_sessions",
+                {
+                    "session_id": session_id,
+                    "status": "running",
+                    "market": "us",
+                    "symbols": ["AAPL", "MSFT", "NVDA"],
+                    "sources": source_ids,
+                    "tick_count": 1,
+                    "event_time": "2026-05-20T14:00:00Z",
+                    "updated_at": "2026-05-20T14:00:00Z",
+                    "event_type": "watch_session_running",
+                    "source_key": session_id,
+                },
+            )
+            for feed, source_id in source_ids.items():
+                store.upsert_source(
+                    {
+                        "source_id": source_id,
+                        "kind": "external_event",
+                        "name": source_id,
+                        "schema_binding": binding,
+                        "metadata": {"domain": "finance", "workflow": "watch-session", "raw_feed": feed},
+                    }
+                )
+            for feed, source_id in source_ids.items():
+                payload = {
+                    "watch_session_id": session_id,
+                    "event_time": "2026-05-20T14:00:01Z",
+                    "event_type": feed,
+                    "source_key": "AAPL",
+                    "market": "us",
+                    "symbol": "AAPL",
+                }
+                if feed == "candidates":
+                    payload.update({"event_type": "research_candidate", "rank": 1, "score": 9.5})
+                if feed == "native_stream_signals":
+                    payload.update({"event_type": "native_stream_signal", "signal_type": "entry_research_signal", "score": 9.5})
+                if feed == "fundamentals":
+                    payload.update(
+                        {
+                            "event_type": "fundamental_unavailable",
+                            "freshness": "unavailable",
+                            "error_type": "provider_unavailable",
+                            "message": "No configured public fundamentals provider is available without credentials.",
+                        }
+                    )
+                store.append_external_event(source_id, payload)
+
     def test_provider_registry_exposes_capabilities_and_catalog(self):
         self.assertEqual(provider_names_for_operation("fetch_history"), ["akshare", "yahoo"])
         self.assertEqual(provider_names_for_operation("fetch_news"), ["google-news"])
@@ -41,6 +121,16 @@ class FinancePackTest(unittest.TestCase):
         self.assertIn("fetch-quotes", providers["tencent"]["commands"])
         self.assertNotIn("fetch-history", providers["tencent"]["commands"])
         self.assertEqual(providers["tencent"]["freshness"]["us"], "delayed")
+
+    def test_native_stream_view_name_stays_within_sql_identifier_limit(self):
+        args = mock.Mock()
+        args.market = "us"
+        args.source_id = "us_continuous_e2e_20260520_candidates_with_a_very_long_suffix"
+
+        view_name = _rank_native_stream_view_name(args)
+
+        self.assertLessEqual(len(view_name), 63)
+        self.assertTrue(view_name.startswith("finance_rank_candidate_stream_"))
 
     def test_provider_registry_drives_normalization_and_operation_errors(self):
         self.assertEqual(normalize_provider(" Yahoo "), "yahoo")
@@ -570,6 +660,122 @@ class FinancePackTest(unittest.TestCase):
                 stop_payload = json.loads(stdout.getvalue())
                 self.assertEqual(stop_payload["action"], "watch-session-stop")
                 self.assertEqual(kill.call_args_list[-1].args[1].name, "SIGTERM")
+
+    def test_watch_session_review_persists_continuous_diagnostics(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-watch-session-review-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                fake_process = mock.Mock()
+                fake_process.pid = 4321
+                with mock.patch("velaria.finance_pack.cli.subprocess.Popen", return_value=fake_process):
+                    stdout = StringIO()
+                    with redirect_stdout(stdout):
+                        exit_code = finance_cli_main(
+                            [
+                                "watch-session",
+                                "start",
+                                "--session-id",
+                                "session_review",
+                                "--market",
+                                "us",
+                                "--symbols",
+                                "AAPL,MSFT,NVDA",
+                                "--start-date",
+                                "20260501",
+                                "--end-date",
+                                "20260518",
+                                "--iterations",
+                                "0",
+                                "--async-run",
+                                "--format",
+                                "json",
+                            ]
+                        )
+                self.assertEqual(exit_code, 0)
+                start_payload = json.loads(stdout.getvalue())
+                self._seed_watch_session_rows("session_review")
+                with open(start_payload["run"]["log_path"], "w", encoding="utf-8") as handle:
+                    handle.write('{"ok": true, "tick": 1}\n')
+
+                stdout = StringIO()
+                with mock.patch("velaria.finance_pack.cli.os.kill") as kill:
+                    with redirect_stdout(stdout):
+                        exit_code = finance_cli_main(["watch-session", "review", "--session-id", "session_review", "--log-limit", "1", "--format", "json"])
+                self.assertEqual(exit_code, 0)
+                kill.assert_called_once_with(4321, 0)
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(payload["action"], "watch-session-review")
+                review = payload["review"]
+                self.assertTrue(review["process_running"])
+                self.assertEqual(review["summary"]["signal_count"], 1)
+                self.assertNotIn("payload_json", review["summary"]["latest_signal"])
+                self.assertIn("velaria_cli_run", review["agent_prompt"])
+                self.assertTrue(any(item["type"] == "provider_unavailable_evidence" for item in review["diagnostics"]))
+                self.assertTrue(any("supervise" in item for item in review["next_actions"]))
+
+                with AgenticStore() as store:
+                    rows = store.read_external_events("finance_watch_session_reviews")
+                self.assertEqual(rows[-1]["session_id"], "session_review")
+                self.assertEqual(rows[-1]["diagnostic_count"], review["diagnostic_count"])
+
+    def test_watch_session_supervise_runs_review_loop_inside_cli(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-watch-session-supervise-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                fake_process = mock.Mock()
+                fake_process.pid = 4321
+                with mock.patch("velaria.finance_pack.cli.subprocess.Popen", return_value=fake_process):
+                    stdout = StringIO()
+                    with redirect_stdout(stdout):
+                        exit_code = finance_cli_main(
+                            [
+                                "watch-session",
+                                "start",
+                                "--session-id",
+                                "session_supervise",
+                                "--market",
+                                "us",
+                                "--symbols",
+                                "AAPL,MSFT,NVDA",
+                                "--start-date",
+                                "20260501",
+                                "--end-date",
+                                "20260518",
+                                "--iterations",
+                                "0",
+                                "--async-run",
+                                "--format",
+                                "json",
+                            ]
+                        )
+                self.assertEqual(exit_code, 0)
+                self._seed_watch_session_rows("session_supervise")
+
+                stdout = StringIO()
+                with mock.patch("velaria.finance_pack.cli.os.kill"):
+                    with redirect_stdout(stdout):
+                        exit_code = finance_cli_main(
+                            [
+                                "watch-session",
+                                "supervise",
+                                "--session-id",
+                                "session_supervise",
+                                "--iterations",
+                                "2",
+                                "--interval-sec",
+                                "0",
+                                "--format",
+                                "json",
+                            ]
+                        )
+                self.assertEqual(exit_code, 0)
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(payload["action"], "watch-session-supervise")
+                self.assertEqual(payload["review_count"], 2)
+                self.assertEqual(payload["latest_review"]["supervisor_iteration"], 2)
+
+                with AgenticStore() as store:
+                    rows = store.read_external_events("finance_watch_session_reviews")
+                self.assertEqual(len(rows), 2)
+                self.assertEqual(rows[-1]["session_id"], "session_supervise")
 
     def test_normalize_akshare_cn_history_keeps_provider_metadata(self):
         raw = pd.DataFrame(

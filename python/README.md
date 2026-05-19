@@ -333,10 +333,29 @@ uv run --project python --extra finance python python/velaria_cli.py finance wat
   --limit 20 \
   --format json
 
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session review \
+  --session-id us_watch_20260519 \
+  --log-limit 20 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session supervise \
+  --session-id us_watch_20260519 \
+  --interval-sec 60 \
+  --log-limit 20 \
+  --format json
+
 uv run --project python --extra finance python python/velaria_cli.py finance watch-session stop \
   --session-id us_watch_20260519 \
   --format json
 ```
+
+`review` reads the async runtime row, process state, log tail, persisted feed
+counts, latest signals, and provider-unavailable evidence, then appends a
+structured row to `finance_watch_session_reviews`. `supervise` runs that same
+review loop continuously inside the CLI (`--iterations 0`) or for a bounded
+number of cycles. The review output includes `next_actions` and an
+`agent_prompt` that is designed to be passed back through `velaria_cli_run` for
+continuous observation and adjustment.
 
 Use agentic stream monitor mode when the ranking loop should create Velaria
 `execution_mode=stream` monitors and emit FocusEvents from the persisted
@@ -416,7 +435,9 @@ subcommand, for example `finance doctor`, `finance sources`, `finance analyze
 --format json`, `finance watch-session start --market us --symbols
 AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0
 --async-run --format json`, `finance watch-session status --session-id
-us_watch_20260519 --format json`, or `finance watch --market cn --symbol 000001 --interval-sec
+us_watch_20260519 --format json`, `finance watch-session review --session-id
+us_watch_20260519 --format json`, `finance watch-session supervise --session-id
+us_watch_20260519 --interval-sec 60 --format json`, or `finance watch --market cn --symbol 000001 --interval-sec
 30 --iterations 0 --jsonl`; do not include `uv`, `python`, or
 `python/velaria_cli.py` in the tool arguments.
 

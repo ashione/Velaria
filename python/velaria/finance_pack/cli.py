@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import math
@@ -288,7 +289,7 @@ def _build_parser() -> argparse.ArgumentParser:
     watch_start.add_argument("--async-run", action="store_true", help="Start the watch session in a background CLI process and return immediately.")
     _add_report_format(watch_start)
 
-    for command in ("list", "show", "events", "signals", "summarize", "status", "logs", "stop"):
+    for command in ("list", "show", "events", "signals", "summarize", "status", "logs", "review", "supervise", "stop"):
         sub = watch_session_subparsers.add_parser(command, help=f"{command} durable watch-session data.")
         if command != "list":
             sub.add_argument("--session-id", required=True)
@@ -296,6 +297,12 @@ def _build_parser() -> argparse.ArgumentParser:
             sub.add_argument("--feed", choices=["all", "quotes", "history", "news", "candidates", "market_context", "fundamentals", "native_stream_signals"], default="all")
         if command in {"events", "signals", "logs"}:
             sub.add_argument("--limit", type=int, default=100)
+        if command in {"review", "supervise"}:
+            sub.add_argument("--log-limit", type=int, default=20, help="Number of runtime log lines to include in each review.")
+        if command == "supervise":
+            sub.add_argument("--iterations", type=int, default=0, help="Number of review cycles. Use 0 to run until interrupted.")
+            sub.add_argument("--interval-sec", type=float, default=60.0, help="Seconds between review cycles.")
+            sub.add_argument("--jsonl", action="store_true", help="Emit one JSON review per cycle.")
         _add_report_format(sub)
 
     history = subparsers.add_parser("fetch-history", help="Fetch public historical OHLCV data.")
@@ -433,6 +440,10 @@ def _watch_session(args: argparse.Namespace) -> int:
         return _watch_session_status(args)
     if command == "logs":
         return _watch_session_logs(args)
+    if command == "review":
+        return _watch_session_review(args)
+    if command == "supervise":
+        return _watch_session_supervise(args)
     if command == "stop":
         return _watch_session_stop(args)
     raise AssertionError(f"unhandled watch-session command: {command}")
@@ -655,6 +666,38 @@ def _append_watch_session_run_event(payload: dict[str, Any]) -> dict[str, Any]:
         return store.append_external_event("finance_watch_session_runs", payload)
 
 
+def _watch_session_review_source_binding() -> dict[str, Any]:
+    return {
+        "time_field": "event_time",
+        "type_field": "event_type",
+        "key_field": "session_id",
+        "field_mappings": {
+            "session_id": "session_id",
+            "effective_status": "effective_status",
+            "diagnostic_count": "diagnostic_count",
+            "process_running": "process_running",
+        },
+    }
+
+
+def _append_watch_session_review_event(payload: dict[str, Any]) -> dict[str, Any]:
+    with AgenticStore() as store:
+        store.upsert_source(
+            {
+                "source_id": "finance_watch_session_reviews",
+                "kind": "external_event",
+                "name": "finance watch session continuous review events",
+                "schema_binding": _watch_session_review_source_binding(),
+                "metadata": {
+                    "domain": "finance",
+                    "workflow": "watch-session",
+                    "runtime": "continuous-review",
+                },
+            }
+        )
+        return store.append_external_event("finance_watch_session_reviews", payload)
+
+
 def _watch_session_list(args: argparse.Namespace) -> int:
     sessions = _list_watch_sessions()
     payload = {"ok": True, "action": "watch-session-list", "sessions": sessions, "session_count": len(sessions)}
@@ -725,13 +768,7 @@ def _watch_session_status(args: argparse.Namespace) -> int:
 def _watch_session_logs(args: argparse.Namespace) -> int:
     run = _get_watch_session_run_or_raise(args.session_id)
     limit = max(0, int(args.limit))
-    log_path = pathlib.Path(str(run.get("log_path") or ""))
-    lines: list[str] = []
-    if log_path.exists():
-        with log_path.open("r", encoding="utf-8", errors="replace") as handle:
-            lines = [line.rstrip("\n") for line in handle if line.rstrip("\n")]
-    if limit:
-        lines = lines[-limit:]
+    log_path, lines = _read_watch_session_log_lines(run, limit=limit)
     payload = {
         "ok": True,
         "action": "watch-session-logs",
@@ -744,6 +781,56 @@ def _watch_session_logs(args: argparse.Namespace) -> int:
     if args.report_format == "json":
         return _emit_json(payload)
     print(_render_watch_session_logs_report(payload))
+    return 0
+
+
+def _watch_session_review(args: argparse.Namespace) -> int:
+    review = _build_watch_session_review(args.session_id, log_limit=max(0, int(args.log_limit)))
+    _append_watch_session_review_event(_review_event_payload(review))
+    payload = {"ok": True, "action": "watch-session-review", "review": review}
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_watch_session_review_report(payload))
+    return 0
+
+
+def _watch_session_supervise(args: argparse.Namespace) -> int:
+    iteration = 0
+    reviews: list[dict[str, Any]] = []
+    latest_review: dict[str, Any] | None = None
+    interrupted = False
+    keep_reviews = int(args.iterations) != 0 and not args.jsonl
+    try:
+        while int(args.iterations) == 0 or iteration < int(args.iterations):
+            iteration += 1
+            review = _build_watch_session_review(args.session_id, log_limit=max(0, int(args.log_limit)))
+            review["supervisor_iteration"] = iteration
+            _append_watch_session_review_event(_review_event_payload(review))
+            latest_review = review
+            if keep_reviews:
+                reviews.append(review)
+            if args.jsonl:
+                print(json.dumps({"ok": True, "action": "watch-session-supervise-review", "review": review}, ensure_ascii=False, sort_keys=True), flush=True)
+            if int(args.iterations) != 0 and iteration >= int(args.iterations):
+                break
+            time.sleep(max(0.0, float(args.interval_sec)))
+    except KeyboardInterrupt:
+        interrupted = True
+    payload = {
+        "ok": True,
+        "action": "watch-session-supervise",
+        "watch_session_id": args.session_id,
+        "review_count": iteration,
+        "interrupted": interrupted,
+        "latest_review": latest_review,
+        "reviews": [] if args.jsonl else reviews,
+    }
+    if args.jsonl:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
+        return 0
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_watch_session_supervise_report(payload))
     return 0
 
 
@@ -910,6 +997,13 @@ def _get_watch_session_run_or_raise(session_id: str) -> dict[str, Any]:
     )
 
 
+def _get_watch_session_run_or_none(session_id: str) -> dict[str, Any] | None:
+    try:
+        return _get_watch_session_run_or_raise(session_id)
+    except FinanceProviderError:
+        return None
+
+
 def _is_process_running(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -920,6 +1014,18 @@ def _is_process_running(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _read_watch_session_log_lines(run: dict[str, Any] | None, *, limit: int) -> tuple[pathlib.Path, list[str]]:
+    raw_path = str((run or {}).get("log_path") or "")
+    log_path = pathlib.Path(raw_path) if raw_path else pathlib.Path()
+    lines: list[str] = []
+    if raw_path and log_path.exists() and log_path.is_file():
+        with log_path.open("r", encoding="utf-8", errors="replace") as handle:
+            lines = [line.rstrip("\n") for line in handle if line.rstrip("\n")]
+    if limit:
+        lines = lines[-limit:]
+    return log_path, lines
 
 
 def _read_watch_session_events(session: dict[str, Any], *, feed: str, limit: int) -> list[dict[str, Any]]:
@@ -960,6 +1066,263 @@ def _summarize_watch_session(session: dict[str, Any]) -> dict[str, Any]:
         "latest_signal": latest_signal,
         "latest_candidates": latest_candidates,
         "review_note": "Research summary only; not investment advice.",
+    }
+
+
+def _build_watch_session_review(session_id: str, *, log_limit: int) -> dict[str, Any]:
+    session = _get_watch_session_or_none(session_id)
+    run = _get_watch_session_run_or_none(session_id)
+    if session is None and run is None:
+        raise FinanceProviderError(
+            f"Finance watch session and runtime not found: {session_id}",
+            error_type="watch_session_not_found",
+            hint="Run finance watch-session list --format json or start one with finance watch-session start --async-run.",
+            details={"session_id": session_id},
+        )
+    process_running = _is_process_running(int((run or {}).get("pid") or 0)) if run else False
+    effective_status = "running" if process_running else str((session or {}).get("status") or (run or {}).get("status") or "exited")
+    summary = _compact_watch_session_summary(_summarize_watch_session(session)) if session else _empty_watch_session_summary(session_id=session_id)
+    rows = _read_watch_session_events(session, feed="all", limit=0) if session else []
+    log_path, raw_log_tail = _read_watch_session_log_lines(run, limit=log_limit)
+    log_tail = [_truncate_review_log_line(line) for line in raw_log_tail]
+    diagnostics = _watch_session_review_diagnostics(
+        session_id=session_id,
+        session=session,
+        run=run,
+        summary=summary,
+        rows=rows,
+        process_running=process_running,
+        effective_status=effective_status,
+        log_tail=log_tail,
+    )
+    return {
+        "session_id": session_id,
+        "event_time": _utc_payload_time(),
+        "event_type": "watch_session_review",
+        "effective_status": effective_status,
+        "process_running": process_running,
+        "runtime": {
+            "run": run,
+            "pid": (run or {}).get("pid"),
+            "log_path": str((run or {}).get("log_path") or "") or None,
+            "core_runtime": (run or {}).get("core_runtime"),
+            "ai_cli_runtime": (run or {}).get("ai_cli_runtime"),
+        },
+        "watch_session": session,
+        "summary": summary,
+        "log_tail": log_tail,
+        "diagnostics": diagnostics,
+        "diagnostic_count": len(diagnostics),
+        "next_actions": _watch_session_review_next_actions(
+            session_id=session_id,
+            process_running=process_running,
+            effective_status=effective_status,
+            run=run,
+        ),
+        "agent_prompt": _watch_session_review_agent_prompt(session_id=session_id, diagnostics=diagnostics, summary=summary),
+        "disclaimer": "Research candidates and realtime signals only; not investment advice.",
+    }
+
+
+def _empty_watch_session_summary(*, session_id: str) -> dict[str, Any]:
+    return {
+        "session_id": session_id,
+        "status": None,
+        "event_count": 0,
+        "counts_by_feed": {},
+        "signal_count": 0,
+        "market_context_count": 0,
+        "fundamental_count": 0,
+        "latest_signal": None,
+        "latest_candidates": [],
+        "review_note": "Runtime exists but durable watch-session data has not been materialized yet.",
+    }
+
+
+def _compact_watch_session_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    compact = dict(summary)
+    compact["latest_signal"] = _compact_watch_session_row(summary.get("latest_signal"))
+    compact["latest_candidates"] = [_compact_watch_session_row(row) for row in (summary.get("latest_candidates") or [])]
+    return compact
+
+
+def _compact_watch_session_row(row: Any) -> dict[str, Any] | None:
+    if not isinstance(row, dict):
+        return None
+    payload = row.get("payload_json") if isinstance(row.get("payload_json"), dict) else {}
+    keys = [
+        "feed",
+        "event_time",
+        "event_type",
+        "source_key",
+        "market",
+        "symbol",
+        "rank",
+        "score",
+        "period_return_pct",
+        "quote_pct_change",
+        "quote_freshness",
+        "news_sentiment_label",
+        "signal_type",
+        "iteration",
+    ]
+    compact: dict[str, Any] = {}
+    for key in keys:
+        value = row.get(key, payload.get(key))
+        if value is not None:
+            compact[key] = value
+    if payload.get("summary"):
+        compact["summary"] = payload.get("summary")
+    return compact
+
+
+def _watch_session_review_diagnostics(
+    *,
+    session_id: str,
+    session: dict[str, Any] | None,
+    run: dict[str, Any] | None,
+    summary: dict[str, Any],
+    rows: list[dict[str, Any]],
+    process_running: bool,
+    effective_status: str,
+    log_tail: list[str],
+) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    if run is None:
+        diagnostics.append(
+            {
+                "type": "runtime_not_started",
+                "severity": "warning",
+                "message": "No async runtime row exists for this session.",
+                "hint": "Use finance watch-session start --async-run for continuous observation.",
+            }
+        )
+    elif not process_running and effective_status not in {"completed", "interrupted", "stop_requested", "not_running"}:
+        diagnostics.append(
+            {
+                "type": "process_not_running",
+                "severity": "error",
+                "message": "The recorded async watch process is not running.",
+                "hint": "Inspect logs, then restart the watch session if the market is still open.",
+            }
+        )
+    if session is None:
+        diagnostics.append(
+            {
+                "type": "session_not_materialized",
+                "severity": "warning",
+                "message": "Runtime has started but no finance_watch_sessions row exists yet.",
+                "hint": "Wait for the first tick or inspect finance watch-session logs.",
+            }
+        )
+    expected_feeds = ["quotes", "history", "news", "candidates", "market_context", "fundamentals", "native_stream_signals"]
+    counts = dict(summary.get("counts_by_feed") or {})
+    for feed in expected_feeds:
+        if session is not None and int(counts.get(feed) or 0) == 0:
+            diagnostics.append(
+                {
+                    "type": "missing_feed",
+                    "severity": "warning",
+                    "feed": feed,
+                    "message": f"No persisted rows found for feed: {feed}.",
+                    "hint": "Check provider reachability and whether the watch loop has completed at least one tick.",
+                }
+            )
+    if session is not None and int(summary.get("signal_count") or 0) == 0:
+        diagnostics.append(
+            {
+                "type": "no_recent_stream_signal",
+                "severity": "warning",
+                "message": "No native stream signal rows have been persisted for this session.",
+                "hint": "Verify native stream availability and signal thresholds.",
+            }
+        )
+    unavailable_rows = []
+    for row in rows:
+        payload = row.get("payload_json") if isinstance(row.get("payload_json"), dict) else {}
+        if payload.get("freshness") == "unavailable" or payload.get("error_type"):
+            unavailable_rows.append(
+                {
+                    "feed": row.get("feed"),
+                    "symbol": payload.get("symbol") or payload.get("source_key"),
+                    "error_type": payload.get("error_type"),
+                    "message": payload.get("message"),
+                }
+            )
+    if unavailable_rows:
+        diagnostics.append(
+            {
+                "type": "provider_unavailable_evidence",
+                "severity": "info",
+                "message": "One or more feeds recorded provider-unavailable evidence instead of mocked data.",
+                "hint": "Treat unavailable feeds as evidence quality constraints in the agent analysis.",
+                "rows": unavailable_rows[:10],
+            }
+        )
+    if log_tail and any("Traceback" in line or '"ok": false' in line.lower() for line in log_tail):
+        diagnostics.append(
+            {
+                "type": "runtime_log_error",
+                "severity": "error",
+                "message": "Recent runtime logs include a failure marker.",
+                "hint": "Read finance watch-session logs and rerun the failing provider command with --format json.",
+            }
+        )
+    return diagnostics
+
+
+def _truncate_review_log_line(line: str, *, max_chars: int = 2000) -> str:
+    if len(line) <= max_chars:
+        return line
+    return f"{line[:max_chars]}... [truncated {len(line) - max_chars} chars]"
+
+
+def _watch_session_review_next_actions(
+    *,
+    session_id: str,
+    process_running: bool,
+    effective_status: str,
+    run: dict[str, Any] | None,
+) -> list[str]:
+    actions = [
+        f"finance watch-session status --session-id {session_id} --format json",
+        f"finance watch-session logs --session-id {session_id} --limit 50 --format json",
+        f"finance watch-session signals --session-id {session_id} --limit 100 --format json",
+        f"finance watch-session summarize --session-id {session_id} --format json",
+        f"finance watch-session review --session-id {session_id} --format json",
+    ]
+    if process_running:
+        actions.append(f"finance watch-session supervise --session-id {session_id} --interval-sec 60 --format json")
+    elif run and run.get("argv") and effective_status not in {"completed", "interrupted", "stop_requested", "not_running"}:
+        actions.append("restart by re-running the original watch-session start command with --async-run after inspecting logs")
+    return actions
+
+
+def _watch_session_review_agent_prompt(*, session_id: str, diagnostics: list[dict[str, Any]], summary: dict[str, Any]) -> str:
+    diagnostic_types = ", ".join(str(item.get("type")) for item in diagnostics) or "none"
+    counts = summary.get("counts_by_feed") or {}
+    return (
+        "Use velaria_cli_run to inspect the durable finance watch session "
+        f"{session_id}. Review status, logs, signals, and summarize output; "
+        f"feed_counts={counts}; diagnostics={diagnostic_types}. "
+        "If data is stale or providers are unavailable, adjust the watch-session command or provider choice, "
+        "then continue supervising. Treat all outputs as research evidence, not investment advice."
+    )
+
+
+def _review_event_payload(review: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "session_id": review.get("session_id"),
+        "event_time": review.get("event_time"),
+        "event_type": review.get("event_type"),
+        "source_key": review.get("session_id"),
+        "effective_status": review.get("effective_status"),
+        "process_running": review.get("process_running"),
+        "diagnostic_count": review.get("diagnostic_count"),
+        "summary": review.get("summary"),
+        "diagnostics": review.get("diagnostics"),
+        "next_actions": review.get("next_actions"),
+        "agent_prompt": review.get("agent_prompt"),
     }
 
 
@@ -1881,7 +2244,11 @@ def _fundamental_schema_binding() -> dict[str, Any]:
 
 def _sql_identifier_suffix(value: str) -> str:
     suffix = "".join(ch if ch.isalnum() else "_" for ch in value.lower()).strip("_")
-    return suffix or "default"
+    suffix = suffix or "default"
+    if len(suffix) <= 32:
+        return suffix
+    digest = hashlib.sha1(suffix.encode("utf-8")).hexdigest()[:8]
+    return f"{suffix[:23].rstrip('_')}_{digest}"
 
 
 def _rank_native_stream_view_name(args: argparse.Namespace) -> str:
@@ -2544,6 +2911,41 @@ def _render_watch_session_logs_report(payload: dict[str, Any]) -> str:
     lines = ["# Finance Watch Session Logs", "", f"- session_id: {payload.get('watch_session_id')}", f"- lines: {payload.get('line_count')}"]
     lines.extend(str(line) for line in payload.get("lines") or [])
     return "\n".join(lines)
+
+
+def _render_watch_session_review_report(payload: dict[str, Any]) -> str:
+    review = payload.get("review") or {}
+    summary = review.get("summary") or {}
+    lines = [
+        "# Finance Watch Session Review",
+        "",
+        f"- session_id: {review.get('session_id')}",
+        f"- status: {review.get('effective_status')}",
+        f"- process_running: {review.get('process_running')}",
+        f"- events: {summary.get('event_count')}",
+        f"- signals: {summary.get('signal_count')}",
+        f"- diagnostics: {review.get('diagnostic_count')}",
+    ]
+    for diagnostic in review.get("diagnostics") or []:
+        lines.append(f"- {diagnostic.get('severity')} {diagnostic.get('type')}: {diagnostic.get('message')}")
+    lines.append("- disclaimer: Research signals only; not investment advice.")
+    return "\n".join(lines)
+
+
+def _render_watch_session_supervise_report(payload: dict[str, Any]) -> str:
+    latest = payload.get("latest_review") or {}
+    return "\n".join(
+        [
+            "# Finance Watch Session Supervisor",
+            "",
+            f"- session_id: {payload.get('watch_session_id')}",
+            f"- reviews: {payload.get('review_count')}",
+            f"- interrupted: {payload.get('interrupted')}",
+            f"- latest_status: {latest.get('effective_status')}",
+            f"- latest_diagnostics: {latest.get('diagnostic_count')}",
+            "- disclaimer: Research signals only; not investment advice.",
+        ]
+    )
 
 
 def _render_doctor(payload: dict[str, Any]) -> str:

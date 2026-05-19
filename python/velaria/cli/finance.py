@@ -35,10 +35,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               velaria finance intelligence start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --format json
               velaria finance intelligence review --session-id finance_us_watch_20260519T133000Z --format json
               velaria finance intelligence replay --session-id finance_us_watch_20260519T133000Z --format json
+              velaria finance intelligence report --session-id finance_us_watch_20260519T133000Z --format json
               velaria finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00
               velaria finance fetch-quotes --provider tencent --market cn --symbols 000001,600519
               velaria finance fetch-news --provider google-news --market us --symbol AAPL --limit 5
+              velaria finance fetch-fundamentals --provider sec-companyfacts --market us --symbols AAPL,MSFT,NVDA
               velaria finance fetch-quotes --provider tencent --market us --symbols AAPL
               velaria finance ingest-quotes --provider tencent --market cn --symbols 000001 --source-id finance_cn_quotes
               velaria finance watch --provider tencent --market cn --symbol 000001 --interval-sec 30 --iterations 0
@@ -63,14 +65,18 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               finance intelligence start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --format json
               finance intelligence review --session-id finance_us_watch_20260519T133000Z --format json
               finance intelligence replay --session-id finance_us_watch_20260519T133000Z --format json
+              finance intelligence report --session-id finance_us_watch_20260519T133000Z --format json
               finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00 --format json
               finance fetch-news --provider google-news --market us --symbol AAPL --limit 5
+              finance fetch-fundamentals --provider sec-companyfacts --market us --symbols AAPL,MSFT,NVDA
               finance fetch-quotes --provider tencent --market cn --symbols 000001
 
             Data-source notes:
               - provider=yahoo supports historical OHLCV through public chart JSON.
+              - provider=yahoo supports delayed quote rows through public chart metadata.
               - provider=google-news supports public RSS news rows for sentiment evidence.
+              - provider=sec-companyfacts supports U.S. fundamentals evidence through SEC Company Facts.
               - provider=akshare supports historical OHLCV and quote rows when upstream endpoints are reachable.
               - provider=tencent supports lightweight public quote rows.
               - Results include provider, source_url, fetched_at, freshness, delay_sec, and license_note.
@@ -151,10 +157,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
     rank = finance_subparsers.add_parser(
         "rank-candidates",
-        help="Rank top research candidates from quotes, history, news, and sentiment.",
+        help="Rank top research candidates from quotes, history, derived metrics, news, and sentiment.",
         description=(
             "Continuously poll quote rows, historical OHLCV, public news RSS, and transparent "
-            "sentiment evidence to emit top research candidates. This does not emit trading advice."
+            "sentiment evidence, derive replayable feature metrics, and emit top research "
+            "candidates. This does not emit trading advice."
         ),
     )
     rank.add_argument("--market", required=True, choices=["cn", "us"], help="Market: cn for A-share, us for U.S. stocks.")
@@ -221,6 +228,10 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     intelligence_replay.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
     intelligence_replay.add_argument("--session-id", required=True, help="Durable watch-session id to replay.")
     _add_report_format(intelligence_replay)
+    intelligence_report = intelligence_subparsers.add_parser("report", help="Generate and persist the final finance intelligence scorecard.")
+    intelligence_report.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
+    intelligence_report.add_argument("--session-id", required=True, help="Durable watch-session id to report.")
+    _add_report_format(intelligence_report)
     intelligence_supervise = intelligence_subparsers.add_parser("supervise", help="Continuously review and persist intelligence notes.")
     intelligence_supervise.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
     intelligence_supervise.add_argument("--session-id", required=True, help="Durable watch-session id to supervise.")
@@ -243,7 +254,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         if command != "list":
             sub.add_argument("--session-id", required=True)
         if command == "events":
-            sub.add_argument("--feed", choices=["all", "quotes", "history", "news", "candidates", "market_context", "fundamentals", "native_stream_signals"], default="all")
+            sub.add_argument("--feed", choices=["all", "quotes", "history", "news", "features", "candidates", "market_context", "fundamentals", "native_stream_signals"], default="all")
         if command in {"events", "signals", "logs"}:
             sub.add_argument("--limit", type=int, default=100)
         if command in {"review", "supervise"}:
@@ -272,7 +283,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Fetch public quote rows.",
         description="Fetch current public quote rows with provider evidence metadata.",
     )
-    _add_provider_market(quotes, default_provider="tencent")
+    _add_provider_market(quotes, default_provider="tencent", choices=provider_names_for_operation("fetch_quotes"))
     quotes.add_argument("--symbols", required=True, help="Comma-separated provider-specific symbols.")
     _add_output(quotes)
 
@@ -287,6 +298,15 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     news.add_argument("--query", help="Override provider search query. Defaults to a market-aware symbol query.")
     news.add_argument("--limit", type=int, default=5, help="Maximum news rows to fetch.")
     _add_output(news)
+
+    fundamentals = finance_subparsers.add_parser(
+        "fetch-fundamentals",
+        help="Fetch public fundamentals evidence rows.",
+        description="Fetch public fundamentals evidence rows and preserve provider diagnostics instead of mocking unavailable data.",
+    )
+    _add_provider_market(fundamentals, default_provider="sec-companyfacts", choices=provider_names_for_operation("fetch_fundamentals"))
+    fundamentals.add_argument("--symbols", required=True, help="Comma-separated symbols, e.g. AAPL,MSFT,NVDA.")
+    _add_output(fundamentals)
 
     ingest = finance_subparsers.add_parser(
         "ingest-quotes",
@@ -334,7 +354,7 @@ def _add_provider_market(parser: argparse.ArgumentParser, *, default_provider: s
         "--provider",
         default=default_provider,
         choices=choices or ["akshare", "tencent"],
-        help="Public data provider. Use akshare for history; tencent is a lightweight quote provider.",
+        help="Public data provider. Run finance sources for provider capabilities and freshness metadata.",
     )
     parser.add_argument("--market", required=True, choices=["cn", "us"], help="Market: cn for A-share, us for U.S. stocks.")
 
@@ -349,7 +369,7 @@ def _add_watch_session_start_args(parser: argparse.ArgumentParser, *, include_in
     parser.add_argument("--history-provider", default="yahoo", choices=provider_names_for_operation("fetch_history"))
     parser.add_argument("--quote-provider", default="tencent", choices=provider_names_for_operation("fetch_quotes"))
     parser.add_argument("--news-provider", default="google-news", choices=provider_names_for_operation("fetch_news"))
-    parser.add_argument("--fundamentals-provider", default="public-unavailable")
+    parser.add_argument("--fundamentals-provider", default="public-unavailable", choices=["public-unavailable", *provider_names_for_operation("fetch_fundamentals")])
     parser.add_argument("--start-date", required=True, help="YYYYMMDD.")
     parser.add_argument("--end-date", required=True, help="YYYYMMDD.")
     parser.add_argument("--period", default="daily", choices=["daily", "weekly", "monthly"])
@@ -404,6 +424,7 @@ def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
         "news_provider",
         "fundamentals_provider",
         "query",
+        "feed",
         "limit",
         "log_limit",
         "start_time",

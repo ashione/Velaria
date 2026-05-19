@@ -21,6 +21,8 @@ AKSHARE_STOCK_DOC_URL = "https://akshare.akfamily.xyz/data/stock/stock.html"
 TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q="
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/"
 GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search"
+SEC_COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
+SEC_COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/"
 DEFAULT_LICENSE_NOTE = (
     "Public market-data provider metadata; validate upstream terms, freshness, "
     "and exchange delay before using for decisions."
@@ -165,6 +167,25 @@ def fetch_news(
             details={"provider": provider, "operation": "fetch_news", "candidates": candidates},
         )
     return adapter.fetch_news(market=market, symbol=symbol, query=query, limit=limit)
+
+
+def fetch_fundamentals(
+    *,
+    provider: str,
+    market: str,
+    symbols: list[str] | str,
+) -> list[dict[str, Any]]:
+    provider = normalize_provider(provider)
+    adapter = _provider_registry().get(provider)
+    if adapter is None or adapter.fetch_fundamentals is None:
+        candidates = provider_names_for_operation("fetch_fundamentals")
+        raise FinanceProviderError(
+            f"provider does not support fundamentals: {provider}",
+            error_type="unsupported_provider_operation",
+            hint=f"Use one of these fundamentals providers: {', '.join(candidates)}.",
+            details={"provider": provider, "operation": "fetch_fundamentals", "candidates": candidates},
+        )
+    return adapter.fetch_fundamentals(market=market, symbols=normalize_symbols(symbols))
 
 
 def normalize_symbols(symbols: str | Iterable[str]) -> list[str]:
@@ -556,6 +577,138 @@ def parse_yahoo_chart_payload(
     return rows
 
 
+def parse_yahoo_quote_payload(
+    payload: dict[str, Any],
+    *,
+    market: str,
+    symbol: str,
+    yahoo_symbol: str,
+    source_url: str,
+    fetched_at: str | None = None,
+) -> list[dict[str, Any]]:
+    market = normalize_market(market)
+    fetched_at = fetched_at or _utc_now()
+    chart = payload.get("chart") or {}
+    if chart.get("error"):
+        raise FinanceProviderError(
+            f"Yahoo quote returned error: {chart['error']}",
+            error_type="provider_fetch_failed",
+            details={"provider": "yahoo", "market": market, "symbol": symbol, "provider_symbol": yahoo_symbol},
+        )
+    results = chart.get("result") or []
+    if not results:
+        raise FinanceProviderError(
+            "Yahoo quote returned no results",
+            error_type="symbol_not_found",
+            hint="Use U.S. tickers such as AAPL or A-share Yahoo symbols such as 000001.SZ.",
+            details={"provider": "yahoo", "market": market, "symbol": symbol, "provider_symbol": yahoo_symbol},
+        )
+    result = results[0]
+    meta = result.get("meta") or {}
+    quote_items = ((result.get("indicators") or {}).get("quote") or [])
+    quote = quote_items[0] if quote_items else {}
+    price = _number(meta.get("regularMarketPrice"))
+    previous_close = _number(meta.get("previousClose") or meta.get("chartPreviousClose"))
+    pct_change = None
+    if price is not None and previous_close not in (None, 0):
+        pct_change = round(((price - previous_close) / previous_close) * 100.0, 6)
+    market_time = meta.get("regularMarketTime") or ((result.get("timestamp") or [None])[-1])
+    event_time = datetime.fromtimestamp(int(market_time), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if market_time else fetched_at
+    return [
+        {
+            "event_time": event_time,
+            "event_type": "quote",
+            "source_key": symbol,
+            "market": market,
+            "symbol": symbol,
+            "provider_symbol": yahoo_symbol,
+            "name": meta.get("longName") or meta.get("shortName") or symbol,
+            "price": price,
+            "open": _number(meta.get("regularMarketOpen")),
+            "high": _number(meta.get("regularMarketDayHigh")),
+            "low": _number(meta.get("regularMarketDayLow")),
+            "previous_close": previous_close,
+            "volume": _list_integer(quote.get("volume"), -1) or _integer(meta.get("regularMarketVolume")),
+            "amount": None,
+            "pct_change": pct_change,
+            "currency": meta.get("currency"),
+            "provider": "yahoo",
+            "source_url": source_url,
+            "fetched_at": fetched_at,
+            "freshness": "delayed",
+            "delay_sec": None,
+            "license_note": DEFAULT_LICENSE_NOTE,
+        }
+    ]
+
+
+def parse_sec_companyfacts_payload(
+    payload: dict[str, Any],
+    *,
+    market: str,
+    symbol: str,
+    cik: str,
+    source_url: str,
+    fetched_at: str | None = None,
+) -> list[dict[str, Any]]:
+    market = normalize_market(market)
+    fetched_at = fetched_at or _utc_now()
+    facts = ((payload.get("facts") or {}).get("us-gaap") or {})
+    revenue = _latest_sec_fact(facts, ("Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax"))
+    net_income = _latest_sec_fact(facts, ("NetIncomeLoss", "ProfitLoss"))
+    assets = _latest_sec_fact(facts, ("Assets",))
+    latest = revenue or net_income or assets
+    if latest is None:
+        return [
+            {
+                "event_time": fetched_at,
+                "event_type": "fundamental_unavailable",
+                "source_key": symbol,
+                "market": market,
+                "symbol": symbol,
+                "cik": cik,
+                "provider": "sec-companyfacts",
+                "source_url": source_url,
+                "freshness": "unavailable",
+                "error_type": "fundamental_fact_not_found",
+                "message": "SEC companyfacts payload did not contain supported GAAP metrics.",
+                "not_mocked": True,
+            }
+        ]
+    return [
+        {
+            "event_time": str(latest.get("filed") or fetched_at),
+            "event_type": "fundamental_snapshot",
+            "source_key": symbol,
+            "market": market,
+            "symbol": symbol,
+            "cik": cik,
+            "provider": "sec-companyfacts",
+            "source_url": source_url,
+            "fetched_at": fetched_at,
+            "freshness": "filing",
+            "fiscal_period_end": latest.get("end"),
+            "form": latest.get("form"),
+            "filed": latest.get("filed"),
+            "revenue": revenue.get("val") if revenue else None,
+            "net_income": net_income.get("val") if net_income else None,
+            "assets": assets.get("val") if assets else None,
+            "license_note": "Public SEC companyfacts API metadata; verify filing taxonomy and period before using for decisions.",
+        }
+    ]
+
+
+def _latest_sec_fact(facts: dict[str, Any], names: tuple[str, ...]) -> dict[str, Any] | None:
+    rows: list[dict[str, Any]] = []
+    for name in names:
+        units = ((facts.get(name) or {}).get("units") or {})
+        for values in units.values():
+            if isinstance(values, list):
+                rows.extend(value for value in values if isinstance(value, dict) and value.get("val") is not None)
+    rows.sort(key=lambda row: str(row.get("filed") or row.get("end") or ""))
+    return rows[-1] if rows else None
+
+
 def parse_google_news_rss(
     payload: str,
     *,
@@ -718,6 +871,26 @@ def _fetch_tencent_quotes(*, market: str, symbols: list[str]) -> list[dict[str, 
     return parse_tencent_quote_payload(payload, market=market, symbols=symbols)
 
 
+def _fetch_yahoo_quotes(*, market: str, symbols: list[str]) -> list[dict[str, Any]]:
+    market = normalize_market(market)
+    rows: list[dict[str, Any]] = []
+    for symbol in symbols:
+        provider_symbol = _yahoo_symbol(market, symbol)
+        url = f"{YAHOO_CHART_URL}{provider_symbol}?range=1d&interval=1m"
+        req = urllib_request.Request(url, headers={"User-Agent": "Velaria/finance-pack"})
+        try:
+            with urllib_request.urlopen(req, timeout=15) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:  # pragma: no cover - exercised by network smoke
+            raise FinanceProviderError(
+                f"failed to fetch {market} quote from yahoo: {exc}",
+                error_type="provider_fetch_failed",
+                details={"provider": "yahoo", "market": market, "symbol": symbol, "provider_symbol": provider_symbol, "source_url": url},
+            ) from exc
+        rows.extend(parse_yahoo_quote_payload(payload, market=market, symbol=symbol, yahoo_symbol=provider_symbol, source_url=url))
+    return rows
+
+
 def _fetch_yahoo_history(
     *,
     market: str,
@@ -754,6 +927,74 @@ def _fetch_yahoo_history(
             details={"provider": "yahoo", "market": market, "symbol": symbol, "provider_symbol": provider_symbol, "source_url": url},
         ) from exc
     return parse_yahoo_chart_payload(payload, market=market, symbol=symbol, yahoo_symbol=provider_symbol)
+
+
+def _fetch_sec_companyfacts(*, market: str, symbols: list[str]) -> list[dict[str, Any]]:
+    market = normalize_market(market)
+    if market != "us":
+        return [_fundamental_unavailable_row(market=market, symbol=symbol, provider="sec-companyfacts", error_type="unsupported_market") for symbol in symbols]
+    try:
+        cik_by_symbol = _fetch_sec_ticker_map()
+    except Exception as exc:  # pragma: no cover - exercised by network smoke
+        return [
+            {
+                **_fundamental_unavailable_row(market=market, symbol=symbol, provider="sec-companyfacts", error_type="provider_fetch_failed"),
+                "message": f"SEC ticker map fetch failed: {exc}",
+                "source_url": SEC_COMPANY_TICKERS_URL,
+            }
+            for symbol in symbols
+        ]
+    rows: list[dict[str, Any]] = []
+    for symbol in symbols:
+        cik = cik_by_symbol.get(symbol.upper())
+        if not cik:
+            rows.append(_fundamental_unavailable_row(market=market, symbol=symbol, provider="sec-companyfacts", error_type="cik_not_found"))
+            continue
+        url = f"{SEC_COMPANYFACTS_URL}CIK{cik}.json"
+        req = urllib_request.Request(url, headers={"User-Agent": "Velaria finance research contact@example.invalid"})
+        try:
+            with urllib_request.urlopen(req, timeout=20) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:  # pragma: no cover - exercised by network smoke
+            rows.append(
+                {
+                    **_fundamental_unavailable_row(market=market, symbol=symbol, provider="sec-companyfacts", error_type="provider_fetch_failed"),
+                    "message": f"SEC companyfacts fetch failed: {exc}",
+                    "source_url": url,
+                    "cik": cik,
+                }
+            )
+            continue
+        rows.extend(parse_sec_companyfacts_payload(payload, market=market, symbol=symbol, cik=cik, source_url=url))
+    return rows
+
+
+def _fetch_sec_ticker_map() -> dict[str, str]:
+    req = urllib_request.Request(SEC_COMPANY_TICKERS_URL, headers={"User-Agent": "Velaria finance research contact@example.invalid"})
+    with urllib_request.urlopen(req, timeout=20) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    mapping: dict[str, str] = {}
+    for item in (payload.values() if isinstance(payload, dict) else []):
+        ticker = str(item.get("ticker") or "").upper()
+        cik = str(item.get("cik_str") or "").zfill(10)
+        if ticker and cik:
+            mapping[ticker] = cik
+    return mapping
+
+
+def _fundamental_unavailable_row(*, market: str, symbol: str, provider: str, error_type: str) -> dict[str, Any]:
+    return {
+        "event_time": _utc_now(),
+        "event_type": "fundamental_unavailable",
+        "source_key": symbol,
+        "market": market,
+        "symbol": symbol,
+        "provider": provider,
+        "freshness": "unavailable",
+        "error_type": error_type,
+        "message": "Public fundamentals provider could not provide a usable row for this symbol.",
+        "not_mocked": True,
+    }
 
 
 def _fetch_google_news(
@@ -815,6 +1056,19 @@ def _provider_registry() -> FinanceProviderRegistry:
             ),
             FinanceProviderAdapter(
                 spec=FinanceProviderSpec(
+                    provider="sec-companyfacts",
+                    markets=("us",),
+                    commands=("fetch-fundamentals", "watch-session", "intelligence"),
+                    freshness={"fundamentals": "filing"},
+                    recommended_quote_provider=False,
+                    recommended_history_provider=False,
+                    source_url=SEC_COMPANYFACTS_URL,
+                    notes="Public SEC companyfacts XBRL API for U.S. company fundamentals; rows are filing snapshots, not realtime data.",
+                ),
+                fetch_fundamentals=_fetch_sec_companyfacts,
+            ),
+            FinanceProviderAdapter(
+                spec=FinanceProviderSpec(
                     provider="tencent",
                     markets=("cn", "us"),
                     commands=("fetch-quotes", "ingest-quotes", "analyze", "watch"),
@@ -830,14 +1084,15 @@ def _provider_registry() -> FinanceProviderRegistry:
                 spec=FinanceProviderSpec(
                     provider="yahoo",
                     markets=("cn", "us"),
-                    commands=("fetch-history", "pipeline"),
-                    freshness={"history": "eod"},
-                    recommended_quote_provider=False,
+                    commands=("fetch-history", "fetch-quotes", "pipeline"),
+                    freshness={"history": "eod", "quotes": "delayed"},
+                    recommended_quote_provider=True,
                     recommended_history_provider=True,
                     source_url=YAHOO_CHART_URL,
-                    notes="Public chart JSON endpoint verified for A-share Yahoo symbols such as 000001.SZ and U.S. symbols such as AAPL.",
+                    notes="Public chart JSON endpoint verified for A-share Yahoo symbols such as 000001.SZ and U.S. symbols such as AAPL; quote freshness is provider-delayed.",
                 ),
                 fetch_history=_fetch_yahoo_history,
+                fetch_quotes=_fetch_yahoo_quotes,
             ),
         ]
     )

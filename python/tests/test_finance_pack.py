@@ -13,17 +13,20 @@ from velaria.cli import main as velaria_cli_main
 from velaria.finance_pack import (
     build_research_prompt,
     evaluate_news_sentiment,
+    fetch_fundamentals,
     fetch_quotes,
     normalize_history_frame,
     normalize_provider,
     normalize_quote_frame,
+    parse_sec_companyfacts_payload,
     parse_google_news_rss,
     parse_tencent_quote_payload,
+    parse_yahoo_quote_payload,
     parse_yahoo_chart_payload,
     provider_catalog,
     provider_names_for_operation,
 )
-from velaria.finance_pack.cli import _rank_native_stream_view_name, main as finance_cli_main
+from velaria.finance_pack.cli import _intelligence_report_payload, _rank_native_stream_view_name, main as finance_cli_main
 
 
 class FinancePackTest(unittest.TestCase):
@@ -109,18 +112,71 @@ class FinancePackTest(unittest.TestCase):
 
     def test_provider_registry_exposes_capabilities_and_catalog(self):
         self.assertEqual(provider_names_for_operation("fetch_history"), ["akshare", "yahoo"])
+        self.assertEqual(provider_names_for_operation("fetch_fundamentals"), ["sec-companyfacts"])
         self.assertEqual(provider_names_for_operation("fetch_news"), ["google-news"])
-        self.assertEqual(provider_names_for_operation("fetch_quotes"), ["akshare", "tencent"])
+        self.assertEqual(provider_names_for_operation("fetch_quotes"), ["akshare", "tencent", "yahoo"])
 
         catalog = provider_catalog()
         providers = {item["provider"]: item for item in catalog}
-        self.assertEqual(set(providers), {"akshare", "google-news", "tencent", "yahoo"})
+        self.assertEqual(set(providers), {"akshare", "google-news", "sec-companyfacts", "tencent", "yahoo"})
         self.assertIn("fetch-history", providers["yahoo"]["commands"])
-        self.assertNotIn("fetch-quotes", providers["yahoo"]["commands"])
+        self.assertIn("fetch-quotes", providers["yahoo"]["commands"])
         self.assertIn("fetch-news", providers["google-news"]["commands"])
+        self.assertIn("fetch-fundamentals", providers["sec-companyfacts"]["commands"])
         self.assertIn("fetch-quotes", providers["tencent"]["commands"])
         self.assertNotIn("fetch-history", providers["tencent"]["commands"])
         self.assertEqual(providers["tencent"]["freshness"]["us"], "delayed")
+
+    def test_parse_sec_companyfacts_payload_extracts_public_fundamentals(self):
+        payload = {
+            "facts": {
+                "us-gaap": {
+                    "Revenues": {
+                        "units": {
+                            "USD": [
+                                {"end": "2025-12-31", "val": 1000, "form": "10-K", "filed": "2026-02-01"},
+                                {"end": "2026-03-31", "val": 300, "form": "10-Q", "filed": "2026-05-01"},
+                            ]
+                        }
+                    },
+                    "NetIncomeLoss": {"units": {"USD": [{"end": "2026-03-31", "val": 42, "form": "10-Q", "filed": "2026-05-01"}]}},
+                }
+            }
+        }
+
+        rows = parse_sec_companyfacts_payload(payload, market="us", symbol="AAPL", cik="0000320193", source_url="https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["provider"], "sec-companyfacts")
+        self.assertEqual(rows[0]["symbol"], "AAPL")
+        self.assertEqual(rows[0]["revenue"], 300)
+        self.assertEqual(rows[0]["net_income"], 42)
+        self.assertEqual(rows[0]["fiscal_period_end"], "2026-03-31")
+
+    def test_yahoo_quote_provider_uses_chart_meta(self):
+        payload = {
+            "chart": {
+                "result": [
+                    {
+                        "meta": {
+                            "symbol": "AAPL",
+                            "regularMarketPrice": 201.5,
+                            "previousClose": 200.0,
+                            "regularMarketTime": 1770000000,
+                            "currency": "USD",
+                        },
+                        "timestamp": [1770000000],
+                        "indicators": {"quote": [{"volume": [123456]}]},
+                    }
+                ],
+                "error": None,
+            }
+        }
+
+        rows = parse_yahoo_quote_payload(payload, market="us", symbol="AAPL", yahoo_symbol="AAPL", source_url="https://query1.finance.yahoo.com/v8/finance/chart/AAPL")
+        self.assertEqual(rows[-1]["provider"], "yahoo")
+        self.assertEqual(rows[-1]["price"], 201.5)
+        self.assertEqual(rows[-1]["pct_change"], 0.75)
 
     def test_native_stream_view_name_stays_within_sql_identifier_limit(self):
         args = mock.Mock()
@@ -135,12 +191,12 @@ class FinancePackTest(unittest.TestCase):
     def test_provider_registry_drives_normalization_and_operation_errors(self):
         self.assertEqual(normalize_provider(" Yahoo "), "yahoo")
         with self.assertRaisesRegex(Exception, "provider does not support quotes") as ctx:
-            fetch_quotes(provider="yahoo", market="us", symbols=["AAPL"])
+            fetch_quotes(provider="google-news", market="us", symbols=["AAPL"])
 
         error = ctx.exception
         self.assertEqual(error.error_type, "unsupported_provider_operation")
         self.assertEqual(error.details["operation"], "fetch_quotes")
-        self.assertEqual(error.details["candidates"], ["akshare", "tencent"])
+        self.assertEqual(error.details["candidates"], ["akshare", "tencent", "yahoo"])
 
     def test_parse_google_news_rss_maps_news_rows_and_sentiment(self):
         rss = """<?xml version="1.0" encoding="UTF-8"?>
@@ -430,7 +486,7 @@ class FinancePackTest(unittest.TestCase):
                 self.assertEqual(payload["native_stream"]["engine"], "velaria_native_realtime_stream")
                 self.assertIsNone(payload["native_stream"]["max_batches"])
                 self.assertIn("WHERE entry_signal >= 1 OR exit_signal >= 1", payload["native_stream"]["sql"])
-                self.assertEqual(set(payload["raw_sources"]), {"quotes", "history", "news", "candidates", "native_stream_signals"})
+                self.assertEqual(set(payload["raw_sources"]), {"quotes", "history", "news", "features", "candidates", "native_stream_signals"})
                 tick = payload["ticks"][0]
                 self.assertEqual(tick["native_stream_signals"][0]["signal_type"], "entry_research_signal")
                 self.assertEqual(tick["native_stream_signals"][0]["symbol"], "NVDA")
@@ -878,16 +934,21 @@ class FinancePackTest(unittest.TestCase):
                 self.assertIn("velaria_cli_run", payload["ai_plane"]["agent_prompt"])
                 self.assertEqual(
                     set(payload["data_plane"]["sources"]),
-                    {"quotes", "history", "news", "candidates", "market_context", "fundamentals", "native_stream_signals"},
+                    {"quotes", "history", "news", "features", "candidates", "market_context", "fundamentals", "native_stream_signals"},
                 )
+                self.assertEqual(payload["data_plane"]["counts_by_feed"]["features"], 1)
+                self.assertEqual(payload["research_candidates"][0]["feature_snapshot"]["momentum_state"], "bullish")
 
                 with AgenticStore() as store:
                     sessions = store.read_external_events("finance_intelligence_sessions")
                     notes = store.read_external_events("finance_intelligence_ai_notes")
+                    features = store.read_external_events(payload["data_plane"]["sources"]["features"])
                 self.assertEqual(sessions[-1]["intelligence_id"], "intel_test")
                 self.assertEqual(sessions[-1]["watch_session_id"], "session_intel")
                 self.assertEqual(notes[-1]["intelligence_id"], "intel_test")
                 self.assertEqual(notes[-1]["top_symbol"], "NVDA")
+                self.assertEqual(features[-1]["symbol"], "NVDA")
+                self.assertIn("rsi_14", features[-1])
 
     def test_intelligence_replay_uses_persisted_watch_data(self):
         with tempfile.TemporaryDirectory(prefix="velaria-finance-intelligence-replay-") as tmp:
@@ -922,6 +983,92 @@ class FinancePackTest(unittest.TestCase):
                     rows = store.read_external_events("finance_intelligence_replays")
                 self.assertEqual(rows[-1]["intelligence_id"], "intel_replay")
                 self.assertEqual(rows[-1]["watch_session_id"], "session_replay")
+
+    def test_intelligence_report_persists_supervisor_scorecard(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-intelligence-report-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                self._seed_watch_session_rows("session_report")
+
+                stdout = StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = finance_cli_main(
+                        [
+                            "intelligence",
+                            "report",
+                            "--intelligence-id",
+                            "intel_report",
+                            "--session-id",
+                            "session_report",
+                            "--format",
+                            "json",
+                        ]
+                    )
+
+                self.assertEqual(exit_code, 0)
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(payload["action"], "intelligence-report")
+                self.assertEqual(payload["report"]["top_symbol"], "AAPL")
+                self.assertEqual(payload["report"]["supervisor_checks"]["replayability"]["status"], "pass")
+                self.assertIn("data_quality", payload["report"]["supervisor_checks"])
+                self.assertIn("final_research_summary", payload["report"])
+
+                with AgenticStore() as store:
+                    rows = store.read_external_events("finance_intelligence_reports")
+                self.assertEqual(rows[-1]["intelligence_id"], "intel_report")
+                self.assertEqual(rows[-1]["top_symbol"], "AAPL")
+
+    def test_intelligence_report_scorecard_uses_latest_candidate_per_symbol(self):
+        rows = [
+            {
+                "feed": "candidates",
+                "payload_json": {
+                    "event_time": "2026-05-20T14:00:00Z",
+                    "event_type": "research_candidate",
+                    "symbol": "NVDA",
+                    "rank": 1,
+                    "score": 5.0,
+                },
+            },
+            {
+                "feed": "candidates",
+                "payload_json": {
+                    "event_time": "2026-05-20T14:01:00Z",
+                    "event_type": "research_candidate",
+                    "symbol": "AAPL",
+                    "rank": 2,
+                    "score": 8.0,
+                },
+            },
+            {
+                "feed": "candidates",
+                "payload_json": {
+                    "event_time": "2026-05-20T14:02:00Z",
+                    "event_type": "research_candidate",
+                    "symbol": "NVDA",
+                    "rank": 1,
+                    "score": 9.0,
+                },
+            },
+        ]
+        summary = {
+            "event_count": 3,
+            "signal_count": 1,
+            "counts_by_feed": {
+                "quotes": 1,
+                "history": 1,
+                "news": 1,
+                "features": 1,
+                "candidates": 3,
+                "market_context": 1,
+                "fundamentals": 1,
+                "native_stream_signals": 1,
+            },
+        }
+
+        report = _intelligence_report_payload(intelligence_id="intel_scorecard", watch_session_id="session_scorecard", rows=rows, summary=summary)
+
+        self.assertEqual(report["scorecard"][0]["symbol"], "NVDA")
+        self.assertEqual(report["scorecard"][0]["score"], 9.0)
 
     def test_normalize_akshare_cn_history_keeps_provider_metadata(self):
         raw = pd.DataFrame(

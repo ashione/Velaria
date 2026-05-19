@@ -102,6 +102,7 @@ Additional ecosystem helpers:
 - `consume_arrow_batches_with_custom_sink(...)`
 - `finance_pack.fetch_history(...)`
 - `finance_pack.fetch_quotes(...)`
+- `finance_pack.fetch_fundamentals(...)`
 - `finance_pack.build_research_prompt(...)`
 
 Mapping rule:
@@ -228,9 +229,10 @@ uv run --project python --extra finance python python/velaria_cli.py finance ran
 
 Use native stream mode when the ranking loop should push normalized candidate
 events through Velaria's native realtime stream source/sink APIs. Add
-`--ingest-raw` when quote, history, news, and candidate rows should all be
-persisted as Velaria external_event sources for later inspection. Native stream
-sink output is also persisted as a durable stream history source named
+`--ingest-raw` when quote, history, news, derived feature metrics, and candidate
+rows should all be persisted as Velaria external_event sources for later
+inspection. Native stream sink output is also persisted as a durable stream
+history source named
 `finance_<market>_rank_candidates_native_stream_signals`:
 
 ```bash
@@ -290,14 +292,21 @@ uv run --project python --extra finance python python/velaria_cli.py finance int
 uv run --project python --extra finance python python/velaria_cli.py finance intelligence replay \
   --session-id us_watch_20260519 \
   --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence report \
+  --session-id us_watch_20260519 \
+  --format json
 ```
 
 `intelligence start` writes `finance_intelligence_sessions` and
-`finance_intelligence_ai_notes`, while all quote/history/news/market/fundamental
-and native stream rows remain under the watch-session feed sources. `replay`
-reads those persisted realtime rows back as historical evidence and writes
-`finance_intelligence_replays`. The `ai_plane.agent_prompt` is designed for
-`velaria_cli_run` and does not fabricate model output.
+`finance_intelligence_ai_notes`, while all quote/history/news/feature/market/
+fundamental and native stream rows remain under the watch-session feed sources.
+`replay` reads those persisted realtime rows back as historical evidence and
+writes `finance_intelligence_replays`. `report` writes
+`finance_intelligence_reports` with a final scorecard, supervisor checks,
+provider quality diagnostics, and a replayable research summary. The
+`ai_plane.agent_prompt` is designed for `velaria_cli_run` and does not
+fabricate model output.
 
 Use `watch-session` when you need the lower-level durable market watch and
 diagnostic surface. It combines candidate ranking, native stream signal
@@ -429,6 +438,17 @@ uv run --project python --extra finance python python/velaria_cli.py finance fet
   --limit 5
 ```
 
+Fetch public U.S. fundamentals evidence through SEC Company Facts. If a symbol,
+market, or upstream endpoint cannot provide the data, the command returns a
+structured unavailable row instead of mock values:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance fetch-fundamentals \
+  --provider sec-companyfacts \
+  --market us \
+  --symbols AAPL,MSFT,NVDA
+```
+
 Fetch A-share historical data through Yahoo chart JSON or AkShare and write a
 Parquet dataset:
 
@@ -474,8 +494,11 @@ AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0
 --async-run --format json`, `finance watch-session status --session-id
 us_watch_20260519 --format json`, `finance watch-session review --session-id
 us_watch_20260519 --format json`, `finance watch-session supervise --session-id
-us_watch_20260519 --interval-sec 60 --format json`, or `finance watch --market cn --symbol 000001 --interval-sec
-30 --iterations 0 --jsonl`; do not include `uv`, `python`, or
+us_watch_20260519 --interval-sec 60 --format json`, `finance intelligence
+report --session-id us_watch_20260519 --format json`, `finance
+fetch-fundamentals --provider sec-companyfacts --market us --symbols
+AAPL,MSFT,NVDA`, or `finance watch --market cn --symbol 000001
+--interval-sec 30 --iterations 0 --jsonl`; do not include `uv`, `python`, or
 `python/velaria_cli.py` in the tool arguments.
 
 `finance pipeline` and `finance rank-candidates` do not require a

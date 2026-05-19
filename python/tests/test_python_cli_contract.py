@@ -139,6 +139,29 @@ class PythonCliContractTest(unittest.TestCase):
         self.assertIn("--intelligence-id", finance_main.call_args.args[0])
         self.assertIn("--session-id", finance_main.call_args.args[0])
 
+    def test_finance_watch_session_events_forwards_feed_filter(self):
+        with mock.patch("velaria.cli.finance.finance_pack_main", return_value=0) as finance_main:
+            exit_code = velaria_cli.main(
+                [
+                    "finance",
+                    "watch-session",
+                    "events",
+                    "--session-id",
+                    "session_contract",
+                    "--feed",
+                    "features",
+                    "--limit",
+                    "2",
+                    "--format",
+                    "json",
+                ]
+            )
+        self.assertEqual(exit_code, 0)
+        forwarded = finance_main.call_args.args[0]
+        self.assertEqual(forwarded[:2], ["watch-session", "events"])
+        self.assertIn("--feed", forwarded)
+        self.assertIn("features", forwarded)
+
     def test_agentic_search_templates_cli_returns_hits(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

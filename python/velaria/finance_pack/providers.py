@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 
 FetchHistoryFn = Callable[..., list[dict[str, Any]]]
+FetchFundamentalsFn = Callable[..., list[dict[str, Any]]]
 FetchNewsFn = Callable[..., list[dict[str, Any]]]
 FetchQuotesFn = Callable[..., list[dict[str, Any]]]
 
@@ -37,12 +38,15 @@ class FinanceProviderSpec:
 class FinanceProviderAdapter:
     spec: FinanceProviderSpec
     fetch_history: FetchHistoryFn | None = None
+    fetch_fundamentals: FetchFundamentalsFn | None = None
     fetch_news: FetchNewsFn | None = None
     fetch_quotes: FetchQuotesFn | None = None
 
     def supports(self, operation: str) -> bool:
         if operation == "fetch_history":
             return self.fetch_history is not None
+        if operation == "fetch_fundamentals":
+            return self.fetch_fundamentals is not None
         if operation == "fetch_news":
             return self.fetch_news is not None
         if operation == "fetch_quotes":

@@ -107,8 +107,9 @@ uv run --project python python python/velaria_cli.py artifacts list --run-id <ru
 - `finance pipeline`：完整链路入口；获取历史 OHLCV、订阅实时 quote tick、运行 monitor，并输出分析和 service 集成 metadata
 - `finance rank-candidates`：候选池排名入口；持续获取 quote、历史 OHLCV、新闻 RSS 和透明情绪证据，输出 Top N 研究候选
 - `finance fetch-history`：获取历史 OHLCV 行情；优先使用 `provider=yahoo`，也可使用 `provider=akshare`
-- `finance fetch-quotes`：获取 quote 行；可用 `provider=akshare` 或 `provider=tencent`
+- `finance fetch-quotes`：获取 quote 行；可用 `provider=akshare`、`provider=tencent` 或 `provider=yahoo`
 - `finance fetch-news`：获取公开新闻 RSS 行和透明情绪 evidence；默认使用 `provider=google-news`
+- `finance fetch-fundamentals`：获取公开基本面 evidence；美股可用 `provider=sec-companyfacts`
 - `finance ingest-quotes`：获取 quote 并写入 `external_event` source，供 monitor 使用
 - `finance watch`：持续监听一个标的，逐 tick 写入 observation、运行 monitor，并输出事件上下文
 - `finance watch-session`：完整盯盘会话入口；把候选排名、native stream 信号、quote/history/news、大盘上下文、基本面 provider 快照落到同一个 `session_id`，并支持复盘查询和总结
@@ -214,6 +215,25 @@ uv run --project python --extra finance python python/velaria_cli.py finance wat
   --session-id us_watch_20260519 \
   --format json
 
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence start \
+  --intelligence-id us_intel_20260519 \
+  --session-id us_watch_20260519 \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --market-symbols SPY,QQQ,DIA \
+  --fundamentals-provider sec-companyfacts \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --top 3 \
+  --news-limit 5 \
+  --iterations 0 \
+  --interval-sec 300 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence report \
+  --session-id us_watch_20260519 \
+  --format json
+
 uv run --project python --extra finance python python/velaria_cli.py finance watch-session start \
   --session-id us_watch_async_20260519 \
   --market us \
@@ -276,6 +296,11 @@ uv run --project python --extra finance python python/velaria_cli.py finance fet
   --symbol AAPL \
   --limit 5
 
+uv run --project python --extra finance python python/velaria_cli.py finance fetch-fundamentals \
+  --provider sec-companyfacts \
+  --market us \
+  --symbols AAPL,MSFT,NVDA
+
 uv run --project python --extra finance python python/velaria_cli.py finance ingest-quotes \
   --provider tencent \
   --market cn \
@@ -311,6 +336,7 @@ finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 202605
 finance intelligence start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --format json
 finance intelligence review --session-id us_watch_async_20260519 --format json
 finance intelligence replay --session-id us_watch_async_20260519 --format json
+finance intelligence report --session-id us_watch_async_20260519 --format json
 finance watch-session start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --format json
 finance watch-session start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --async-run --format json
 finance watch-session status --session-id us_watch_async_20260519 --format json
@@ -321,6 +347,7 @@ finance watch-session stop --session-id us_watch_async_20260519 --format json
 finance watch-session summarize --session-id us_watch_20260519 --format json
 finance fetch-quotes --provider tencent --market cn --symbols 000001
 finance fetch-news --provider google-news --market us --symbol AAPL --limit 5
+finance fetch-fundamentals --provider sec-companyfacts --market us --symbols AAPL,MSFT,NVDA
 finance ingest-quotes --provider tencent --market cn --symbols 000001 --source-id finance_cn_quotes
 finance watch --market cn --symbol 000001 --interval-sec 30 --iterations 0 --jsonl
 ```
@@ -331,7 +358,7 @@ finance watch --market cn --symbol 000001 --interval-sec 30 --iterations 0 --jso
 - `finance pipeline` 默认输出人类可读中文报告；Agent 自动化应传 `--format json`
 - `finance rank-candidates` 输出 `research_candidates`，不是买卖建议；Agent 自动化应传 `--format json`、持续模式 `--jsonl`，native stream 模式 `--native-stream --ingest-raw`，或 agentic stream monitor 模式 `--stream-monitor --until-time <RFC3339>`
 - `finance intelligence start` 是产品化主入口，复用 watch-session 的 public provider、raw ingestion 和 Velaria native realtime stream 链路，并额外写入 `finance_intelligence_sessions` 和 `finance_intelligence_ai_notes`
-- `finance intelligence review` 读取同一个 watch-session 的进程、日志、feed 计数和信号摘要，沉淀 agent-readable AI note；`finance intelligence replay` 只从已持久化的实时 feed 读取，不重新请求 provider
+- `finance intelligence review` 读取同一个 watch-session 的进程、日志、feed 计数和信号摘要，沉淀 agent-readable AI note；`finance intelligence replay` 只从已持久化的实时 feed 读取，不重新请求 provider；`finance intelligence report` 生成并持久化最终 scorecard、supervisor checks 和 replayable research summary
 - `finance intelligence supervise --iterations 0` 在 CLI 内持续运行 review loop，适合 agent 通过 `velaria_cli_run` 长时间观察、调试和复盘；输出仍是研究证据，不是投资建议
 - `finance watch-session start` 输出完整盯盘会话 JSON，包含 `watch_session`、`raw_sources`、`native_stream`、`ticks`、`research_candidates`、`stream_signals`；它会默认启用 native stream 和 raw ingestion
 - `finance watch-session start --async-run` 会在后台 CLI 进程中运行同一条 core native stream 链路，前台返回 `pid`、`log_path` 和后续命令；Agent 自动化应随后调用 `status/logs/signals/summarize/stop`
@@ -344,7 +371,7 @@ finance watch --market cn --symbol 000001 --interval-sec 30 --iterations 0 --jso
 - `fetch-news` 输出 `sentiment`，情绪方法为透明关键词词典，不是不可解释模型判断
 - `finance watch` 默认在有限 `--iterations` 后输出一个 JSON；`--iterations 0` 是持续监听，配合 `--jsonl` 可逐 tick 输出
 - `finance pipeline` 输出包含 `history`、`subscription`、`quote`、`focus_events`、`analysis`、`analysis_prompt` 和 `service_integration`
-- `finance rank-candidates` 输出包含 `score_parts`、`quote`、`history`、`news_sentiment`、`news`、`risk_flags`、`evidence`、`service_integration`；开启 `--native-stream` 时还包含 `native_stream`、`native_stream_signals`，并把 native stream sink 输出写入 `finance_<market>_rank_candidates_native_stream_signals`；开启 `--ingest-raw` 时会把 quote/history/news/candidate 写入 Velaria external_event sources；开启 `--stream-monitor` 时还包含 `stream_monitors`、`stream_monitor_runs`、`focus_events`
+- `finance rank-candidates` 输出包含 `score_parts`、`quote`、`history`、`news_sentiment`、`news`、`feature_snapshot`、`risk_flags`、`evidence`、`service_integration`；开启 `--native-stream` 时还包含 `native_stream`、`native_stream_signals`，并把 native stream sink 输出写入 `finance_<market>_rank_candidates_native_stream_signals`；开启 `--ingest-raw` 时会把 quote/history/news/features/candidate 写入 Velaria external_event sources；开启 `--stream-monitor` 时还包含 `stream_monitors`、`stream_monitor_runs`、`focus_events`
 - provider 失败应读取 `error_type`、`message`、`hint`、`details`
 - 行数据包含 `provider`、`source_url`、`fetched_at`、`freshness`、`delay_sec`、`license_note`
 - watch tick 包含 `quote`、`observations`、`signals`、`focus_events`、`artifacts`、`analysis` 和 `analysis_prompt`
@@ -361,7 +388,9 @@ Provider 使用建议：
 - 需要产品化盯盘、复盘和 agent brief 时优先运行 `finance intelligence start`，然后用 `finance intelligence review/replay/supervise` 和 `finance watch-session summarize/events/signals` 查询同一会话
 - 历史行情优先尝试 `provider=yahoo`；AkShare / Eastmoney 可作为补充 provider
 - 轻量 quote 优先尝试 `provider=tencent`
+- 美股 quote 也可尝试 `provider=yahoo`，它来自公开 chart metadata，按 provider contract 标记延迟或未知 freshness
 - 新闻和舆论证据优先尝试 `provider=google-news`；它是公开 RSS 搜索源，输出 `freshness=near_realtime`
+- 美股基本面优先尝试 `provider=sec-companyfacts`；如果 SEC、CIK 或字段不可用，必须保留结构化 unavailable row，不要 mock
 - Tencent 美股 quote 当前按 provider contract 标记为 `freshness=delayed`，不要描述为交易所级实时
 - AkShare / Eastmoney 上游不可达时，不要 mock 或编造历史数据；把结构化 provider 错误返回给用户，并可用 Tencent quote 做实时监控链路验证
 
@@ -370,8 +399,9 @@ Service 集成：
 - 不要假设存在 finance-specific service route
 - `finance pipeline` 使用 CLI 写入 Velaria `AgenticStore`
 - `finance rank-candidates --native-stream --ingest-raw` 会创建 Velaria native realtime stream source/sink，把 candidate event 推入 native stream SQL，同时把 quote/history/news/candidate 和 native stream sink signal 全部落入 Velaria external_event sources
-- `finance intelligence start` 是上层产品入口：它复用 watch-session 底层算子和 runtime，不复制 provider 或 stream 逻辑；输出 `runtime_plane`、`data_plane`、`ai_plane`，并把 session、AI note、replay 事件分别写入 Velaria external_event sources
+- `finance intelligence start` 是上层产品入口：它复用 watch-session 底层算子和 runtime，不复制 provider 或 stream 逻辑；输出 `runtime_plane`、`data_plane`、`ai_plane`，并把 session、AI note、features、native stream signal 和后续 replay/report 事件分别写入 Velaria external_event sources
 - `finance intelligence replay` 证明实时数据会自然沉淀为历史数据：它只读取 watch-session 已落库 rows，不再次访问 Yahoo/Tencent/Google News provider
+- `finance intelligence report` 读取同一批已沉淀 rows，输出 `supervisor_checks.replayability/data_quality/signal_consistency/provider_quality`，并写入 `finance_intelligence_reports`
 - `finance watch-session start` 复用同一条 ranking/native stream/raw ingestion 链路，并额外写入 `finance_watch_sessions`、大盘上下文 source 和基本面 source；provider 不可用时写入结构化 unavailable 事件，不 mock 数据
 - `finance watch-session start --async-run` 额外写入 `finance_watch_session_runs`，记录 `pid`、`log_path`、`core_runtime=velaria_native_realtime_stream`、`ai_cli_runtime=velaria_cli_run`，使 Agent 可以边观察边调试
 - `finance watch-session review/supervise` 额外写入 `finance_watch_session_reviews`，把持续运行诊断、下一步命令和 agent_prompt 沉淀为可复盘事件

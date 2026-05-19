@@ -27,6 +27,7 @@ from . import (
     FinanceProviderError,
     build_research_prompt,
     evaluate_news_sentiment,
+    fetch_fundamentals,
     fetch_history,
     fetch_news,
     fetch_quotes,
@@ -115,6 +116,24 @@ def main(argv: list[str] | None = None) -> int:
                     "query": args.query,
                     "row_count": len(rows),
                     "sentiment": evaluate_news_sentiment(rows),
+                    "output": str(output) if output else None,
+                    "format": args.output_format if output else None,
+                    "preview": rows[: args.preview_rows],
+                }
+            )
+        if args.command == "fetch-fundamentals":
+            rows = fetch_fundamentals(provider=args.provider, market=args.market, symbols=args.symbols)
+            output = pathlib.Path(args.output) if args.output else None
+            if output is not None:
+                _write_rows(output, rows, args.output_format)
+            return _emit_json(
+                {
+                    "ok": True,
+                    "action": "fetch-fundamentals",
+                    "provider": args.provider,
+                    "market": args.market,
+                    "symbols": _split_symbols(args.symbols),
+                    "row_count": len(rows),
                     "output": str(output) if output else None,
                     "format": args.output_format if output else None,
                     "preview": rows[: args.preview_rows],
@@ -217,7 +236,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     rank = subparsers.add_parser(
         "rank-candidates",
-        help="Continuously rank top research candidates from quotes, history, news, and sentiment.",
+        help="Continuously rank top research candidates from quotes, history, derived metrics, news, and sentiment.",
     )
     rank.add_argument("--market", required=True, choices=["cn", "us"])
     rank.add_argument("--symbols", required=True, help="Comma-separated candidate symbols, e.g. AAPL,MSFT,NVDA.")
@@ -275,6 +294,10 @@ def _build_parser() -> argparse.ArgumentParser:
     intelligence_replay.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
     intelligence_replay.add_argument("--session-id", required=True, help="Durable watch-session id to replay.")
     _add_report_format(intelligence_replay)
+    intelligence_report = intelligence_subparsers.add_parser("report", help="Generate and persist the final finance intelligence scorecard.")
+    intelligence_report.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
+    intelligence_report.add_argument("--session-id", required=True, help="Durable watch-session id to report.")
+    _add_report_format(intelligence_report)
     intelligence_supervise = intelligence_subparsers.add_parser("supervise", help="Continuously review and persist intelligence notes inside the CLI process.")
     intelligence_supervise.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
     intelligence_supervise.add_argument("--session-id", required=True, help="Durable watch-session id to supervise.")
@@ -297,7 +320,7 @@ def _build_parser() -> argparse.ArgumentParser:
         if command != "list":
             sub.add_argument("--session-id", required=True)
         if command == "events":
-            sub.add_argument("--feed", choices=["all", "quotes", "history", "news", "candidates", "market_context", "fundamentals", "native_stream_signals"], default="all")
+            sub.add_argument("--feed", choices=["all", "quotes", "history", "news", "features", "candidates", "market_context", "fundamentals", "native_stream_signals"], default="all")
         if command in {"events", "signals", "logs"}:
             sub.add_argument("--limit", type=int, default=100)
         if command in {"review", "supervise"}:
@@ -318,7 +341,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_output(history)
 
     quotes = subparsers.add_parser("fetch-quotes", help="Fetch public quote rows.")
-    _add_provider_market(quotes, default_provider="tencent")
+    _add_provider_market(quotes, default_provider="tencent", choices=provider_names_for_operation("fetch_quotes"))
     quotes.add_argument("--symbols", required=True, help="Comma-separated provider-specific symbols.")
     _add_output(quotes)
 
@@ -329,6 +352,11 @@ def _build_parser() -> argparse.ArgumentParser:
     news.add_argument("--query", help="Override provider search query. Defaults to a market-aware symbol query.")
     news.add_argument("--limit", type=int, default=5, help="Maximum news rows to fetch.")
     _add_output(news)
+
+    fundamentals = subparsers.add_parser("fetch-fundamentals", help="Fetch public fundamentals evidence rows.")
+    _add_provider_market(fundamentals, default_provider="sec-companyfacts", choices=provider_names_for_operation("fetch_fundamentals"))
+    fundamentals.add_argument("--symbols", required=True, help="Comma-separated symbols, e.g. AAPL,MSFT,NVDA.")
+    _add_output(fundamentals)
 
     ingest = subparsers.add_parser("ingest-quotes", help="Fetch quotes and append them to a Velaria external_event source.")
     _add_provider_market(ingest, default_provider="tencent")
@@ -358,7 +386,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _add_provider_market(parser: argparse.ArgumentParser, *, default_provider: str, choices: list[str] | None = None) -> None:
-    parser.add_argument("--provider", default=default_provider, choices=choices or ["akshare", "tencent"])
+    parser.add_argument(
+        "--provider",
+        default=default_provider,
+        choices=choices or ["akshare", "tencent"],
+        help="Public data provider. Run finance sources for provider capabilities and freshness metadata.",
+    )
     parser.add_argument("--market", required=True, choices=["cn", "us"])
 
 
@@ -372,7 +405,12 @@ def _add_watch_session_start_args(parser: argparse.ArgumentParser, *, include_in
     parser.add_argument("--history-provider", default="yahoo", choices=provider_names_for_operation("fetch_history"))
     parser.add_argument("--quote-provider", default="tencent", choices=provider_names_for_operation("fetch_quotes"))
     parser.add_argument("--news-provider", default="google-news", choices=provider_names_for_operation("fetch_news"))
-    parser.add_argument("--fundamentals-provider", default="public-unavailable", help="Fundamentals provider name; unavailable providers are recorded as evidence, not mocked.")
+    parser.add_argument(
+        "--fundamentals-provider",
+        default="public-unavailable",
+        choices=["public-unavailable", *provider_names_for_operation("fetch_fundamentals")],
+        help="Fundamentals provider name; unavailable providers are recorded as evidence, not mocked.",
+    )
     parser.add_argument("--start-date", required=True, help="YYYYMMDD.")
     parser.add_argument("--end-date", required=True, help="YYYYMMDD.")
     parser.add_argument("--period", default="daily", choices=["daily", "weekly", "monthly"])
@@ -411,6 +449,8 @@ def _run_sources(args: argparse.Namespace) -> int:
             "finance doctor",
             "finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131",
             "finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --top 3",
+            "finance fetch-fundamentals --provider sec-companyfacts --market us --symbols AAPL,MSFT,NVDA",
+            "finance intelligence start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --format json",
             "finance analyze --market cn --symbol 000001",
             "finance watch --market cn --symbol 000001 --iterations 0 --jsonl",
         ],
@@ -490,6 +530,8 @@ def _intelligence(args: argparse.Namespace) -> int:
         return _intelligence_review(args)
     if command == "replay":
         return _intelligence_replay(args)
+    if command == "report":
+        return _intelligence_report(args)
     if command == "supervise":
         return _intelligence_supervise(args)
     raise AssertionError(f"unhandled intelligence command: {command}")
@@ -1375,7 +1417,7 @@ def _watch_session_review_diagnostics(
                 "hint": "Wait for the first tick or inspect finance watch-session logs.",
             }
         )
-    expected_feeds = ["quotes", "history", "news", "candidates", "market_context", "fundamentals", "native_stream_signals"]
+    expected_feeds = ["quotes", "history", "news", "features", "candidates", "market_context", "fundamentals", "native_stream_signals"]
     counts = dict(summary.get("counts_by_feed") or {})
     for feed in expected_feeds:
         if session is not None and int(counts.get(feed) or 0) == 0:
@@ -1537,6 +1579,39 @@ def _intelligence_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+def _intelligence_report(args: argparse.Namespace) -> int:
+    intelligence_id = args.intelligence_id or _make_intelligence_id(args.session_id)
+    session = _get_watch_session_or_raise(args.session_id)
+    rows = _read_watch_session_events(session, feed="all", limit=0)
+    summary = _compact_watch_session_summary(_summarize_watch_session(session))
+    report = _intelligence_report_payload(intelligence_id=intelligence_id, watch_session_id=args.session_id, rows=rows, summary=summary)
+    persisted = _append_intelligence_report_event(report)
+    ai_note = _append_intelligence_ai_note_event(
+        _intelligence_ai_note_payload(
+            intelligence_id=intelligence_id,
+            watch_session_id=args.session_id,
+            summary=summary,
+            diagnostics=list(report.get("diagnostics") or []),
+            note_type="agent_final_scorecard",
+        )
+    )
+    payload = {
+        "ok": True,
+        "action": "intelligence-report",
+        "intelligence_id": intelligence_id,
+        "watch_session_id": args.session_id,
+        "report": report,
+        "persisted_report": persisted,
+        "data_plane": _intelligence_data_plane(dict(session.get("sources") or {}), summary),
+        "ai_plane": _intelligence_ai_plane(intelligence_id=intelligence_id, watch_session_id=args.session_id, summary=summary, ai_note=ai_note),
+        "disclaimer": "Research candidates and realtime signals only; not investment advice.",
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_intelligence_report(payload))
+    return 0
+
+
 def _intelligence_supervise(args: argparse.Namespace) -> int:
     intelligence_id = args.intelligence_id or _make_intelligence_id(args.session_id)
     reviews: list[dict[str, Any]] = []
@@ -1664,6 +1739,23 @@ def _intelligence_replay_source_binding() -> dict[str, Any]:
     }
 
 
+def _intelligence_report_source_binding() -> dict[str, Any]:
+    return {
+        "time_field": "event_time",
+        "type_field": "event_type",
+        "key_field": "intelligence_id",
+        "field_mappings": {
+            "intelligence_id": "intelligence_id",
+            "watch_session_id": "watch_session_id",
+            "event_count": "event_count",
+            "signal_count": "signal_count",
+            "candidate_count": "candidate_count",
+            "top_symbol": "top_symbol",
+            "overall_status": "overall_status",
+        },
+    }
+
+
 def _append_intelligence_session_event(payload: dict[str, Any]) -> dict[str, Any]:
     with AgenticStore() as store:
         if store.get_source("finance_intelligence_sessions") is None:
@@ -1709,6 +1801,21 @@ def _append_intelligence_replay_event(payload: dict[str, Any]) -> dict[str, Any]
         return store.append_external_event("finance_intelligence_replays", payload)
 
 
+def _append_intelligence_report_event(payload: dict[str, Any]) -> dict[str, Any]:
+    with AgenticStore() as store:
+        if store.get_source("finance_intelligence_reports") is None:
+            store.upsert_source(
+                {
+                    "source_id": "finance_intelligence_reports",
+                    "kind": "external_event",
+                    "name": "finance intelligence reports",
+                    "schema_binding": _intelligence_report_source_binding(),
+                    "metadata": {"domain": "finance", "workflow": "finance-intelligence"},
+                }
+            )
+        return store.append_external_event("finance_intelligence_reports", payload)
+
+
 def _intelligence_runtime_plane(watch_payload: dict[str, Any]) -> dict[str, Any]:
     native_stream = watch_payload.get("native_stream") or {}
     run = watch_payload.get("run") or {}
@@ -1751,6 +1858,7 @@ def _intelligence_ai_plane(
         "next_commands": [
             f"finance intelligence review --session-id {watch_session_id} --format json",
             f"finance intelligence replay --session-id {watch_session_id} --format json",
+            f"finance intelligence report --session-id {watch_session_id} --format json",
             f"finance watch-session signals --session-id {watch_session_id} --format json",
         ],
     }
@@ -1813,6 +1921,173 @@ def _intelligence_replay_payload(
         "latest_candidates": summary.get("latest_candidates") or [],
         "replay_note": "Realtime watch rows were read from persisted Velaria external_event sources.",
     }
+
+
+def _intelligence_report_payload(
+    *,
+    intelligence_id: str,
+    watch_session_id: str,
+    rows: list[dict[str, Any]],
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    scorecard = _intelligence_candidate_scorecard(rows=rows, summary=summary)
+    top_symbol = (scorecard[0].get("symbol") if scorecard else None) or _top_symbol_from_summary(summary)
+    checks = _intelligence_supervisor_checks(rows=rows, summary=summary)
+    diagnostics = _intelligence_report_diagnostics(checks)
+    overall_status = "pass" if all(check.get("status") == "pass" for check in checks.values()) else "review"
+    return {
+        "intelligence_id": intelligence_id,
+        "watch_session_id": watch_session_id,
+        "event_time": _utc_payload_time(),
+        "event_type": "intelligence_report",
+        "source_key": intelligence_id,
+        "event_count": int(summary.get("event_count") or len(rows)),
+        "candidate_count": len([row for row in rows if row.get("feed") == "candidates"]),
+        "signal_count": int(summary.get("signal_count") or 0),
+        "top_symbol": top_symbol,
+        "overall_status": overall_status,
+        "counts_by_feed": summary.get("counts_by_feed") or {},
+        "scorecard": scorecard,
+        "supervisor_checks": checks,
+        "diagnostics": diagnostics,
+        "final_research_summary": _intelligence_final_research_summary(
+            top_symbol=top_symbol,
+            summary=summary,
+            scorecard=scorecard,
+            checks=checks,
+        ),
+        "runtime_contract": {
+            "core_runtime": "velaria_native_realtime_stream",
+            "metric_engine": "velaria_python_metric_graph",
+            "data_runtime": "velaria_agentic_store",
+            "ai_runtime": "velaria_cli_run",
+        },
+        "disclaimer": "Research candidates and realtime signals only; not investment advice.",
+    }
+
+
+def _intelligence_candidate_scorecard(*, rows: list[dict[str, Any]], summary: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        if row.get("feed") != "candidates":
+            continue
+        payload = _watch_row_payload(row)
+        symbol = payload.get("symbol") or row.get("symbol")
+        if not symbol:
+            continue
+        candidates.append(
+            {
+                "symbol": str(symbol),
+                "rank": int(payload.get("rank") or row.get("rank") or 999999),
+                "score": round(_float_or_zero(payload.get("score", row.get("score"))), 4),
+                "period_return_pct": _optional_float(payload.get("period_return_pct")),
+                "quote_pct_change": _optional_float(payload.get("quote_pct_change")),
+                "news_sentiment_label": payload.get("news_sentiment_label"),
+                "feature_snapshot": payload.get("feature_snapshot"),
+                "summary": payload.get("summary"),
+                "event_time": payload.get("event_time") or row.get("event_time"),
+            }
+        )
+    if not candidates:
+        for item in summary.get("latest_candidates") or []:
+            if isinstance(item, dict) and item.get("symbol"):
+                candidates.append(
+                    {
+                        "symbol": str(item.get("symbol")),
+                        "rank": int(item.get("rank") or 999999),
+                        "score": round(_float_or_zero(item.get("score")), 4),
+                        "period_return_pct": _optional_float(item.get("period_return_pct")),
+                        "quote_pct_change": _optional_float(item.get("quote_pct_change")),
+                        "news_sentiment_label": item.get("news_sentiment_label"),
+                        "feature_snapshot": item.get("feature_snapshot"),
+                        "summary": item.get("summary"),
+                        "event_time": item.get("event_time"),
+                    }
+                )
+    latest_by_symbol: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        latest_by_symbol[str(candidate["symbol"])] = candidate
+    ranked = sorted(latest_by_symbol.values(), key=lambda item: (int(item.get("rank") or 999999), -float(item.get("score") or 0.0), str(item.get("symbol") or "")))
+    return ranked[:5]
+
+
+def _intelligence_supervisor_checks(*, rows: list[dict[str, Any]], summary: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    counts = dict(summary.get("counts_by_feed") or {})
+    expected_feeds = ["quotes", "history", "news", "features", "candidates", "market_context", "fundamentals", "native_stream_signals"]
+    missing = [feed for feed in expected_feeds if int(counts.get(feed) or 0) == 0]
+    unavailable_rows = [
+        _watch_row_payload(row)
+        for row in rows
+        if str(_watch_row_payload(row).get("event_type") or "").endswith("_unavailable")
+        or _watch_row_payload(row).get("error_type") in {"provider_unavailable", "provider_fetch_failed", "unsupported_market", "cik_not_found"}
+    ]
+    signal_count = int(summary.get("signal_count") or 0)
+    event_count = int(summary.get("event_count") or len(rows))
+    return {
+        "replayability": {
+            "status": "pass" if event_count > 0 else "fail",
+            "event_count": event_count,
+            "message": "Realtime rows are persisted in Velaria external_event sources." if event_count > 0 else "No persisted realtime rows are available.",
+        },
+        "data_quality": {
+            "status": "pass" if not missing else "warning",
+            "counts_by_feed": counts,
+            "missing_feeds": missing,
+            "message": "All expected feeds are present." if not missing else "Some expected feeds are missing or have not emitted rows yet.",
+        },
+        "signal_consistency": {
+            "status": "pass" if signal_count > 0 else "warning",
+            "signal_count": signal_count,
+            "message": "Native stream produced signal rows." if signal_count > 0 else "No native stream signal rows were found.",
+        },
+        "provider_quality": {
+            "status": "pass" if not unavailable_rows else "warning",
+            "unavailable_count": len(unavailable_rows),
+            "sample": unavailable_rows[:3],
+            "message": "No provider-unavailable evidence was found." if not unavailable_rows else "Provider gaps were persisted as evidence instead of mocked data.",
+        },
+    }
+
+
+def _intelligence_report_diagnostics(checks: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    for name, check in checks.items():
+        status = str(check.get("status") or "unknown")
+        if status == "pass":
+            continue
+        diagnostics.append(
+            {
+                "type": f"supervisor_{name}",
+                "severity": "error" if status == "fail" else "warning",
+                "message": str(check.get("message") or f"{name} requires review."),
+                "hint": "Inspect finance intelligence replay and provider rows before acting on the signal.",
+            }
+        )
+    return diagnostics
+
+
+def _intelligence_final_research_summary(
+    *,
+    top_symbol: str | None,
+    summary: dict[str, Any],
+    scorecard: list[dict[str, Any]],
+    checks: dict[str, dict[str, Any]],
+) -> str:
+    checked = ", ".join(f"{name}={check.get('status')}" for name, check in checks.items())
+    score = scorecard[0].get("score") if scorecard else None
+    return (
+        f"Top research candidate is {top_symbol or 'none'}"
+        f"{f' with score {score}' if score is not None else ''}; "
+        f"persisted_events={summary.get('event_count') or 0}, "
+        f"signals={summary.get('signal_count') or 0}, "
+        f"checks={checked}. "
+        "This is replayable research evidence, not investment advice."
+    )
+
+
+def _watch_row_payload(row: dict[str, Any]) -> dict[str, Any]:
+    payload = row.get("payload_json") if isinstance(row.get("payload_json"), dict) else {}
+    return {**row, **payload}
 
 
 def _top_symbol_from_summary(summary: dict[str, Any]) -> str | None:
@@ -2164,6 +2439,7 @@ def _upsert_rank_raw_sources(
     quote_source_id = f"{source_id}_quotes"
     history_source_id = f"{source_id}_history"
     news_source_id = f"{source_id}_news"
+    feature_source_id = f"{source_id}_features"
     watch_session_id = getattr(args, "watch_session_id", None)
     workflow = "watch-session" if watch_session_id else "rank-candidates"
     with AgenticStore() as store:
@@ -2250,6 +2526,23 @@ def _upsert_rank_raw_sources(
                 },
             }
         )
+        feature_source = store.upsert_source(
+            {
+                "source_id": feature_source_id,
+                "kind": "external_event",
+                "name": f"finance {args.market} metric and feature rows",
+                "schema_binding": _feature_schema_binding(),
+                "metadata": {
+                    "domain": "finance",
+                    "workflow": workflow,
+                    "raw_feed": "features",
+                    "market": args.market,
+                    "symbols": symbols,
+                    "provider": "velaria-metric-engine",
+                    **({"watch_session_id": watch_session_id} if watch_session_id else {}),
+                },
+            }
+        )
         market_context_source = None
         fundamental_source = None
         if watch_session_id:
@@ -2311,6 +2604,7 @@ def _upsert_rank_raw_sources(
         "quotes": quote_source,
         "history": history_source,
         "news": news_source,
+        "features": feature_source,
         "candidates": candidate_source,
     }
     if native_stream_signal_source is not None:
@@ -2452,6 +2746,7 @@ def _run_rank_tick(
     quotes = {_quote_symbol_key(row.get("symbol")): row for row in quote_rows}
     history_rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
     news_rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    feature_rows: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
     for symbol in symbols:
         history_rows = fetch_history(
@@ -2472,7 +2767,9 @@ def _run_rank_tick(
         history_rows_by_symbol[symbol] = history_rows
         news_rows_by_symbol[symbol] = news_rows
         quote = quotes.get(_quote_symbol_key(symbol)) or {}
-        candidates.append(_build_candidate(symbol=symbol, market=args.market, quote=quote, history_rows=history_rows, news_rows=news_rows))
+        feature = _build_feature_row(symbol=symbol, market=args.market, quote=quote, history_rows=history_rows, news_rows=news_rows)
+        feature_rows.append(feature)
+        candidates.append(_build_candidate(symbol=symbol, market=args.market, quote=quote, history_rows=history_rows, news_rows=news_rows, feature=feature))
     ranked = sorted(candidates, key=lambda item: item["score"], reverse=True)
     top = ranked[: max(1, int(args.top))]
     event_time = (top[0].get("event_time") if top else None) or _utc_payload_time()
@@ -2491,6 +2788,7 @@ def _run_rank_tick(
             quote_rows=quote_rows,
             history_rows_by_symbol=history_rows_by_symbol,
             news_rows_by_symbol=news_rows_by_symbol,
+            feature_rows=feature_rows,
         )
         _append_watch_session_rows(
             store,
@@ -2541,6 +2839,7 @@ def _run_rank_tick(
         "candidate_count": len(top),
         "market_context": market_context_rows,
         "fundamentals": fundamental_rows,
+        "features": feature_rows,
         "observations": observations,
         "raw_ingestion": _rank_raw_ingestion_payload(raw_sources),
         "native_stream_signals": native_stream_signals,
@@ -2558,6 +2857,7 @@ def _append_rank_raw_rows(
     quote_rows: list[dict[str, Any]],
     history_rows_by_symbol: dict[str, list[dict[str, Any]]],
     news_rows_by_symbol: dict[str, list[dict[str, Any]]],
+    feature_rows: list[dict[str, Any]],
 ) -> None:
     if not raw_sources:
         return
@@ -2570,6 +2870,8 @@ def _append_rank_raw_rows(
     for symbol, rows in news_rows_by_symbol.items():
         for row in rows:
             store.append_external_event(raw_sources["news"]["source_id"], _with_watch_session(_rank_news_event(row, market=args.market, symbol=symbol), watch_session_id))
+    for row in feature_rows:
+        store.append_external_event(raw_sources["features"]["source_id"], _with_watch_session(row, watch_session_id))
 
 
 def _append_watch_session_rows(
@@ -2664,6 +2966,27 @@ def _fetch_cn_tencent_market_context(*, symbols: list[str]) -> list[dict[str, An
 
 
 def _fetch_fundamental_rows(args: argparse.Namespace, *, symbols: list[str]) -> list[dict[str, Any]]:
+    if str(args.fundamentals_provider) != "public-unavailable":
+        try:
+            return fetch_fundamentals(provider=str(args.fundamentals_provider), market=args.market, symbols=symbols)
+        except FinanceProviderError as exc:
+            fetched_at = _utc_payload_time()
+            return [
+                {
+                    "event_time": fetched_at,
+                    "event_type": "fundamental_unavailable",
+                    "source_key": symbol,
+                    "market": args.market,
+                    "symbol": symbol,
+                    "provider": args.fundamentals_provider,
+                    "freshness": "unavailable",
+                    "error_type": exc.error_type,
+                    "message": str(exc),
+                    "hint": exc.hint,
+                    "not_mocked": True,
+                }
+                for symbol in symbols
+            ]
     fetched_at = _utc_payload_time()
     rows: list[dict[str, Any]] = []
     for symbol in symbols:
@@ -2759,6 +3082,32 @@ def _fundamental_schema_binding() -> dict[str, Any]:
             "freshness": "freshness",
             "error_type": "error_type",
             "market_cap": "market_cap",
+        },
+    }
+
+
+def _feature_schema_binding() -> dict[str, Any]:
+    return {
+        "time_field": "event_time",
+        "type_field": "event_type",
+        "key_field": "source_key",
+        "field_mappings": {
+            "watch_session_id": "watch_session_id",
+            "market": "market",
+            "symbol": "symbol",
+            "period_return_pct": "period_return_pct",
+            "return_1d_pct": "return_1d_pct",
+            "return_5d_pct": "return_5d_pct",
+            "volatility_pct": "volatility_pct",
+            "ma_5": "ma_5",
+            "ma_20": "ma_20",
+            "ma_5_distance_pct": "ma_5_distance_pct",
+            "rsi_14": "rsi_14",
+            "liquidity_score": "liquidity_score",
+            "news_sentiment_score": "news_sentiment_score",
+            "news_velocity": "news_velocity",
+            "provider_quality_score": "provider_quality_score",
+            "momentum_state": "momentum_state",
         },
     }
 
@@ -2987,6 +3336,13 @@ def _float_or_zero(value: Any) -> float:
     return parsed if math.isfinite(parsed) else 0.0
 
 
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    parsed = _float_or_zero(value)
+    return parsed if math.isfinite(parsed) else None
+
+
 def _build_candidate(
     *,
     symbol: str,
@@ -2994,10 +3350,12 @@ def _build_candidate(
     quote: dict[str, Any],
     history_rows: list[dict[str, Any]],
     news_rows: list[dict[str, Any]],
+    feature: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     history_metrics = _history_metrics(history_rows)
     news_sentiment = evaluate_news_sentiment(news_rows)
-    score_parts = _candidate_score_parts(quote=quote, history=history_metrics, news_sentiment=news_sentiment, news_rows=news_rows)
+    feature = feature or _build_feature_row(symbol=symbol, market=market, quote=quote, history_rows=history_rows, news_rows=news_rows)
+    score_parts = _candidate_score_parts(quote=quote, history=history_metrics, news_sentiment=news_sentiment, news_rows=news_rows, feature=feature)
     score = round(sum(score_parts.values()), 6)
     risk_flags: list[str] = []
     if quote.get("freshness") not in {"realtime", "near_realtime"}:
@@ -3016,6 +3374,7 @@ def _build_candidate(
         "news_sentiment_label": news_sentiment.get("label"),
         "quote_freshness": quote.get("freshness"),
         "score_parts": score_parts,
+        "feature_snapshot": feature,
         "quote": quote,
         "history": history_metrics,
         "news_sentiment": news_sentiment,
@@ -3041,6 +3400,59 @@ def _build_candidate(
     }
 
 
+def _build_feature_row(
+    *,
+    symbol: str,
+    market: str,
+    quote: dict[str, Any],
+    history_rows: list[dict[str, Any]],
+    news_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    history = _history_metrics(history_rows)
+    closes = [float(row.get("close")) for row in history_rows if isinstance(row.get("close"), (int, float))]
+    volumes = [float(row.get("volume")) for row in history_rows if isinstance(row.get("volume"), (int, float))]
+    returns = [_pct_change(closes[index - 1], closes[index]) for index in range(1, len(closes))]
+    news_sentiment = evaluate_news_sentiment(news_rows)
+    latest_close = closes[-1] if closes else _float_or_zero(quote.get("price"))
+    ma_5 = _mean(closes[-5:])
+    ma_20 = _mean(closes[-20:])
+    ma_distance = _pct_change(ma_5, latest_close) if ma_5 not in (None, 0) and latest_close else None
+    rsi_14 = _rsi(closes[-15:])
+    return_1d = returns[-1] if returns else None
+    return_5d = _pct_change(closes[-6], closes[-1]) if len(closes) >= 6 else None
+    volatility = _stddev(returns[-20:])
+    liquidity_score = _liquidity_score(float(quote.get("volume") or (volumes[-1] if volumes else 0.0)))
+    provider_quality = _provider_quality_score(quote=quote, history_rows=history_rows, news_rows=news_rows)
+    momentum_state = _momentum_state(period_return=history.get("period_return_pct"), quote_pct=quote.get("pct_change"), rsi=rsi_14)
+    event_time = str(quote.get("event_time") or _utc_payload_time())
+    return {
+        "event_time": event_time,
+        "event_type": "feature_snapshot",
+        "source_key": str(quote.get("symbol") or symbol),
+        "market": market,
+        "symbol": str(quote.get("symbol") or symbol),
+        "provider": "velaria-metric-engine",
+        "period_return_pct": history.get("period_return_pct"),
+        "return_1d_pct": return_1d,
+        "return_5d_pct": return_5d,
+        "volatility_pct": volatility,
+        "ma_5": ma_5,
+        "ma_20": ma_20,
+        "ma_5_distance_pct": ma_distance,
+        "rsi_14": rsi_14,
+        "latest_volume": quote.get("volume") or (volumes[-1] if volumes else None),
+        "avg_volume_5": _mean(volumes[-5:]),
+        "liquidity_score": liquidity_score,
+        "news_sentiment_score": news_sentiment.get("score"),
+        "news_sentiment_label": news_sentiment.get("label"),
+        "news_velocity": len(news_rows),
+        "provider_quality_score": provider_quality,
+        "momentum_state": momentum_state,
+        "engine": "velaria_python_metric_graph",
+        "replayable": True,
+    }
+
+
 def _history_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     closes = [row.get("close") for row in rows if isinstance(row.get("close"), (int, float))]
     period_return = None
@@ -3062,13 +3474,15 @@ def _candidate_score_parts(
     history: dict[str, Any],
     news_sentiment: dict[str, Any],
     news_rows: list[dict[str, Any]],
+    feature: dict[str, Any],
 ) -> dict[str, float]:
     history_part = _clamp(float(history.get("period_return_pct") or 0.0), -12.0, 12.0)
     quote_part = _clamp(float(quote.get("pct_change") or 0.0) * 2.0, -8.0, 8.0)
-    volume = float(quote.get("volume") or 0.0)
-    liquidity_part = 0.0 if volume <= 0 else min(4.0, math.log10(volume + 1.0) / 2.0)
+    liquidity_part = float(feature.get("liquidity_score") or 0.0)
     news_part = _clamp(float(news_sentiment.get("score") or 0.0) * 3.0, -4.0, 4.0) + min(1.0, len(news_rows) * 0.2)
     freshness_penalty = -0.5 if quote.get("freshness") not in {"realtime", "near_realtime"} else 0.0
+    volatility_penalty = -min(3.0, max(0.0, float(feature.get("volatility_pct") or 0.0) / 4.0))
+    provider_quality = _clamp(float(feature.get("provider_quality_score") or 0.0) - 1.0, -2.0, 0.0)
     missing_penalty = 0.0
     if not history.get("row_count"):
         missing_penalty -= 2.0
@@ -3080,8 +3494,77 @@ def _candidate_score_parts(
         "liquidity": round(liquidity_part, 6),
         "news_sentiment": round(news_part, 6),
         "freshness_penalty": round(freshness_penalty, 6),
+        "volatility_penalty": round(volatility_penalty, 6),
+        "provider_quality": round(provider_quality, 6),
         "missing_data_penalty": round(missing_penalty, 6),
     }
+
+
+def _pct_change(previous: float | None, current: float | None) -> float | None:
+    if previous in (None, 0) or current is None:
+        return None
+    return round(((float(current) - float(previous)) / float(previous)) * 100.0, 6)
+
+
+def _mean(values: list[float]) -> float | None:
+    clean = [float(value) for value in values if math.isfinite(float(value))]
+    return round(sum(clean) / len(clean), 6) if clean else None
+
+
+def _stddev(values: list[float | None]) -> float | None:
+    clean = [float(value) for value in values if value is not None and math.isfinite(float(value))]
+    if len(clean) < 2:
+        return None
+    avg = sum(clean) / len(clean)
+    variance = sum((value - avg) ** 2 for value in clean) / (len(clean) - 1)
+    return round(math.sqrt(variance), 6)
+
+
+def _rsi(closes: list[float]) -> float | None:
+    if len(closes) < 2:
+        return None
+    gains: list[float] = []
+    losses: list[float] = []
+    for index in range(1, len(closes)):
+        delta = closes[index] - closes[index - 1]
+        if delta >= 0:
+            gains.append(delta)
+        else:
+            losses.append(abs(delta))
+    avg_gain = sum(gains) / max(1, len(closes) - 1)
+    avg_loss = sum(losses) / max(1, len(closes) - 1)
+    if avg_loss == 0:
+        return 100.0 if avg_gain > 0 else 50.0
+    rs = avg_gain / avg_loss
+    return round(100.0 - (100.0 / (1.0 + rs)), 6)
+
+
+def _liquidity_score(volume: float) -> float:
+    return 0.0 if volume <= 0 else round(min(4.0, math.log10(volume + 1.0) / 2.0), 6)
+
+
+def _provider_quality_score(*, quote: dict[str, Any], history_rows: list[dict[str, Any]], news_rows: list[dict[str, Any]]) -> float:
+    score = 1.0
+    if quote.get("freshness") in {"realtime", "near_realtime"}:
+        score += 0.5
+    elif quote.get("freshness") == "delayed":
+        score += 0.2
+    if history_rows:
+        score += 0.3
+    if news_rows:
+        score += 0.2
+    return round(min(2.0, score), 6)
+
+
+def _momentum_state(*, period_return: Any, quote_pct: Any, rsi: Any) -> str:
+    period = _float_or_zero(period_return)
+    quote = _float_or_zero(quote_pct)
+    rsi_value = _float_or_zero(rsi)
+    if period > 5.0 and quote >= 0.0 and rsi_value >= 50.0:
+        return "bullish"
+    if period < -5.0 or quote <= -3.0 or (rsi_value and rsi_value < 35.0):
+        return "bearish"
+    return "neutral"
 
 
 def _quote_symbol_key(symbol: Any) -> str:

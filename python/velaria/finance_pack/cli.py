@@ -999,7 +999,8 @@ def _rank_native_stream_sql() -> str:
     return (
         "SELECT event_time, market, symbol, rank, score, period_return_pct, quote_pct_change, "
         "entry_signal, exit_signal, quote_freshness, news_sentiment_label "
-        "FROM finance_rank_candidate_stream"
+        "FROM finance_rank_candidate_stream "
+        "WHERE entry_signal >= 1 OR exit_signal >= 1"
     )
 
 

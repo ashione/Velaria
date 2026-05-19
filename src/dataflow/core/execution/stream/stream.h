@@ -167,6 +167,21 @@ struct StreamingQueryOptions {
   }
 };
 
+enum class StreamPredicateExprKind { Comparison, And, Or };
+
+struct StreamPredicateComparison {
+  std::string column;
+  std::string op;
+  Value value;
+};
+
+struct StreamPredicateExpr {
+  StreamPredicateExprKind kind = StreamPredicateExprKind::Comparison;
+  StreamPredicateComparison comparison;
+  std::shared_ptr<StreamPredicateExpr> left;
+  std::shared_ptr<StreamPredicateExpr> right;
+};
+
 struct StreamPullContext {
   std::string query_id;
   // `backlog_batches` and `inflight_batches` both represent the number of
@@ -517,6 +532,7 @@ class StreamingDataFrame {
   StreamingDataFrame select(const std::vector<std::string>& columns) const;
   StreamingDataFrame filter(const std::string& column, const std::string& op,
                             const Value& value) const;
+  StreamingDataFrame filterPredicate(std::shared_ptr<StreamPredicateExpr> predicate) const;
   StreamingDataFrame withColumn(const std::string& name, const std::string& sourceColumn) const;
   StreamingDataFrame withColumn(const std::string& name, ComputedColumnKind function,
                                const std::vector<ComputedColumnArg>& args) const;

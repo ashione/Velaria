@@ -339,6 +339,7 @@ class FinancePackTest(unittest.TestCase):
                 self.assertTrue(payload["native_stream"]["enabled"])
                 self.assertEqual(payload["native_stream"]["engine"], "velaria_native_realtime_stream")
                 self.assertIsNone(payload["native_stream"]["max_batches"])
+                self.assertIn("WHERE entry_signal >= 1 OR exit_signal >= 1", payload["native_stream"]["sql"])
                 self.assertEqual(set(payload["raw_sources"]), {"quotes", "history", "news", "candidates"})
                 tick = payload["ticks"][0]
                 self.assertEqual(tick["native_stream_signals"][0]["signal_type"], "entry_research_signal")

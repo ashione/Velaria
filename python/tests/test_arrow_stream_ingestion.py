@@ -285,6 +285,44 @@ class ArrowStreamIngestionTest(unittest.TestCase):
             query.stop()
             worker.join(timeout=5)
 
+    def test_realtime_stream_where_supports_or_predicate(self):
+        session = velaria.Session()
+        source = session.create_realtime_stream_source(["ts", "symbol", "entry_signal", "exit_signal"])
+        stream_df = session.read_realtime_stream_source(source)
+        session.create_temp_view("signal_events", stream_df)
+        sink = session.create_realtime_stream_sink()
+        query_df = session.stream_sql(
+            "SELECT symbol, entry_signal, exit_signal "
+            "FROM signal_events "
+            "WHERE entry_signal >= 1 OR exit_signal >= 1"
+        )
+        query = query_df.write_stream_queue_sink(sink, trigger_interval_ms=0)
+        query.start()
+        worker = threading.Thread(target=lambda: query.await_termination(max_batches=1), daemon=True)
+        worker.start()
+        try:
+            source.push_rows(
+                [
+                    {"ts": "2026-03-29T10:00:00", "symbol": "keep_entry", "entry_signal": 1, "exit_signal": 0},
+                    {"ts": "2026-03-29T10:00:01", "symbol": "keep_exit", "entry_signal": 0, "exit_signal": 1},
+                    {"ts": "2026-03-29T10:00:02", "symbol": "drop", "entry_signal": 0, "exit_signal": 0},
+                ]
+            )
+            observed = None
+            for _ in range(50):
+                batch = sink.poll_arrow()
+                if batch is not None:
+                    observed = batch
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(observed)
+            rows = observed.to_pylist()
+            self.assertEqual([row["symbol"] for row in rows], ["keep_entry", "keep_exit"])
+        finally:
+            source.close()
+            query.stop()
+            worker.join(timeout=5)
+
 
 if __name__ == "__main__":
     unittest.main()

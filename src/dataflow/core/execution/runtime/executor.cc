@@ -1168,8 +1168,8 @@ RowSelection unionSelections(const RowSelection& lhs, const RowSelection& rhs) {
   return out;
 }
 
-RowSelection evaluatePlanPredicateExpr(const Table& input,
-                                       const std::shared_ptr<PlanPredicateExpr>& expr) {
+RowSelection evaluatePlanPredicateExprInternal(const Table& input,
+                                               const std::shared_ptr<PlanPredicateExpr>& expr) {
   if (!expr) {
     RowSelection out;
     out.input_row_count = input.rowCount();
@@ -1191,8 +1191,8 @@ RowSelection evaluatePlanPredicateExpr(const Table& input,
     return vectorizedFilterSelection(viewValueColumn(input, expr->comparison.column_index),
                                      expr->comparison.value, expr->comparison.op);
   }
-  const auto left = evaluatePlanPredicateExpr(input, expr->left);
-  const auto right = evaluatePlanPredicateExpr(input, expr->right);
+  const auto left = evaluatePlanPredicateExprInternal(input, expr->left);
+  const auto right = evaluatePlanPredicateExprInternal(input, expr->right);
   if (expr->kind == PlanPredicateExprKind::And) {
     return intersectSelections(left, right);
   }
@@ -1406,6 +1406,11 @@ BorrowedOrOwnedTable borrowOrExecute(const LocalExecutor& executor, const PlanNo
 }
 
 }  // namespace
+
+RowSelection evaluatePlanPredicateExpr(const Table& input,
+                                       const std::shared_ptr<PlanPredicateExpr>& expr) {
+  return evaluatePlanPredicateExprInternal(input, expr);
+}
 
 Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_indices,
                             const std::vector<AggregateSpec>& aggs) {

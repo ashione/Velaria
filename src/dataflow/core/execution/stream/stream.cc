@@ -28,6 +28,7 @@
 #include "src/dataflow/core/contract/api/dataframe.h"
 #include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/csv.h"
+#include "src/dataflow/core/execution/runtime/executor.h"
 #include "src/dataflow/experimental/stream/actor_stream_runtime.h"
 
 namespace dataflow {
@@ -1821,11 +1822,27 @@ StreamingDataFrame StreamingDataFrame::filter(const std::string& column, const s
   auto t = transforms_;
   t.emplace_back(
       [column, op, value](const Table& input, const StreamingQueryOptions&) {
-        const auto input_column = viewValueColumn(input, input.schema.indexOf(column));
-        const auto selection = vectorizedFilterSelection(input_column, value, op);
-        return filterTable(input, selection, false);
+        auto predicate = std::make_shared<PlanPredicateExpr>();
+        predicate->kind = PlanPredicateExprKind::Comparison;
+        predicate->comparison.column_index = input.schema.indexOf(column);
+        predicate->comparison.op = op;
+        predicate->comparison.value = value;
+        return filterTable(input, evaluatePlanPredicateExpr(input, predicate), false);
       },
       StreamTransformMode::PartitionLocal, false, "filter");
+  return StreamingDataFrame(source_, std::move(t), state_);
+}
+
+StreamingDataFrame StreamingDataFrame::filterPredicate(
+    StreamPredicateBinder predicate_binder) const {
+  auto t = transforms_;
+  t.emplace_back(
+      [predicate_binder = std::move(predicate_binder)](const Table& input,
+                                                       const StreamingQueryOptions&) {
+        return filterTable(input, evaluatePlanPredicateExpr(input, predicate_binder(input.schema)),
+                           false);
+      },
+      StreamTransformMode::PartitionLocal, false, "predicate-filter");
   return StreamingDataFrame(source_, std::move(t), state_);
 }
 

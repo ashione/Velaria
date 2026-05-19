@@ -105,6 +105,7 @@ struct StreamPlanNode {
   std::string column;
   std::string op;
   Value value;
+  StreamPredicateBinder predicate_expr;
   std::vector<std::string> columns;
   std::vector<std::string> order_columns;
   std::vector<bool> order_ascending;

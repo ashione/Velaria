@@ -167,6 +167,8 @@ struct StreamingQueryOptions {
   }
 };
 
+using StreamPredicateBinder = std::function<std::shared_ptr<PlanPredicateExpr>(const Schema&)>;
+
 struct StreamPullContext {
   std::string query_id;
   // `backlog_batches` and `inflight_batches` both represent the number of
@@ -517,6 +519,7 @@ class StreamingDataFrame {
   StreamingDataFrame select(const std::vector<std::string>& columns) const;
   StreamingDataFrame filter(const std::string& column, const std::string& op,
                             const Value& value) const;
+  StreamingDataFrame filterPredicate(StreamPredicateBinder predicate_binder) const;
   StreamingDataFrame withColumn(const std::string& name, const std::string& sourceColumn) const;
   StreamingDataFrame withColumn(const std::string& name, ComputedColumnKind function,
                                const std::vector<ComputedColumnArg>& args) const;

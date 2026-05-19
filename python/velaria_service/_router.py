@@ -245,9 +245,7 @@ class VelariaService:
             source = session.create_realtime_stream_source(columns)
             stream_df = session.read_realtime_stream_source(source)
             runner_id = f"{monitor_id}:{compiled_rule['rule_id']}"
-            view_name = _safe_sql_identifier(
-                f"input_table_{monitor_id}_{compiled_rule['rule_id']}_{uuid.uuid4().hex[:8]}"
-            )
+            view_name = _safe_sql_identifier(f"rt_{uuid.uuid4().hex[:16]}")
             session.create_temp_view(view_name, stream_df)
             sink = session.create_realtime_stream_sink()
             query_df = session.stream_sql(str(compiled_rule["sql"]).replace("input_table", view_name))

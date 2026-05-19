@@ -50,6 +50,7 @@ Owns:
 - Excel / Bitable / custom stream adapters
 - local workspace and run tracking
 - Velaria Agent runtime wrapping Codex App Server or Claude Agent SDK
+- public-data finance helpers for agentic monitor workflows, kept in the Python ecosystem layer
 
 Does not own:
 
@@ -136,6 +137,7 @@ Available today:
 - Python Arrow ingress/output and workspace-backed run tracking
 - Python realtime queue-backed stream source/sink for direct Arrow ingestion into long-running local stream queries
 - local agentic event service for `external_event` source ingest, monitor lifecycle, search/grounding, and `FocusEvent` polling
+- public-data finance pack for A-share / U.S. stock history and quote ingestion through AkShare / Tencent public endpoints, with provider freshness metadata for agentic monitor workflows
 - reusable keyword-index assets for Arrow / Parquet datasets, including async build from the local desktop flow
 - local desktop app prototype under `app/`, backed by `velaria-service`
 - desktop import flow can asynchronously build reusable embedding datasets and keyword indexes from the same saved dataset

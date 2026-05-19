@@ -256,6 +256,8 @@ bool collectConjunctivePredicates(const std::shared_ptr<PredicateExpr>& expr,
 
 using PredicateRewriter = std::function<Predicate(const Predicate&)>;
 
+std::string resolveStreamColumnName(const ColumnRef& ref, const FromItem& from);
+
 std::shared_ptr<PredicateExpr> rewritePredicateExpr(const std::shared_ptr<PredicateExpr>& expr,
                                                     const PredicateRewriter& rewrite_predicate) {
   if (!expr) return nullptr;
@@ -293,6 +295,41 @@ std::shared_ptr<::dataflow::PlanPredicateExpr> toPlanPredicateExpr(
   out->left = toPlanPredicateExpr(expr->left);
   out->right = toPlanPredicateExpr(expr->right);
   return out;
+}
+
+::dataflow::StreamPredicateBinder toStreamPredicateBinder(const std::shared_ptr<PredicateExpr>& expr,
+                                                          const FromItem& from) {
+  if (!expr) return {};
+  if (expr->kind == PredicateExprKind::Comparison) {
+    if (expr->predicate.lhs_is_aggregate) {
+      throw SQLSemanticError("WHERE does not support aggregate expressions");
+    }
+    if (expr->predicate.rhs_is_column_candidate) {
+      throwUnsupportedSqlV1("stream SQL WHERE does not support column-to-column predicates");
+    }
+    const auto column = resolveStreamColumnName(expr->predicate.lhs, from);
+    const auto op = opToString(expr->predicate.op);
+    const auto value = expr->predicate.rhs;
+    return [column, op, value](const Schema& schema) {
+      auto out = std::make_shared<::dataflow::PlanPredicateExpr>();
+      out->kind = ::dataflow::PlanPredicateExprKind::Comparison;
+      out->comparison.column_index = schema.indexOf(column);
+      out->comparison.op = op;
+      out->comparison.value = value;
+      return out;
+    };
+  }
+  auto left = toStreamPredicateBinder(expr->left, from);
+  auto right = toStreamPredicateBinder(expr->right, from);
+  const auto kind = expr->kind == PredicateExprKind::And ? ::dataflow::PlanPredicateExprKind::And
+                                                        : ::dataflow::PlanPredicateExprKind::Or;
+  return [left = std::move(left), right = std::move(right), kind](const Schema& schema) {
+    auto out = std::make_shared<::dataflow::PlanPredicateExpr>();
+    out->kind = kind;
+    out->left = left ? left(schema) : nullptr;
+    out->right = right ? right(schema) : nullptr;
+    return out;
+  };
 }
 
 VectorDistanceMetric parseHybridMetric(const std::string& metric) {
@@ -1807,18 +1844,19 @@ StreamLogicalPlan SqlPlanner::buildStreamLogicalPlan(const SqlQuery& query,
   logical.nodes.push_back(scan);
 
   if (query.where) {
-    if (!predicateExprIsSimpleComparison(query.where)) {
-      throwUnsupportedSqlV1("stream SQL WHERE does not support AND/OR");
-    }
-    const auto& predicate = query.where->predicate;
-    if (predicate.lhs_is_aggregate) {
-      throw SQLSemanticError("WHERE does not support aggregate expressions");
-    }
     StreamPlanNode filter;
     filter.kind = StreamPlanNodeKind::Filter;
-    filter.column = resolveStreamColumnName(predicate.lhs, query.from);
-    filter.op = opToString(predicate.op);
-    filter.value = predicate.rhs;
+    if (predicateExprIsSimpleComparison(query.where)) {
+      const auto& predicate = query.where->predicate;
+      if (predicate.lhs_is_aggregate) {
+        throw SQLSemanticError("WHERE does not support aggregate expressions");
+      }
+      filter.column = resolveStreamColumnName(predicate.lhs, query.from);
+      filter.op = opToString(predicate.op);
+      filter.value = predicate.rhs;
+    } else {
+      filter.predicate_expr = toStreamPredicateBinder(query.where, query.from);
+    }
     logical.nodes.push_back(filter);
   }
 
@@ -2154,7 +2192,11 @@ std::string SqlPlanner::explainStreamLogicalPlan(const StreamLogicalPlan& logica
     if (node.kind == StreamPlanNodeKind::Scan) {
       out << " source=" << node.source_name;
     } else if (node.kind == StreamPlanNodeKind::Filter) {
-      out << " column=" << node.column << " op=" << node.op;
+      if (node.predicate_expr) {
+        out << " predicate=compound";
+      } else {
+        out << " column=" << node.column << " op=" << node.op;
+      }
     } else if (node.kind == StreamPlanNodeKind::Project) {
       out << " columns=[" << joinStrings(node.columns, ", ") << "]";
     } else if (node.kind == StreamPlanNodeKind::WithColumn) {
@@ -2236,7 +2278,11 @@ StreamingDataFrame SqlPlanner::materializeStreamFromPhysical(
       case StreamPlanNodeKind::Scan:
         break;
       case StreamPlanNodeKind::Filter:
-        current = current.filter(node.column, node.op, node.value);
+        if (node.predicate_expr) {
+          current = current.filterPredicate(node.predicate_expr);
+        } else {
+          current = current.filter(node.column, node.op, node.value);
+        }
         break;
       case StreamPlanNodeKind::Project:
         current = current.select(node.columns);

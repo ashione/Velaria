@@ -31,6 +31,7 @@ The supported Python ecosystem includes:
 - vector search and vector explain APIs
 - offline embedding pipeline helpers for versioned vector assets
 - offline keyword-index build helpers and reusable BM25 keyword-search assets
+- public-data finance helpers for A-share / U.S. stock history and quote ingestion
 - agent runtime wrapper for Codex App Server and Claude Code / Claude Agent SDK integration
 - interactive agent CLI via `velaria_cli.py -i`
 
@@ -44,6 +45,7 @@ Examples and helper assets include:
 - `examples/demo_vector_search.py`
 - `benchmarks/bench_arrow_ingestion.py`
 - `examples/demo_embedding_pipeline.py`
+- `examples/finance_public_data_smoke.py`
 - `benchmarks/bench_embedding_pipeline.py`
 - local ecosystem scripts and skills
 
@@ -98,12 +100,330 @@ Additional ecosystem helpers:
 - `CustomArrowStreamSink`
 - `create_stream_from_custom_source(...)`
 - `consume_arrow_batches_with_custom_sink(...)`
+- `finance_pack.fetch_history(...)`
+- `finance_pack.fetch_quotes(...)`
+- `finance_pack.build_research_prompt(...)`
 
 Mapping rule:
 
 - Python names may be ecosystem-friendly
 - behavior must map back to the same native kernel contract exposed by C++
 - Python wrappers should not force row materialization earlier than required by the user-facing boundary
+
+## Finance Agentic Pack
+
+The finance pack is a Python ecosystem helper for agentic monitor workflows. It
+does not add financial semantics to the native kernel.
+
+Install the optional public-data provider dependency:
+
+```bash
+uv sync --project python --extra finance
+```
+
+Start with the product readiness check and source guide:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance doctor
+
+uv run --project python --extra finance python python/velaria_cli.py finance sources
+```
+
+`finance sources` is generated from the provider registry used by the fetch
+commands. It is the authoritative runtime list for provider capabilities,
+supported markets, command support, freshness metadata, and recommended
+history/quote/news paths.
+
+Run the one-command A-share analysis workflow. This fetches a public quote,
+stores it as a Velaria observation, runs a monitor, and prints a readable
+research report with source evidence:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance analyze \
+  --market cn \
+  --symbol 000001
+```
+
+Use JSON output for agent automation:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance analyze \
+  --market cn \
+  --symbol 000001 \
+  --format json
+```
+
+Run the complete CLI chain: fetch historical OHLCV, persist a history artifact,
+subscribe to live quote ticks, run a monitor, and emit analysis plus service
+integration metadata:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance pipeline \
+  --market cn \
+  --symbol 000001 \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --iterations 1 \
+  --interval-sec 0
+```
+
+Use JSON output for the complete chain:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance pipeline \
+  --market cn \
+  --symbol 000001 \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --iterations 1 \
+  --interval-sec 0 \
+  --format json
+```
+
+Run the same complete chain for a U.S. stock. The default path uses Yahoo for
+historical OHLCV and Tencent for quote ticks; Tencent U.S. quote rows are
+reported as `freshness=delayed` by the provider contract.
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance pipeline \
+  --market us \
+  --symbol AAPL \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --iterations 1 \
+  --interval-sec 0 \
+  --format json
+```
+
+Rank a candidate pool with quote polling, historical momentum, public news RSS,
+and transparent sentiment evidence. This command emits research candidates,
+not trading advice:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance rank-candidates \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --top 3 \
+  --news-limit 5 \
+  --iterations 1 \
+  --format json
+```
+
+Use continuous JSONL mode for a running monitor-style loop:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance rank-candidates \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --top 3 \
+  --news-limit 5 \
+  --iterations 0 \
+  --interval-sec 30 \
+  --jsonl
+```
+
+Use native stream mode when the ranking loop should push normalized candidate
+events through Velaria's native realtime stream source/sink APIs. Add
+`--ingest-raw` when quote, history, news, and candidate rows should all be
+persisted as Velaria external_event sources for later inspection. Native stream
+sink output is also persisted as a durable stream history source named
+`finance_<market>_rank_candidates_native_stream_signals`:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance rank-candidates \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --top 3 \
+  --news-limit 5 \
+  --native-stream \
+  --ingest-raw \
+  --entry-score-threshold 8 \
+  --entry-return-threshold 5 \
+  --exit-score-threshold 0 \
+  --exit-quote-pct-threshold -3 \
+  --iterations 0 \
+  --interval-sec 300 \
+  --format json
+```
+
+Query stored stream output later with:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance stream-history \
+  --market us \
+  --source-id finance_us_rank_candidates_native_stream_signals \
+  --limit 50 \
+  --format json
+```
+
+Use `watch-session` when the goal is an end-to-end market watch that persists
+every feed for later replay and review. It combines candidate ranking, native
+stream signal generation, raw quote/history/news storage, market context
+snapshots, and fundamental provider snapshots under one durable `session_id`.
+If a public provider cannot supply a requested feed, the row is persisted as a
+structured unavailable event instead of being mocked:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session start \
+  --session-id us_watch_20260519 \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --market-symbols SPY,QQQ,DIA \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --top 3 \
+  --news-limit 5 \
+  --entry-score-threshold 8 \
+  --entry-return-threshold 5 \
+  --exit-score-threshold 0 \
+  --exit-quote-pct-threshold -3 \
+  --iterations 0 \
+  --interval-sec 300 \
+  --format json
+```
+
+Inspect the durable session and produce the closing review from the same data:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session list --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session events \
+  --session-id us_watch_20260519 \
+  --feed all \
+  --limit 200 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session summarize \
+  --session-id us_watch_20260519 \
+  --format json
+```
+
+Use agentic stream monitor mode when the ranking loop should create Velaria
+`execution_mode=stream` monitors and emit FocusEvents from the persisted
+ranking event stream. `--until-time` runs inside the CLI until the RFC3339
+deadline; no external driver script is required:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance rank-candidates \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --top 3 \
+  --news-limit 5 \
+  --stream-monitor \
+  --ingest-raw \
+  --entry-score-threshold 8 \
+  --entry-return-threshold 5 \
+  --exit-score-threshold 0 \
+  --exit-quote-pct-threshold -3 \
+  --until-time 2026-05-18T16:00:00-04:00 \
+  --interval-sec 300 \
+  --format json
+```
+
+Fetch public news rows directly when you need to inspect the news provider and
+sentiment evidence:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance fetch-news \
+  --provider google-news \
+  --market us \
+  --symbol AAPL \
+  --limit 5
+```
+
+Fetch A-share historical data through Yahoo chart JSON or AkShare and write a
+Parquet dataset:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance fetch-history \
+  --provider yahoo \
+  --market cn \
+  --symbol 000001 \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --output /tmp/velaria-cn-history.parquet
+```
+
+Fetch public quote rows and ingest them as a Velaria `external_event` source:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance ingest-quotes \
+  --provider tencent \
+  --market cn \
+  --symbols 000001,600519 \
+  --source-id finance_cn_quotes
+```
+
+Watch one public quote symbol, append each observation to an `external_event`
+source, run a monitor, and return FocusEvent plus analysis context:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance watch \
+  --market cn \
+  --symbol 000001 \
+  --interval-sec 30 \
+  --iterations 0 \
+  --jsonl
+```
+
+The same finance commands are available to `velaria_cli.py -i` through the
+registered agent tool `velaria_cli_run`. In agent mode, pass only the Velaria
+subcommand, for example `finance doctor`, `finance sources`, `finance analyze
+--market cn --symbol 000001 --format json`, `finance pipeline --market cn
+--symbol 000001 --start-date 20250101 --end-date 20250131 --iterations 1
+--format json`, `finance watch-session start --market us --symbols
+AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0
+--format json`, or `finance watch --market cn --symbol 000001 --interval-sec
+30 --iterations 0 --jsonl`; do not include `uv`, `python`, or
+`python/velaria_cli.py` in the tool arguments.
+
+`finance pipeline` and `finance rank-candidates` do not require a
+finance-specific service route. They write to the same Velaria `AgenticStore`
+used by the local service. When `finance rank-candidates --stream-monitor` is
+used, the command also creates entry/exit `execution_mode=stream` monitors and
+executes them for each candidate ranking tick. If
+`velaria_service` is started with the same `VELARIA_HOME`, the generic
+`external-events`, `monitors`, and `focus-events` service routes can inspect
+the source, monitor, ranking observations, and events created by the CLI.
+
+Run the public-data smoke against real AkShare endpoints:
+
+```bash
+uv run --project python --extra finance python python/examples/finance_public_data_smoke.py
+```
+
+When AkShare / Eastmoney is blocked by a local proxy or upstream network policy,
+verify public quote ingestion through Tencent's lightweight quote endpoint:
+
+```bash
+uv run --project python --extra finance python python/examples/finance_public_data_smoke.py --quotes-only
+```
+
+The standardized rows include provider evidence fields:
+
+- `provider`
+- `source_url`
+- `fetched_at`
+- `freshness`
+- `delay_sec`
+- `license_note`
+
+U.S. quote freshness is reported from the provider path and may be delayed or
+unknown. The finance pack records that metadata instead of treating every quote
+as exchange-grade realtime data.
+
+For research workflows, use `finance_pack.build_research_prompt(...)` to turn
+`FocusEvent` objects and related datasets into a prompt for the interactive
+Velaria Agent. The prompt requires live source links and states that output is
+research assistance, not investment advice.
 
 File reader mapping:
 

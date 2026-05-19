@@ -27,6 +27,9 @@ embedding = [
     "sentence-transformers>=5.3.0",
     "socksio>=1.0.0",
 ]
+finance = [
+    "akshare>=1.18,<2",
+]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

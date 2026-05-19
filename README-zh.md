@@ -50,6 +50,7 @@ Velaria 围绕一个 kernel 和两个非 kernel 层组织。
 - Excel / Bitable / custom stream adapter
 - 本地 workspace 与 run tracking
 - 通过 Codex App Server 或 Claude Agent SDK runtime 封装 Velaria Agent
+- 面向 agentic monitor 工作流的公开财经数据 helper，边界保持在 Python 生态层
 
 不负责：
 
@@ -136,6 +137,7 @@ Arrow / CSV / Python ingress
 - Python Arrow 输入/输出与 workspace-backed run tracking
 - Python 侧支持 realtime queue-backed stream source/sink，可把 Arrow batch 直接写入长运行本地流查询
 - 本地 agentic event service，支持 `external_event` Source 接入、Monitor 生命周期、search / grounding 与 `FocusEvent` 轮询
+- 公开财经数据 finance pack，可通过 AkShare / 腾讯公开接口接入 A股 / 美股历史行情与 quote，并携带 provider freshness 元数据进入 agentic monitor 工作流
 - 面向 Arrow / Parquet 数据集的可复用 keyword index 资产，以及桌面导入流里的异步索引构建
 - `app/` 下的本地桌面原型，由 `velaria-service` 提供本地服务
 - 桌面端导入流可以在保存同一份数据集后，异步构建可复用的 embedding 数据集与 keyword index

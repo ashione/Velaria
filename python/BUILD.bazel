@@ -32,6 +32,7 @@ py_library(
         "velaria/cli/artifacts.py",
         "velaria/cli/datasets.py",
         "velaria/cli/embedding.py",
+        "velaria/cli/finance.py",
         "velaria/cli/file_sql.py",
         "velaria/cli/interactive.py",
         "velaria/cli/run_cmd.py",
@@ -46,6 +47,9 @@ py_library(
         "velaria/agentic_search.py",
         "velaria/agentic_runtime.py",
         "velaria/embedding.py",
+        "velaria/finance_pack/__init__.py",
+        "velaria/finance_pack/cli.py",
+        "velaria/finance_pack/providers.py",
         "velaria/keyword_index.py",
         "velaria/ai_runtime/__init__.py",
         "velaria/ai_runtime/_runtime_common.py",
@@ -365,6 +369,17 @@ py_test(
 )
 
 py_test(
+    name = "finance_pack_test",
+    srcs = ["tests/test_finance_pack.py"],
+    main = "tests/test_finance_pack.py",
+    imports = ["."],
+    deps = [
+        ":velaria_cli_lib",
+        ":velaria_py_pkg",
+    ],
+)
+
+py_test(
     name = "python_cli_contract_test",
     srcs = ["tests/test_python_cli_contract.py"],
     main = "tests/test_python_cli_contract.py",
@@ -419,6 +434,7 @@ test_suite(
         ":custom_stream_source_test",
         ":embedding_pipeline_test",
         ":file_source_api_test",
+        ":finance_pack_test",
         ":python_cli_contract_test",
         ":read_excel_test",
         ":streaming_v05_test",

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <memory>
 
+#include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/logical/planner/plan.h"
 
 namespace dataflow {
@@ -15,6 +16,8 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
 Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_indices,
                             const std::vector<AggregateSpec>& aggs,
                             const AggregateExecSpec* preferred_exec_spec);
+RowSelection evaluatePlanPredicateExpr(const Table& input,
+                                       const std::shared_ptr<PlanPredicateExpr>& expr);
 
 class Executor {
  public:

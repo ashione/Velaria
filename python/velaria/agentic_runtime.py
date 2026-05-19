@@ -51,8 +51,9 @@ def _jsonl_to_table(rows: list[dict[str, Any]]) -> pa.Table:
         if isinstance(payload, dict):
             for key, value in payload.items():
                 flat.setdefault(key, value)
-        if "payload_json" in flat and isinstance(flat["payload_json"], (dict, list)):
-            flat["payload_json"] = json.dumps(flat["payload_json"], ensure_ascii=False, sort_keys=True)
+        for key, value in list(flat.items()):
+            if isinstance(value, (dict, list)):
+                flat[key] = json.dumps(value, ensure_ascii=False, sort_keys=True)
         normalized.append(flat)
     return pa.Table.from_pylist(normalized)
 

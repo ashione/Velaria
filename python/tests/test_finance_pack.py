@@ -44,6 +44,11 @@ from velaria.finance_pack.evidence_index import (
     finance_evidence_index_dir,
     load_finance_evidence_index,
 )
+from velaria.finance_pack.jobs import (
+    append_finance_job_event,
+    finance_job_payload,
+    latest_finance_jobs,
+)
 
 
 class FinancePackTest(unittest.TestCase):
@@ -766,6 +771,120 @@ class FinancePackTest(unittest.TestCase):
                 stop_payload = json.loads(stdout.getvalue())
                 self.assertEqual(stop_payload["action"], "watch-session-stop")
                 self.assertEqual(kill.call_args_list[-1].args[1].name, "SIGTERM")
+
+    def test_finance_job_events_are_persisted_and_latest_is_queryable(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-jobs-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                append_finance_job_event(
+                    finance_job_payload(
+                        job_id="job_session_test_watch",
+                        job_type="watch_session_job",
+                        watch_session_id="session_jobs",
+                        intelligence_id="intel_jobs",
+                        status="running",
+                        command=["finance", "watch-session", "start"],
+                        summary={"tick_count": 1},
+                    )
+                )
+                append_finance_job_event(
+                    finance_job_payload(
+                        job_id="job_session_test_watch",
+                        job_type="watch_session_job",
+                        watch_session_id="session_jobs",
+                        intelligence_id="intel_jobs",
+                        status="completed",
+                        command=["finance", "watch-session", "start"],
+                        summary={"tick_count": 3},
+                    )
+                )
+
+                jobs = latest_finance_jobs("session_jobs")
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["job_id"], "job_session_test_watch")
+        self.assertEqual(jobs[0]["status"], "completed")
+        self.assertEqual(jobs[0]["summary"]["tick_count"], 3)
+
+    def test_intelligence_jobs_status_stop_and_resume_use_durable_job_surface(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-intelligence-jobs-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                fake_process = mock.Mock()
+                fake_process.pid = 4321
+                with mock.patch("velaria.finance_pack.cli.subprocess.Popen", return_value=fake_process):
+                    stdout = StringIO()
+                    with redirect_stdout(stdout):
+                        exit_code = finance_cli_main(
+                            [
+                                "intelligence",
+                                "start",
+                                "--session-id",
+                                "session_jobs_cli",
+                                "--intelligence-id",
+                                "intel_jobs_cli",
+                                "--market",
+                                "us",
+                                "--symbols",
+                                "AAPL,MSFT,NVDA",
+                                "--start-date",
+                                "20260501",
+                                "--end-date",
+                                "20260518",
+                                "--iterations",
+                                "2",
+                                "--interval-sec",
+                                "1",
+                                "--async-run",
+                                "--format",
+                                "json",
+                            ]
+                        )
+                self.assertEqual(exit_code, 0)
+                start_payload = json.loads(stdout.getvalue())
+                self.assertEqual(start_payload["action"], "intelligence-async-start")
+
+                stdout = StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = finance_cli_main(["intelligence", "jobs", "--session-id", "session_jobs_cli", "--format", "json"])
+                self.assertEqual(exit_code, 0)
+                jobs_payload = json.loads(stdout.getvalue())
+                self.assertEqual(jobs_payload["action"], "intelligence-jobs")
+                self.assertGreaterEqual(jobs_payload["job_count"], 1)
+
+                stdout = StringIO()
+                with mock.patch("velaria.finance_pack.cli.os.kill") as kill:
+                    with mock.patch("velaria.finance_pack.cli._process_command_line", return_value="python -m velaria.finance_pack.cli watch-session start --session-id session_jobs_cli"):
+                        with redirect_stdout(stdout):
+                            exit_code = finance_cli_main(["intelligence", "status", "--session-id", "session_jobs_cli", "--format", "json"])
+                self.assertEqual(exit_code, 0)
+                status_payload = json.loads(stdout.getvalue())
+                self.assertEqual(status_payload["action"], "intelligence-status")
+                self.assertTrue(status_payload["process_running"])
+                kill.assert_called_once_with(4321, 0)
+
+                stdout = StringIO()
+                with mock.patch("velaria.finance_pack.cli.os.kill") as kill:
+                    with mock.patch("velaria.finance_pack.cli._process_command_line", return_value="python -m velaria.finance_pack.cli watch-session start --session-id session_jobs_cli"):
+                        with redirect_stdout(stdout):
+                            exit_code = finance_cli_main(["intelligence", "stop", "--session-id", "session_jobs_cli", "--format", "json"])
+                self.assertEqual(exit_code, 0)
+                stop_payload = json.loads(stdout.getvalue())
+                self.assertEqual(stop_payload["action"], "intelligence-stop")
+                self.assertTrue(stop_payload["signal_sent"])
+                self.assertEqual(kill.call_args_list[-1].args[1].name, "SIGTERM")
+
+                resumed_process = mock.Mock()
+                resumed_process.pid = 9876
+                stdout = StringIO()
+                with mock.patch("velaria.finance_pack.cli.subprocess.Popen", return_value=resumed_process) as popen:
+                    with mock.patch("velaria.finance_pack.cli._process_command_line", return_value="python unrelated.py"):
+                        with redirect_stdout(stdout):
+                            exit_code = finance_cli_main(["intelligence", "resume", "--session-id", "session_jobs_cli", "--format", "json"])
+                self.assertEqual(exit_code, 0)
+                resume_payload = json.loads(stdout.getvalue())
+                self.assertEqual(resume_payload["action"], "intelligence-resume")
+                self.assertTrue(resume_payload["resumed"])
+                self.assertEqual(resume_payload["run"]["pid"], 9876)
+                self.assertIn("watch-session", popen.call_args.args[0])
 
     def test_watch_session_review_persists_continuous_diagnostics(self):
         with tempfile.TemporaryDirectory(prefix="velaria-finance-watch-session-review-") as tmp:

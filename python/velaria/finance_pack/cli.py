@@ -45,6 +45,7 @@ from .evidence_index import (
     finance_evidence_index_metadata_for_payload,
     hybrid_search_finance_rows,
 )
+from .jobs import append_finance_job_event, finance_job_payload, latest_finance_jobs, watch_run_job_payload
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -323,6 +324,19 @@ def _build_parser() -> argparse.ArgumentParser:
     intelligence_search.add_argument("--feed", choices=FINANCE_EVIDENCE_FEEDS, default="all")
     intelligence_search.add_argument("--index-mode", choices=["auto", "rebuild", "off"], default="auto", help="auto reuses or refreshes a persisted evidence index, rebuild forces refresh, off uses a temporary in-memory index.")
     _add_report_format(intelligence_search)
+    intelligence_jobs = intelligence_subparsers.add_parser("jobs", help="List durable finance intelligence jobs.")
+    intelligence_jobs.add_argument("--session-id", help="Durable watch-session id. Omit to list recent jobs for all sessions.")
+    _add_report_format(intelligence_jobs)
+    intelligence_status = intelligence_subparsers.add_parser("status", help="Inspect durable finance intelligence runtime status.")
+    intelligence_status.add_argument("--session-id", required=True, help="Durable watch-session id to inspect.")
+    intelligence_status.add_argument("--log-limit", type=int, default=20, help="Number of runtime log lines to include.")
+    _add_report_format(intelligence_status)
+    intelligence_stop = intelligence_subparsers.add_parser("stop", help="Request stop for a durable finance intelligence runtime.")
+    intelligence_stop.add_argument("--session-id", required=True, help="Durable watch-session id to stop.")
+    _add_report_format(intelligence_stop)
+    intelligence_resume = intelligence_subparsers.add_parser("resume", help="Resume a stopped finance intelligence runtime from its durable argv.")
+    intelligence_resume.add_argument("--session-id", required=True, help="Durable watch-session id to resume.")
+    _add_report_format(intelligence_resume)
     intelligence_supervise = intelligence_subparsers.add_parser("supervise", help="Continuously review and persist intelligence notes inside the CLI process.")
     intelligence_supervise.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
     intelligence_supervise.add_argument("--session-id", required=True, help="Durable watch-session id to supervise.")
@@ -563,6 +577,14 @@ def _intelligence(args: argparse.Namespace) -> int:
         return _intelligence_index(args)
     if command == "search":
         return _intelligence_search(args)
+    if command == "jobs":
+        return _intelligence_jobs(args)
+    if command == "status":
+        return _intelligence_status(args)
+    if command == "stop":
+        return _intelligence_stop(args)
+    if command == "resume":
+        return _intelligence_resume(args)
     if command == "supervise":
         return _intelligence_supervise(args)
     raise AssertionError(f"unhandled intelligence command: {command}")
@@ -583,6 +605,13 @@ def _intelligence_start(args: argparse.Namespace) -> int:
                 raw_sources={},
                 tick_count=0,
             )
+        )
+        _append_finance_watch_job(
+            watch_session_id=session_id,
+            intelligence_id=intelligence_id,
+            status="running",
+            run=dict(watch_payload.get("run") or {}),
+            summary={"tick_count": 0, "mode": "async"},
         )
         payload = {
             "ok": True,
@@ -633,6 +662,13 @@ def _intelligence_start(args: argparse.Namespace) -> int:
             summary=summary,
             diagnostics=[],
         )
+    )
+    _append_finance_watch_job(
+        watch_session_id=session_id,
+        intelligence_id=intelligence_id,
+        status=str(watch_session.get("status") or "completed"),
+        run={},
+        summary={"tick_count": int(watch_payload.get("tick_count") or 0), "mode": "sync"},
     )
     payload = {
         "ok": True,
@@ -1633,6 +1669,14 @@ def _intelligence_review(args: argparse.Namespace) -> int:
             diagnostics=review["diagnostics"],
         )
     )
+    _append_finance_artifact_job(
+        job_type="review_job",
+        intelligence_id=intelligence_id,
+        watch_session_id=args.session_id,
+        status="completed",
+        summary={"diagnostic_count": int(review.get("diagnostic_count") or 0)},
+        artifacts={"ai_note_event_id": note.get("event_id")},
+    )
     payload = {
         "ok": True,
         "action": "intelligence-review",
@@ -1655,6 +1699,14 @@ def _intelligence_replay(args: argparse.Namespace) -> int:
     summary = _compact_watch_session_summary(_summarize_watch_session(session))
     replay = _intelligence_replay_payload(intelligence_id=intelligence_id, watch_session_id=args.session_id, rows=rows, summary=summary)
     persisted = _append_intelligence_replay_event(replay)
+    _append_finance_artifact_job(
+        job_type="replay_job",
+        intelligence_id=intelligence_id,
+        watch_session_id=args.session_id,
+        status="completed",
+        summary={"event_count": int(replay.get("event_count") or 0), "signal_count": int(replay.get("signal_count") or 0)},
+        artifacts={"replay_event_id": persisted.get("event_id")},
+    )
     payload = {
         "ok": True,
         "action": "intelligence-replay",
@@ -1687,6 +1739,14 @@ def _intelligence_report(args: argparse.Namespace) -> int:
             diagnostics=list(report.get("diagnostics") or []),
             note_type="agent_final_scorecard",
         )
+    )
+    _append_finance_artifact_job(
+        job_type="report_job",
+        intelligence_id=intelligence_id,
+        watch_session_id=args.session_id,
+        status="completed",
+        summary={"candidate_count": int(report.get("candidate_count") or 0), "signal_count": int(report.get("signal_count") or 0)},
+        artifacts={"report_event_id": persisted.get("event_id"), "ai_note_event_id": ai_note.get("event_id")},
     )
     payload = {
         "ok": True,
@@ -1724,6 +1784,14 @@ def _intelligence_index(args: argparse.Namespace) -> int:
             feed=feed,
             index=index,
         )
+    )
+    _append_finance_artifact_job(
+        job_type="evidence_index_job",
+        intelligence_id=intelligence_id,
+        watch_session_id=args.session_id,
+        status="completed",
+        summary={"feed": feed, "doc_count": int(index.get("doc_count") or 0), "index_status": index.get("status")},
+        artifacts={"index_event_id": persisted.get("event_id"), "index_dir": index.get("index_dir")},
     )
     payload = {
         "ok": True,
@@ -1769,6 +1837,14 @@ def _intelligence_search(args: argparse.Namespace) -> int:
             )
         )
     persisted = _append_intelligence_search_event(search)
+    _append_finance_artifact_job(
+        job_type="evidence_search_job",
+        intelligence_id=intelligence_id,
+        watch_session_id=args.session_id,
+        status="completed",
+        summary={"query_text": str(args.query), "hit_count": int(search.get("hit_count") or 0), "feed": str(args.feed)},
+        artifacts={"search_event_id": persisted.get("event_id")},
+    )
     payload = {
         "ok": True,
         "action": "intelligence-search",
@@ -1779,6 +1855,268 @@ def _intelligence_search(args: argparse.Namespace) -> int:
         "data_plane": _intelligence_data_plane(dict(session.get("sources") or {}), summary),
         "ai_plane": _intelligence_ai_plane(intelligence_id=intelligence_id, watch_session_id=args.session_id, summary=summary),
         "disclaimer": "Research evidence search only; not investment advice.",
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_intelligence_report(payload))
+    return 0
+
+
+def _append_finance_watch_job(
+    *,
+    watch_session_id: str,
+    intelligence_id: str | None,
+    status: str,
+    run: dict[str, Any],
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    return append_finance_job_event(
+        finance_job_payload(
+            job_id=f"watch_session:{watch_session_id}",
+            job_type="watch_session_job",
+            watch_session_id=watch_session_id,
+            intelligence_id=intelligence_id,
+            status=status,
+            command=[str(item) for item in (run.get("argv") or [])],
+            summary=summary,
+            artifacts={"log_path": run.get("log_path")} if run else {},
+            run=run,
+            next_steps=[
+                f"finance intelligence status --session-id {watch_session_id} --format json",
+                f"finance intelligence search --session-id {watch_session_id} --query \"market news signal\" --format json",
+                f"finance intelligence report --session-id {watch_session_id} --format json",
+            ],
+        )
+    )
+
+
+def _append_finance_artifact_job(
+    *,
+    job_type: str,
+    intelligence_id: str,
+    watch_session_id: str,
+    status: str,
+    summary: dict[str, Any],
+    artifacts: dict[str, Any],
+) -> dict[str, Any]:
+    return append_finance_job_event(
+        finance_job_payload(
+            job_id=f"{job_type}:{intelligence_id}:{watch_session_id}",
+            job_type=job_type,
+            watch_session_id=watch_session_id,
+            intelligence_id=intelligence_id,
+            status=status,
+            command=[],
+            summary=summary,
+            artifacts=artifacts,
+            next_steps=[
+                f"finance intelligence jobs --session-id {watch_session_id} --format json",
+                f"finance intelligence status --session-id {watch_session_id} --format json",
+            ],
+        )
+    )
+
+
+def _intelligence_job_views(
+    session_id: str | None,
+    *,
+    session: dict[str, Any] | None = None,
+    run: dict[str, Any] | None = None,
+    process_running: bool | None = None,
+    effective_status: str | None = None,
+) -> list[dict[str, Any]]:
+    jobs = latest_finance_jobs(session_id)
+    if not session_id:
+        return jobs
+    run = run if run is not None else _get_watch_session_run_or_none(session_id)
+    if run:
+        session = session if session is not None else _get_watch_session_or_none(session_id)
+        process_running = _watch_session_run_process_running(run) if process_running is None else process_running
+        effective_status = effective_status or _watch_session_effective_status(session=session, run=run, process_running=process_running)
+        watch_job = watch_run_job_payload(
+            run,
+            intelligence_id=_make_intelligence_id(session_id),
+            effective_status=effective_status,
+            summary={"process_running": process_running, "effective_status": effective_status},
+        )
+        existing = {str(job.get("job_id") or ""): job for job in jobs}
+        existing[str(watch_job.get("job_id"))] = watch_job
+        jobs = sorted(existing.values(), key=lambda item: str(item.get("updated_at") or item.get("event_time") or ""), reverse=True)
+    return jobs
+
+
+def _intelligence_jobs(args: argparse.Namespace) -> int:
+    jobs = _intelligence_job_views(getattr(args, "session_id", None))
+    payload = {
+        "ok": True,
+        "action": "intelligence-jobs",
+        "watch_session_id": getattr(args, "session_id", None),
+        "jobs": jobs,
+        "job_count": len(jobs),
+        "disclaimer": "Research runtime status only; not investment advice.",
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_intelligence_report(payload))
+    return 0
+
+
+def _intelligence_status(args: argparse.Namespace) -> int:
+    session = _get_watch_session_or_none(args.session_id)
+    run = _get_watch_session_run_or_none(args.session_id)
+    process_running = _watch_session_run_process_running(run)
+    effective_status = _watch_session_effective_status(session=session, run=run, process_running=process_running)
+    log_path, log_lines = _read_watch_session_log_lines(run, limit=max(0, int(args.log_limit)))
+    summary = _compact_watch_session_summary(_summarize_watch_session(session)) if session else _empty_watch_session_summary(session_id=args.session_id)
+    payload = {
+        "ok": bool(session or run),
+        "action": "intelligence-status",
+        "watch_session_id": args.session_id,
+        "watch_session": session,
+        "run": run,
+        "process_running": process_running,
+        "process_identity_verified": process_running,
+        "effective_status": effective_status,
+        "summary": summary,
+        "jobs": _intelligence_job_views(args.session_id, session=session, run=run, process_running=process_running, effective_status=effective_status),
+        "log_path": str(log_path) if run and run.get("log_path") else None,
+        "log_lines": log_lines,
+        "error_type": None if (session or run) else "watch_session_not_found",
+        "message": None if (session or run) else f"Finance watch session not found: {args.session_id}",
+        "hint": None if (session or run) else "Start one with finance intelligence start --async-run --format json.",
+        "disclaimer": "Research runtime status only; not investment advice.",
+    }
+    if args.report_format == "json":
+        return _emit_json(payload, exit_code=0 if payload["ok"] else 1)
+    print(_render_intelligence_report(payload))
+    return 0 if payload["ok"] else 1
+
+
+def _intelligence_stop(args: argparse.Namespace) -> int:
+    run = _get_watch_session_run_or_none(args.session_id)
+    if not run:
+        payload = {
+            "ok": False,
+            "action": "intelligence-stop",
+            "watch_session_id": args.session_id,
+            "signal_sent": False,
+            "error_type": "watch_session_runtime_not_found",
+            "message": f"Finance watch session runtime not found: {args.session_id}",
+            "hint": "Start the session with finance intelligence start --async-run, or inspect durable data with finance intelligence status.",
+        }
+        return _emit_json(payload, exit_code=1)
+    pid = int(run.get("pid") or 0)
+    process_running = _watch_session_run_process_running(run)
+    signal_sent = False
+    if process_running:
+        os.kill(pid, signal.SIGTERM)
+        signal_sent = True
+    stopped = {
+        **run,
+        "status": "stop_requested" if signal_sent else "not_running",
+        "updated_at": _utc_payload_time(),
+        "event_time": _utc_payload_time(),
+        "event_type": "watch_session_stop_requested" if signal_sent else "watch_session_stop_not_running",
+        "source_key": args.session_id,
+    }
+    _append_watch_session_run_event(stopped)
+    _append_finance_watch_job(
+        watch_session_id=args.session_id,
+        intelligence_id=_make_intelligence_id(args.session_id),
+        status=str(stopped["status"]),
+        run=stopped,
+        summary={"process_running": process_running, "signal_sent": signal_sent},
+    )
+    payload = {
+        "ok": True,
+        "action": "intelligence-stop",
+        "watch_session_id": args.session_id,
+        "run": stopped,
+        "process_running": process_running,
+        "process_identity_verified": process_running,
+        "signal_sent": signal_sent,
+        "jobs": _intelligence_job_views(args.session_id, run=stopped, process_running=False, effective_status=str(stopped["status"])),
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_intelligence_report(payload))
+    return 0
+
+
+def _intelligence_resume(args: argparse.Namespace) -> int:
+    run = _get_watch_session_run_or_none(args.session_id)
+    if not run:
+        payload = {
+            "ok": True,
+            "action": "intelligence-resume",
+            "watch_session_id": args.session_id,
+            "resumed": False,
+            "error_type": "resume_unavailable",
+            "message": f"Finance watch session runtime not found: {args.session_id}",
+            "hint": "Resume needs a prior async run record with argv. Start with finance intelligence start --async-run.",
+        }
+        return _emit_json(payload)
+    if _watch_session_run_process_running(run):
+        payload = {
+            "ok": True,
+            "action": "intelligence-resume",
+            "watch_session_id": args.session_id,
+            "resumed": False,
+            "already_running": True,
+            "run": run,
+            "jobs": _intelligence_job_views(args.session_id, run=run, process_running=True, effective_status="running"),
+        }
+        return _emit_json(payload) if args.report_format == "json" else 0
+    argv = [str(item) for item in (run.get("argv") or []) if str(item)]
+    if not argv:
+        payload = {
+            "ok": True,
+            "action": "intelligence-resume",
+            "watch_session_id": args.session_id,
+            "resumed": False,
+            "error_type": "resume_unavailable",
+            "message": "The durable runtime record does not contain a restart argv.",
+            "hint": "Restart by running finance intelligence start with the intended providers and symbols.",
+        }
+        return _emit_json(payload)
+    log_path = pathlib.Path(str(run.get("log_path") or (get_finance_watch_session_run_dir() / f"{args.session_id}.jsonl")))
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("ab") as log_handle:
+        process = subprocess.Popen(
+            argv,
+            cwd=str(pathlib.Path.cwd()),
+            env=os.environ.copy(),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    resumed = {
+        **run,
+        "status": "running",
+        "pid": int(process.pid),
+        "process_identity": _watch_session_process_identity(pid=int(process.pid), argv=argv, session_id=args.session_id),
+        "log_path": str(log_path),
+        "argv": argv,
+        "updated_at": _utc_payload_time(),
+        "event_time": _utc_payload_time(),
+        "event_type": "watch_session_async_resume",
+        "source_key": args.session_id,
+    }
+    _append_watch_session_run_event(resumed)
+    _append_finance_watch_job(
+        watch_session_id=args.session_id,
+        intelligence_id=_make_intelligence_id(args.session_id),
+        status="running",
+        run=resumed,
+        summary={"resumed": True},
+    )
+    payload = {
+        "ok": True,
+        "action": "intelligence-resume",
+        "watch_session_id": args.session_id,
+        "resumed": True,
+        "run": resumed,
+        "jobs": _intelligence_job_views(args.session_id, run=resumed, process_running=True, effective_status="running"),
     }
     if args.report_format == "json":
         return _emit_json(payload)

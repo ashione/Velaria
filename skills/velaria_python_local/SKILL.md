@@ -260,6 +260,22 @@ uv run --project python --extra finance python python/velaria_cli.py finance int
   --top-k 5 \
   --format json
 
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence jobs \
+  --session-id us_watch_20260519 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence status \
+  --session-id us_watch_20260519 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence stop \
+  --session-id us_watch_20260519 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence resume \
+  --session-id us_watch_20260519 \
+  --format json
+
 uv run --project python --extra finance python python/velaria_cli.py finance watch-session start \
   --session-id us_watch_async_20260519 \
   --market us \
@@ -365,6 +381,10 @@ finance intelligence replay --session-id us_watch_async_20260519 --format json
 finance intelligence index --session-id us_watch_async_20260519 --format json
 finance intelligence search --session-id us_watch_async_20260519 --query "NVDA momentum risk news fundamentals" --format json
 finance intelligence report --session-id us_watch_async_20260519 --format json
+finance intelligence jobs --session-id us_watch_async_20260519 --format json
+finance intelligence status --session-id us_watch_async_20260519 --format json
+finance intelligence stop --session-id us_watch_async_20260519 --format json
+finance intelligence resume --session-id us_watch_async_20260519 --format json
 finance watch-session start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --format json
 finance watch-session start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --async-run --format json
 finance watch-session status --session-id us_watch_async_20260519 --format json
@@ -387,7 +407,7 @@ finance watch --market cn --symbol 000001 --interval-sec 30 --iterations 0 --jso
 - `finance rank-candidates` 输出 `research_candidates`，不是买卖建议；Agent 自动化应传 `--format json`、持续模式 `--jsonl`，native stream 模式 `--native-stream --ingest-raw`，或 agentic stream monitor 模式 `--stream-monitor --until-time <RFC3339>`
 - `finance rank-candidates --signal-policy-preset balanced|momentum|defensive` 先用可解释 policy 计算 `entry_signal` / `exit_signal`，再交给 native stream SQL 的 `WHERE entry_signal >= 1 OR exit_signal >= 1` 过滤；如果需要自定义，传 `--signal-policy` JSON，格式为 `entry.all` / `entry.any` / `exit.all` / `exit.any` 条件列表
 - `finance intelligence start` 是产品化主入口，复用 watch-session 的 public provider、raw ingestion 和 Velaria native realtime stream 链路，并额外写入 `finance_intelligence_sessions` 和 `finance_intelligence_ai_notes`
-- `finance intelligence review` 读取同一个 watch-session 的进程、日志、feed 计数和信号摘要，沉淀 agent-readable AI note；`finance intelligence replay` 只从已持久化的实时 feed 读取，不重新请求 provider；`finance intelligence index` 将 evidence docs、BM25 keyword index 和 metadata fingerprint 写入 `$VELARIA_HOME/finance/evidence_indexes/` 并登记 `finance_intelligence_evidence_indexes`；`finance intelligence search` 默认 `--index-mode auto`，命中同指纹索引时返回 `retrieval.index_status=hit`，缺失或过期时重建，并写入 `finance_intelligence_searches`；finance intelligence 产品路径不使用 hash embedding，未显式接入真实生产 embedding provider 前 `retrieval.semantic.status=disabled`；`finance intelligence report` 生成并持久化最终 scorecard、supervisor checks 和 replayable research summary
+- `finance intelligence review` 读取同一个 watch-session 的进程、日志、feed 计数和信号摘要，沉淀 agent-readable AI note；`finance intelligence replay` 只从已持久化的实时 feed 读取，不重新请求 provider；`finance intelligence index` 将 evidence docs、BM25 keyword index 和 metadata fingerprint 写入 `$VELARIA_HOME/finance/evidence_indexes/` 并登记 `finance_intelligence_evidence_indexes`；`finance intelligence search` 默认 `--index-mode auto`，命中同指纹索引时返回 `retrieval.index_status=hit`，缺失或过期时重建，并写入 `finance_intelligence_searches`；finance intelligence 产品路径不使用 hash embedding，未显式接入真实生产 embedding provider 前 `retrieval.semantic.status=disabled`；`finance intelligence report` 生成并持久化最终 scorecard、supervisor checks 和 replayable research summary；`finance intelligence jobs/status/stop/resume` 暴露 `finance_intelligence_jobs` 与 `finance_watch_session_runs` 的 durable job surface，供 Agent 查询、停止和恢复长时间运行的 intelligence session
 - `finance intelligence supervise --iterations 0` 在 CLI 内持续运行 review loop，适合 agent 通过 `velaria_cli_run` 长时间观察、调试和复盘；输出仍是研究证据，不是投资建议
 - `finance watch-session start` 输出完整盯盘会话 JSON，包含 `watch_session`、`raw_sources`、`native_stream`、`ticks`、`research_candidates`、`stream_signals`；它会默认启用 native stream 和 raw ingestion
 - `finance watch-session start --async-run` 会在后台 CLI 进程中运行同一条 core native stream 链路，前台返回 `pid`、`log_path` 和后续命令；Agent 自动化应随后调用 `status/logs/signals/summarize/stop`

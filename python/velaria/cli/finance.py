@@ -38,6 +38,10 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               velaria finance intelligence report --session-id finance_us_watch_20260519T133000Z --format json
               velaria finance intelligence index --session-id finance_us_watch_20260519T133000Z --format json
               velaria finance intelligence search --session-id finance_us_watch_20260519T133000Z --query "NVDA momentum risk news fundamentals" --format json
+              velaria finance intelligence jobs --session-id finance_us_watch_20260519T133000Z --format json
+              velaria finance intelligence status --session-id finance_us_watch_20260519T133000Z --format json
+              velaria finance intelligence stop --session-id finance_us_watch_20260519T133000Z --format json
+              velaria finance intelligence resume --session-id finance_us_watch_20260519T133000Z --format json
               velaria finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00
               velaria finance fetch-quotes --provider tencent --market cn --symbols 000001,600519
@@ -70,6 +74,10 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               finance intelligence report --session-id finance_us_watch_20260519T133000Z --format json
               finance intelligence index --session-id finance_us_watch_20260519T133000Z --format json
               finance intelligence search --session-id finance_us_watch_20260519T133000Z --query "NVDA momentum risk news fundamentals" --format json
+              finance intelligence jobs --session-id finance_us_watch_20260519T133000Z --format json
+              finance intelligence status --session-id finance_us_watch_20260519T133000Z --format json
+              finance intelligence stop --session-id finance_us_watch_20260519T133000Z --format json
+              finance intelligence resume --session-id finance_us_watch_20260519T133000Z --format json
               finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00 --format json
               finance fetch-news --provider google-news --market us --symbol AAPL --limit 5
@@ -259,6 +267,19 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
     intelligence_search.add_argument("--index-mode", choices=["auto", "rebuild", "off"], default="auto", help="auto reuses or refreshes a persisted evidence index, rebuild forces refresh, off uses a temporary in-memory index.")
     _add_report_format(intelligence_search)
+    intelligence_jobs = intelligence_subparsers.add_parser("jobs", help="List durable finance intelligence jobs.")
+    intelligence_jobs.add_argument("--session-id", help="Durable watch-session id. Omit to list recent jobs for all sessions.")
+    _add_report_format(intelligence_jobs)
+    intelligence_status = intelligence_subparsers.add_parser("status", help="Inspect durable finance intelligence runtime status.")
+    intelligence_status.add_argument("--session-id", required=True, help="Durable watch-session id to inspect.")
+    intelligence_status.add_argument("--log-limit", type=int, default=20, help="Number of runtime log lines to include.")
+    _add_report_format(intelligence_status)
+    intelligence_stop = intelligence_subparsers.add_parser("stop", help="Request stop for a durable finance intelligence runtime.")
+    intelligence_stop.add_argument("--session-id", required=True, help="Durable watch-session id to stop.")
+    _add_report_format(intelligence_stop)
+    intelligence_resume = intelligence_subparsers.add_parser("resume", help="Resume a stopped finance intelligence runtime from its durable argv.")
+    intelligence_resume.add_argument("--session-id", required=True, help="Durable watch-session id to resume.")
+    _add_report_format(intelligence_resume)
     intelligence_supervise = intelligence_subparsers.add_parser("supervise", help="Continuously review and persist intelligence notes.")
     intelligence_supervise.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
     intelligence_supervise.add_argument("--session-id", required=True, help="Durable watch-session id to supervise.")

@@ -17,6 +17,7 @@ from velaria.finance_pack import (
     classify_information_source,
     evaluate_news_sentiment,
     fetch_fundamentals,
+    fetch_news,
     fetch_quotes,
     normalize_history_frame,
     normalize_provider,
@@ -207,6 +208,7 @@ class FinancePackTest(unittest.TestCase):
         self.assertTrue(configured_policy["configured"])
         self.assertEqual(configured_policy["source"], "VELARIA_SEC_USER_AGENT")
         self.assertEqual(configured_policy["user_agent"], "VelariaFinanceTest/1.0 ops@example.com")
+        self.assertEqual(configured_policy["provider"], "sec")
 
     def test_sec_companyfacts_fetch_uses_configured_user_agent(self):
         captured_user_agents: list[str | None] = []
@@ -246,6 +248,17 @@ class FinancePackTest(unittest.TestCase):
         self.assertEqual(rows[0]["provider"], "sec-companyfacts")
         self.assertEqual(rows[0]["revenue"], 300)
         self.assertEqual(captured_user_agents, ["VelariaFinanceTest/1.0 ops@example.com", "VelariaFinanceTest/1.0 ops@example.com"])
+
+    def test_sec_filings_ticker_map_failure_is_agent_friendly(self):
+        with mock.patch("velaria.finance_pack._fetch_sec_ticker_map", side_effect=OSError("network down")):
+            with self.assertRaises(FinanceProviderError) as ctx:
+                fetch_news(provider="sec-filings", market="us", symbol="AAPL")
+
+        error = ctx.exception
+        self.assertEqual(error.error_type, "provider_fetch_failed")
+        self.assertIn("SEC ticker map fetch failed", str(error))
+        self.assertIn("source_url", error.details)
+        self.assertEqual(error.details["provider"], "sec-filings")
 
     def test_yahoo_quote_provider_uses_chart_meta(self):
         payload = {
@@ -2162,6 +2175,10 @@ class FinancePackTest(unittest.TestCase):
         self.assertEqual(rows[0]["close"], 10.5)
         self.assertEqual(rows[0]["volume"], 1000)
         self.assertEqual(rows[0]["freshness"], "eod")
+        self.assertEqual(rows[0]["source_category"], "market_data")
+        self.assertEqual(rows[0]["source_type"], "quote_history")
+        self.assertGreater(rows[0]["source_score"], 0.0)
+        self.assertIn("historical bars", rows[0]["source_score_reason"])
 
     def test_pipeline_cli_fetches_history_subscribes_and_analyzes(self):
         history_rows = [

@@ -404,7 +404,13 @@ def _build_parser() -> argparse.ArgumentParser:
     news.add_argument("--provider", default="google-news", choices=provider_names_for_operation("fetch_news"))
     news.add_argument("--market", required=True, choices=["cn", "us"])
     news.add_argument("--symbol", required=True, help="Single symbol, e.g. 000001 or AAPL.")
-    news.add_argument("--query", help="Override provider search query. Defaults to a market-aware symbol query.")
+    news.add_argument(
+        "--query",
+        help=(
+            "Provider-specific query override: google-news uses it as the RSS search query; "
+            "sec-filings treats values like 10-Q/8-K as filing form filters; yahoo-finance-news uses the symbol feed."
+        ),
+    )
     news.add_argument("--limit", type=int, default=5, help="Maximum news rows to fetch.")
     _add_output(news)
 
@@ -2943,7 +2949,7 @@ def _run_doctor(args: argparse.Namespace) -> int:
             ),
             "hint": sec_policy["hint"],
             "evidence": {
-                "provider": sec_policy["provider"],
+                "provider": "sec",
                 "source": sec_policy["source"],
                 "configured": sec_policy["configured"],
                 "user_agent": sec_policy["user_agent"],

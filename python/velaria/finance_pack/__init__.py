@@ -210,7 +210,7 @@ def sec_user_agent_policy() -> dict[str, Any]:
     configured = os.environ.get(SEC_USER_AGENT_ENV, "").strip()
     if configured:
         return {
-            "provider": "sec-companyfacts",
+            "provider": "sec",
             "configured": True,
             "source": SEC_USER_AGENT_ENV,
             "user_agent": configured,
@@ -218,7 +218,7 @@ def sec_user_agent_policy() -> dict[str, Any]:
             "hint": f"SEC User-Agent is configured from {SEC_USER_AGENT_ENV}.",
         }
     return {
-        "provider": "sec-companyfacts",
+        "provider": "sec",
         "configured": False,
         "source": "default",
         "user_agent": DEFAULT_SEC_USER_AGENT,
@@ -701,7 +701,7 @@ def parse_yahoo_chart_payload(
             hint="Check the Yahoo provider symbol and date range.",
             details={"provider": "yahoo", "market": market, "symbol": symbol, "provider_symbol": yahoo_symbol},
         )
-    return rows
+    return [enrich_information_source(row) for row in rows]
 
 
 def parse_yahoo_quote_payload(
@@ -1310,7 +1310,15 @@ def _fetch_sec_filings(
             hint="Use market 'us' with provider sec-filings, or use a news provider that supports the selected market.",
             details={"provider": "sec-filings", "market": market, "symbol": symbol},
         )
-    cik_by_symbol = _fetch_sec_ticker_map()
+    try:
+        cik_by_symbol = _fetch_sec_ticker_map()
+    except Exception as exc:  # pragma: no cover - exercised by unit tests and network smoke
+        raise FinanceProviderError(
+            f"SEC ticker map fetch failed for filings: {exc}",
+            error_type="provider_fetch_failed",
+            hint=f"Set {SEC_USER_AGENT_ENV}, verify network access to SEC, and retry later.",
+            details={"provider": "sec-filings", "market": market, "symbol": symbol, "source_url": SEC_COMPANY_TICKERS_URL},
+        ) from exc
     cik = cik_by_symbol.get(symbol.upper())
     if not cik:
         return [

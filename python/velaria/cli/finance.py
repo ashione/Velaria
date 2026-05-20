@@ -350,12 +350,18 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     news = finance_subparsers.add_parser(
         "fetch-news",
         help="Fetch public news rows and sentiment evidence.",
-        description="Fetch public RSS news rows and emit lightweight, transparent sentiment evidence.",
+        description="Fetch public news, finance news, or regulatory filing evidence rows with transparent sentiment metadata.",
     )
     news.add_argument("--provider", default="google-news", choices=provider_names_for_operation("fetch_news"), help="Public news provider.")
     news.add_argument("--market", required=True, choices=["cn", "us"], help="Market: cn for A-share, us for U.S. stocks.")
     news.add_argument("--symbol", required=True, help="Single symbol, e.g. 000001 or AAPL.")
-    news.add_argument("--query", help="Override provider search query. Defaults to a market-aware symbol query.")
+    news.add_argument(
+        "--query",
+        help=(
+            "Provider-specific query override: google-news uses it as the RSS search query; "
+            "sec-filings treats values like 10-Q/8-K as filing form filters; yahoo-finance-news uses the symbol feed."
+        ),
+    )
     news.add_argument("--limit", type=int, default=5, help="Maximum news rows to fetch.")
     _add_output(news)
 

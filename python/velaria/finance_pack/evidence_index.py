@@ -5,6 +5,7 @@ import json
 import pathlib
 import shutil
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -27,6 +28,138 @@ FINANCE_EVIDENCE_FEEDS = (
 FINANCE_EVIDENCE_INDEX_VERSION = 2
 FINANCE_EVIDENCE_SEMANTIC_STATUS = "disabled"
 FINANCE_EVIDENCE_SEMANTIC_REASON = "semantic retrieval requires an explicitly configured production embedding provider"
+
+
+@dataclass(frozen=True)
+class EvidenceSearchOptions:
+    feed: str = "all"
+    top_k: int = 5
+    index_mode: str = "auto"
+
+
+@dataclass(frozen=True)
+class EvidenceSearchResult:
+    hits: list[dict[str, Any]]
+    index_ref: dict[str, Any]
+    retrieval: dict[str, Any]
+
+
+class FinanceEvidenceRetriever:
+    retriever_name = "finance_evidence_retriever"
+    retriever_version = "v1"
+
+    def build_index(
+        self,
+        *,
+        intelligence_id: str,
+        watch_session_id: str,
+        rows: list[dict[str, Any]],
+        feed: str,
+    ) -> dict[str, Any]:
+        index = build_finance_evidence_index(
+            intelligence_id=intelligence_id,
+            watch_session_id=watch_session_id,
+            rows=rows,
+            feed=feed,
+        )
+        index.setdefault("retriever", self.retriever_name)
+        index.setdefault("retriever_version", self.retriever_version)
+        return index
+
+    def load_index(
+        self,
+        *,
+        watch_session_id: str,
+        feed: str,
+        expected_fingerprint: str,
+    ) -> tuple[dict[str, Any] | None, str]:
+        return load_finance_evidence_index(watch_session_id=watch_session_id, feed=feed, expected_fingerprint=expected_fingerprint)
+
+    def resolve_index(
+        self,
+        *,
+        intelligence_id: str,
+        watch_session_id: str,
+        rows: list[dict[str, Any]],
+        feed: str,
+        index_mode: str,
+    ) -> dict[str, Any]:
+        return resolve_finance_evidence_search_index(
+            intelligence_id=intelligence_id,
+            watch_session_id=watch_session_id,
+            rows=rows,
+            feed=feed,
+            index_mode=index_mode,
+        )
+
+    def search_rows(
+        self,
+        *,
+        intelligence_id: str,
+        watch_session_id: str,
+        rows: list[dict[str, Any]],
+        query_text: str,
+        options: EvidenceSearchOptions | None = None,
+    ) -> EvidenceSearchResult:
+        effective = options or EvidenceSearchOptions()
+        index_ref = self.resolve_index(
+            intelligence_id=intelligence_id,
+            watch_session_id=watch_session_id,
+            rows=rows,
+            feed=effective.feed,
+            index_mode=effective.index_mode,
+        )
+        return self.search_docs(
+            docs=index_ref["docs"],
+            query_text=query_text,
+            top_k=effective.top_k,
+            index_ref=index_ref,
+            index_mode=effective.index_mode,
+        )
+
+    def search_docs(
+        self,
+        *,
+        docs: list[dict[str, Any]],
+        query_text: str,
+        top_k: int,
+        index_ref: dict[str, Any] | None = None,
+        index_mode: str = "off",
+    ) -> EvidenceSearchResult:
+        index_ref = index_ref or {
+            "index_status": "off",
+            "index_path": None,
+            "fingerprint": None,
+            "docs": docs,
+        }
+        hits = hybrid_search_finance_docs(
+            docs=docs,
+            query_text=query_text,
+            top_k=top_k,
+            keyword_index_dir=index_ref.get("keyword_index_path"),
+        )
+        retrieval = {
+            "mode": "finance_evidence_hybrid_search",
+            "retriever": self.retriever_name,
+            "retriever_version": self.retriever_version,
+            "keyword": "bm25_keyword_index",
+            "semantic": {
+                "status": FINANCE_EVIDENCE_SEMANTIC_STATUS,
+                "reason": FINANCE_EVIDENCE_SEMANTIC_REASON,
+            },
+            "fusion": "rrf",
+            "rank_constant": 60,
+            "structured_features": ["feed_priority", "symbol_match", "signal_priority", "recency"],
+            "index_mode": index_mode,
+            "index_status": index_ref["index_status"],
+            "index_path": index_ref.get("index_path"),
+            "index_fingerprint": index_ref.get("fingerprint"),
+            "doc_count": len(docs),
+        }
+        return EvidenceSearchResult(hits=hits, index_ref=index_ref, retrieval=retrieval)
+
+
+DEFAULT_FINANCE_EVIDENCE_RETRIEVER = FinanceEvidenceRetriever()
 
 
 def hybrid_search_finance_rows(*, rows: list[dict[str, Any]], query_text: str, top_k: int) -> list[dict[str, Any]]:
@@ -254,6 +387,8 @@ def build_finance_evidence_index(
         "built_at": built_at,
         "row_count": len(rows),
         "doc_count": len(docs),
+        "retriever": FinanceEvidenceRetriever.retriever_name,
+        "retriever_version": FinanceEvidenceRetriever.retriever_version,
         "semantic_status": FINANCE_EVIDENCE_SEMANTIC_STATUS,
         "semantic_reason": FINANCE_EVIDENCE_SEMANTIC_REASON,
         "index_path": str(index_dir),

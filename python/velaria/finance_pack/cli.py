@@ -36,14 +36,14 @@ from . import (
     provider_names_for_operation,
 )
 from .evidence_index import (
+    DEFAULT_FINANCE_EVIDENCE_RETRIEVER,
+    EvidenceSearchOptions,
     FINANCE_EVIDENCE_FEEDS,
     FINANCE_EVIDENCE_SEMANTIC_REASON,
     FINANCE_EVIDENCE_SEMANTIC_STATUS,
     build_finance_evidence_index,
     finance_evidence_index_metadata_for_payload,
-    hybrid_search_finance_docs,
     hybrid_search_finance_rows,
-    resolve_finance_evidence_search_index,
 )
 
 
@@ -2248,20 +2248,16 @@ def _intelligence_search_payload(
     feed: str,
     index_mode: str = "auto",
 ) -> dict[str, Any]:
-    index_ref = resolve_finance_evidence_search_index(
+    result = DEFAULT_FINANCE_EVIDENCE_RETRIEVER.search_rows(
         intelligence_id=intelligence_id,
         watch_session_id=watch_session_id,
         rows=rows,
-        feed=feed,
-        index_mode=index_mode,
-    )
-    hits = hybrid_search_finance_docs(
-        docs=index_ref["docs"],
         query_text=query_text,
-        top_k=top_k,
-        keyword_index_dir=index_ref.get("keyword_index_path"),
+        options=EvidenceSearchOptions(feed=feed, top_k=top_k, index_mode=index_mode),
     )
+    hits = result.hits
     top = hits[0] if hits else {}
+    index_ref = result.index_ref
     index_meta = finance_evidence_index_metadata_for_payload(index_ref)
     return {
         "intelligence_id": intelligence_id,
@@ -2274,22 +2270,7 @@ def _intelligence_search_payload(
         "hit_count": len(hits),
         "top_target_kind": top.get("target_kind"),
         "top_symbol": (top.get("source_ref") or {}).get("symbol"),
-        "retrieval": {
-            "mode": "finance_evidence_hybrid_search",
-            "keyword": "bm25_keyword_index",
-            "semantic": {
-                "status": FINANCE_EVIDENCE_SEMANTIC_STATUS,
-                "reason": FINANCE_EVIDENCE_SEMANTIC_REASON,
-            },
-            "fusion": "rrf",
-            "rank_constant": 60,
-            "structured_features": ["feed_priority", "symbol_match", "signal_priority", "recency"],
-            "index_mode": index_mode,
-            "index_status": index_ref["index_status"],
-            "index_path": index_ref.get("index_path"),
-            "index_fingerprint": index_ref.get("fingerprint"),
-            "doc_count": len(index_ref["docs"]),
-        },
+        "retrieval": result.retrieval,
         "index": index_meta,
         "hits": hits,
         "disclaimer": "Research evidence search only; not investment advice.",

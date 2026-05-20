@@ -37,7 +37,9 @@ from velaria.finance_pack.cli import (
     main as finance_cli_main,
 )
 from velaria.finance_pack.evidence_index import (
+    EvidenceSearchOptions,
     FINANCE_EVIDENCE_INDEX_VERSION,
+    FinanceEvidenceRetriever,
     build_finance_evidence_index,
     finance_evidence_index_dir,
     load_finance_evidence_index,
@@ -1214,6 +1216,35 @@ class FinancePackTest(unittest.TestCase):
 
                 self.assertIsNone(loaded)
                 self.assertEqual(reason, "stale")
+
+    def test_finance_evidence_retriever_contract_searches_without_semantic_provider(self):
+        rows = [
+            {
+                "feed": "candidates",
+                "event_id": "candidate-aapl",
+                "event_time": "2026-05-20T14:00:00Z",
+                "payload_json": {
+                    "watch_session_id": "session_retriever",
+                    "event_type": "research_candidate",
+                    "symbol": "AAPL",
+                    "summary": "AAPL momentum risk evidence",
+                    "score": 9.0,
+                },
+            }
+        ]
+        retriever = FinanceEvidenceRetriever()
+        result = retriever.search_rows(
+            intelligence_id="intel_retriever",
+            watch_session_id="session_retriever",
+            rows=rows,
+            query_text="AAPL momentum",
+            options=EvidenceSearchOptions(feed="all", top_k=1, index_mode="off"),
+        )
+
+        self.assertEqual(result.retrieval["semantic"]["status"], "disabled")
+        self.assertEqual(result.retrieval["retriever"], "finance_evidence_retriever")
+        self.assertEqual(result.retrieval["retriever_version"], retriever.retriever_version)
+        self.assertEqual(len(result.hits), 1)
 
     def test_intelligence_index_persists_reusable_hybrid_evidence_index(self):
         with tempfile.TemporaryDirectory(prefix="velaria-finance-intelligence-index-") as tmp:

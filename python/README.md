@@ -317,6 +317,10 @@ uv run --project python --extra finance python python/velaria_cli.py finance int
   --session-id us_watch_20260519 \
   --format json
 
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence index \
+  --session-id us_watch_20260519 \
+  --format json
+
 uv run --project python --extra finance python python/velaria_cli.py finance intelligence search \
   --session-id us_watch_20260519 \
   --query "NVDA momentum risk news fundamentals" \
@@ -331,7 +335,11 @@ fundamental and native stream rows remain under the watch-session feed sources.
 writes `finance_intelligence_replays`. `search` hybrid-searches the persisted
 watch-session evidence with BM25 keyword retrieval, hash embedding cosine
 similarity, structured finance signals, recency, and reciprocal rank fusion,
-then writes `finance_intelligence_searches`. `report` writes
+then writes `finance_intelligence_searches`. By default `search` uses
+`--index-mode auto`, which reuses a persisted evidence index when its metadata
+fingerprint matches the current session rows, and rebuilds it when stale.
+Use `intelligence index` to prebuild that reusable index under
+`$VELARIA_HOME/finance/evidence_indexes/`. `report` writes
 `finance_intelligence_reports` with a final scorecard, supervisor checks,
 provider quality diagnostics, and a replayable research summary. The
 `ai_plane.agent_prompt` is designed for `velaria_cli_run` and does not
@@ -525,6 +533,7 @@ AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0
 us_watch_20260519 --format json`, `finance watch-session review --session-id
 us_watch_20260519 --format json`, `finance watch-session supervise --session-id
 us_watch_20260519 --interval-sec 60 --format json`, `finance intelligence
+index --session-id us_watch_20260519 --format json`, `finance intelligence
 search --session-id us_watch_20260519 --query "NVDA momentum risk news
 fundamentals" --format json`, `finance intelligence report --session-id
 us_watch_20260519 --format json`, `finance fetch-fundamentals

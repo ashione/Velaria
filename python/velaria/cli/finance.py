@@ -36,6 +36,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               velaria finance intelligence review --session-id finance_us_watch_20260519T133000Z --format json
               velaria finance intelligence replay --session-id finance_us_watch_20260519T133000Z --format json
               velaria finance intelligence report --session-id finance_us_watch_20260519T133000Z --format json
+              velaria finance intelligence index --session-id finance_us_watch_20260519T133000Z --format json
               velaria finance intelligence search --session-id finance_us_watch_20260519T133000Z --query "NVDA momentum risk news fundamentals" --format json
               velaria finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00
@@ -67,6 +68,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               finance intelligence review --session-id finance_us_watch_20260519T133000Z --format json
               finance intelligence replay --session-id finance_us_watch_20260519T133000Z --format json
               finance intelligence report --session-id finance_us_watch_20260519T133000Z --format json
+              finance intelligence index --session-id finance_us_watch_20260519T133000Z --format json
               finance intelligence search --session-id finance_us_watch_20260519T133000Z --query "NVDA momentum risk news fundamentals" --format json
               finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00 --format json
@@ -236,6 +238,15 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     intelligence_report.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
     intelligence_report.add_argument("--session-id", required=True, help="Durable watch-session id to report.")
     _add_report_format(intelligence_report)
+    intelligence_index = intelligence_subparsers.add_parser("index", help="Build or refresh a reusable hybrid evidence index for a watch session.")
+    intelligence_index.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
+    intelligence_index.add_argument("--session-id", required=True, help="Durable watch-session id to index.")
+    intelligence_index.add_argument(
+        "--feed",
+        choices=["all", "quotes", "history", "news", "features", "candidates", "market_context", "fundamentals", "native_stream_signals"],
+        default="all",
+    )
+    _add_report_format(intelligence_index)
     intelligence_search = intelligence_subparsers.add_parser("search", help="Hybrid-search persisted finance evidence for a watch session.")
     intelligence_search.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
     intelligence_search.add_argument("--session-id", required=True, help="Durable watch-session id to search.")
@@ -246,6 +257,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         choices=["all", "quotes", "history", "news", "features", "candidates", "market_context", "fundamentals", "native_stream_signals"],
         default="all",
     )
+    intelligence_search.add_argument("--index-mode", choices=["auto", "rebuild", "off"], default="auto", help="auto reuses or refreshes a persisted evidence index, rebuild forces refresh, off uses a temporary in-memory index.")
     _add_report_format(intelligence_search)
     intelligence_supervise = intelligence_subparsers.add_parser("supervise", help="Continuously review and persist intelligence notes.")
     intelligence_supervise.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
@@ -442,6 +454,7 @@ def _to_finance_pack_argv(args: argparse.Namespace) -> list[str]:
         "fundamentals_provider",
         "query",
         "feed",
+        "index_mode",
         "limit",
         "log_limit",
         "start_time",

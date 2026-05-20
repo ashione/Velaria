@@ -7,6 +7,7 @@ import json
 import math
 import os
 import pathlib
+import shutil
 import signal
 import subprocess
 import sys
@@ -38,6 +39,22 @@ from . import (
     provider_catalog,
     provider_names_for_operation,
 )
+
+
+_FINANCE_EVIDENCE_FEEDS = (
+    "all",
+    "quotes",
+    "history",
+    "news",
+    "features",
+    "candidates",
+    "market_context",
+    "fundamentals",
+    "native_stream_signals",
+)
+_FINANCE_EVIDENCE_INDEX_VERSION = 1
+_FINANCE_EVIDENCE_EMBEDDING_MODEL = "hash-finance-evidence"
+_FINANCE_EVIDENCE_EMBEDDING_DIMENSION = 32
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -303,12 +320,18 @@ def _build_parser() -> argparse.ArgumentParser:
     intelligence_report.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
     intelligence_report.add_argument("--session-id", required=True, help="Durable watch-session id to report.")
     _add_report_format(intelligence_report)
+    intelligence_index = intelligence_subparsers.add_parser("index", help="Build or refresh a reusable hybrid evidence index for a watch session.")
+    intelligence_index.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
+    intelligence_index.add_argument("--session-id", required=True, help="Durable watch-session id to index.")
+    intelligence_index.add_argument("--feed", choices=_FINANCE_EVIDENCE_FEEDS, default="all")
+    _add_report_format(intelligence_index)
     intelligence_search = intelligence_subparsers.add_parser("search", help="Hybrid-search persisted finance evidence for a watch session.")
     intelligence_search.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
     intelligence_search.add_argument("--session-id", required=True, help="Durable watch-session id to search.")
     intelligence_search.add_argument("--query", required=True, help="Evidence query text, e.g. NVDA momentum risk news fundamentals.")
     intelligence_search.add_argument("--top-k", type=int, default=5, help="Number of fused evidence hits.")
-    intelligence_search.add_argument("--feed", choices=["all", "quotes", "history", "news", "features", "candidates", "market_context", "fundamentals", "native_stream_signals"], default="all")
+    intelligence_search.add_argument("--feed", choices=_FINANCE_EVIDENCE_FEEDS, default="all")
+    intelligence_search.add_argument("--index-mode", choices=["auto", "rebuild", "off"], default="auto", help="auto reuses or refreshes a persisted evidence index, rebuild forces refresh, off uses a temporary in-memory index.")
     _add_report_format(intelligence_search)
     intelligence_supervise = intelligence_subparsers.add_parser("supervise", help="Continuously review and persist intelligence notes inside the CLI process.")
     intelligence_supervise.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
@@ -546,6 +569,8 @@ def _intelligence(args: argparse.Namespace) -> int:
         return _intelligence_replay(args)
     if command == "report":
         return _intelligence_report(args)
+    if command == "index":
+        return _intelligence_index(args)
     if command == "search":
         return _intelligence_search(args)
     if command == "supervise":
@@ -1690,6 +1715,44 @@ def _intelligence_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _intelligence_index(args: argparse.Namespace) -> int:
+    intelligence_id = args.intelligence_id or _make_intelligence_id(args.session_id)
+    session = _get_watch_session_or_raise(args.session_id)
+    feed = str(args.feed)
+    rows = _read_watch_session_events(session, feed=feed, limit=0)
+    summary = _compact_watch_session_summary(_summarize_watch_session(session))
+    index = _build_finance_evidence_index(
+        intelligence_id=intelligence_id,
+        watch_session_id=args.session_id,
+        rows=rows,
+        feed=feed,
+    )
+    persisted = _append_intelligence_index_event(
+        _intelligence_index_payload(
+            intelligence_id=intelligence_id,
+            watch_session_id=args.session_id,
+            feed=feed,
+            index=index,
+        )
+    )
+    payload = {
+        "ok": True,
+        "action": "intelligence-index",
+        "intelligence_id": intelligence_id,
+        "watch_session_id": args.session_id,
+        "feed": feed,
+        "index": index,
+        "persisted_index": persisted,
+        "data_plane": _intelligence_data_plane(dict(session.get("sources") or {}), summary),
+        "ai_plane": _intelligence_ai_plane(intelligence_id=intelligence_id, watch_session_id=args.session_id, summary=summary),
+        "disclaimer": "Research evidence index only; not investment advice.",
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_intelligence_report(payload))
+    return 0
+
+
 def _intelligence_search(args: argparse.Namespace) -> int:
     intelligence_id = args.intelligence_id or _make_intelligence_id(args.session_id)
     session = _get_watch_session_or_raise(args.session_id)
@@ -1702,7 +1765,19 @@ def _intelligence_search(args: argparse.Namespace) -> int:
         rows=rows,
         top_k=max(1, int(args.top_k)),
         feed=str(args.feed),
+        index_mode=str(args.index_mode),
     )
+    retrieval = search.get("retrieval") if isinstance(search.get("retrieval"), dict) else {}
+    index_meta = search.get("index") if isinstance(search.get("index"), dict) else {}
+    if retrieval.get("index_status") in {"built", "rebuilt"} and index_meta:
+        _append_intelligence_index_event(
+            _intelligence_index_payload(
+                intelligence_id=intelligence_id,
+                watch_session_id=args.session_id,
+                feed=str(args.feed),
+                index=index_meta,
+            )
+        )
     persisted = _append_intelligence_search_event(search)
     payload = {
         "ok": True,
@@ -1881,6 +1956,22 @@ def _intelligence_search_source_binding() -> dict[str, Any]:
     }
 
 
+def _intelligence_index_source_binding() -> dict[str, Any]:
+    return {
+        "time_field": "event_time",
+        "type_field": "event_type",
+        "key_field": "intelligence_id",
+        "field_mappings": {
+            "intelligence_id": "intelligence_id",
+            "watch_session_id": "watch_session_id",
+            "feed": "feed",
+            "index_status": "index_status",
+            "doc_count": "doc_count",
+            "fingerprint": "fingerprint",
+        },
+    }
+
+
 def _append_intelligence_session_event(payload: dict[str, Any]) -> dict[str, Any]:
     with AgenticStore() as store:
         if store.get_source("finance_intelligence_sessions") is None:
@@ -1956,6 +2047,21 @@ def _append_intelligence_search_event(payload: dict[str, Any]) -> dict[str, Any]
         return store.append_external_event("finance_intelligence_searches", payload)
 
 
+def _append_intelligence_index_event(payload: dict[str, Any]) -> dict[str, Any]:
+    with AgenticStore() as store:
+        if store.get_source("finance_intelligence_evidence_indexes") is None:
+            store.upsert_source(
+                {
+                    "source_id": "finance_intelligence_evidence_indexes",
+                    "kind": "external_event",
+                    "name": "finance intelligence evidence indexes",
+                    "schema_binding": _intelligence_index_source_binding(),
+                    "metadata": {"domain": "finance", "workflow": "finance-intelligence", "retrieval": "hybrid-rrf-index"},
+                }
+            )
+        return store.append_external_event("finance_intelligence_evidence_indexes", payload)
+
+
 def _intelligence_runtime_plane(watch_payload: dict[str, Any]) -> dict[str, Any]:
     native_stream = watch_payload.get("native_stream") or {}
     run = watch_payload.get("run") or {}
@@ -1999,6 +2105,7 @@ def _intelligence_ai_plane(
             f"finance intelligence review --session-id {watch_session_id} --format json",
             f"finance intelligence replay --session-id {watch_session_id} --format json",
             f"finance intelligence report --session-id {watch_session_id} --format json",
+            f"finance intelligence index --session-id {watch_session_id} --format json",
             f"finance intelligence search --session-id {watch_session_id} --query '{_top_symbol_from_summary(summary) or 'market'} risk momentum news fundamentals' --format json",
             f"finance watch-session signals --session-id {watch_session_id} --format json",
         ],
@@ -2107,6 +2214,38 @@ def _intelligence_report_payload(
     }
 
 
+def _intelligence_index_payload(
+    *,
+    intelligence_id: str,
+    watch_session_id: str,
+    feed: str,
+    index: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "intelligence_id": intelligence_id,
+        "watch_session_id": watch_session_id,
+        "event_time": _utc_payload_time(),
+        "event_type": "intelligence_evidence_index",
+        "source_key": intelligence_id,
+        "feed": feed,
+        "index_status": index.get("status"),
+        "doc_count": index.get("doc_count") or 0,
+        "row_count": index.get("row_count") or 0,
+        "fingerprint": index.get("fingerprint"),
+        "index_path": index.get("index_path"),
+        "metadata_path": index.get("metadata_path"),
+        "docs_path": index.get("docs_path"),
+        "vectors_path": index.get("vectors_path"),
+        "keyword_index_path": index.get("keyword_index_path"),
+        "retrieval": {
+            "mode": "finance_evidence_hybrid_search",
+            "keyword": "bm25_keyword_index",
+            "semantic": "hash_embedding_cosine",
+            "fusion": "rrf",
+        },
+    }
+
+
 def _intelligence_search_payload(
     *,
     intelligence_id: str,
@@ -2115,9 +2254,24 @@ def _intelligence_search_payload(
     rows: list[dict[str, Any]],
     top_k: int,
     feed: str,
+    index_mode: str = "auto",
 ) -> dict[str, Any]:
-    hits = _hybrid_search_finance_rows(rows=rows, query_text=query_text, top_k=top_k)
+    index_ref = _resolve_finance_evidence_search_index(
+        intelligence_id=intelligence_id,
+        watch_session_id=watch_session_id,
+        rows=rows,
+        feed=feed,
+        index_mode=index_mode,
+    )
+    hits = _hybrid_search_finance_docs(
+        docs=index_ref["docs"],
+        query_text=query_text,
+        top_k=top_k,
+        keyword_index_dir=index_ref.get("keyword_index_path"),
+        doc_vectors_by_id=index_ref.get("vectors"),
+    )
     top = hits[0] if hits else {}
+    index_meta = _finance_evidence_index_metadata_for_payload(index_ref)
     return {
         "intelligence_id": intelligence_id,
         "watch_session_id": watch_session_id,
@@ -2136,7 +2290,13 @@ def _intelligence_search_payload(
             "fusion": "rrf",
             "rank_constant": 60,
             "structured_features": ["feed_priority", "symbol_match", "signal_priority", "recency"],
+            "index_mode": index_mode,
+            "index_status": index_ref["index_status"],
+            "index_path": index_ref.get("index_path"),
+            "index_fingerprint": index_ref.get("fingerprint"),
+            "doc_count": len(index_ref["docs"]),
         },
+        "index": index_meta,
         "hits": hits,
         "disclaimer": "Research evidence search only; not investment advice.",
     }
@@ -2144,24 +2304,47 @@ def _intelligence_search_payload(
 
 def _hybrid_search_finance_rows(*, rows: list[dict[str, Any]], query_text: str, top_k: int) -> list[dict[str, Any]]:
     docs = _finance_evidence_docs(rows)
+    return _hybrid_search_finance_docs(docs=docs, query_text=query_text, top_k=top_k)
+
+
+def _hybrid_search_finance_docs(
+    *,
+    docs: list[dict[str, Any]],
+    query_text: str,
+    top_k: int,
+    keyword_index_dir: str | pathlib.Path | None = None,
+    doc_vectors_by_id: dict[str, list[float]] | None = None,
+) -> list[dict[str, Any]]:
     if not docs:
         return []
     top_k = max(1, int(top_k))
     window = min(len(docs), max(top_k * 4, top_k))
     keyword_scores: dict[str, float] = {}
     keyword_rank: list[str] = []
-    with tempfile.TemporaryDirectory(prefix="velaria-finance-evidence-index-") as tmp:
-        table = pa.Table.from_pylist(docs)
-        build_keyword_index([table], output_dir=tmp, text_columns=["title", "summary", "body"], analyzer="builtin", doc_id_field="doc_id")
-        keyword_table = search_keyword_index(tmp, query_text=query_text, top_k=window)
+    if keyword_index_dir is not None:
+        keyword_table = _safe_search_keyword_index(keyword_index_dir, query_text=query_text, top_k=window)
         for row in keyword_table.to_pylist():
             doc_id = str(row.get("doc_id"))
             keyword_rank.append(doc_id)
             keyword_scores[doc_id] = float(row.get("keyword_score") or 0.0)
-    provider = HashEmbeddingProvider(dimension=32)
-    query_vector = provider.embed([query_text], model="hash-finance-evidence")[0]
-    doc_vectors = provider.embed([doc["search_text"] for doc in docs], model="hash-finance-evidence")
-    semantic_scores = {doc["doc_id"]: max(0.0, _cosine_similarity(query_vector, doc_vectors[index])) for index, doc in enumerate(docs)}
+    else:
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-evidence-index-") as tmp:
+            table = pa.Table.from_pylist(docs)
+            build_keyword_index([table], output_dir=tmp, text_columns=["title", "summary", "body"], analyzer="builtin", doc_id_field="doc_id")
+            keyword_table = _safe_search_keyword_index(tmp, query_text=query_text, top_k=window)
+            for row in keyword_table.to_pylist():
+                doc_id = str(row.get("doc_id"))
+                keyword_rank.append(doc_id)
+                keyword_scores[doc_id] = float(row.get("keyword_score") or 0.0)
+    provider = HashEmbeddingProvider(dimension=_FINANCE_EVIDENCE_EMBEDDING_DIMENSION)
+    query_vector = provider.embed([query_text], model=_FINANCE_EVIDENCE_EMBEDDING_MODEL)[0]
+    if doc_vectors_by_id is None:
+        vectors = provider.embed([doc["search_text"] for doc in docs], model=_FINANCE_EVIDENCE_EMBEDDING_MODEL)
+        doc_vectors_by_id = {str(doc["doc_id"]): vectors[index] for index, doc in enumerate(docs)}
+    semantic_scores = {
+        str(doc["doc_id"]): max(0.0, _cosine_similarity(query_vector, doc_vectors_by_id.get(str(doc["doc_id"]), [])))
+        for doc in docs
+    }
     semantic_rank = [doc_id for doc_id, score in sorted(semantic_scores.items(), key=lambda item: (-item[1], item[0]))[:window] if score > 0.0]
     recency_rank = [doc["doc_id"] for doc in sorted(docs, key=lambda doc: str(doc.get("event_time") or ""), reverse=True)[:window]]
     structured_scores = {doc["doc_id"]: _finance_structured_evidence_score(doc, query_text=query_text) for doc in docs}
@@ -2220,6 +2403,204 @@ def _hybrid_search_finance_rows(*, rows: list[dict[str, Any]], query_text: str, 
         )
     fused.sort(key=lambda item: (-float(item["score"]), str(item["target_id"])))
     return fused[:top_k]
+
+
+def _safe_search_keyword_index(index_dir: str | pathlib.Path, *, query_text: str, top_k: int) -> pa.Table:
+    try:
+        return search_keyword_index(index_dir, query_text=query_text, top_k=top_k)
+    except ValueError:
+        return pa.Table.from_pylist([])
+
+
+def _resolve_finance_evidence_search_index(
+    *,
+    intelligence_id: str,
+    watch_session_id: str,
+    rows: list[dict[str, Any]],
+    feed: str,
+    index_mode: str,
+) -> dict[str, Any]:
+    normalized_mode = index_mode if index_mode in {"auto", "rebuild", "off"} else "auto"
+    docs = _finance_evidence_docs(rows)
+    if normalized_mode == "off":
+        return {
+            "index_status": "off",
+            "index_path": None,
+            "fingerprint": _finance_evidence_fingerprint(rows),
+            "docs": docs,
+            "vectors": None,
+        }
+
+    fingerprint = _finance_evidence_fingerprint(rows)
+    if normalized_mode == "auto":
+        loaded, reason = _load_finance_evidence_index(watch_session_id=watch_session_id, feed=feed, expected_fingerprint=fingerprint)
+        if loaded is not None:
+            loaded["index_status"] = "hit"
+            return loaded
+        status = "rebuilt" if reason == "stale" else "built"
+    else:
+        status = "rebuilt"
+
+    built = _build_finance_evidence_index(
+        intelligence_id=intelligence_id,
+        watch_session_id=watch_session_id,
+        rows=rows,
+        feed=feed,
+    )
+    loaded, _ = _load_finance_evidence_index(watch_session_id=watch_session_id, feed=feed, expected_fingerprint=fingerprint)
+    if loaded is None:
+        return {
+            "index_status": status,
+            "index_path": built.get("index_path"),
+            "fingerprint": fingerprint,
+            "docs": docs,
+            "vectors": None,
+        }
+    loaded["index_status"] = status
+    return loaded
+
+
+def _finance_evidence_index_dir(*, watch_session_id: str, feed: str) -> pathlib.Path:
+    from velaria.workspace.paths import get_velaria_home
+
+    return get_velaria_home() / "finance" / "evidence_indexes" / _sql_identifier_suffix(watch_session_id) / _sql_identifier_suffix(feed)
+
+
+def _finance_evidence_index_metadata_for_payload(index_ref: dict[str, Any]) -> dict[str, Any] | None:
+    metadata = dict(index_ref.get("metadata") or {})
+    for key in ("index_path", "metadata_path", "docs_path", "vectors_path", "keyword_index_path", "fingerprint"):
+        if index_ref.get(key) is not None:
+            metadata.setdefault(key, index_ref.get(key))
+    if not metadata:
+        return None
+    metadata.setdefault("status", "ready")
+    metadata.setdefault("doc_count", len(index_ref.get("docs") or []))
+    return metadata
+
+
+def _finance_evidence_fingerprint(rows: list[dict[str, Any]]) -> str:
+    digest = hashlib.sha256()
+    for row in rows:
+        payload = _watch_row_payload(row)
+        stable = {
+            "feed": row.get("feed") or payload.get("feed"),
+            "event_id": row.get("event_id") or payload.get("event_id"),
+            "event_time": row.get("event_time") or payload.get("event_time"),
+            "ingested_at": row.get("ingested_at"),
+            "payload": _compact_finance_evidence_payload(payload),
+        }
+        digest.update(json.dumps(stable, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _build_finance_evidence_index(
+    *,
+    intelligence_id: str,
+    watch_session_id: str,
+    rows: list[dict[str, Any]],
+    feed: str,
+) -> dict[str, Any]:
+    docs = _finance_evidence_docs(rows)
+    index_dir = _finance_evidence_index_dir(watch_session_id=watch_session_id, feed=feed)
+    if index_dir.exists():
+        shutil.rmtree(index_dir)
+    index_dir.mkdir(parents=True, exist_ok=True)
+
+    metadata_path = index_dir / "metadata.json"
+    docs_path = index_dir / "docs.jsonl"
+    vectors_path = index_dir / "vectors.json"
+    keyword_index_path = index_dir / "keyword"
+    fingerprint = _finance_evidence_fingerprint(rows)
+    built_at = _utc_payload_time()
+
+    with docs_path.open("w", encoding="utf-8") as handle:
+        for doc in docs:
+            handle.write(json.dumps(doc, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+
+    vectors_rows: list[dict[str, Any]] = []
+    if docs:
+        build_keyword_index(
+            [pa.Table.from_pylist(docs)],
+            output_dir=keyword_index_path,
+            text_columns=["title", "summary", "body"],
+            analyzer="builtin",
+            doc_id_field="doc_id",
+        )
+        provider = HashEmbeddingProvider(dimension=_FINANCE_EVIDENCE_EMBEDDING_DIMENSION)
+        vectors = provider.embed([doc["search_text"] for doc in docs], model=_FINANCE_EVIDENCE_EMBEDDING_MODEL)
+        vectors_rows = [{"doc_id": str(doc["doc_id"]), "vector": vectors[index]} for index, doc in enumerate(docs)]
+    else:
+        keyword_index_path.mkdir(parents=True, exist_ok=True)
+    vectors_path.write_text(json.dumps(vectors_rows, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+
+    metadata = {
+        "status": "ready",
+        "index_version": _FINANCE_EVIDENCE_INDEX_VERSION,
+        "intelligence_id": intelligence_id,
+        "watch_session_id": watch_session_id,
+        "feed": feed,
+        "fingerprint": fingerprint,
+        "built_at": built_at,
+        "row_count": len(rows),
+        "doc_count": len(docs),
+        "embedding_provider": "hash",
+        "embedding_model": _FINANCE_EVIDENCE_EMBEDDING_MODEL,
+        "embedding_dimension": _FINANCE_EVIDENCE_EMBEDDING_DIMENSION,
+        "index_path": str(index_dir),
+        "metadata_path": str(metadata_path),
+        "docs_path": str(docs_path),
+        "vectors_path": str(vectors_path),
+        "keyword_index_path": str(keyword_index_path),
+    }
+    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return metadata
+
+
+def _load_finance_evidence_index(
+    *,
+    watch_session_id: str,
+    feed: str,
+    expected_fingerprint: str,
+) -> tuple[dict[str, Any] | None, str]:
+    index_dir = _finance_evidence_index_dir(watch_session_id=watch_session_id, feed=feed)
+    metadata_path = index_dir / "metadata.json"
+    docs_path = index_dir / "docs.jsonl"
+    vectors_path = index_dir / "vectors.json"
+    keyword_index_path = index_dir / "keyword"
+    if not metadata_path.exists() or not docs_path.exists() or not vectors_path.exists():
+        return None, "missing"
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None, "invalid"
+    if int(metadata.get("index_version") or 0) != _FINANCE_EVIDENCE_INDEX_VERSION:
+        return None, "stale"
+    if str(metadata.get("fingerprint") or "") != expected_fingerprint:
+        return None, "stale"
+    if not keyword_index_path.exists():
+        return None, "invalid"
+
+    docs: list[dict[str, Any]] = []
+    with docs_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            text = line.strip()
+            if text:
+                docs.append(json.loads(text))
+    vector_rows = json.loads(vectors_path.read_text(encoding="utf-8") or "[]")
+    vectors = {str(item.get("doc_id")): [float(value) for value in item.get("vector", [])] for item in vector_rows if isinstance(item, dict)}
+    return {
+        "index_status": "hit",
+        "index_path": str(index_dir),
+        "metadata_path": str(metadata_path),
+        "docs_path": str(docs_path),
+        "vectors_path": str(vectors_path),
+        "keyword_index_path": str(keyword_index_path),
+        "fingerprint": metadata.get("fingerprint"),
+        "metadata": metadata,
+        "docs": docs,
+        "vectors": vectors,
+    }, "hit"
 
 
 def _finance_evidence_docs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

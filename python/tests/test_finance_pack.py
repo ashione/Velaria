@@ -1145,8 +1145,64 @@ class FinancePackTest(unittest.TestCase):
 
                 with AgenticStore() as store:
                     rows = store.read_external_events("finance_intelligence_searches")
+                    index_rows = store.read_external_events("finance_intelligence_evidence_indexes")
                 self.assertEqual(rows[-1]["intelligence_id"], "intel_search")
                 self.assertEqual(rows[-1]["query_text"], "AAPL fundamental unavailable risk")
+                self.assertEqual(index_rows[-1]["index_status"], "ready")
+                self.assertGreaterEqual(index_rows[-1]["doc_count"], 1)
+
+    def test_intelligence_index_persists_reusable_hybrid_evidence_index(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-intelligence-index-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                self._seed_watch_session_rows("session_index")
+
+                stdout = StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = finance_cli_main(
+                        [
+                            "intelligence",
+                            "index",
+                            "--intelligence-id",
+                            "intel_index",
+                            "--session-id",
+                            "session_index",
+                            "--format",
+                            "json",
+                        ]
+                    )
+
+                self.assertEqual(exit_code, 0)
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(payload["action"], "intelligence-index")
+                self.assertEqual(payload["index"]["status"], "ready")
+                self.assertGreaterEqual(payload["index"]["doc_count"], 1)
+                self.assertTrue(os.path.exists(payload["index"]["metadata_path"]))
+                self.assertTrue(os.path.exists(payload["index"]["docs_path"]))
+
+                stdout = StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = finance_cli_main(
+                        [
+                            "intelligence",
+                            "search",
+                            "--intelligence-id",
+                            "intel_index",
+                            "--session-id",
+                            "session_index",
+                            "--query",
+                            "AAPL risk fundamentals",
+                            "--top-k",
+                            "2",
+                            "--format",
+                            "json",
+                        ]
+                    )
+
+                self.assertEqual(exit_code, 0)
+                search_payload = json.loads(stdout.getvalue())
+                self.assertEqual(search_payload["search"]["retrieval"]["index_status"], "hit")
+                self.assertEqual(search_payload["search"]["retrieval"]["index_path"], payload["index"]["index_path"])
+                self.assertGreaterEqual(len(search_payload["search"]["hits"]), 1)
 
     def test_signal_policy_drives_native_stream_flags(self):
         args = mock.Mock()

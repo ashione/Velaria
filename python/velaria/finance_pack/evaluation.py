@@ -283,7 +283,7 @@ def _retrieval_quality(searches: list[dict[str, Any]], indexes: list[dict[str, A
             index_status[str(retrieval.get("index_status"))] += 1
         if payload.get("top_target_kind"):
             top_feeds[str(payload.get("top_target_kind"))] += 1
-        if "hash" in str(semantic.get("provider") or "").lower():
+        if _contains_hash_embedding_artifact(semantic):
             hash_detected = True
     for index in indexes:
         payload = _payload(index)
@@ -291,7 +291,7 @@ def _retrieval_quality(searches: list[dict[str, Any]], indexes: list[dict[str, A
             semantic_status[str(payload.get("semantic_status"))] += 1
         if payload.get("index_status"):
             index_status[str(payload.get("index_status"))] += 1
-        if "hash" in str(payload.get("semantic_provider") or "").lower():
+        if _contains_hash_embedding_artifact(payload):
             hash_detected = True
     return {
         "search_count": len(searches),
@@ -301,6 +301,22 @@ def _retrieval_quality(searches: list[dict[str, Any]], indexes: list[dict[str, A
         "top_evidence_feed_distribution": dict(top_feeds),
         "no_hash_embedding": not hash_detected,
     }
+
+
+def _contains_hash_embedding_artifact(value: Any) -> bool:
+    legacy_vector_keys = {"vectors_path", "vector_path", "vectors_json", "vector_count", "embedding_provider", "semantic_provider", "provider"}
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            key_text = str(key).lower()
+            if key_text in {"vectors_path", "vector_path", "vectors_json", "vector_count"} and nested not in (None, "", 0):
+                return True
+            if key_text in legacy_vector_keys and "hash" in str(nested).lower():
+                return True
+            if _contains_hash_embedding_artifact(nested):
+                return True
+    if isinstance(value, list):
+        return any(_contains_hash_embedding_artifact(item) for item in value)
+    return False
 
 
 def _runtime_quality(jobs: list[dict[str, Any]]) -> dict[str, Any]:

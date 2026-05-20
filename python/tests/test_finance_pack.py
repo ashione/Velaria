@@ -887,6 +887,103 @@ class FinancePackTest(unittest.TestCase):
                 self.assertEqual(resume_payload["run"]["pid"], 9876)
                 self.assertIn("watch-session", popen.call_args.args[0])
 
+    def test_intelligence_resume_rejects_untrusted_persisted_argv(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-intelligence-resume-guard-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                fake_process = mock.Mock()
+                fake_process.pid = 4321
+                with mock.patch("velaria.finance_pack.cli.subprocess.Popen", return_value=fake_process):
+                    stdout = StringIO()
+                    with redirect_stdout(stdout):
+                        exit_code = finance_cli_main(
+                            [
+                                "intelligence",
+                                "start",
+                                "--session-id",
+                                "session_resume_guard",
+                                "--market",
+                                "us",
+                                "--symbols",
+                                "AAPL",
+                                "--start-date",
+                                "20260501",
+                                "--end-date",
+                                "20260518",
+                                "--async-run",
+                                "--format",
+                                "json",
+                            ]
+                        )
+                self.assertEqual(exit_code, 0)
+                with AgenticStore() as store:
+                    store.append_external_event(
+                        "finance_watch_session_runs",
+                        {
+                            "session_id": "session_resume_guard",
+                            "status": "not_running",
+                            "pid": 0,
+                            "process_identity": {"command_markers": ["unexpected"]},
+                            "log_path": str(pathlib.Path(tmp) / "bad.jsonl"),
+                            "argv": ["/bin/echo", "not-a-watch-session"],
+                            "started_at": "2026-05-20T14:00:00Z",
+                            "updated_at": "2026-05-20T14:10:00Z",
+                            "event_time": "2026-05-20T14:10:00Z",
+                            "event_type": "watch_session_async_start",
+                            "source_key": "session_resume_guard",
+                        },
+                    )
+
+                stdout = StringIO()
+                with mock.patch("velaria.finance_pack.cli.subprocess.Popen") as popen:
+                    with redirect_stdout(stdout):
+                        exit_code = finance_cli_main(["intelligence", "resume", "--session-id", "session_resume_guard", "--format", "json"])
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["action"], "intelligence-resume")
+        self.assertFalse(payload["resumed"])
+        self.assertEqual(payload["error_type"], "resume_unavailable")
+        self.assertIn("trusted watch-session", payload["hint"])
+        popen.assert_not_called()
+
+    def test_intelligence_resume_text_mode_reports_already_running_state(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-intelligence-resume-text-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                fake_process = mock.Mock()
+                fake_process.pid = 4321
+                with mock.patch("velaria.finance_pack.cli.subprocess.Popen", return_value=fake_process):
+                    stdout = StringIO()
+                    with redirect_stdout(stdout):
+                        exit_code = finance_cli_main(
+                            [
+                                "intelligence",
+                                "start",
+                                "--session-id",
+                                "session_resume_text",
+                                "--market",
+                                "us",
+                                "--symbols",
+                                "AAPL",
+                                "--start-date",
+                                "20260501",
+                                "--end-date",
+                                "20260518",
+                                "--async-run",
+                                "--format",
+                                "json",
+                            ]
+                        )
+                self.assertEqual(exit_code, 0)
+                stdout = StringIO()
+                with mock.patch("velaria.finance_pack.cli.os.kill"):
+                    with mock.patch("velaria.finance_pack.cli._process_command_line", return_value="python -m velaria.finance_pack.cli watch-session start --session-id session_resume_text"):
+                        with redirect_stdout(stdout):
+                            exit_code = finance_cli_main(["intelligence", "resume", "--session-id", "session_resume_text"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("action: intelligence-resume", stdout.getvalue())
+        self.assertIn("watch_session_id: session_resume_text", stdout.getvalue())
+
     def test_finance_evaluation_scores_persisted_rows_without_refetching(self):
         rows = [
             {"feed": "native_stream_signals", "payload_json": {"event_time": "2026-05-20T14:00:01Z", "symbol": "AAPL", "signal_type": "entry_research_signal", "score": 9.5}},
@@ -908,6 +1005,18 @@ class FinancePackTest(unittest.TestCase):
         self.assertEqual(evaluation["provider_quality"]["unavailable_count"], 1)
         self.assertEqual(evaluation["retrieval_quality"]["search_count"], 1)
         self.assertTrue(evaluation["retrieval_quality"]["no_hash_embedding"])
+
+    def test_finance_evaluation_detects_legacy_hash_vector_artifacts(self):
+        evaluation = evaluate_finance_session(
+            watch_session_id="session_eval_hash",
+            rows=[{"feed": "native_stream_signals", "payload_json": {"event_time": "2026-05-20T14:00:01Z", "symbol": "AAPL", "signal_type": "entry_research_signal"}}],
+            jobs=[{"job_id": "job_1", "status": "completed"}],
+            searches=[{"retrieval": {"semantic": {"status": "disabled"}}}],
+            indexes=[{"doc_count": 1, "vectors_path": "/tmp/legacy/vectors.json", "semantic_status": "disabled"}],
+        )
+
+        self.assertFalse(evaluation["retrieval_quality"]["no_hash_embedding"])
+        self.assertEqual(evaluation["quality_status"], "failed")
 
     def test_intelligence_evaluate_and_eval_report_persist_quality_events(self):
         with tempfile.TemporaryDirectory(prefix="velaria-finance-intelligence-eval-") as tmp:

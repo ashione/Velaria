@@ -2084,17 +2084,20 @@ def _intelligence_resume(args: argparse.Namespace) -> int:
             "run": run,
             "jobs": _intelligence_job_views(args.session_id, run=run, process_running=True, effective_status="running"),
         }
-        return _emit_json(payload) if args.report_format == "json" else 0
-    argv = [str(item) for item in (run.get("argv") or []) if str(item)]
-    if not argv:
+        if args.report_format == "json":
+            return _emit_json(payload)
+        print(_render_intelligence_report(payload))
+        return 0
+    argv = [str(item) for item in (run.get("argv") or []) if item is not None]
+    if not argv or not _watch_session_resume_argv_trusted(run, argv=argv, session_id=args.session_id):
         payload = {
             "ok": True,
             "action": "intelligence-resume",
             "watch_session_id": args.session_id,
             "resumed": False,
             "error_type": "resume_unavailable",
-            "message": "The durable runtime record does not contain a restart argv.",
-            "hint": "Restart by running finance intelligence start with the intended providers and symbols.",
+            "message": "The durable runtime record does not contain a trusted watch-session restart argv.",
+            "hint": "Resume only executes trusted watch-session argv records. Restart by running finance intelligence start with the intended providers and symbols.",
         }
         return _emit_json(payload)
     log_path = pathlib.Path(str(run.get("log_path") or (get_finance_watch_session_run_dir() / f"{args.session_id}.jsonl")))
@@ -2140,6 +2143,29 @@ def _intelligence_resume(args: argparse.Namespace) -> int:
         return _emit_json(payload)
     print(_render_intelligence_report(payload))
     return 0
+
+
+def _watch_session_resume_argv_trusted(run: dict[str, Any], *, argv: list[str], session_id: str) -> bool:
+    if not argv:
+        return False
+    executable_name = pathlib.Path(argv[0]).name.lower()
+    if "python" not in executable_name:
+        return False
+    identity = run.get("process_identity") if isinstance(run.get("process_identity"), dict) else {}
+    expected_fingerprint = identity.get("argv_fingerprint")
+    actual_fingerprint = hashlib.sha256(json.dumps(argv, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    if expected_fingerprint and str(expected_fingerprint) != actual_fingerprint:
+        return False
+    if "-m" not in argv or "velaria.finance_pack.cli" not in argv:
+        return False
+    required_sequence = ["watch-session", "start", "--session-id", session_id]
+    cursor = 0
+    for item in argv:
+        if item == required_sequence[cursor]:
+            cursor += 1
+            if cursor == len(required_sequence):
+                return True
+    return False
 
 
 def _read_intelligence_source_events(source_id: str, watch_session_id: str) -> list[dict[str, Any]]:

@@ -109,6 +109,59 @@ def _mock_agent_runtime(fake):
 
 
 class PythonCliContractTest(unittest.TestCase):
+    def test_finance_intelligence_cli_forwards_model_readable_command(self):
+        with mock.patch("velaria.cli.finance.finance_pack_main", return_value=0) as finance_main:
+            exit_code = velaria_cli.main(
+                [
+                    "finance",
+                    "intelligence",
+                    "start",
+                    "--intelligence-id",
+                    "intel_contract",
+                    "--session-id",
+                    "session_contract",
+                    "--market",
+                    "us",
+                    "--symbols",
+                    "AAPL,MSFT,NVDA",
+                    "--start-date",
+                    "20260501",
+                    "--end-date",
+                    "20260518",
+                    "--iterations",
+                    "1",
+                    "--format",
+                    "json",
+                ]
+            )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(finance_main.call_args.args[0][:2], ["intelligence", "start"])
+        self.assertIn("--intelligence-id", finance_main.call_args.args[0])
+        self.assertIn("--session-id", finance_main.call_args.args[0])
+
+    def test_finance_watch_session_events_forwards_feed_filter(self):
+        with mock.patch("velaria.cli.finance.finance_pack_main", return_value=0) as finance_main:
+            exit_code = velaria_cli.main(
+                [
+                    "finance",
+                    "watch-session",
+                    "events",
+                    "--session-id",
+                    "session_contract",
+                    "--feed",
+                    "features",
+                    "--limit",
+                    "2",
+                    "--format",
+                    "json",
+                ]
+            )
+        self.assertEqual(exit_code, 0)
+        forwarded = finance_main.call_args.args[0]
+        self.assertEqual(forwarded[:2], ["watch-session", "events"])
+        self.assertIn("--feed", forwarded)
+        self.assertIn("features", forwarded)
+
     def test_agentic_search_templates_cli_returns_hits(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

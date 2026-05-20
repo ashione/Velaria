@@ -102,6 +102,7 @@ Additional ecosystem helpers:
 - `consume_arrow_batches_with_custom_sink(...)`
 - `finance_pack.fetch_history(...)`
 - `finance_pack.fetch_quotes(...)`
+- `finance_pack.fetch_fundamentals(...)`
 - `finance_pack.build_research_prompt(...)`
 
 Mapping rule:
@@ -228,9 +229,10 @@ uv run --project python --extra finance python python/velaria_cli.py finance ran
 
 Use native stream mode when the ranking loop should push normalized candidate
 events through Velaria's native realtime stream source/sink APIs. Add
-`--ingest-raw` when quote, history, news, and candidate rows should all be
-persisted as Velaria external_event sources for later inspection. Native stream
-sink output is also persisted as a durable stream history source named
+`--ingest-raw` when quote, history, news, derived feature metrics, and candidate
+rows should all be persisted as Velaria external_event sources for later
+inspection. Native stream sink output is also persisted as a durable stream
+history source named
 `finance_<market>_rank_candidates_native_stream_signals`:
 
 ```bash
@@ -247,8 +249,28 @@ uv run --project python --extra finance python python/velaria_cli.py finance ran
   --entry-return-threshold 5 \
   --exit-score-threshold 0 \
   --exit-quote-pct-threshold -3 \
+  --signal-policy-preset balanced \
   --iterations 0 \
   --interval-sec 300 \
+  --format json
+```
+
+Native stream signal flags are computed by a signal policy before they enter
+the generic stream SQL predicate `WHERE entry_signal >= 1 OR exit_signal >= 1`.
+Use `--signal-policy-preset balanced|momentum|defensive` for built-in policies,
+or pass `--signal-policy` JSON to make the condition tree explicit:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance rank-candidates \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --native-stream \
+  --ingest-raw \
+  --signal-policy '{"entry":{"all":[{"field":"momentum_state","op":"!=","value":"bearish"},{"field":"score","op":">=","value":0}]},"exit":{"any":[{"field":"news_sentiment_label","op":"=","value":"negative"},{"field":"quote_pct_change","op":"<=","value":-2}]}}' \
+  --iterations 1 \
+  --interval-sec 0 \
   --format json
 ```
 
@@ -262,12 +284,105 @@ uv run --project python --extra finance python python/velaria_cli.py finance str
   --format json
 ```
 
-Use `watch-session` when the goal is an end-to-end market watch that persists
-every feed for later replay and review. It combines candidate ranking, native
-stream signal generation, raw quote/history/news storage, market context
-snapshots, and fundamental provider snapshots under one durable `session_id`.
-If a public provider cannot supply a requested feed, the row is persisted as a
-structured unavailable event instead of being mocked:
+Use `intelligence` as the productized entrypoint when the goal is the full
+finance loop: public data ingestion, Velaria native realtime stream signals,
+durable event storage, agent-readable AI briefs, and replay from persisted
+rows. It reuses the same watch-session runtime instead of creating a separate
+finance engine:
+
+```bash
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence start \
+  --intelligence-id us_intel_20260519 \
+  --session-id us_watch_20260519 \
+  --market us \
+  --symbols AAPL,MSFT,NVDA \
+  --market-symbols SPY,QQQ,DIA \
+  --start-date 20260501 \
+  --end-date 20260518 \
+  --top 3 \
+  --news-limit 5 \
+  --iterations 0 \
+  --interval-sec 300 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence review \
+  --session-id us_watch_20260519 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence replay \
+  --session-id us_watch_20260519 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence report \
+  --session-id us_watch_20260519 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence index \
+  --session-id us_watch_20260519 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence search \
+  --session-id us_watch_20260519 \
+  --query "NVDA momentum risk news fundamentals" \
+  --top-k 5 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence jobs \
+  --session-id us_watch_20260519 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence status \
+  --session-id us_watch_20260519 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence stop \
+  --session-id us_watch_20260519 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence resume \
+  --session-id us_watch_20260519 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence evaluate \
+  --session-id us_watch_20260519 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence eval-report \
+  --session-id us_watch_20260519 \
+  --format json
+```
+
+`intelligence start` writes `finance_intelligence_sessions` and
+`finance_intelligence_ai_notes`, while all quote/history/news/feature/market/
+fundamental and native stream rows remain under the watch-session feed sources.
+`replay` reads those persisted realtime rows back as historical evidence and
+writes `finance_intelligence_replays`. `search` hybrid-searches the persisted
+watch-session evidence with BM25 keyword retrieval, structured finance signals,
+recency, and reciprocal rank fusion,
+then writes `finance_intelligence_searches`. By default `search` uses
+`--index-mode auto`, which reuses a persisted evidence index when its metadata
+fingerprint matches the current session rows, and rebuilds it when stale.
+Use `intelligence index` to prebuild that reusable index under
+`$VELARIA_HOME/finance/evidence_indexes/`. Finance intelligence does not use
+hash embeddings in the product path; `retrieval.semantic.status` is `disabled`
+until a real production embedding provider is explicitly configured. `report`
+writes `finance_intelligence_reports` with a final scorecard, supervisor
+checks, provider quality diagnostics, and a replayable research summary.
+`jobs`, `status`, `stop`, and `resume` expose the durable job surface backed by
+`finance_intelligence_jobs` and `finance_watch_session_runs`; use them when an
+agent needs to inspect or control a long-running finance intelligence session
+without scraping logs. `evaluate` and `eval-report` read only persisted rows and
+persist `finance_intelligence_evaluations` with signal, provider, retrieval,
+and runtime quality metrics. The
+`ai_plane.agent_prompt` is designed for `velaria_cli_run` and does not
+fabricate model output.
+
+Use `watch-session` when you need the lower-level durable market watch and
+diagnostic surface. It combines candidate ranking, native stream signal
+generation, raw quote/history/news storage, market context snapshots, and
+fundamental provider snapshots under one durable `session_id`. If a public
+provider cannot supply a requested feed, the row is persisted as a structured
+unavailable event instead of being mocked:
 
 ```bash
 uv run --project python --extra finance python python/velaria_cli.py finance watch-session start \
@@ -283,6 +398,7 @@ uv run --project python --extra finance python python/velaria_cli.py finance wat
   --entry-return-threshold 5 \
   --exit-score-threshold 0 \
   --exit-quote-pct-threshold -3 \
+  --signal-policy-preset balanced \
   --iterations 0 \
   --interval-sec 300 \
   --format json
@@ -333,10 +449,29 @@ uv run --project python --extra finance python python/velaria_cli.py finance wat
   --limit 20 \
   --format json
 
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session review \
+  --session-id us_watch_20260519 \
+  --log-limit 20 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance watch-session supervise \
+  --session-id us_watch_20260519 \
+  --interval-sec 60 \
+  --log-limit 20 \
+  --format json
+
 uv run --project python --extra finance python python/velaria_cli.py finance watch-session stop \
   --session-id us_watch_20260519 \
   --format json
 ```
+
+`review` reads the async runtime row, process state, log tail, persisted feed
+counts, latest signals, and provider-unavailable evidence, then appends a
+structured row to `finance_watch_session_reviews`. `supervise` runs that same
+review loop continuously inside the CLI (`--iterations 0`) or for a bounded
+number of cycles. The review output includes `next_actions` and an
+`agent_prompt` that is designed to be passed back through `velaria_cli_run` for
+continuous observation and adjustment.
 
 Use agentic stream monitor mode when the ranking loop should create Velaria
 `execution_mode=stream` monitors and emit FocusEvents from the persisted
@@ -363,7 +498,9 @@ uv run --project python --extra finance python python/velaria_cli.py finance ran
 ```
 
 Fetch public news rows directly when you need to inspect the news provider and
-sentiment evidence:
+sentiment evidence. News/filing rows include `source_category`, `source_type`,
+`source_score`, and `source_score_reason` so ranking, replay, and agents can
+distinguish broad news aggregators from finance news and regulatory filings:
 
 ```bash
 uv run --project python --extra finance python python/velaria_cli.py finance fetch-news \
@@ -371,6 +508,34 @@ uv run --project python --extra finance python python/velaria_cli.py finance fet
   --market us \
   --symbol AAPL \
   --limit 5
+
+uv run --project python --extra finance python python/velaria_cli.py finance fetch-news \
+  --provider yahoo-finance-news \
+  --market us \
+  --symbol AAPL \
+  --limit 5
+
+export VELARIA_SEC_USER_AGENT="VelariaFinance/1.0 ops@example.com"
+
+uv run --project python --extra finance python python/velaria_cli.py finance fetch-news \
+  --provider sec-filings \
+  --market us \
+  --symbol AAPL \
+  --limit 5
+```
+
+Fetch public U.S. fundamentals evidence through SEC Company Facts. If a symbol,
+market, or upstream endpoint cannot provide the data, the command returns a
+structured unavailable row instead of mock values. For production SEC access,
+set a descriptive application/contact User-Agent first:
+
+```bash
+export VELARIA_SEC_USER_AGENT="VelariaFinance/1.0 ops@example.com"
+
+uv run --project python --extra finance python python/velaria_cli.py finance fetch-fundamentals \
+  --provider sec-companyfacts \
+  --market us \
+  --symbols AAPL,MSFT,NVDA
 ```
 
 Fetch A-share historical data through Yahoo chart JSON or AkShare and write a
@@ -416,8 +581,22 @@ subcommand, for example `finance doctor`, `finance sources`, `finance analyze
 --format json`, `finance watch-session start --market us --symbols
 AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0
 --async-run --format json`, `finance watch-session status --session-id
-us_watch_20260519 --format json`, or `finance watch --market cn --symbol 000001 --interval-sec
-30 --iterations 0 --jsonl`; do not include `uv`, `python`, or
+us_watch_20260519 --format json`, `finance watch-session review --session-id
+us_watch_20260519 --format json`, `finance watch-session supervise --session-id
+us_watch_20260519 --interval-sec 60 --format json`, `finance intelligence
+index --session-id us_watch_20260519 --format json`, `finance intelligence
+search --session-id us_watch_20260519 --query "NVDA momentum risk news
+fundamentals" --format json`, `finance intelligence report --session-id
+us_watch_20260519 --format json`, `finance intelligence jobs --session-id
+us_watch_20260519 --format json`, `finance intelligence status --session-id
+us_watch_20260519 --format json`, `finance intelligence stop --session-id
+us_watch_20260519 --format json`, `finance intelligence resume --session-id
+us_watch_20260519 --format json`, `finance intelligence evaluate --session-id
+us_watch_20260519 --format json`, `finance intelligence eval-report --session-id
+us_watch_20260519 --format json`, `finance fetch-fundamentals
+--provider sec-companyfacts --market us --symbols
+AAPL,MSFT,NVDA`, or `finance watch --market cn --symbol 000001
+--interval-sec 30 --iterations 0 --jsonl`; do not include `uv`, `python`, or
 `python/velaria_cli.py` in the tool arguments.
 
 `finance pipeline` and `finance rank-candidates` do not require a

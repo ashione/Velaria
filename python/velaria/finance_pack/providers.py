@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 
 FetchHistoryFn = Callable[..., list[dict[str, Any]]]
+FetchFundamentalsFn = Callable[..., list[dict[str, Any]]]
 FetchNewsFn = Callable[..., list[dict[str, Any]]]
 FetchQuotesFn = Callable[..., list[dict[str, Any]]]
 
@@ -19,6 +20,10 @@ class FinanceProviderSpec:
     recommended_history_provider: bool
     source_url: str
     notes: str
+    source_category: str = "market_data"
+    source_type: str = "provider"
+    source_score: float = 0.5
+    source_score_reason: str = "Default provider source score; inspect row-level freshness and errors before use."
 
     def to_catalog_row(self) -> dict[str, Any]:
         return {
@@ -30,6 +35,10 @@ class FinanceProviderSpec:
             "recommended_history_provider": self.recommended_history_provider,
             "source_url": self.source_url,
             "notes": self.notes,
+            "source_category": self.source_category,
+            "source_type": self.source_type,
+            "source_score": self.source_score,
+            "source_score_reason": self.source_score_reason,
         }
 
 
@@ -37,12 +46,15 @@ class FinanceProviderSpec:
 class FinanceProviderAdapter:
     spec: FinanceProviderSpec
     fetch_history: FetchHistoryFn | None = None
+    fetch_fundamentals: FetchFundamentalsFn | None = None
     fetch_news: FetchNewsFn | None = None
     fetch_quotes: FetchQuotesFn | None = None
 
     def supports(self, operation: str) -> bool:
         if operation == "fetch_history":
             return self.fetch_history is not None
+        if operation == "fetch_fundamentals":
+            return self.fetch_fundamentals is not None
         if operation == "fetch_news":
             return self.fetch_news is not None
         if operation == "fetch_quotes":

@@ -440,7 +440,8 @@ def parse_tencent_quote_payload(
             if len(fields) < 7:
                 continue
             symbol = fields[2].strip()
-            if symbol not in symbol_set:
+            requested = {_normalize_cn_tencent_symbol(item) for item in symbol_set}
+            if symbol not in requested:
                 continue
             rows.append(
                 {
@@ -505,6 +506,15 @@ def parse_tencent_quote_payload(
             details={"market": market, "symbols": sorted(symbol_set)},
         )
     return rows
+
+
+def _normalize_cn_tencent_symbol(symbol: str) -> str:
+    normalized = symbol.strip().lower()
+    if normalized.startswith("s_"):
+        normalized = normalized[2:]
+    if normalized.startswith(("sh", "sz")) and len(normalized) > 2:
+        return normalized[2:]
+    return normalized
 
 
 def parse_yahoo_chart_payload(

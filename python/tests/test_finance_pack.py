@@ -11,6 +11,7 @@ import pandas as pd
 from velaria.agentic_store import AgenticStore
 from velaria.cli import main as velaria_cli_main
 from velaria.finance_pack import (
+    FinanceProviderError,
     build_research_prompt,
     evaluate_news_sentiment,
     fetch_fundamentals,
@@ -26,7 +27,14 @@ from velaria.finance_pack import (
     provider_catalog,
     provider_names_for_operation,
 )
-from velaria.finance_pack.cli import _intelligence_report_payload, _rank_native_stream_row, _rank_native_stream_view_name, main as finance_cli_main
+from velaria.finance_pack.cli import (
+    _intelligence_report_payload,
+    _rank_native_signal_rows,
+    _rank_native_stream_row,
+    _rank_native_stream_source_row,
+    _rank_native_stream_view_name,
+    main as finance_cli_main,
+)
 
 
 class FinancePackTest(unittest.TestCase):
@@ -177,6 +185,16 @@ class FinancePackTest(unittest.TestCase):
         self.assertEqual(rows[-1]["provider"], "yahoo")
         self.assertEqual(rows[-1]["price"], 201.5)
         self.assertEqual(rows[-1]["pct_change"], 0.75)
+
+    def test_tencent_cn_quote_parser_accepts_exchange_prefixed_index_symbol(self):
+        payload = 'v_sh000001="1~上证指数~000001~4169.54~4131.53~4122.96~617611067~0~0~0.00~0~0.00~0~0.00~0~0.00~0~0.00~0~0.00~0~0.00~0~0.00~0~0.00~0~~20260519161415~38.01~0.92~4170.29~4107.99~4169.54/617611067/1306522478007~617611067~130652248~1.28~18.32~~4170.29~4107.99~1.51~644374.84~694466.01~0.00~-1~-1~0.87~0~";'
+
+        rows = parse_tencent_quote_payload(payload, market="cn", symbols=["s_sh000001"], fetched_at="2026-05-20T00:58:00Z")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["symbol"], "000001")
+        self.assertEqual(rows[0]["name"], "上证指数")
+        self.assertEqual(rows[0]["price"], 4169.54)
 
     def test_native_stream_view_name_stays_within_sql_identifier_limit(self):
         args = mock.Mock()
@@ -690,12 +708,34 @@ class FinancePackTest(unittest.TestCase):
 
                 stdout = StringIO()
                 with mock.patch("velaria.finance_pack.cli.os.kill") as kill:
-                    with redirect_stdout(stdout):
-                        exit_code = finance_cli_main(["watch-session", "status", "--session-id", "session_async", "--format", "json"])
+                    with mock.patch("velaria.finance_pack.cli._process_command_line", return_value="python -m velaria.finance_pack.cli watch-session start --session-id session_async"):
+                        with redirect_stdout(stdout):
+                            exit_code = finance_cli_main(["watch-session", "status", "--session-id", "session_async", "--format", "json"])
                 self.assertEqual(exit_code, 0)
                 status_payload = json.loads(stdout.getvalue())
                 self.assertTrue(status_payload["process_running"])
                 kill.assert_called_once_with(4321, 0)
+
+                stdout = StringIO()
+                with mock.patch("velaria.finance_pack.cli.os.kill") as kill:
+                    with mock.patch("velaria.finance_pack.cli._process_command_line", return_value="python unrelated.py"):
+                        with redirect_stdout(stdout):
+                            exit_code = finance_cli_main(["watch-session", "status", "--session-id", "session_async", "--format", "json"])
+                self.assertEqual(exit_code, 0)
+                stale_payload = json.loads(stdout.getvalue())
+                self.assertFalse(stale_payload["process_running"])
+                self.assertEqual(stale_payload["effective_status"], "not_running")
+                kill.assert_called_once_with(4321, 0)
+
+                stdout = StringIO()
+                with mock.patch("velaria.finance_pack.cli.os.kill") as kill:
+                    with mock.patch("velaria.finance_pack.cli._process_command_line", return_value="python unrelated.py"):
+                        with redirect_stdout(stdout):
+                            exit_code = finance_cli_main(["watch-session", "stop", "--session-id", "session_async", "--format", "json"])
+                self.assertEqual(exit_code, 0)
+                stale_stop_payload = json.loads(stdout.getvalue())
+                self.assertFalse(stale_stop_payload["signal_sent"])
+                self.assertEqual(kill.call_args_list, [mock.call(4321, 0)])
 
                 log_path = payload["run"]["log_path"]
                 with open(log_path, "w", encoding="utf-8") as handle:
@@ -710,8 +750,9 @@ class FinancePackTest(unittest.TestCase):
 
                 stdout = StringIO()
                 with mock.patch("velaria.finance_pack.cli.os.kill") as kill:
-                    with redirect_stdout(stdout):
-                        exit_code = finance_cli_main(["watch-session", "stop", "--session-id", "session_async", "--format", "json"])
+                    with mock.patch("velaria.finance_pack.cli._process_command_line", return_value="python -m velaria.finance_pack.cli watch-session start --session-id session_async"):
+                        with redirect_stdout(stdout):
+                            exit_code = finance_cli_main(["watch-session", "stop", "--session-id", "session_async", "--format", "json"])
                 self.assertEqual(exit_code, 0)
                 stop_payload = json.loads(stdout.getvalue())
                 self.assertEqual(stop_payload["action"], "watch-session-stop")
@@ -754,8 +795,9 @@ class FinancePackTest(unittest.TestCase):
 
                 stdout = StringIO()
                 with mock.patch("velaria.finance_pack.cli.os.kill") as kill:
-                    with redirect_stdout(stdout):
-                        exit_code = finance_cli_main(["watch-session", "review", "--session-id", "session_review", "--log-limit", "1", "--format", "json"])
+                    with mock.patch("velaria.finance_pack.cli._process_command_line", return_value="python -m velaria.finance_pack.cli watch-session start --session-id session_review"):
+                        with redirect_stdout(stdout):
+                            exit_code = finance_cli_main(["watch-session", "review", "--session-id", "session_review", "--log-limit", "1", "--format", "json"])
                 self.assertEqual(exit_code, 0)
                 kill.assert_called_once_with(4321, 0)
                 payload = json.loads(stdout.getvalue())
@@ -1138,6 +1180,75 @@ class FinancePackTest(unittest.TestCase):
         self.assertEqual(row["entry_signal"], 1)
         self.assertEqual(row["exit_signal"], 0)
         self.assertEqual(row["signal_policy"]["source"], "custom")
+        self.assertIn('"field": "momentum_state"', row["signal_policy_json"])
+
+        stream_row = _rank_native_stream_source_row(row)
+        self.assertIn("signal_policy_json", stream_row)
+        signal = _rank_native_signal_rows(stream_row)[0]
+        self.assertEqual(signal["signal_policy_source"], "custom")
+        self.assertIn('"field": "momentum_state"', signal["signal_policy_json"])
+
+    def test_signal_policy_rejects_unknown_fields(self):
+        args = mock.Mock()
+        args.market = "us"
+        args.entry_score_threshold = 8.0
+        args.entry_return_threshold = 5.0
+        args.exit_score_threshold = 0.0
+        args.exit_quote_pct_threshold = -3.0
+        args.signal_policy_preset = "balanced"
+        args.signal_policy = json.dumps(
+            {
+                "entry": {"all": [{"field": "score_typo", "op": "<=", "value": 0}]},
+                "exit": {"any": []},
+            }
+        )
+
+        with self.assertRaises(FinanceProviderError) as raised:
+            _rank_native_stream_row(args, {"market": "us", "symbol": "NVDA"})
+
+        self.assertEqual(raised.exception.error_type, "invalid_signal_policy")
+
+    def test_signal_policy_rejects_unsupported_operator(self):
+        args = mock.Mock()
+        args.market = "us"
+        args.entry_score_threshold = 8.0
+        args.entry_return_threshold = 5.0
+        args.exit_score_threshold = 0.0
+        args.exit_quote_pct_threshold = -3.0
+        args.signal_policy_preset = "balanced"
+        args.signal_policy = json.dumps(
+            {
+                "entry": {"all": [{"field": "momentum_state", "op": ">=", "value": "neutral"}]},
+                "exit": {"any": []},
+            }
+        )
+
+        with self.assertRaises(FinanceProviderError) as raised:
+            _rank_native_stream_row(args, {"market": "us", "symbol": "NVDA"})
+
+        self.assertEqual(raised.exception.error_type, "invalid_signal_policy")
+        self.assertIn("allowed_ops", raised.exception.details)
+
+    def test_signal_policy_rejects_non_numeric_numeric_field_values(self):
+        args = mock.Mock()
+        args.market = "us"
+        args.entry_score_threshold = 8.0
+        args.entry_return_threshold = 5.0
+        args.exit_score_threshold = 0.0
+        args.exit_quote_pct_threshold = -3.0
+        args.signal_policy_preset = "balanced"
+        args.signal_policy = json.dumps(
+            {
+                "entry": {"all": [{"field": "score", "op": "=", "value": "not-a-number"}]},
+                "exit": {"any": []},
+            }
+        )
+
+        with self.assertRaises(FinanceProviderError) as raised:
+            _rank_native_stream_row(args, {"market": "us", "symbol": "NVDA"})
+
+        self.assertEqual(raised.exception.error_type, "invalid_signal_policy")
+        self.assertEqual(raised.exception.details["field"], "score")
 
     def test_normalize_akshare_cn_history_keeps_provider_metadata(self):
         raw = pd.DataFrame(
@@ -1714,6 +1825,20 @@ class FinancePackTest(unittest.TestCase):
         self.assertEqual(rows[0]["name"], "平安银行")
         self.assertEqual(rows[0]["price"], 10.99)
         self.assertEqual(rows[0]["pct_change"], -0.54)
+
+    def test_parse_tencent_cn_quote_payload_accepts_prefixed_index_symbol(self):
+        payload = 'v_s_sh000001="51~上证指数~000001~3880.12~4.20~0.11~1000~2000~~0~GP-A~";'
+
+        rows = parse_tencent_quote_payload(
+            payload,
+            market="cn",
+            symbols=["sh000001"],
+            fetched_at="2026-05-15T07:00:00Z",
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["symbol"], "000001")
+        self.assertEqual(rows[0]["name"], "上证指数")
 
     def test_parse_tencent_us_quote_accepts_akshare_prefixed_symbol(self):
         payload = 'v_usAAPL="51~Apple~AAPL.OQ~300.23~299.00~300.00~1000~~~~~~~~~~~~~~~~~~~~~~~~~~0.41~301.00~298.00~~123456~37000000~";'

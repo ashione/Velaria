@@ -765,6 +765,7 @@ def _watch_session_start_async_payload(args: argparse.Namespace) -> dict[str, An
         "session_id": session_id,
         "status": "running",
         "pid": int(process.pid),
+        "process_identity": _watch_session_process_identity(pid=int(process.pid), argv=child_argv, session_id=session_id),
         "log_path": str(log_path),
         "argv": child_argv,
         "started_at": _utc_payload_time(),
@@ -971,7 +972,7 @@ def _watch_session_summarize(args: argparse.Namespace) -> int:
 def _watch_session_status(args: argparse.Namespace) -> int:
     run = _get_watch_session_run_or_raise(args.session_id)
     session = _get_watch_session_or_none(args.session_id)
-    process_running = _is_process_running(int(run.get("pid") or 0))
+    process_running = _watch_session_run_process_running(run)
     payload = {
         "ok": True,
         "action": "watch-session-status",
@@ -979,7 +980,8 @@ def _watch_session_status(args: argparse.Namespace) -> int:
         "run": run,
         "watch_session": session,
         "process_running": process_running,
-        "effective_status": "running" if process_running else str((session or {}).get("status") or run.get("status") or "exited"),
+        "process_identity_verified": process_running,
+        "effective_status": _watch_session_effective_status(session=session, run=run, process_running=process_running),
     }
     if args.report_format == "json":
         return _emit_json(payload)
@@ -1060,7 +1062,7 @@ def _watch_session_stop(args: argparse.Namespace) -> int:
     run = _get_watch_session_run_or_raise(args.session_id)
     pid = int(run.get("pid") or 0)
     signal_sent = False
-    process_running = _is_process_running(pid)
+    process_running = _watch_session_run_process_running(run)
     if process_running:
         os.kill(pid, signal.SIGTERM)
         signal_sent = True
@@ -1079,6 +1081,7 @@ def _watch_session_stop(args: argparse.Namespace) -> int:
         "watch_session_id": args.session_id,
         "run": stopped,
         "process_running": process_running,
+        "process_identity_verified": process_running,
         "signal_sent": signal_sent,
     }
     if args.report_format == "json":
@@ -1238,6 +1241,61 @@ def _is_process_running(pid: int) -> bool:
     return True
 
 
+def _watch_session_process_identity(*, pid: int, argv: list[str], session_id: str) -> dict[str, Any]:
+    markers = ["velaria.finance_pack.cli", "watch-session", "start", "--session-id", session_id]
+    fingerprint = hashlib.sha256(json.dumps(argv, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    return {"pid": pid, "argv_fingerprint": fingerprint, "command_markers": markers}
+
+
+def _watch_session_run_process_running(run: dict[str, Any] | None) -> bool:
+    if not run:
+        return False
+    pid = int(run.get("pid") or 0)
+    if not _is_process_running(pid):
+        return False
+    command_line = _process_command_line(pid)
+    if not command_line:
+        return False
+    return all(marker and str(marker) in command_line for marker in _watch_session_process_markers(run))
+
+
+def _watch_session_process_markers(run: dict[str, Any]) -> list[str]:
+    identity = run.get("process_identity") if isinstance(run.get("process_identity"), dict) else {}
+    markers = identity.get("command_markers") if isinstance(identity.get("command_markers"), list) else []
+    if markers:
+        return [str(marker) for marker in markers if str(marker)]
+    session_id = str(run.get("session_id") or "")
+    return [marker for marker in ["velaria.finance_pack.cli", "watch-session", "start", "--session-id", session_id] if marker]
+
+
+def _process_command_line(pid: int) -> str:
+    try:
+        completed = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            check=False,
+        )
+    except Exception:
+        return ""
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout.strip()
+
+
+def _watch_session_effective_status(*, session: dict[str, Any] | None, run: dict[str, Any] | None, process_running: bool) -> str:
+    if process_running:
+        return "running"
+    session_status = str((session or {}).get("status") or "")
+    if session_status and session_status not in {"running", "started"}:
+        return session_status
+    run_status = str((run or {}).get("status") or "")
+    if run_status in {"completed", "interrupted", "stop_requested", "not_running"}:
+        return run_status
+    return "not_running"
+
+
 def _read_watch_session_log_lines(run: dict[str, Any] | None, *, limit: int) -> tuple[pathlib.Path, list[str]]:
     raw_path = str((run or {}).get("log_path") or "")
     log_path = pathlib.Path(raw_path) if raw_path else pathlib.Path()
@@ -1301,8 +1359,8 @@ def _build_watch_session_review(session_id: str, *, log_limit: int) -> dict[str,
             hint="Run finance watch-session list --format json or start one with finance watch-session start --async-run.",
             details={"session_id": session_id},
         )
-    process_running = _is_process_running(int((run or {}).get("pid") or 0)) if run else False
-    effective_status = "running" if process_running else str((session or {}).get("status") or (run or {}).get("status") or "exited")
+    process_running = _watch_session_run_process_running(run)
+    effective_status = _watch_session_effective_status(session=session, run=run, process_running=process_running)
     summary = _compact_watch_session_summary(_summarize_watch_session(session)) if session else _empty_watch_session_summary(session_id=session_id)
     rows = _read_watch_session_events(session, feed="all", limit=0) if session else []
     log_path, raw_log_tail = _read_watch_session_log_lines(run, limit=log_limit)
@@ -2211,6 +2269,9 @@ def _compact_finance_evidence_payload(payload: dict[str, Any]) -> dict[str, Any]
         "news_sentiment_label",
         "momentum_state",
         "signal_type",
+        "signal_policy_source",
+        "signal_policy_preset",
+        "signal_policy_json",
         "provider",
         "freshness",
         "error_type",
@@ -3322,6 +3383,7 @@ def _rank_native_stream_schema() -> list[str]:
         "provider_quality_score",
         "signal_policy_source",
         "signal_policy_preset",
+        "signal_policy_json",
     ]
 
 
@@ -3347,6 +3409,7 @@ def _rank_native_stream_signal_schema_binding() -> dict[str, Any]:
             "provider_quality_score": "provider_quality_score",
             "signal_policy_source": "signal_policy_source",
             "signal_policy_preset": "signal_policy_preset",
+            "signal_policy_json": "signal_policy_json",
             "iteration": "iteration",
         },
     }
@@ -3430,7 +3493,7 @@ def _rank_native_stream_sql(view_name: str = "finance_rank_candidate_stream") ->
     return (
         "SELECT event_time, market, symbol, rank, score, period_return_pct, quote_pct_change, "
         "entry_signal, exit_signal, quote_freshness, news_sentiment_label, momentum_state, liquidity_score, "
-        "provider_quality_score, signal_policy_source, signal_policy_preset "
+        "provider_quality_score, signal_policy_source, signal_policy_preset, signal_policy_json "
         f"FROM {view_name} "
         "WHERE entry_signal >= 1 OR exit_signal >= 1"
     )
@@ -3583,6 +3646,7 @@ def _rank_native_stream_row(args: argparse.Namespace, candidate: dict[str, Any])
     news_label = str(candidate.get("news_sentiment_label") or "unknown")
     feature = candidate.get("feature_snapshot") if isinstance(candidate.get("feature_snapshot"), dict) else {}
     policy = _resolve_signal_policy(args)
+    policy_json = json.dumps(policy, ensure_ascii=False, sort_keys=True)
     values = {
         "score": score,
         "period_return_pct": period_return_pct,
@@ -3613,6 +3677,7 @@ def _rank_native_stream_row(args: argparse.Namespace, candidate: dict[str, Any])
         "provider_quality_score": values["provider_quality_score"],
         "signal_policy_source": str(policy.get("source") or "preset"),
         "signal_policy_preset": str(policy.get("preset") or ""),
+        "signal_policy_json": policy_json,
         "signal_policy": policy,
     }
 
@@ -3643,8 +3708,8 @@ def _resolve_signal_policy(args: argparse.Namespace) -> dict[str, Any]:
         return {
             "source": "custom",
             "preset": preset,
-            "entry": _normalize_signal_group(parsed.get("entry")),
-            "exit": _normalize_signal_group(parsed.get("exit")),
+            "entry": _normalize_signal_group(parsed.get("entry"), strict=True),
+            "exit": _normalize_signal_group(parsed.get("exit"), strict=True),
         }
     return {
         "source": "preset",
@@ -3716,12 +3781,61 @@ def _signal_policy_preset(preset: str, args: argparse.Namespace) -> dict[str, An
     }
 
 
-def _normalize_signal_group(group: Any) -> dict[str, list[dict[str, Any]]]:
+def _normalize_signal_group(group: Any, *, strict: bool = False) -> dict[str, list[dict[str, Any]]]:
     if not isinstance(group, dict):
+        if strict and group is not None:
+            raise FinanceProviderError(
+                "finance signal policy group must be an object",
+                error_type="invalid_signal_policy",
+                hint="Use entry/exit objects with all/any condition arrays.",
+            )
         return {"all": [], "any": []}
+    normalized: dict[str, list[dict[str, Any]]] = {"all": [], "any": []}
+    for key in ("all", "any"):
+        raw_conditions = group.get(key, [])
+        if strict and not isinstance(raw_conditions, list):
+            raise FinanceProviderError(
+                "finance signal policy conditions must be arrays",
+                error_type="invalid_signal_policy",
+                hint="Use all/any arrays such as {\"entry\":{\"all\":[{\"field\":\"score\",\"op\":\">=\",\"value\":8}]}}.",
+                details={"section": key},
+            )
+        normalized[key] = [
+            _normalize_signal_condition(item, section=key) if strict else item
+            for item in raw_conditions
+            if isinstance(item, dict)
+        ]
+    return normalized
+
+
+def _normalize_signal_condition(condition: dict[str, Any], *, section: str) -> dict[str, Any]:
+    field = str(condition.get("field") or "")
+    op = str(condition.get("op") or "=").lower()
+    if field not in _SIGNAL_POLICY_FIELD_TYPES:
+        raise FinanceProviderError(
+            f"unknown finance signal policy field: {field}",
+            error_type="invalid_signal_policy",
+            hint="Use one of the supported signal policy fields returned in details.candidates.",
+            details={"field": field, "section": section, "candidates": sorted(_SIGNAL_POLICY_FIELD_TYPES)},
+        )
+    allowed_ops = _NUMERIC_SIGNAL_OPS | {"=", "==", "!=", "<>", "in", "not_in", "not in"} if _SIGNAL_POLICY_FIELD_TYPES[field] == "number" else _STRING_SIGNAL_OPS
+    if op not in allowed_ops:
+        raise FinanceProviderError(
+            f"unsupported finance signal policy operator: {op}",
+            error_type="invalid_signal_policy",
+            hint="Use numeric operators for numeric fields and equality/in operators for text fields.",
+            details={"field": field, "op": op, "allowed_ops": sorted(allowed_ops)},
+        )
+    if _SIGNAL_POLICY_FIELD_TYPES[field] == "number":
+        if op in {"in", "not_in", "not in"}:
+            for item in _signal_sequence(condition.get("value")):
+                _signal_number_or_raise(item, field=field)
+        else:
+            _signal_number_or_raise(condition.get("value"), field=field)
     return {
-        "all": [item for item in group.get("all", []) if isinstance(item, dict)],
-        "any": [item for item in group.get("any", []) if isinstance(item, dict)],
+        "field": field,
+        "op": op,
+        "value": condition.get("value"),
     }
 
 
@@ -3744,8 +3858,8 @@ def _evaluate_signal_condition(condition: dict[str, Any], values: dict[str, Any]
     if op in {"!=", "<>"}:
         return not _signal_value_equal(actual, expected)
     if op in {">", ">=", "<", "<="}:
-        actual_number = _float_or_zero(actual)
-        expected_number = _float_or_zero(expected)
+        actual_number = _signal_number_or_raise(actual, field=field)
+        expected_number = _signal_number_or_raise(expected, field=field)
         if op == ">":
             return actual_number > expected_number
         if op == ">=":
@@ -3764,6 +3878,43 @@ def _signal_value_equal(actual: Any, expected: Any) -> bool:
     if isinstance(actual, (int, float)) or isinstance(expected, (int, float)):
         return math.isclose(_float_or_zero(actual), _float_or_zero(expected), rel_tol=1e-9, abs_tol=1e-9)
     return str(actual).lower() == str(expected).lower()
+
+
+_SIGNAL_POLICY_FIELD_TYPES = {
+    "score": "number",
+    "period_return_pct": "number",
+    "quote_pct_change": "number",
+    "liquidity_score": "number",
+    "provider_quality_score": "number",
+    "rank": "number",
+    "news_sentiment_label": "string",
+    "quote_freshness": "string",
+    "momentum_state": "string",
+}
+_NUMERIC_SIGNAL_OPS = {">", ">=", "<", "<="}
+_STRING_SIGNAL_OPS = {"=", "==", "!=", "<>", "in", "not_in", "not in"}
+
+
+def _signal_number_or_raise(value: Any, *, field: str) -> float:
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return float(value)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise FinanceProviderError(
+            f"finance signal policy field requires a numeric value: {field}",
+            error_type="invalid_signal_policy",
+            hint="Use numeric values with >, >=, <, and <= operators.",
+            details={"field": field, "value": value},
+        ) from exc
+    if not math.isfinite(parsed):
+        raise FinanceProviderError(
+            f"finance signal policy field requires a finite numeric value: {field}",
+            error_type="invalid_signal_policy",
+            hint="Use finite numeric values with >, >=, <, and <= operators.",
+            details={"field": field, "value": value},
+        )
+    return parsed
 
 
 def _signal_sequence(value: Any) -> list[Any]:
@@ -3797,6 +3948,7 @@ def _rank_native_signal_rows(row: dict[str, Any]) -> list[dict[str, Any]]:
                 "provider_quality_score": row.get("provider_quality_score"),
                 "signal_policy_source": row.get("signal_policy_source"),
                 "signal_policy_preset": row.get("signal_policy_preset"),
+                "signal_policy_json": row.get("signal_policy_json"),
             }
         )
     return signals

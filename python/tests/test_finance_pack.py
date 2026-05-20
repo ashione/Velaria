@@ -1,5 +1,6 @@
 import json
 import os
+import pathlib
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -34,6 +35,12 @@ from velaria.finance_pack.cli import (
     _rank_native_stream_source_row,
     _rank_native_stream_view_name,
     main as finance_cli_main,
+)
+from velaria.finance_pack.evidence_index import (
+    FINANCE_EVIDENCE_INDEX_VERSION,
+    build_finance_evidence_index,
+    finance_evidence_index_dir,
+    load_finance_evidence_index,
 )
 
 
@@ -1151,6 +1158,62 @@ class FinancePackTest(unittest.TestCase):
                 self.assertEqual(rows[-1]["query_text"], "AAPL fundamental unavailable risk")
                 self.assertEqual(index_rows[-1]["index_status"], "ready")
                 self.assertGreaterEqual(index_rows[-1]["doc_count"], 1)
+
+    def test_evidence_index_module_builds_no_hash_v2_index(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-evidence-index-module-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                rows = [
+                    {
+                        "feed": "candidates",
+                        "event_id": "candidate-aapl",
+                        "event_time": "2026-05-20T14:00:00Z",
+                        "payload_json": {
+                            "watch_session_id": "session_module_index",
+                            "event_time": "2026-05-20T14:00:00Z",
+                            "event_type": "research_candidate",
+                            "symbol": "AAPL",
+                            "summary": "AAPL positive momentum evidence",
+                            "score": 9.0,
+                        },
+                    }
+                ]
+
+                index = build_finance_evidence_index(
+                    intelligence_id="intel_module_index",
+                    watch_session_id="session_module_index",
+                    rows=rows,
+                    feed="all",
+                )
+
+                index_dir = pathlib.Path(index["index_path"])
+                self.assertEqual(index["index_version"], FINANCE_EVIDENCE_INDEX_VERSION)
+                self.assertEqual(index["semantic_status"], "disabled")
+                self.assertTrue((index_dir / "metadata.json").exists())
+                self.assertTrue((index_dir / "docs.jsonl").exists())
+                self.assertTrue((index_dir / "keyword" / "manifest.json").exists())
+                self.assertFalse((index_dir / "vectors.json").exists())
+                self.assertNotIn("vectors_path", index)
+
+    def test_evidence_index_module_rejects_stale_v1_index(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-evidence-index-stale-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                index_dir = finance_evidence_index_dir(watch_session_id="session_stale", feed="all")
+                index_dir.mkdir(parents=True)
+                (index_dir / "metadata.json").write_text(
+                    json.dumps({"index_version": 1, "fingerprint": "old"}) + "\n",
+                    encoding="utf-8",
+                )
+                (index_dir / "docs.jsonl").write_text("", encoding="utf-8")
+                (index_dir / "keyword").mkdir()
+
+                loaded, reason = load_finance_evidence_index(
+                    watch_session_id="session_stale",
+                    feed="all",
+                    expected_fingerprint="old",
+                )
+
+                self.assertIsNone(loaded)
+                self.assertEqual(reason, "stale")
 
     def test_intelligence_index_persists_reusable_hybrid_evidence_index(self):
         with tempfile.TemporaryDirectory(prefix="velaria-finance-intelligence-index-") as tmp:

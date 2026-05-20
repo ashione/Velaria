@@ -346,6 +346,8 @@ uv run --project python --extra finance python python/velaria_cli.py finance fet
   --symbol AAPL \
   --limit 5
 
+export VELARIA_SEC_USER_AGENT="VelariaFinance/1.0 ops@example.com"
+
 uv run --project python --extra finance python python/velaria_cli.py finance fetch-fundamentals \
   --provider sec-companyfacts \
   --market us \
@@ -450,7 +452,7 @@ Provider 使用建议：
 - 轻量 quote 优先尝试 `provider=tencent`
 - 美股 quote 也可尝试 `provider=yahoo`，它来自公开 chart metadata，按 provider contract 标记延迟或未知 freshness
 - 新闻和舆论证据优先尝试 `provider=google-news`；它是公开 RSS 搜索源，输出 `freshness=near_realtime`
-- 美股基本面优先尝试 `provider=sec-companyfacts`；如果 SEC、CIK 或字段不可用，必须保留结构化 unavailable row，不要 mock
+- 美股基本面优先尝试 `provider=sec-companyfacts`；生产访问 SEC 前先设置 `VELARIA_SEC_USER_AGENT` 为包含应用名和联系人的 User-Agent；如果 SEC、CIK 或字段不可用，必须保留结构化 unavailable row，不要 mock
 - Tencent 美股 quote 当前按 provider contract 标记为 `freshness=delayed`，不要描述为交易所级实时
 - AkShare / Eastmoney 上游不可达时，不要 mock 或编造历史数据；把结构化 provider 错误返回给用户，并可用 Tencent quote 做实时监控链路验证
 

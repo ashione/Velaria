@@ -34,6 +34,7 @@ from . import (
     finance_quote_schema_binding,
     provider_catalog,
     provider_names_for_operation,
+    sec_user_agent_policy,
 )
 from .evidence_index import (
     DEFAULT_FINANCE_EVIDENCE_RETRIEVER,
@@ -2924,6 +2925,26 @@ def _run_doctor(args: argparse.Namespace) -> int:
             "required": False,
             "message": "akshare is installed" if akshare_available else "akshare is not installed; history commands need the finance extra",
             "hint": "Run: uv sync --project python --extra finance",
+        }
+    )
+    sec_policy = sec_user_agent_policy()
+    checks.append(
+        {
+            "name": "sec_companyfacts_policy",
+            "status": sec_policy["status"],
+            "required": False,
+            "message": (
+                "SEC Company Facts User-Agent is configured"
+                if sec_policy["configured"]
+                else "SEC Company Facts uses the default non-production User-Agent policy"
+            ),
+            "hint": sec_policy["hint"],
+            "evidence": {
+                "provider": sec_policy["provider"],
+                "source": sec_policy["source"],
+                "configured": sec_policy["configured"],
+                "user_agent": sec_policy["user_agent"],
+            },
         }
     )
     if args.skip_network:

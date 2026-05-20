@@ -27,6 +27,7 @@ from velaria.finance_pack import (
     parse_yahoo_chart_payload,
     provider_catalog,
     provider_names_for_operation,
+    sec_user_agent_policy,
 )
 from velaria.finance_pack.cli import (
     _intelligence_report_payload,
@@ -175,6 +176,58 @@ class FinancePackTest(unittest.TestCase):
         self.assertEqual(rows[0]["revenue"], 300)
         self.assertEqual(rows[0]["net_income"], 42)
         self.assertEqual(rows[0]["fiscal_period_end"], "2026-03-31")
+
+    def test_sec_companyfacts_user_agent_policy_is_configurable_and_not_placeholder(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            default_policy = sec_user_agent_policy()
+        self.assertFalse(default_policy["configured"])
+        self.assertNotIn("contact@example.invalid", default_policy["user_agent"])
+        self.assertIn("VELARIA_SEC_USER_AGENT", default_policy["hint"])
+
+        with mock.patch.dict(os.environ, {"VELARIA_SEC_USER_AGENT": "VelariaFinanceTest/1.0 ops@example.com"}):
+            configured_policy = sec_user_agent_policy()
+        self.assertTrue(configured_policy["configured"])
+        self.assertEqual(configured_policy["source"], "VELARIA_SEC_USER_AGENT")
+        self.assertEqual(configured_policy["user_agent"], "VelariaFinanceTest/1.0 ops@example.com")
+
+    def test_sec_companyfacts_fetch_uses_configured_user_agent(self):
+        captured_user_agents: list[str | None] = []
+
+        class FakeResponse:
+            def __init__(self, payload: dict[str, object]):
+                self._payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps(self._payload).encode("utf-8")
+
+        facts_payload = {
+            "facts": {
+                "us-gaap": {
+                    "Revenues": {"units": {"USD": [{"end": "2026-03-31", "val": 300, "form": "10-Q", "filed": "2026-05-01"}]}},
+                    "NetIncomeLoss": {"units": {"USD": [{"end": "2026-03-31", "val": 42, "form": "10-Q", "filed": "2026-05-01"}]}},
+                }
+            }
+        }
+
+        def fake_urlopen(req, timeout=0):
+            captured_user_agents.append(dict(req.header_items()).get("User-agent"))
+            if "company_tickers" in req.full_url:
+                return FakeResponse({"0": {"ticker": "AAPL", "cik_str": 320193}})
+            return FakeResponse(facts_payload)
+
+        with mock.patch.dict(os.environ, {"VELARIA_SEC_USER_AGENT": "VelariaFinanceTest/1.0 ops@example.com"}):
+            with mock.patch("velaria.finance_pack.urllib_request.urlopen", side_effect=fake_urlopen):
+                rows = fetch_fundamentals(provider="sec-companyfacts", market="us", symbols="AAPL")
+
+        self.assertEqual(rows[0]["provider"], "sec-companyfacts")
+        self.assertEqual(rows[0]["revenue"], 300)
+        self.assertEqual(captured_user_agents, ["VelariaFinanceTest/1.0 ops@example.com", "VelariaFinanceTest/1.0 ops@example.com"])
 
     def test_yahoo_quote_provider_uses_chart_meta(self):
         payload = {
@@ -2106,6 +2159,8 @@ class FinancePackTest(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["action"], "doctor")
         checks = {item["name"]: item for item in payload["checks"]}
+        self.assertIn(checks["sec_companyfacts_policy"]["status"], {"ok", "warning"})
+        self.assertIn("VELARIA_SEC_USER_AGENT", checks["sec_companyfacts_policy"]["hint"])
         self.assertEqual(checks["tencent_quote_probe"]["status"], "ok")
         self.assertIn("finance analyze --market cn --symbol 000001", payload["next_steps"])
 

@@ -510,9 +510,12 @@ uv run --project python --extra finance python python/velaria_cli.py finance fet
 
 Fetch public U.S. fundamentals evidence through SEC Company Facts. If a symbol,
 market, or upstream endpoint cannot provide the data, the command returns a
-structured unavailable row instead of mock values:
+structured unavailable row instead of mock values. For production SEC access,
+set a descriptive application/contact User-Agent first:
 
 ```bash
+export VELARIA_SEC_USER_AGENT="VelariaFinance/1.0 ops@example.com"
+
 uv run --project python --extra finance python python/velaria_cli.py finance fetch-fundamentals \
   --provider sec-companyfacts \
   --market us \

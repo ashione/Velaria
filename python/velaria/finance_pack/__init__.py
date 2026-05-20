@@ -4,6 +4,7 @@ import importlib
 import html
 import json
 import math
+import os
 import re
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
@@ -23,6 +24,11 @@ YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/"
 GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search"
 SEC_COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/"
+SEC_USER_AGENT_ENV = "VELARIA_SEC_USER_AGENT"
+DEFAULT_SEC_USER_AGENT = (
+    "VelariaFinancePack/0.3 public-data-research; "
+    "set VELARIA_SEC_USER_AGENT with an app/contact for production SEC access"
+)
 DEFAULT_LICENSE_NOTE = (
     "Public market-data provider metadata; validate upstream terms, freshness, "
     "and exchange delay before using for decisions."
@@ -146,6 +152,30 @@ def provider_names_for_operation(operation: str) -> list[str]:
 
 def provider_catalog() -> list[dict[str, Any]]:
     return _provider_registry().catalog()
+
+
+def sec_user_agent_policy() -> dict[str, Any]:
+    configured = os.environ.get(SEC_USER_AGENT_ENV, "").strip()
+    if configured:
+        return {
+            "provider": "sec-companyfacts",
+            "configured": True,
+            "source": SEC_USER_AGENT_ENV,
+            "user_agent": configured,
+            "status": "ok",
+            "hint": f"SEC User-Agent is configured from {SEC_USER_AGENT_ENV}.",
+        }
+    return {
+        "provider": "sec-companyfacts",
+        "configured": False,
+        "source": "default",
+        "user_agent": DEFAULT_SEC_USER_AGENT,
+        "status": "warning",
+        "hint": (
+            f"Set {SEC_USER_AGENT_ENV} to a descriptive app/contact string before production SEC use, "
+            'for example "VelariaFinance/1.0 ops@example.com".'
+        ),
+    }
 
 
 def fetch_news(
@@ -961,7 +991,7 @@ def _fetch_sec_companyfacts(*, market: str, symbols: list[str]) -> list[dict[str
             rows.append(_fundamental_unavailable_row(market=market, symbol=symbol, provider="sec-companyfacts", error_type="cik_not_found"))
             continue
         url = f"{SEC_COMPANYFACTS_URL}CIK{cik}.json"
-        req = urllib_request.Request(url, headers={"User-Agent": "Velaria finance research contact@example.invalid"})
+        req = urllib_request.Request(url, headers=_sec_request_headers())
         try:
             with urllib_request.urlopen(req, timeout=20) as response:
                 payload = json.loads(response.read().decode("utf-8"))
@@ -980,7 +1010,7 @@ def _fetch_sec_companyfacts(*, market: str, symbols: list[str]) -> list[dict[str
 
 
 def _fetch_sec_ticker_map() -> dict[str, str]:
-    req = urllib_request.Request(SEC_COMPANY_TICKERS_URL, headers={"User-Agent": "Velaria finance research contact@example.invalid"})
+    req = urllib_request.Request(SEC_COMPANY_TICKERS_URL, headers=_sec_request_headers())
     with urllib_request.urlopen(req, timeout=20) as response:
         payload = json.loads(response.read().decode("utf-8"))
     mapping: dict[str, str] = {}
@@ -990,6 +1020,10 @@ def _fetch_sec_ticker_map() -> dict[str, str]:
         if ticker and cik:
             mapping[ticker] = cik
     return mapping
+
+
+def _sec_request_headers() -> dict[str, str]:
+    return {"User-Agent": str(sec_user_agent_policy()["user_agent"])}
 
 
 def _fundamental_unavailable_row(*, market: str, symbol: str, provider: str, error_type: str) -> dict[str, Any]:
@@ -1073,7 +1107,10 @@ def _provider_registry() -> FinanceProviderRegistry:
                     recommended_quote_provider=False,
                     recommended_history_provider=False,
                     source_url=SEC_COMPANYFACTS_URL,
-                    notes="Public SEC companyfacts XBRL API for U.S. company fundamentals; rows are filing snapshots, not realtime data.",
+                    notes=(
+                        "Public SEC companyfacts XBRL API for U.S. company fundamentals; rows are filing snapshots, "
+                        f"not realtime data. Set {SEC_USER_AGENT_ENV} with an app/contact string before production SEC use."
+                    ),
                 ),
                 fetch_fundamentals=_fetch_sec_companyfacts,
             ),

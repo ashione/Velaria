@@ -149,7 +149,7 @@ class FinanceEvidenceRetriever:
             },
             "fusion": "rrf",
             "rank_constant": 60,
-            "structured_features": ["feed_priority", "symbol_match", "signal_priority", "recency"],
+            "structured_features": ["feed_priority", "symbol_match", "signal_priority", "recency", "source_score"],
             "index_mode": index_mode,
             "index_status": index_ref["index_status"],
             "index_path": index_ref.get("index_path"),
@@ -492,6 +492,10 @@ def compact_finance_evidence_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "signal_policy_preset",
         "signal_policy_json",
         "provider",
+        "source_category",
+        "source_type",
+        "source_score",
+        "source_score_reason",
         "freshness",
         "error_type",
         "message",
@@ -522,6 +526,10 @@ def finance_structured_evidence_score(doc: dict[str, Any], *, query_text: str) -
         score += 2.0
     if row.get("news_sentiment_label") in {"negative", "positive"}:
         score += 1.0
+    try:
+        score += min(2.0, max(0.0, float(row.get("source_score") or 0.0) * 2.0))
+    except (TypeError, ValueError):
+        pass
     return score
 
 

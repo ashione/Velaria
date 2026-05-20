@@ -498,11 +498,27 @@ uv run --project python --extra finance python python/velaria_cli.py finance ran
 ```
 
 Fetch public news rows directly when you need to inspect the news provider and
-sentiment evidence:
+sentiment evidence. News/filing rows include `source_category`, `source_type`,
+`source_score`, and `source_score_reason` so ranking, replay, and agents can
+distinguish broad news aggregators from finance news and regulatory filings:
 
 ```bash
 uv run --project python --extra finance python python/velaria_cli.py finance fetch-news \
   --provider google-news \
+  --market us \
+  --symbol AAPL \
+  --limit 5
+
+uv run --project python --extra finance python python/velaria_cli.py finance fetch-news \
+  --provider yahoo-finance-news \
+  --market us \
+  --symbol AAPL \
+  --limit 5
+
+export VELARIA_SEC_USER_AGENT="VelariaFinance/1.0 ops@example.com"
+
+uv run --project python --extra finance python python/velaria_cli.py finance fetch-news \
+  --provider sec-filings \
   --market us \
   --symbol AAPL \
   --limit 5

@@ -22,13 +22,65 @@ AKSHARE_STOCK_DOC_URL = "https://akshare.akfamily.xyz/data/stock/stock.html"
 TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q="
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/"
 GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search"
+SEC_FILINGS_ATOM_URL = "https://www.sec.gov/cgi-bin/browse-edgar"
 SEC_COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/"
+YAHOO_FINANCE_NEWS_RSS_URL = "https://feeds.finance.yahoo.com/rss/2.0/headline"
 SEC_USER_AGENT_ENV = "VELARIA_SEC_USER_AGENT"
 DEFAULT_SEC_USER_AGENT = (
     "VelariaFinancePack/0.3 public-data-research; "
     "set VELARIA_SEC_USER_AGENT with an app/contact for production SEC access"
 )
+INFORMATION_SOURCE_POLICIES: dict[str, dict[str, Any]] = {
+    "akshare": {
+        "source_category": "market_data",
+        "source_type": "data_package",
+        "source_score": 0.7,
+        "source_score_reason": "Public data package wrapping upstream market-data endpoints; quality depends on endpoint reachability and freshness.",
+    },
+    "google-news": {
+        "source_category": "news",
+        "source_type": "news_aggregator",
+        "source_score": 0.65,
+        "source_score_reason": "Public news search RSS aggregator; useful for breadth but publisher and duplicate quality vary.",
+    },
+    "sec-companyfacts": {
+        "source_category": "fundamentals",
+        "source_type": "regulatory_fundamentals",
+        "source_score": 0.94,
+        "source_score_reason": "Official SEC companyfacts XBRL data; filing taxonomy and period selection still require validation.",
+    },
+    "sec-filings": {
+        "source_category": "regulatory",
+        "source_type": "filing",
+        "source_score": 0.96,
+        "source_score_reason": "Official SEC EDGAR filing feed; high authority but not a realtime market-data source.",
+    },
+    "tencent": {
+        "source_category": "market_data",
+        "source_type": "quote",
+        "source_score": 0.82,
+        "source_score_reason": "Public quote endpoint; freshness is market-dependent and U.S. quotes are marked delayed.",
+    },
+    "yahoo": {
+        "source_category": "market_data",
+        "source_type": "quote_history",
+        "source_score": 0.78,
+        "source_score_reason": "Public chart endpoint for historical bars and delayed quotes.",
+    },
+    "yahoo-finance-news": {
+        "source_category": "news",
+        "source_type": "finance_news",
+        "source_score": 0.72,
+        "source_score_reason": "Public Yahoo Finance RSS headline feed for finance news; publisher provenance still requires review.",
+    },
+    "velaria-metric-engine": {
+        "source_category": "derived_metric",
+        "source_type": "feature",
+        "source_score": 0.6,
+        "source_score_reason": "Derived Velaria metric row; inspect upstream evidence rows and score_parts before relying on it.",
+    },
+}
 DEFAULT_LICENSE_NOTE = (
     "Public market-data provider metadata; validate upstream terms, freshness, "
     "and exchange delay before using for decisions."
@@ -178,6 +230,41 @@ def sec_user_agent_policy() -> dict[str, Any]:
     }
 
 
+def classify_information_source(*, provider: str, event_type: str | None = None, freshness: str | None = None) -> dict[str, Any]:
+    normalized_provider = str(provider or "").strip().lower()
+    policy = INFORMATION_SOURCE_POLICIES.get(normalized_provider)
+    if policy is None:
+        policy = {
+            "source_category": "unknown",
+            "source_type": str(event_type or "unknown"),
+            "source_score": 0.35,
+            "source_score_reason": "Unknown provider; treat as low-confidence evidence until source provenance is reviewed.",
+        }
+    score = float(policy["source_score"])
+    if freshness == "unavailable":
+        score = min(score, 0.2)
+    elif freshness == "delayed":
+        score = max(0.0, score - 0.05)
+    elif freshness in {"realtime", "near_realtime", "filing", "eod"}:
+        score = min(1.0, score + 0.0)
+    return {
+        "source_category": policy["source_category"],
+        "source_type": policy["source_type"],
+        "source_score": round(score, 6),
+        "source_score_reason": policy["source_score_reason"],
+    }
+
+
+def enrich_information_source(row: dict[str, Any]) -> dict[str, Any]:
+    provider = str(row.get("provider") or "")
+    fields = classify_information_source(
+        provider=provider,
+        event_type=str(row.get("event_type") or ""),
+        freshness=str(row.get("freshness") or ""),
+    )
+    return {**row, **fields}
+
+
 def fetch_news(
     *,
     provider: str,
@@ -269,7 +356,7 @@ def normalize_history_frame(
                 "license_note": license_note,
             }
         )
-    return rows
+    return [enrich_information_source(row) for row in rows]
 
 
 def normalize_quote_frame(
@@ -317,7 +404,7 @@ def normalize_quote_frame(
                 "license_note": license_note,
             }
         )
-    return rows
+    return [enrich_information_source(row) for row in rows]
 
 
 def fetch_history(
@@ -447,7 +534,7 @@ def _fetch_akshare_quotes(
             hint="For U.S. stocks, inspect akshare stock_us_spot_em() codes and pass the provider-specific code such as '105.AAPL'.",
             details={"provider": provider, "market": market, "symbols": symbols},
         )
-    return rows
+    return [enrich_information_source(row) for row in rows]
 
 
 def parse_tencent_quote_payload(
@@ -535,7 +622,7 @@ def parse_tencent_quote_payload(
             hint="Use A-share symbols like 000001/600519 or U.S. symbols like AAPL.",
             details={"market": market, "symbols": sorted(symbol_set)},
         )
-    return rows
+    return [enrich_information_source(row) for row in rows]
 
 
 def _normalize_cn_tencent_symbol(symbol: str) -> str:
@@ -655,7 +742,8 @@ def parse_yahoo_quote_payload(
     market_time = meta.get("regularMarketTime") or ((result.get("timestamp") or [None])[-1])
     event_time = datetime.fromtimestamp(int(market_time), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if market_time else fetched_at
     return [
-        {
+        enrich_information_source(
+            {
             "event_time": event_time,
             "event_type": "quote",
             "source_key": symbol,
@@ -678,7 +766,8 @@ def parse_yahoo_quote_payload(
             "freshness": "delayed",
             "delay_sec": None,
             "license_note": DEFAULT_LICENSE_NOTE,
-        }
+            }
+        )
     ]
 
 
@@ -700,7 +789,8 @@ def parse_sec_companyfacts_payload(
     latest = revenue or net_income or assets
     if latest is None:
         return [
-            {
+            enrich_information_source(
+                {
                 "event_time": fetched_at,
                 "event_type": "fundamental_unavailable",
                 "source_key": symbol,
@@ -713,10 +803,12 @@ def parse_sec_companyfacts_payload(
                 "error_type": "fundamental_fact_not_found",
                 "message": "SEC companyfacts payload did not contain supported GAAP metrics.",
                 "not_mocked": True,
-            }
+                }
+            )
         ]
     return [
-        {
+        enrich_information_source(
+            {
             "event_time": str(latest.get("filed") or fetched_at),
             "event_type": "fundamental_snapshot",
             "source_key": symbol,
@@ -734,7 +826,8 @@ def parse_sec_companyfacts_payload(
             "net_income": net_income.get("val") if net_income else None,
             "assets": assets.get("val") if assets else None,
             "license_note": "Public SEC companyfacts API metadata; verify filing taxonomy and period before using for decisions.",
-        }
+            }
+        )
     ]
 
 
@@ -759,16 +852,67 @@ def parse_google_news_rss(
     source_url: str = GOOGLE_NEWS_RSS_URL,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
+    return _parse_rss_news_rows(
+        payload,
+        market=market,
+        symbol=symbol,
+        query=query,
+        provider="google-news",
+        source_url=source_url,
+        fetched_at=fetched_at,
+        freshness="near_realtime",
+        default_publisher=None,
+        limit=limit,
+    )
+
+
+def parse_yahoo_finance_news_rss(
+    payload: str,
+    *,
+    market: str,
+    symbol: str,
+    query: str,
+    source_url: str,
+    fetched_at: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    return _parse_rss_news_rows(
+        payload,
+        market=market,
+        symbol=symbol,
+        query=query,
+        provider="yahoo-finance-news",
+        source_url=source_url,
+        fetched_at=fetched_at,
+        freshness="near_realtime",
+        default_publisher="Yahoo Finance",
+        limit=limit,
+    )
+
+
+def _parse_rss_news_rows(
+    payload: str,
+    *,
+    market: str,
+    symbol: str,
+    query: str,
+    provider: str,
+    source_url: str,
+    fetched_at: str | None,
+    freshness: str,
+    default_publisher: str | None,
+    limit: int | None,
+) -> list[dict[str, Any]]:
     market = normalize_market(market)
     fetched_at = fetched_at or _utc_now()
     try:
         root = ET.fromstring(payload)
     except ET.ParseError as exc:
         raise FinanceProviderError(
-            "Google News RSS returned invalid XML",
+            f"{provider} RSS returned invalid XML",
             error_type="provider_parse_failed",
             hint="Retry later or inspect the provider RSS payload.",
-            details={"provider": "google-news", "market": market, "symbol": symbol, "query": query},
+            details={"provider": provider, "market": market, "symbol": symbol, "query": query},
         ) from exc
     items = root.findall(".//item")
     rows: list[dict[str, Any]] = []
@@ -778,27 +922,80 @@ def parse_google_news_rss(
         source = item.find("source")
         summary = _xml_text(item, "description")
         rows.append(
-            {
-                "event_time": fetched_at,
-                "event_type": "news",
-                "source_key": symbol,
-                "market": market,
-                "symbol": symbol,
-                "title": title,
-                "summary": summary,
-                "url": link,
-                "publisher": _clean_text(source.text) if source is not None and source.text else None,
-                "publisher_url": source.attrib.get("url") if source is not None else None,
-                "published_at": _rss_datetime(_xml_text(item, "pubDate")),
-                "query": query,
-                "provider": "google-news",
-                "source_url": source_url,
-                "fetched_at": fetched_at,
-                "freshness": "near_realtime",
-                "delay_sec": None,
-                "license_note": NEWS_LICENSE_NOTE,
-            }
+            enrich_information_source(
+                {
+                    "event_time": fetched_at,
+                    "event_type": "news",
+                    "source_key": symbol,
+                    "market": market,
+                    "symbol": symbol,
+                    "title": title,
+                    "summary": summary,
+                    "url": link,
+                    "publisher": _clean_text(source.text) if source is not None and source.text else default_publisher,
+                    "publisher_url": source.attrib.get("url") if source is not None else None,
+                    "published_at": _rss_datetime(_xml_text(item, "pubDate")),
+                    "query": query,
+                    "provider": provider,
+                    "source_url": source_url,
+                    "fetched_at": fetched_at,
+                    "freshness": freshness,
+                    "delay_sec": None,
+                    "license_note": NEWS_LICENSE_NOTE,
+                }
+            )
         )
+    return rows
+
+
+def parse_sec_filings_atom(
+    payload: str,
+    *,
+    market: str,
+    symbol: str,
+    cik: str,
+    source_url: str,
+    fetched_at: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    market = normalize_market(market)
+    fetched_at = fetched_at or _utc_now()
+    try:
+        root = ET.fromstring(payload)
+    except ET.ParseError as exc:
+        raise FinanceProviderError(
+            "SEC filings Atom feed returned invalid XML",
+            error_type="provider_parse_failed",
+            hint="Retry later or inspect the SEC Atom payload.",
+            details={"provider": "sec-filings", "market": market, "symbol": symbol, "cik": cik, "source_url": source_url},
+        ) from exc
+    entries = _xml_findall(root, "entry")
+    rows: list[dict[str, Any]] = []
+    for entry in entries[: max(0, limit) if limit is not None else None]:
+        title = _xml_child_text(entry, "title")
+        summary = _xml_child_text(entry, "summary")
+        updated = _atom_datetime(_xml_child_text(entry, "updated"))
+        link = _xml_child_link(entry)
+        row = {
+            "event_time": updated or fetched_at,
+            "event_type": "filing",
+            "source_key": symbol,
+            "market": market,
+            "symbol": symbol,
+            "cik": cik,
+            "title": title,
+            "summary": summary,
+            "url": link,
+            "published_at": updated,
+            "filing_form": _sec_filing_form(title),
+            "provider": "sec-filings",
+            "source_url": source_url,
+            "fetched_at": fetched_at,
+            "freshness": "near_realtime",
+            "delay_sec": None,
+            "license_note": "Public SEC EDGAR filing feed metadata; verify form type, accession, and filing document before using for decisions.",
+        }
+        rows.append(enrich_information_source(row))
     return rows
 
 
@@ -1027,18 +1224,20 @@ def _sec_request_headers() -> dict[str, str]:
 
 
 def _fundamental_unavailable_row(*, market: str, symbol: str, provider: str, error_type: str) -> dict[str, Any]:
-    return {
-        "event_time": _utc_now(),
-        "event_type": "fundamental_unavailable",
-        "source_key": symbol,
-        "market": market,
-        "symbol": symbol,
-        "provider": provider,
-        "freshness": "unavailable",
-        "error_type": error_type,
-        "message": "Public fundamentals provider could not provide a usable row for this symbol.",
-        "not_mocked": True,
-    }
+    return enrich_information_source(
+        {
+            "event_time": _utc_now(),
+            "event_type": "fundamental_unavailable",
+            "source_key": symbol,
+            "market": market,
+            "symbol": symbol,
+            "provider": provider,
+            "freshness": "unavailable",
+            "error_type": error_type,
+            "message": "Public fundamentals provider could not provide a usable row for this symbol.",
+            "not_mocked": True,
+        }
+    )
 
 
 def _fetch_google_news(
@@ -1065,6 +1264,95 @@ def _fetch_google_news(
     return parse_google_news_rss(payload, market=market, symbol=symbol, query=query_text, source_url=url, limit=limit)
 
 
+def _fetch_yahoo_finance_news(
+    *,
+    market: str,
+    symbol: str,
+    query: str | None = None,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    market = normalize_market(market)
+    provider_symbol = _yahoo_symbol(market, symbol)
+    params = urllib_parse.urlencode({"s": provider_symbol, "region": "US", "lang": "en-US"})
+    url = f"{YAHOO_FINANCE_NEWS_RSS_URL}?{params}"
+    req = urllib_request.Request(url, headers={"User-Agent": "Velaria/finance-pack"})
+    try:
+        with urllib_request.urlopen(req, timeout=15) as response:
+            payload = response.read().decode("utf-8", errors="replace")
+    except Exception as exc:  # pragma: no cover - exercised by network smoke
+        raise FinanceProviderError(
+            f"failed to fetch {market} news from yahoo-finance-news: {exc}",
+            error_type="provider_fetch_failed",
+            details={"provider": "yahoo-finance-news", "market": market, "symbol": symbol, "provider_symbol": provider_symbol, "source_url": url},
+        ) from exc
+    return parse_yahoo_finance_news_rss(
+        payload,
+        market=market,
+        symbol=symbol,
+        query=query or provider_symbol,
+        source_url=url,
+        limit=limit,
+    )
+
+
+def _fetch_sec_filings(
+    *,
+    market: str,
+    symbol: str,
+    query: str | None = None,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    market = normalize_market(market)
+    if market != "us":
+        raise FinanceProviderError(
+            "SEC filings provider only supports U.S. market symbols",
+            error_type="unsupported_market",
+            hint="Use market 'us' with provider sec-filings, or use a news provider that supports the selected market.",
+            details={"provider": "sec-filings", "market": market, "symbol": symbol},
+        )
+    cik_by_symbol = _fetch_sec_ticker_map()
+    cik = cik_by_symbol.get(symbol.upper())
+    if not cik:
+        return [
+            enrich_information_source(
+                {
+                    "event_time": _utc_now(),
+                    "event_type": "filing_unavailable",
+                    "source_key": symbol,
+                    "market": market,
+                    "symbol": symbol,
+                    "provider": "sec-filings",
+                    "source_url": SEC_FILINGS_ATOM_URL,
+                    "freshness": "unavailable",
+                    "error_type": "cik_not_found",
+                    "message": "SEC ticker map did not contain a CIK for this symbol.",
+                    "not_mocked": True,
+                }
+            )
+        ]
+    params: dict[str, Any] = {
+        "action": "getcompany",
+        "CIK": cik,
+        "owner": "exclude",
+        "count": max(1, int(limit)),
+        "output": "atom",
+    }
+    if query and re.fullmatch(r"[A-Za-z0-9 -]+", query.strip()):
+        params["type"] = query.strip().upper()
+    url = f"{SEC_FILINGS_ATOM_URL}?{urllib_parse.urlencode(params)}"
+    req = urllib_request.Request(url, headers=_sec_request_headers())
+    try:
+        with urllib_request.urlopen(req, timeout=20) as response:
+            payload = response.read().decode("utf-8", errors="replace")
+    except Exception as exc:  # pragma: no cover - exercised by network smoke
+        raise FinanceProviderError(
+            f"failed to fetch {market} filings from sec-filings: {exc}",
+            error_type="provider_fetch_failed",
+            details={"provider": "sec-filings", "market": market, "symbol": symbol, "cik": cik, "source_url": url},
+        ) from exc
+    return parse_sec_filings_atom(payload, market=market, symbol=symbol, cik=cik, source_url=url, limit=limit)
+
+
 def _provider_registry() -> FinanceProviderRegistry:
     global _PROVIDER_REGISTRY
     if _PROVIDER_REGISTRY is not None:
@@ -1081,6 +1369,7 @@ def _provider_registry() -> FinanceProviderRegistry:
                     recommended_history_provider=True,
                     source_url=AKSHARE_STOCK_DOC_URL,
                     notes="Public Python data package; upstream Eastmoney endpoints may be blocked by local network policy.",
+                    **INFORMATION_SOURCE_POLICIES["akshare"],
                 ),
                 fetch_history=_fetch_akshare_history,
                 fetch_quotes=_fetch_akshare_quotes,
@@ -1095,8 +1384,26 @@ def _provider_registry() -> FinanceProviderRegistry:
                     recommended_history_provider=False,
                     source_url=GOOGLE_NEWS_RSS_URL,
                     notes="Public Google News RSS search feed used for current news context and lightweight sentiment evidence.",
+                    **INFORMATION_SOURCE_POLICIES["google-news"],
                 ),
                 fetch_news=_fetch_google_news,
+            ),
+            FinanceProviderAdapter(
+                spec=FinanceProviderSpec(
+                    provider="sec-filings",
+                    markets=("us",),
+                    commands=("fetch-news", "watch-session", "intelligence"),
+                    freshness={"filings": "near_realtime"},
+                    recommended_quote_provider=False,
+                    recommended_history_provider=False,
+                    source_url=SEC_FILINGS_ATOM_URL,
+                    notes=(
+                        "Public SEC EDGAR Atom feed for recent company filings; use it as regulatory event evidence, "
+                        f"not as market quote data. Set {SEC_USER_AGENT_ENV} before production SEC use."
+                    ),
+                    **INFORMATION_SOURCE_POLICIES["sec-filings"],
+                ),
+                fetch_news=_fetch_sec_filings,
             ),
             FinanceProviderAdapter(
                 spec=FinanceProviderSpec(
@@ -1111,6 +1418,7 @@ def _provider_registry() -> FinanceProviderRegistry:
                         "Public SEC companyfacts XBRL API for U.S. company fundamentals; rows are filing snapshots, "
                         f"not realtime data. Set {SEC_USER_AGENT_ENV} with an app/contact string before production SEC use."
                     ),
+                    **INFORMATION_SOURCE_POLICIES["sec-companyfacts"],
                 ),
                 fetch_fundamentals=_fetch_sec_companyfacts,
             ),
@@ -1124,6 +1432,7 @@ def _provider_registry() -> FinanceProviderRegistry:
                     recommended_history_provider=False,
                     source_url=TENCENT_QUOTE_URL,
                     notes="Lightweight public quote endpoint. Use for first-run analyze/watch validation.",
+                    **INFORMATION_SOURCE_POLICIES["tencent"],
                 ),
                 fetch_quotes=_fetch_tencent_quotes,
             ),
@@ -1137,9 +1446,24 @@ def _provider_registry() -> FinanceProviderRegistry:
                     recommended_history_provider=True,
                     source_url=YAHOO_CHART_URL,
                     notes="Public chart JSON endpoint verified for A-share Yahoo symbols such as 000001.SZ and U.S. symbols such as AAPL; quote freshness is provider-delayed.",
+                    **INFORMATION_SOURCE_POLICIES["yahoo"],
                 ),
                 fetch_history=_fetch_yahoo_history,
                 fetch_quotes=_fetch_yahoo_quotes,
+            ),
+            FinanceProviderAdapter(
+                spec=FinanceProviderSpec(
+                    provider="yahoo-finance-news",
+                    markets=("cn", "us"),
+                    commands=("fetch-news", "rank-candidates", "watch-session", "intelligence"),
+                    freshness={"news": "near_realtime"},
+                    recommended_quote_provider=False,
+                    recommended_history_provider=False,
+                    source_url=YAHOO_FINANCE_NEWS_RSS_URL,
+                    notes="Public Yahoo Finance RSS headline feed for symbol-focused finance news evidence.",
+                    **INFORMATION_SOURCE_POLICIES["yahoo-finance-news"],
+                ),
+                fetch_news=_fetch_yahoo_finance_news,
             ),
         ]
     )
@@ -1237,6 +1561,28 @@ def _xml_text(item: ET.Element, name: str) -> str | None:
     return _clean_text(child.text)
 
 
+def _xml_findall(root: ET.Element, name: str) -> list[ET.Element]:
+    return root.findall(f".//{{*}}{name}") or root.findall(f".//{name}")
+
+
+def _xml_child_text(item: ET.Element, name: str) -> str | None:
+    child = item.find(f"{{*}}{name}")
+    if child is None:
+        child = item.find(name)
+    if child is None or child.text is None:
+        return None
+    return _clean_text(child.text)
+
+
+def _xml_child_link(item: ET.Element) -> str | None:
+    child = item.find("{*}link")
+    if child is None:
+        child = item.find("link")
+    if child is None:
+        return None
+    return child.attrib.get("href") or child.text
+
+
 def _clean_text(value: str) -> str:
     text = re.sub(r"<[^>]+>", " ", str(value))
     return " ".join(html.unescape(text).split())
@@ -1252,6 +1598,25 @@ def _rss_datetime(value: str | None) -> str | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _atom_datetime(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return _rss_datetime(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _sec_filing_form(title: str | None) -> str | None:
+    if not title:
+        return None
+    match = re.search(r"\b(10-K|10-Q|8-K|6-K|20-F|40-F|S-1|S-3|S-4|424B[0-9]?|DEF 14A|SC 13D|SC 13G)\b", title.upper())
+    return match.group(1) if match else None
 
 
 def _is_missing(value: Any) -> bool:

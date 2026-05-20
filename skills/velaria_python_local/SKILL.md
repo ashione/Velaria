@@ -110,7 +110,7 @@ uv run --project python python python/velaria_cli.py artifacts list --run-id <ru
 - `finance intelligence search`：对同一 watch-session 已沉淀的 quote/history/news/features/candidates/fundamentals/native stream signal 做 hybrid search，返回可复盘 evidence hit
 - `finance fetch-history`：获取历史 OHLCV 行情；优先使用 `provider=yahoo`，也可使用 `provider=akshare`
 - `finance fetch-quotes`：获取 quote 行；可用 `provider=akshare`、`provider=tencent` 或 `provider=yahoo`
-- `finance fetch-news`：获取公开新闻 RSS 行和透明情绪 evidence；默认使用 `provider=google-news`
+- `finance fetch-news`：获取公开新闻、财经新闻或监管 filing evidence；可用 `provider=google-news`、`provider=yahoo-finance-news`、`provider=sec-filings`
 - `finance fetch-fundamentals`：获取公开基本面 evidence；美股可用 `provider=sec-companyfacts`
 - `finance ingest-quotes`：获取 quote 并写入 `external_event` source，供 monitor 使用
 - `finance watch`：持续监听一个标的，逐 tick 写入 observation、运行 monitor，并输出事件上下文
@@ -346,7 +346,19 @@ uv run --project python --extra finance python python/velaria_cli.py finance fet
   --symbol AAPL \
   --limit 5
 
+uv run --project python --extra finance python python/velaria_cli.py finance fetch-news \
+  --provider yahoo-finance-news \
+  --market us \
+  --symbol AAPL \
+  --limit 5
+
 export VELARIA_SEC_USER_AGENT="VelariaFinance/1.0 ops@example.com"
+
+uv run --project python --extra finance python python/velaria_cli.py finance fetch-news \
+  --provider sec-filings \
+  --market us \
+  --symbol AAPL \
+  --limit 5
 
 uv run --project python --extra finance python python/velaria_cli.py finance fetch-fundamentals \
   --provider sec-companyfacts \
@@ -451,7 +463,7 @@ Provider 使用建议：
 - 历史行情优先尝试 `provider=yahoo`；AkShare / Eastmoney 可作为补充 provider
 - 轻量 quote 优先尝试 `provider=tencent`
 - 美股 quote 也可尝试 `provider=yahoo`，它来自公开 chart metadata，按 provider contract 标记延迟或未知 freshness
-- 新闻和舆论证据优先尝试 `provider=google-news`；它是公开 RSS 搜索源，输出 `freshness=near_realtime`
+- 新闻和舆论证据优先尝试 `provider=google-news`；更聚焦的财经新闻可尝试 `provider=yahoo-finance-news`；监管 filing 事件可尝试 `provider=sec-filings`。所有这些 row 都带 `source_category/source_type/source_score/source_score_reason`
 - 美股基本面优先尝试 `provider=sec-companyfacts`；生产访问 SEC 前先设置 `VELARIA_SEC_USER_AGENT` 为包含应用名和联系人的 User-Agent；如果 SEC、CIK 或字段不可用，必须保留结构化 unavailable row，不要 mock
 - Tencent 美股 quote 当前按 provider contract 标记为 `freshness=delayed`，不要描述为交易所级实时
 - AkShare / Eastmoney 上游不可达时，不要 mock 或编造历史数据；把结构化 provider 错误返回给用户，并可用 Tencent quote 做实时监控链路验证

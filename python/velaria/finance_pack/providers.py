@@ -20,6 +20,10 @@ class FinanceProviderSpec:
     recommended_history_provider: bool
     source_url: str
     notes: str
+    source_category: str = "market_data"
+    source_type: str = "provider"
+    source_score: float = 0.5
+    source_score_reason: str = "Default provider source score; inspect row-level freshness and errors before use."
 
     def to_catalog_row(self) -> dict[str, Any]:
         return {
@@ -31,6 +35,10 @@ class FinanceProviderSpec:
             "recommended_history_provider": self.recommended_history_provider,
             "source_url": self.source_url,
             "notes": self.notes,
+            "source_category": self.source_category,
+            "source_type": self.source_type,
+            "source_score": self.source_score,
+            "source_score_reason": self.source_score_reason,
         }
 
 

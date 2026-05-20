@@ -14,6 +14,7 @@ from velaria.cli import main as velaria_cli_main
 from velaria.finance_pack import (
     FinanceProviderError,
     build_research_prompt,
+    classify_information_source,
     evaluate_news_sentiment,
     fetch_fundamentals,
     fetch_quotes,
@@ -21,8 +22,10 @@ from velaria.finance_pack import (
     normalize_provider,
     normalize_quote_frame,
     parse_sec_companyfacts_payload,
+    parse_sec_filings_atom,
     parse_google_news_rss,
     parse_tencent_quote_payload,
+    parse_yahoo_finance_news_rss,
     parse_yahoo_quote_payload,
     parse_yahoo_chart_payload,
     provider_catalog,
@@ -137,19 +140,34 @@ class FinancePackTest(unittest.TestCase):
     def test_provider_registry_exposes_capabilities_and_catalog(self):
         self.assertEqual(provider_names_for_operation("fetch_history"), ["akshare", "yahoo"])
         self.assertEqual(provider_names_for_operation("fetch_fundamentals"), ["sec-companyfacts"])
-        self.assertEqual(provider_names_for_operation("fetch_news"), ["google-news"])
+        self.assertEqual(provider_names_for_operation("fetch_news"), ["google-news", "sec-filings", "yahoo-finance-news"])
         self.assertEqual(provider_names_for_operation("fetch_quotes"), ["akshare", "tencent", "yahoo"])
 
         catalog = provider_catalog()
         providers = {item["provider"]: item for item in catalog}
-        self.assertEqual(set(providers), {"akshare", "google-news", "sec-companyfacts", "tencent", "yahoo"})
+        self.assertEqual(set(providers), {"akshare", "google-news", "sec-companyfacts", "sec-filings", "tencent", "yahoo", "yahoo-finance-news"})
         self.assertIn("fetch-history", providers["yahoo"]["commands"])
         self.assertIn("fetch-quotes", providers["yahoo"]["commands"])
         self.assertIn("fetch-news", providers["google-news"]["commands"])
+        self.assertIn("fetch-news", providers["sec-filings"]["commands"])
+        self.assertIn("fetch-news", providers["yahoo-finance-news"]["commands"])
         self.assertIn("fetch-fundamentals", providers["sec-companyfacts"]["commands"])
         self.assertIn("fetch-quotes", providers["tencent"]["commands"])
         self.assertNotIn("fetch-history", providers["tencent"]["commands"])
         self.assertEqual(providers["tencent"]["freshness"]["us"], "delayed")
+        self.assertEqual(providers["sec-filings"]["source_category"], "regulatory")
+        self.assertGreater(providers["sec-filings"]["source_score"], providers["google-news"]["source_score"])
+
+    def test_information_source_classification_scores_public_sources(self):
+        sec = classify_information_source(provider="sec-filings", event_type="filing", freshness="near_realtime")
+        google = classify_information_source(provider="google-news", event_type="news", freshness="near_realtime")
+        unknown = classify_information_source(provider="unknown-provider", event_type="news", freshness="delayed")
+
+        self.assertEqual(sec["source_category"], "regulatory")
+        self.assertEqual(sec["source_type"], "filing")
+        self.assertGreater(sec["source_score"], google["source_score"])
+        self.assertEqual(unknown["source_category"], "unknown")
+        self.assertLess(unknown["source_score"], google["source_score"])
 
     def test_parse_sec_companyfacts_payload_extracts_public_fundamentals(self):
         payload = {
@@ -322,6 +340,103 @@ class FinancePackTest(unittest.TestCase):
         self.assertGreater(sentiment["positive_hits"], 0)
         self.assertGreater(sentiment["negative_hits"], 0)
         self.assertIn(sentiment["label"], {"mixed", "positive", "negative", "neutral"})
+
+    def test_parse_yahoo_finance_news_rss_maps_scored_news_rows(self):
+        rss = """<?xml version="1.0" encoding="UTF-8"?>
+        <rss><channel>
+          <item>
+            <title>Apple gains as services growth improves</title>
+            <link>https://finance.yahoo.com/news/example</link>
+            <pubDate>Wed, 20 May 2026 09:30:25 +0000</pubDate>
+            <description>Yahoo Finance coverage cites strong demand and resilient margins.</description>
+          </item>
+        </channel></rss>"""
+
+        rows = parse_yahoo_finance_news_rss(
+            rss,
+            market="us",
+            symbol="AAPL",
+            query="AAPL",
+            source_url="https://feeds.finance.yahoo.com/rss/2.0/headline?s=AAPL",
+            fetched_at="2026-05-20T10:00:00Z",
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["provider"], "yahoo-finance-news")
+        self.assertEqual(rows[0]["source_category"], "news")
+        self.assertEqual(rows[0]["source_type"], "finance_news")
+        self.assertGreater(rows[0]["source_score"], 0.0)
+        self.assertIn("finance news", rows[0]["source_score_reason"])
+
+    def test_parse_sec_filings_atom_maps_scored_regulatory_rows(self):
+        atom = """<?xml version="1.0" encoding="ISO-8859-1" ?>
+        <feed xmlns="http://www.w3.org/2005/Atom">
+          <entry>
+            <title>10-Q - APPLE INC. (0000320193) (Filer)</title>
+            <link href="https://www.sec.gov/Archives/edgar/data/320193/example-index.htm" />
+            <updated>2026-05-01T20:00:00-04:00</updated>
+            <summary type="html">Filed quarterly report</summary>
+          </entry>
+        </feed>"""
+
+        rows = parse_sec_filings_atom(
+            atom,
+            market="us",
+            symbol="AAPL",
+            cik="0000320193",
+            source_url="https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000320193&output=atom",
+            fetched_at="2026-05-20T10:00:00Z",
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["provider"], "sec-filings")
+        self.assertEqual(rows[0]["event_type"], "filing")
+        self.assertEqual(rows[0]["filing_form"], "10-Q")
+        self.assertEqual(rows[0]["source_category"], "regulatory")
+        self.assertEqual(rows[0]["source_type"], "filing")
+        self.assertGreater(rows[0]["source_score"], 0.9)
+
+    def test_source_score_participates_in_evidence_structured_ranking(self):
+        rows = [
+            {
+                "feed": "news",
+                "event_id": "google-aapl",
+                "event_time": "2026-05-20T09:00:00Z",
+                "payload_json": {
+                    "event_type": "news",
+                    "symbol": "AAPL",
+                    "provider": "google-news",
+                    "title": "AAPL neutral item",
+                    "summary": "AAPL demand",
+                    "source_score": 0.65,
+                },
+            },
+            {
+                "feed": "news",
+                "event_id": "sec-aapl",
+                "event_time": "2026-05-20T08:00:00Z",
+                "payload_json": {
+                    "event_type": "filing",
+                    "symbol": "AAPL",
+                    "provider": "sec-filings",
+                    "title": "AAPL 10-Q filing",
+                    "summary": "AAPL demand",
+                    "source_score": 0.95,
+                },
+            },
+        ]
+
+        result = FinanceEvidenceRetriever().search_rows(
+            intelligence_id="intel_sources",
+            watch_session_id="session_sources",
+            rows=rows,
+            query_text="AAPL demand",
+            options=EvidenceSearchOptions(feed="news", top_k=2, index_mode="off"),
+        )
+
+        self.assertEqual(result.retrieval["structured_features"][-1], "source_score")
+        self.assertEqual(result.hits[0]["row"]["provider"], "sec-filings")
+        self.assertGreater(result.hits[0]["score_breakdown"]["structured_score"], result.hits[1]["score_breakdown"]["structured_score"])
 
     def test_rank_candidates_cli_outputs_research_candidates_with_news(self):
         quote_rows = [

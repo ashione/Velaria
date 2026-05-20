@@ -26,6 +26,7 @@ from velaria.agentic_store import AgenticStore
 from . import (
     FinanceProviderError,
     build_research_prompt,
+    enrich_information_source,
     evaluate_news_sentiment,
     fetch_fundamentals,
     fetch_history,
@@ -505,6 +506,8 @@ def _run_sources(args: argparse.Namespace) -> int:
             "finance doctor",
             "finance pipeline --market cn --symbol 000001 --start-date 20250101 --end-date 20250131",
             "finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --top 3",
+            "finance fetch-news --provider yahoo-finance-news --market us --symbol AAPL --limit 5",
+            "finance fetch-news --provider sec-filings --market us --symbol AAPL --limit 5",
             "finance fetch-fundamentals --provider sec-companyfacts --market us --symbols AAPL,MSFT,NVDA",
             "finance intelligence start --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --iterations 0 --format json",
             "finance analyze --market cn --symbol 000001",
@@ -4515,7 +4518,7 @@ def _build_feature_row(
     provider_quality = _provider_quality_score(quote=quote, history_rows=history_rows, news_rows=news_rows)
     momentum_state = _momentum_state(period_return=history.get("period_return_pct"), quote_pct=quote.get("pct_change"), rsi=rsi_14)
     event_time = str(quote.get("event_time") or _utc_payload_time())
-    return {
+    return enrich_information_source({
         "event_time": event_time,
         "event_type": "feature_snapshot",
         "source_key": str(quote.get("symbol") or symbol),
@@ -4540,7 +4543,7 @@ def _build_feature_row(
         "momentum_state": momentum_state,
         "engine": "velaria_python_metric_graph",
         "replayable": True,
-    }
+    })
 
 
 def _history_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -4643,6 +4646,14 @@ def _provider_quality_score(*, quote: dict[str, Any], history_rows: list[dict[st
         score += 0.3
     if news_rows:
         score += 0.2
+    source_scores = [
+        _optional_float(quote.get("source_score")),
+        *[_optional_float(row.get("source_score")) for row in history_rows[:1]],
+        *[_optional_float(row.get("source_score")) for row in news_rows[:3]],
+    ]
+    source_scores = [item for item in source_scores if item is not None]
+    if source_scores:
+        score += min(0.3, max(0.0, (sum(source_scores) / len(source_scores)) - 0.5))
     return round(min(2.0, score), 6)
 
 
@@ -4893,6 +4904,7 @@ def _render_sources(payload: dict[str, Any]) -> str:
     for source in payload["sources"]:
         lines.append(f"- {source['provider']}: markets={','.join(source['markets'])}; commands={','.join(source['commands'])}")
         lines.append(f"  freshness={json.dumps(source['freshness'], ensure_ascii=False, sort_keys=True)}")
+        lines.append(f"  category={source.get('source_category')}; type={source.get('source_type')}; score={source.get('source_score')}")
         lines.append(f"  source_url={source['source_url']}")
         lines.append(f"  note={source['notes']}")
     lines.append("")

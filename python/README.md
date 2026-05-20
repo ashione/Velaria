@@ -333,13 +333,15 @@ uv run --project python --extra finance python python/velaria_cli.py finance int
 fundamental and native stream rows remain under the watch-session feed sources.
 `replay` reads those persisted realtime rows back as historical evidence and
 writes `finance_intelligence_replays`. `search` hybrid-searches the persisted
-watch-session evidence with BM25 keyword retrieval, hash embedding cosine
-similarity, structured finance signals, recency, and reciprocal rank fusion,
+watch-session evidence with BM25 keyword retrieval, structured finance signals,
+recency, and reciprocal rank fusion,
 then writes `finance_intelligence_searches`. By default `search` uses
 `--index-mode auto`, which reuses a persisted evidence index when its metadata
 fingerprint matches the current session rows, and rebuilds it when stale.
 Use `intelligence index` to prebuild that reusable index under
-`$VELARIA_HOME/finance/evidence_indexes/`. `report` writes
+`$VELARIA_HOME/finance/evidence_indexes/`. Finance intelligence does not use
+hash embeddings in the product path; `retrieval.semantic.status` is `disabled`
+until a real production embedding provider is explicitly configured. `report` writes
 `finance_intelligence_reports` with a final scorecard, supervisor checks,
 provider quality diagnostics, and a replayable research summary. The
 `ai_plane.agent_prompt` is designed for `velaria_cli_run` and does not

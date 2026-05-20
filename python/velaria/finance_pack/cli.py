@@ -24,7 +24,6 @@ import velaria
 from velaria.agentic_dsl import compile_rule_spec
 from velaria.agentic_runtime import execute_monitor_once
 from velaria.agentic_store import AgenticStore
-from velaria.embedding import HashEmbeddingProvider
 from velaria.keyword_index import build_keyword_index, search_keyword_index
 
 from . import (
@@ -52,9 +51,9 @@ _FINANCE_EVIDENCE_FEEDS = (
     "fundamentals",
     "native_stream_signals",
 )
-_FINANCE_EVIDENCE_INDEX_VERSION = 1
-_FINANCE_EVIDENCE_EMBEDDING_MODEL = "hash-finance-evidence"
-_FINANCE_EVIDENCE_EMBEDDING_DIMENSION = 32
+_FINANCE_EVIDENCE_INDEX_VERSION = 2
+_FINANCE_EVIDENCE_SEMANTIC_STATUS = "disabled"
+_FINANCE_EVIDENCE_SEMANTIC_REASON = "semantic retrieval requires an explicitly configured production embedding provider"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2235,12 +2234,14 @@ def _intelligence_index_payload(
         "index_path": index.get("index_path"),
         "metadata_path": index.get("metadata_path"),
         "docs_path": index.get("docs_path"),
-        "vectors_path": index.get("vectors_path"),
         "keyword_index_path": index.get("keyword_index_path"),
         "retrieval": {
             "mode": "finance_evidence_hybrid_search",
             "keyword": "bm25_keyword_index",
-            "semantic": "hash_embedding_cosine",
+            "semantic": {
+                "status": _FINANCE_EVIDENCE_SEMANTIC_STATUS,
+                "reason": _FINANCE_EVIDENCE_SEMANTIC_REASON,
+            },
             "fusion": "rrf",
         },
     }
@@ -2268,7 +2269,6 @@ def _intelligence_search_payload(
         query_text=query_text,
         top_k=top_k,
         keyword_index_dir=index_ref.get("keyword_index_path"),
-        doc_vectors_by_id=index_ref.get("vectors"),
     )
     top = hits[0] if hits else {}
     index_meta = _finance_evidence_index_metadata_for_payload(index_ref)
@@ -2286,7 +2286,10 @@ def _intelligence_search_payload(
         "retrieval": {
             "mode": "finance_evidence_hybrid_search",
             "keyword": "bm25_keyword_index",
-            "semantic": "hash_embedding_cosine",
+            "semantic": {
+                "status": _FINANCE_EVIDENCE_SEMANTIC_STATUS,
+                "reason": _FINANCE_EVIDENCE_SEMANTIC_REASON,
+            },
             "fusion": "rrf",
             "rank_constant": 60,
             "structured_features": ["feed_priority", "symbol_match", "signal_priority", "recency"],
@@ -2313,7 +2316,6 @@ def _hybrid_search_finance_docs(
     query_text: str,
     top_k: int,
     keyword_index_dir: str | pathlib.Path | None = None,
-    doc_vectors_by_id: dict[str, list[float]] | None = None,
 ) -> list[dict[str, Any]]:
     if not docs:
         return []
@@ -2336,16 +2338,8 @@ def _hybrid_search_finance_docs(
                 doc_id = str(row.get("doc_id"))
                 keyword_rank.append(doc_id)
                 keyword_scores[doc_id] = float(row.get("keyword_score") or 0.0)
-    provider = HashEmbeddingProvider(dimension=_FINANCE_EVIDENCE_EMBEDDING_DIMENSION)
-    query_vector = provider.embed([query_text], model=_FINANCE_EVIDENCE_EMBEDDING_MODEL)[0]
-    if doc_vectors_by_id is None:
-        vectors = provider.embed([doc["search_text"] for doc in docs], model=_FINANCE_EVIDENCE_EMBEDDING_MODEL)
-        doc_vectors_by_id = {str(doc["doc_id"]): vectors[index] for index, doc in enumerate(docs)}
-    semantic_scores = {
-        str(doc["doc_id"]): max(0.0, _cosine_similarity(query_vector, doc_vectors_by_id.get(str(doc["doc_id"]), [])))
-        for doc in docs
-    }
-    semantic_rank = [doc_id for doc_id, score in sorted(semantic_scores.items(), key=lambda item: (-item[1], item[0]))[:window] if score > 0.0]
+    semantic_scores = {str(doc["doc_id"]): 0.0 for doc in docs}
+    semantic_rank: list[str] = []
     recency_rank = [doc["doc_id"] for doc in sorted(docs, key=lambda doc: str(doc.get("event_time") or ""), reverse=True)[:window]]
     structured_scores = {doc["doc_id"]: _finance_structured_evidence_score(doc, query_text=query_text) for doc in docs}
     structured_rank = [doc_id for doc_id, score in sorted(structured_scores.items(), key=lambda item: (-item[1], item[0]))[:window] if score > 0.0]
@@ -2375,12 +2369,12 @@ def _hybrid_search_finance_docs(
         keyword_score = keyword_scores.get(doc_id, 0.0)
         semantic_score = semantic_scores.get(doc_id, 0.0)
         structured_score = structured_scores.get(doc_id, 0.0)
-        if keyword_score > 0.0 and semantic_score > 0.0:
-            reason = "hybrid_match"
-        elif keyword_score > 0.0:
+        if keyword_score > 0.0:
             reason = "keyword_match"
+        elif structured_score > 0.0:
+            reason = "structured_match"
         else:
-            reason = "embedding_match"
+            reason = "recency_match"
         fused.append(
             {
                 "target_kind": doc["target_kind"],
@@ -2390,7 +2384,7 @@ def _hybrid_search_finance_docs(
                 "score_breakdown": {
                     "rrf_score": round(rrf_score, 6),
                     "keyword_score": round(keyword_score, 6),
-                    "embedding_score": round(semantic_score, 6),
+                    "semantic_score": round(semantic_score, 6),
                     "structured_score": round(structured_score, 6),
                     "ranks": rank_details,
                 },
@@ -2428,7 +2422,6 @@ def _resolve_finance_evidence_search_index(
             "index_path": None,
             "fingerprint": _finance_evidence_fingerprint(rows),
             "docs": docs,
-            "vectors": None,
         }
 
     fingerprint = _finance_evidence_fingerprint(rows)
@@ -2454,7 +2447,6 @@ def _resolve_finance_evidence_search_index(
             "index_path": built.get("index_path"),
             "fingerprint": fingerprint,
             "docs": docs,
-            "vectors": None,
         }
     loaded["index_status"] = status
     return loaded
@@ -2468,7 +2460,7 @@ def _finance_evidence_index_dir(*, watch_session_id: str, feed: str) -> pathlib.
 
 def _finance_evidence_index_metadata_for_payload(index_ref: dict[str, Any]) -> dict[str, Any] | None:
     metadata = dict(index_ref.get("metadata") or {})
-    for key in ("index_path", "metadata_path", "docs_path", "vectors_path", "keyword_index_path", "fingerprint"):
+    for key in ("index_path", "metadata_path", "docs_path", "keyword_index_path", "fingerprint"):
         if index_ref.get(key) is not None:
             metadata.setdefault(key, index_ref.get(key))
     if not metadata:
@@ -2509,7 +2501,6 @@ def _build_finance_evidence_index(
 
     metadata_path = index_dir / "metadata.json"
     docs_path = index_dir / "docs.jsonl"
-    vectors_path = index_dir / "vectors.json"
     keyword_index_path = index_dir / "keyword"
     fingerprint = _finance_evidence_fingerprint(rows)
     built_at = _utc_payload_time()
@@ -2518,7 +2509,6 @@ def _build_finance_evidence_index(
         for doc in docs:
             handle.write(json.dumps(doc, ensure_ascii=False, sort_keys=True, default=str) + "\n")
 
-    vectors_rows: list[dict[str, Any]] = []
     if docs:
         build_keyword_index(
             [pa.Table.from_pylist(docs)],
@@ -2527,12 +2517,8 @@ def _build_finance_evidence_index(
             analyzer="builtin",
             doc_id_field="doc_id",
         )
-        provider = HashEmbeddingProvider(dimension=_FINANCE_EVIDENCE_EMBEDDING_DIMENSION)
-        vectors = provider.embed([doc["search_text"] for doc in docs], model=_FINANCE_EVIDENCE_EMBEDDING_MODEL)
-        vectors_rows = [{"doc_id": str(doc["doc_id"]), "vector": vectors[index]} for index, doc in enumerate(docs)]
     else:
         keyword_index_path.mkdir(parents=True, exist_ok=True)
-    vectors_path.write_text(json.dumps(vectors_rows, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
 
     metadata = {
         "status": "ready",
@@ -2544,13 +2530,11 @@ def _build_finance_evidence_index(
         "built_at": built_at,
         "row_count": len(rows),
         "doc_count": len(docs),
-        "embedding_provider": "hash",
-        "embedding_model": _FINANCE_EVIDENCE_EMBEDDING_MODEL,
-        "embedding_dimension": _FINANCE_EVIDENCE_EMBEDDING_DIMENSION,
+        "semantic_status": _FINANCE_EVIDENCE_SEMANTIC_STATUS,
+        "semantic_reason": _FINANCE_EVIDENCE_SEMANTIC_REASON,
         "index_path": str(index_dir),
         "metadata_path": str(metadata_path),
         "docs_path": str(docs_path),
-        "vectors_path": str(vectors_path),
         "keyword_index_path": str(keyword_index_path),
     }
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -2566,9 +2550,8 @@ def _load_finance_evidence_index(
     index_dir = _finance_evidence_index_dir(watch_session_id=watch_session_id, feed=feed)
     metadata_path = index_dir / "metadata.json"
     docs_path = index_dir / "docs.jsonl"
-    vectors_path = index_dir / "vectors.json"
     keyword_index_path = index_dir / "keyword"
-    if not metadata_path.exists() or not docs_path.exists() or not vectors_path.exists():
+    if not metadata_path.exists() or not docs_path.exists():
         return None, "missing"
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -2587,19 +2570,15 @@ def _load_finance_evidence_index(
             text = line.strip()
             if text:
                 docs.append(json.loads(text))
-    vector_rows = json.loads(vectors_path.read_text(encoding="utf-8") or "[]")
-    vectors = {str(item.get("doc_id")): [float(value) for value in item.get("vector", [])] for item in vector_rows if isinstance(item, dict)}
     return {
         "index_status": "hit",
         "index_path": str(index_dir),
         "metadata_path": str(metadata_path),
         "docs_path": str(docs_path),
-        "vectors_path": str(vectors_path),
         "keyword_index_path": str(keyword_index_path),
         "fingerprint": metadata.get("fingerprint"),
         "metadata": metadata,
         "docs": docs,
-        "vectors": vectors,
     }, "hit"
 
 

@@ -376,6 +376,7 @@ bazel run //:stream_demo
 - 多进程验收顺序必须是 `scheduler -> worker -> client`。
 - Python 测试、脚本、依赖安装统一使用 `uv run ...` / `uv pip ...`，不要直接使用 `python3` / `pip3`。
 - Python 生态层若需要隔离依赖或避免污染默认环境，使用 `UV_PROJECT_ENVIRONMENT=<env-name>` 显式创建和复用隔离环境，并在当前任务说明中写清环境用途；不要把具体环境名硬编码进仓库规则。
+- `HashEmbeddingProvider` / hash embedding 只可用于测试、demo 或确定性占位验证，不能作为产品化语义检索、金融 evidence ranking 或生产推荐信号。生产路径没有显式接入真实 embedding provider 时，必须把 semantic retrieval 标记为 disabled，并依赖可解释的 keyword / structured / recency 信号。
 - 若出现 `no-worker-available`，优先确认是否启动了 `--no-auto-worker`，然后再检查 worker 是否已连上 scheduler。
 - 若出现 `cannot connect`，先查 scheduler 是否已监听、端口是否一致。
 - `Value` 当前允许 `Int64/Double` 跨类型比较；若改成严格类型模式，需同步更新 Planner 与示例。

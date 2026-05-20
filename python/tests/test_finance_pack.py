@@ -1140,8 +1140,9 @@ class FinancePackTest(unittest.TestCase):
                 payload = json.loads(stdout.getvalue())
                 self.assertEqual(payload["action"], "intelligence-search")
                 self.assertEqual(payload["search"]["retrieval"]["fusion"], "rrf")
+                self.assertEqual(payload["search"]["retrieval"]["semantic"]["status"], "disabled")
                 self.assertGreaterEqual(len(payload["search"]["hits"]), 1)
-                self.assertIn(payload["search"]["hits"][0]["match_reason"], {"keyword_match", "embedding_match", "hybrid_match"})
+                self.assertIn(payload["search"]["hits"][0]["match_reason"], {"keyword_match", "structured_match", "recency_match"})
 
                 with AgenticStore() as store:
                     rows = store.read_external_events("finance_intelligence_searches")
@@ -1175,9 +1176,11 @@ class FinancePackTest(unittest.TestCase):
                 payload = json.loads(stdout.getvalue())
                 self.assertEqual(payload["action"], "intelligence-index")
                 self.assertEqual(payload["index"]["status"], "ready")
+                self.assertEqual(payload["index"]["semantic_status"], "disabled")
                 self.assertGreaterEqual(payload["index"]["doc_count"], 1)
                 self.assertTrue(os.path.exists(payload["index"]["metadata_path"]))
                 self.assertTrue(os.path.exists(payload["index"]["docs_path"]))
+                self.assertNotIn("vectors_path", payload["index"])
 
                 stdout = StringIO()
                 with redirect_stdout(stdout):

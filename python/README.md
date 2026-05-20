@@ -342,6 +342,14 @@ uv run --project python --extra finance python python/velaria_cli.py finance int
 uv run --project python --extra finance python python/velaria_cli.py finance intelligence resume \
   --session-id us_watch_20260519 \
   --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence evaluate \
+  --session-id us_watch_20260519 \
+  --format json
+
+uv run --project python --extra finance python python/velaria_cli.py finance intelligence eval-report \
+  --session-id us_watch_20260519 \
+  --format json
 ```
 
 `intelligence start` writes `finance_intelligence_sessions` and
@@ -363,7 +371,9 @@ checks, provider quality diagnostics, and a replayable research summary.
 `jobs`, `status`, `stop`, and `resume` expose the durable job surface backed by
 `finance_intelligence_jobs` and `finance_watch_session_runs`; use them when an
 agent needs to inspect or control a long-running finance intelligence session
-without scraping logs. The
+without scraping logs. `evaluate` and `eval-report` read only persisted rows and
+persist `finance_intelligence_evaluations` with signal, provider, retrieval,
+and runtime quality metrics. The
 `ai_plane.agent_prompt` is designed for `velaria_cli_run` and does not
 fabricate model output.
 
@@ -562,6 +572,8 @@ us_watch_20260519 --format json`, `finance intelligence jobs --session-id
 us_watch_20260519 --format json`, `finance intelligence status --session-id
 us_watch_20260519 --format json`, `finance intelligence stop --session-id
 us_watch_20260519 --format json`, `finance intelligence resume --session-id
+us_watch_20260519 --format json`, `finance intelligence evaluate --session-id
+us_watch_20260519 --format json`, `finance intelligence eval-report --session-id
 us_watch_20260519 --format json`, `finance fetch-fundamentals
 --provider sec-companyfacts --market us --symbols
 AAPL,MSFT,NVDA`, or `finance watch --market cn --symbol 000001

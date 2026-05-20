@@ -42,6 +42,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               velaria finance intelligence status --session-id finance_us_watch_20260519T133000Z --format json
               velaria finance intelligence stop --session-id finance_us_watch_20260519T133000Z --format json
               velaria finance intelligence resume --session-id finance_us_watch_20260519T133000Z --format json
+              velaria finance intelligence evaluate --session-id finance_us_watch_20260519T133000Z --format json
+              velaria finance intelligence eval-report --session-id finance_us_watch_20260519T133000Z --format json
               velaria finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               velaria finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00
               velaria finance fetch-quotes --provider tencent --market cn --symbols 000001,600519
@@ -78,6 +80,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
               finance intelligence status --session-id finance_us_watch_20260519T133000Z --format json
               finance intelligence stop --session-id finance_us_watch_20260519T133000Z --format json
               finance intelligence resume --session-id finance_us_watch_20260519T133000Z --format json
+              finance intelligence evaluate --session-id finance_us_watch_20260519T133000Z --format json
+              finance intelligence eval-report --session-id finance_us_watch_20260519T133000Z --format json
               finance stream-history --market us --source-id finance_us_rank_candidates_native_stream_signals --format json
               finance rank-candidates --market us --symbols AAPL,MSFT,NVDA --start-date 20260501 --end-date 20260518 --stream-monitor --until-time 2026-05-18T16:00:00-04:00 --format json
               finance fetch-news --provider google-news --market us --symbol AAPL --limit 5
@@ -280,6 +284,14 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     intelligence_resume = intelligence_subparsers.add_parser("resume", help="Resume a stopped finance intelligence runtime from its durable argv.")
     intelligence_resume.add_argument("--session-id", required=True, help="Durable watch-session id to resume.")
     _add_report_format(intelligence_resume)
+    intelligence_evaluate = intelligence_subparsers.add_parser("evaluate", help="Evaluate persisted finance intelligence replay quality.")
+    intelligence_evaluate.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
+    intelligence_evaluate.add_argument("--session-id", required=True, help="Durable watch-session id to evaluate.")
+    _add_report_format(intelligence_evaluate)
+    intelligence_eval_report = intelligence_subparsers.add_parser("eval-report", help="Render the latest persisted finance intelligence evaluation report.")
+    intelligence_eval_report.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
+    intelligence_eval_report.add_argument("--session-id", required=True, help="Durable watch-session id to report.")
+    _add_report_format(intelligence_eval_report)
     intelligence_supervise = intelligence_subparsers.add_parser("supervise", help="Continuously review and persist intelligence notes.")
     intelligence_supervise.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
     intelligence_supervise.add_argument("--session-id", required=True, help="Durable watch-session id to supervise.")

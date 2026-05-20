@@ -50,6 +50,7 @@ py_library(
         "velaria/finance_pack/__init__.py",
         "velaria/finance_pack/cli.py",
         "velaria/finance_pack/evidence_index.py",
+        "velaria/finance_pack/evaluation.py",
         "velaria/finance_pack/jobs.py",
         "velaria/finance_pack/providers.py",
         "velaria/keyword_index.py",

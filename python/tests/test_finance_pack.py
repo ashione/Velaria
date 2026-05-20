@@ -44,6 +44,7 @@ from velaria.finance_pack.evidence_index import (
     finance_evidence_index_dir,
     load_finance_evidence_index,
 )
+from velaria.finance_pack.evaluation import evaluate_finance_session
 from velaria.finance_pack.jobs import (
     append_finance_job_event,
     finance_job_payload,
@@ -885,6 +886,56 @@ class FinancePackTest(unittest.TestCase):
                 self.assertTrue(resume_payload["resumed"])
                 self.assertEqual(resume_payload["run"]["pid"], 9876)
                 self.assertIn("watch-session", popen.call_args.args[0])
+
+    def test_finance_evaluation_scores_persisted_rows_without_refetching(self):
+        rows = [
+            {"feed": "native_stream_signals", "payload_json": {"event_time": "2026-05-20T14:00:01Z", "symbol": "AAPL", "signal_type": "entry_research_signal", "score": 9.5}},
+            {"feed": "native_stream_signals", "payload_json": {"event_time": "2026-05-20T14:00:02Z", "symbol": "NVDA", "signal_type": "exit_risk_signal", "score": 7.5}},
+            {"feed": "quotes", "payload_json": {"event_time": "2026-05-20T14:00:00Z", "symbol": "AAPL", "provider": "yahoo", "freshness": "delayed", "source_url": "https://example.invalid/aapl"}},
+            {"feed": "fundamentals", "payload_json": {"event_time": "2026-05-20T14:00:00Z", "symbol": "MSFT", "event_type": "fundamental_unavailable", "error_type": "provider_unavailable"}},
+        ]
+        evaluation = evaluate_finance_session(
+            watch_session_id="session_eval",
+            rows=rows,
+            jobs=[{"job_id": "job_1", "status": "completed", "artifacts": {"log_path": "/tmp/x"}}],
+            searches=[{"hit_count": 3, "top_target_kind": "native_stream_signals", "retrieval": {"semantic": {"status": "disabled"}, "index_status": "hit"}}],
+            indexes=[{"doc_count": 4, "index_status": "ready", "semantic_status": "disabled"}],
+        )
+
+        self.assertEqual(evaluation["watch_session_id"], "session_eval")
+        self.assertEqual(evaluation["signal_quality"]["signal_count"], 2)
+        self.assertEqual(evaluation["signal_quality"]["outcome_availability"]["status"], "unavailable")
+        self.assertEqual(evaluation["provider_quality"]["unavailable_count"], 1)
+        self.assertEqual(evaluation["retrieval_quality"]["search_count"], 1)
+        self.assertTrue(evaluation["retrieval_quality"]["no_hash_embedding"])
+
+    def test_intelligence_evaluate_and_eval_report_persist_quality_events(self):
+        with tempfile.TemporaryDirectory(prefix="velaria-finance-intelligence-eval-") as tmp:
+            with mock.patch.dict(os.environ, {"VELARIA_HOME": tmp}):
+                self._seed_watch_session_rows("session_eval_cli")
+
+                stdout = StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = finance_cli_main(["intelligence", "evaluate", "--session-id", "session_eval_cli", "--format", "json"])
+                self.assertEqual(exit_code, 0)
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(payload["action"], "intelligence-evaluate")
+                self.assertEqual(payload["evaluation"]["watch_session_id"], "session_eval_cli")
+                self.assertGreaterEqual(payload["evaluation"]["provider_quality"]["row_count"], 1)
+
+                stdout = StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = finance_cli_main(["intelligence", "eval-report", "--session-id", "session_eval_cli", "--format", "json"])
+                self.assertEqual(exit_code, 0)
+                report_payload = json.loads(stdout.getvalue())
+                self.assertEqual(report_payload["action"], "intelligence-eval-report")
+                self.assertEqual(report_payload["report"]["watch_session_id"], "session_eval_cli")
+
+                with AgenticStore() as store:
+                    rows = store.read_external_events("finance_intelligence_evaluations")
+                    jobs = store.read_external_events("finance_intelligence_jobs")
+                self.assertGreaterEqual(len(rows), 1)
+                self.assertTrue(any((job.get("payload_json") or {}).get("job_type") == "evaluation_job" for job in jobs))
 
     def test_watch_session_review_persists_continuous_diagnostics(self):
         with tempfile.TemporaryDirectory(prefix="velaria-finance-watch-session-review-") as tmp:

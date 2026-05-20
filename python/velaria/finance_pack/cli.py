@@ -45,6 +45,12 @@ from .evidence_index import (
     finance_evidence_index_metadata_for_payload,
     hybrid_search_finance_rows,
 )
+from .evaluation import (
+    append_finance_evaluation_event,
+    build_finance_evaluation_report,
+    evaluate_finance_session,
+    latest_finance_evaluation,
+)
 from .jobs import append_finance_job_event, finance_job_payload, latest_finance_jobs, watch_run_job_payload
 
 
@@ -337,6 +343,14 @@ def _build_parser() -> argparse.ArgumentParser:
     intelligence_resume = intelligence_subparsers.add_parser("resume", help="Resume a stopped finance intelligence runtime from its durable argv.")
     intelligence_resume.add_argument("--session-id", required=True, help="Durable watch-session id to resume.")
     _add_report_format(intelligence_resume)
+    intelligence_evaluate = intelligence_subparsers.add_parser("evaluate", help="Evaluate persisted finance intelligence replay quality.")
+    intelligence_evaluate.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
+    intelligence_evaluate.add_argument("--session-id", required=True, help="Durable watch-session id to evaluate.")
+    _add_report_format(intelligence_evaluate)
+    intelligence_eval_report = intelligence_subparsers.add_parser("eval-report", help="Render the latest persisted finance intelligence evaluation report.")
+    intelligence_eval_report.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
+    intelligence_eval_report.add_argument("--session-id", required=True, help="Durable watch-session id to report.")
+    _add_report_format(intelligence_eval_report)
     intelligence_supervise = intelligence_subparsers.add_parser("supervise", help="Continuously review and persist intelligence notes inside the CLI process.")
     intelligence_supervise.add_argument("--intelligence-id", help="Defaults to intelligence_<watch session id>.")
     intelligence_supervise.add_argument("--session-id", required=True, help="Durable watch-session id to supervise.")
@@ -585,6 +599,10 @@ def _intelligence(args: argparse.Namespace) -> int:
         return _intelligence_stop(args)
     if command == "resume":
         return _intelligence_resume(args)
+    if command == "evaluate":
+        return _intelligence_evaluate(args)
+    if command == "eval-report":
+        return _intelligence_eval_report(args)
     if command == "supervise":
         return _intelligence_supervise(args)
     raise AssertionError(f"unhandled intelligence command: {command}")
@@ -2117,6 +2135,105 @@ def _intelligence_resume(args: argparse.Namespace) -> int:
         "resumed": True,
         "run": resumed,
         "jobs": _intelligence_job_views(args.session_id, run=resumed, process_running=True, effective_status="running"),
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_intelligence_report(payload))
+    return 0
+
+
+def _read_intelligence_source_events(source_id: str, watch_session_id: str) -> list[dict[str, Any]]:
+    with AgenticStore() as store:
+        if store.get_source(source_id) is None:
+            return []
+        rows = store.read_external_events(source_id)
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        payload = row.get("payload_json") if isinstance(row.get("payload_json"), dict) else {}
+        row_session_id = payload.get("watch_session_id") or row.get("watch_session_id")
+        if row_session_id == watch_session_id:
+            filtered.append(dict(row))
+    return filtered
+
+
+def _build_finance_evaluation_payload(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    session = _get_watch_session_or_raise(args.session_id)
+    rows = _read_watch_session_events(session, feed="all", limit=0)
+    jobs = latest_finance_jobs(args.session_id)
+    searches = _read_intelligence_source_events("finance_intelligence_searches", args.session_id)
+    indexes = _read_intelligence_source_events("finance_intelligence_evidence_indexes", args.session_id)
+    evaluation = evaluate_finance_session(
+        watch_session_id=args.session_id,
+        intelligence_id=args.intelligence_id or _make_intelligence_id(args.session_id),
+        rows=rows,
+        jobs=jobs,
+        searches=searches,
+        indexes=indexes,
+    )
+    return session, evaluation, rows
+
+
+def _intelligence_evaluate(args: argparse.Namespace) -> int:
+    intelligence_id = args.intelligence_id or _make_intelligence_id(args.session_id)
+    session, evaluation, _rows = _build_finance_evaluation_payload(args)
+    persisted = append_finance_evaluation_event(evaluation)
+    _append_finance_artifact_job(
+        job_type="evaluation_job",
+        intelligence_id=intelligence_id,
+        watch_session_id=args.session_id,
+        status="completed",
+        summary={
+            "quality_status": evaluation.get("quality_status"),
+            "signal_count": int(evaluation.get("signal_count") or 0),
+            "row_count": int(evaluation.get("row_count") or 0),
+        },
+        artifacts={"evaluation_event_id": persisted.get("event_id")},
+    )
+    summary = _compact_watch_session_summary(_summarize_watch_session(session))
+    payload = {
+        "ok": True,
+        "action": "intelligence-evaluate",
+        "intelligence_id": intelligence_id,
+        "watch_session_id": args.session_id,
+        "evaluation": evaluation,
+        "persisted_evaluation": persisted,
+        "data_plane": _intelligence_data_plane(dict(session.get("sources") or {}), summary),
+        "disclaimer": "Replay evaluation only; not investment advice.",
+    }
+    if args.report_format == "json":
+        return _emit_json(payload)
+    print(_render_intelligence_report(payload))
+    return 0
+
+
+def _intelligence_eval_report(args: argparse.Namespace) -> int:
+    intelligence_id = args.intelligence_id or _make_intelligence_id(args.session_id)
+    session = _get_watch_session_or_raise(args.session_id)
+    evaluation = latest_finance_evaluation(args.session_id)
+    persisted = None
+    if evaluation is None:
+        _session, evaluation, _rows = _build_finance_evaluation_payload(args)
+        persisted = append_finance_evaluation_event(evaluation)
+    report = build_finance_evaluation_report(evaluation)
+    _append_finance_artifact_job(
+        job_type="evaluation_report_job",
+        intelligence_id=intelligence_id,
+        watch_session_id=args.session_id,
+        status="completed",
+        summary={"quality_status": report.get("quality_status"), "finding_count": len(report.get("findings") or [])},
+        artifacts={"evaluation_event_id": (persisted or {}).get("event_id") or evaluation.get("event_id")},
+    )
+    summary = _compact_watch_session_summary(_summarize_watch_session(session))
+    payload = {
+        "ok": True,
+        "action": "intelligence-eval-report",
+        "intelligence_id": intelligence_id,
+        "watch_session_id": args.session_id,
+        "report": report,
+        "evaluation": evaluation,
+        "persisted_evaluation": persisted,
+        "data_plane": _intelligence_data_plane(dict(session.get("sources") or {}), summary),
+        "disclaimer": "Replay evaluation only; not investment advice.",
     }
     if args.report_format == "json":
         return _emit_json(payload)

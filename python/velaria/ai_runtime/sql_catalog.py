@@ -520,10 +520,18 @@ def _fill_pattern_defaults(template: str, table_name: str, columns: list[str]) -
         ["amount", "value", "price", "close", "score", "count", "volume"],
     ) or _first_non_date_column(columns, date_col) or "value_col"
     return template.format(
-        table_name=table_name or "input_table",
-        date_col=date_col,
-        value_col=value_col,
+        table_name=_quote_identifier_if_needed(table_name or "input_table"),
+        date_col=_quote_identifier_if_needed(date_col),
+        value_col=_quote_identifier_if_needed(value_col),
     )
+
+
+def _quote_identifier_if_needed(identifier: str) -> str:
+    if not identifier:
+        return identifier
+    if re.fullmatch(r"[a-z_][a-z0-9_]*", identifier):
+        return identifier
+    return '"' + identifier.replace('"', '""') + '"'
 
 
 def _first_matching_column(columns: list[str], needles: list[str]) -> str:

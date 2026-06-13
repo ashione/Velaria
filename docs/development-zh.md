@@ -24,7 +24,7 @@ uv run --project python python python/examples/demo_vector_search.py
 tracked run 示例：
 
 ```bash
-uv run --project python python python/velaria_cli.py -i
+uv run --project python python python/velaria_cli.py
 
 uv run --project python python python/velaria_cli.py run start -- file-sql \
   --run-name "score_demo" \
@@ -88,10 +88,8 @@ client -> scheduler(jobmaster) -> worker -> in-proc operator chain -> result
 
 ## Agent Runtime
 
-
-
-```bash
-```
+Codex 和 Claude SDK adapter 依赖由 Python 包声明。只有需要
+`--runtime claude` 时才配置 Claude adapter。
 
 配置 Agent provider。两个 runtime 共用相同的 `agent*` 配置键和
 `~/.velaria/config.json` 文件。
@@ -134,8 +132,8 @@ EOF
 ```
 
 `agentRuntimePath` 是可选项。Codex 可以省略它并使用本地 `codex app-server`
-命令；只有需要覆盖该可执行文件时才设置 `agentRuntimePath` /
-`agentCodexRuntimePath`。Claude Code runtime 可以使用 `agentClaudeRuntimePath`。
+runtime bridge；只有需要覆盖该 bridge 时才设置 `agentRuntimePath` /
+`agentCodexRuntimePath`。Claude SDK adapter 可以使用 `agentClaudeRuntimePath`。
 `agentRuntimeWorkspace` 是 runtime 工作目录，用于保存 agent
 thread、生成配置以及 MCP/function 日志；如果省略，Velaria 会使用
 `~/.velaria/ai-runtime/` 下的项目级目录。`agentReuseLocalConfig` 控制 runtime
@@ -159,19 +157,22 @@ uv run --project python python python/velaria_cli.py ai generate-sql \
   --prompt "top 5 by score" --schema "name,score,region"
 ```
 
-交互模式：
+Agent 模式：
 
 ```bash
-uv run --project python python python/velaria_cli.py -i
-› 找出分数最高的5个人
-› /status
-› :run list --limit 5
+uv run --project python python python/velaria_cli.py
+uv run --project python python python/velaria_cli.py agent --runtime claude
+uv run --project python python python/velaria_cli.py agent --print "找出分数最高的5个人"
+uv run --project python python python/velaria_cli.py agent --stream-json "summarize recent runs"
 ```
 
-交互式 CLI 是 agent runtime wrapper：它会直接启动已配置的
-Codex/Claude runtime，通过 MCP resource/tool 按需暴露 Velaria usage skill 与 SQL catalog，并通过 runtime bridge / MCP server
-暴露 Velaria local functions。`velaria_service` 仍作为桌面 app 和其他 app
-client 使用的 HTTP sidecar，交互式 CLI 不需要先启动 service。
+Python CLI 默认入口在 TTY 中启动 Velaria 自有 Agent TUI。Codex 或 Claude
+只作为 Velaria controller 下面的 runtime adapter；用户仍停留在 Velaria CLI
+surface。脚本化 Agent turn 使用 `agent --print` 或 `agent --stream-json`。
+Agent 会通过 MCP resource/tool 按需暴露 Velaria usage skill 与 SQL catalog，
+并通过 runtime bridge / MCP server 暴露 Velaria local functions。
+`velaria_service` 仍作为桌面 app 和其他 app client 使用的 HTTP sidecar，
+CLI Agent 模式不需要先启动 service。
 
 构建：
 

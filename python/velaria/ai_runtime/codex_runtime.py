@@ -550,8 +550,8 @@ def _codex_sdk_events(event: Any) -> list[dict[str, Any]]:
 
     if item_type in {"userMessage", "message"} and item.get("role") == "user":
         return []
-    if item_type in {"assistantMessage", "message"}:
-        content = text or _codex_text_from_blocks(item.get("content"))
+    if item_type in {"assistantMessage", "agentMessage", "message"}:
+        content = text or _codex_message_text(item)
         return [{"type": "assistant_text", "content": content, "data": data}] if content else []
     if item_type == "reasoning":
         content = text or _codex_reasoning_text(item)
@@ -583,6 +583,8 @@ def _codex_sdk_events(event: Any) -> list[dict[str, Any]]:
         return [{"type": "error", "content": content, "data": {**data, "item": item}}]
     if raw_type in {"done", "completed", "turnDone"}:
         return [{"type": "done", "content": "", "data": data}]
+    if raw_type in {"codex", "agentMessage"} and text:
+        return [{"type": "assistant_text", "content": text, "data": data}]
     if text:
         return [{"type": raw_type or "assistant_text", "content": text, "data": data}]
     return []
@@ -634,6 +636,7 @@ def _find_codex_item(value: Any) -> dict[str, Any] | None:
             "tool_search_output",
             "message",
             "assistantMessage",
+            "agentMessage",
             "userMessage",
             "reasoning",
             "error",
@@ -681,6 +684,17 @@ def _codex_text_from_blocks(blocks: Any) -> str:
             if isinstance(text, str):
                 parts.append(text)
     return "".join(parts)
+
+
+def _codex_message_text(item: dict[str, Any]) -> str:
+    for key in ("text", "message"):
+        value = item.get(key)
+        if isinstance(value, str):
+            return value
+    content = item.get("content")
+    if isinstance(content, str):
+        return content
+    return _codex_text_from_blocks(content)
 
 
 def _codex_reasoning_text(item: dict[str, Any]) -> str:

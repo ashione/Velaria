@@ -448,7 +448,7 @@ class AiRuntimeAgentTest(unittest.TestCase):
         )
         self.assertTrue(patterns["ok"])
         self.assertIn("ISO_WEEK(observation_date)", patterns["patterns"][0]["template"])
-        self.assertIn("AVG(NASDAQ100)", patterns["patterns"][0]["template"])
+        self.assertIn('AVG("NASDAQ100")', patterns["patterns"][0]["template"])
         current_time = execute_local_function(
             "velaria_sql_query_patterns",
             {"task": "增加当前时间"},
@@ -1253,4 +1253,29 @@ class AiRuntimeAgentTest(unittest.TestCase):
         self.assertEqual(
             _codex_sdk_event(assistant_event),
             {"type": "assistant_text", "content": "Hello.", "data": assistant_event.data},
+        )
+
+        agent_message_event = types.SimpleNamespace(
+            step_type="codex",
+            text="Hello from Codex SDK.",
+            data={
+                "item": {
+                    "type": "agentMessage",
+                    "text": "Hello from Codex SDK.",
+                }
+            },
+        )
+        self.assertEqual(
+            _codex_sdk_event(agent_message_event),
+            {"type": "assistant_text", "content": "Hello from Codex SDK.", "data": agent_message_event.data},
+        )
+
+        codex_step_event = types.SimpleNamespace(
+            step_type="codex",
+            text="Fallback final text.",
+            data={},
+        )
+        self.assertEqual(
+            _codex_sdk_event(codex_step_event),
+            {"type": "assistant_text", "content": "Fallback final text.", "data": codex_step_event.data},
         )

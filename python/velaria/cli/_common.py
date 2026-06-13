@@ -167,11 +167,6 @@ def _emit_error_json(
     return 1
 
 
-def _interactive_banner() -> int:
-    print("Velaria interactive mode. Type '/help' for usage, '/exit' to quit.")
-    return 0
-
-
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 

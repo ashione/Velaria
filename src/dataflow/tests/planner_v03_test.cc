@@ -1,9 +1,11 @@
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 
 #include "src/dataflow/core/contract/api/dataframe.h"
 #include "src/dataflow/core/execution/columnar_batch.h"
+#include "src/dataflow/core/execution/runtime/execution_optimizer.h"
 #include "src/dataflow/core/execution/runtime/executor.h"
 #include "src/dataflow/core/logical/planner/plan.h"
 
@@ -177,6 +179,216 @@ int main() {
   const auto aggregate_total = dataflow::materializeValueColumn(aggregate_out, total_idx);
   expect(aggregate_total.values.size() == 2, "aggregate cached total size mismatch");
   expect(aggregate_total.values[0].asDouble() == 10.0, "aggregate cached total first row mismatch");
+
+  dataflow::Table dense_sum_source(dataflow::Schema({"bucket", "amount"}), {});
+  dense_sum_source.rows.reserve(128);
+  for (std::size_t i = 0; i < 128; ++i) {
+    dense_sum_source.rows.push_back(
+        {dataflow::Value(static_cast<int64_t>(i % 8)), dataflow::Value(int64_t(2))});
+  }
+  dataflow::AggregateSpec dense_sum_spec{dataflow::AggregateFunction::Sum, 1, "total_amount"};
+  const auto dense_sum_pattern =
+      dataflow::analyzeAggregateExecution(dense_sum_source, {0}, {dense_sum_spec});
+  expect(dense_sum_pattern.exec_spec.impl_kind == dataflow::AggImplKind::Dense,
+         "compact int64 aggregate should use dense grouping");
+  expect(dense_sum_pattern.shape == dataflow::AggregateExecutionShape::SumSingleInt64Key,
+         "dense single int64 sum should use typed sum runtime shape");
+  expect(dense_sum_pattern.exec_spec.partial_layout ==
+             dataflow::AggregatePartialLayoutKind::StateColumnar,
+         "dense single int64 sum should expose state-columnar partial layout");
+  auto dense_sum_out =
+      dataflow::executeAggregateTable(dense_sum_source, {0}, {dense_sum_spec},
+                                      &dense_sum_pattern.exec_spec);
+  dataflow::materializeRows(&dense_sum_out);
+  expect(dense_sum_out.rows.size() == 8, "dense sum should group compact key domain");
+  expect(dense_sum_out.columnar_cache != nullptr, "dense sum should retain columnar cache");
+  dataflow::validateTableColumnarCache(dense_sum_out, "dense int64 sum aggregate");
+  const auto dense_sum_total_idx = dense_sum_out.schema.indexOf("total_amount");
+  for (const auto& row : dense_sum_out.rows) {
+    expect(row[dense_sum_total_idx].asDouble() == 32.0,
+           "dense sum should preserve numeric reducer semantics");
+  }
+
+  dataflow::AggregateSpec dense_count_spec{dataflow::AggregateFunction::Count, 0, "row_count"};
+  const auto dense_count_pattern =
+      dataflow::analyzeAggregateExecution(dense_sum_source, {0}, {dense_count_spec});
+  expect(dense_count_pattern.exec_spec.impl_kind == dataflow::AggImplKind::Dense,
+         "compact int64 count aggregate should use dense grouping");
+  expect(dense_count_pattern.shape == dataflow::AggregateExecutionShape::CountSingleInt64Key,
+         "dense single int64 count should use typed count runtime shape");
+  expect(dense_count_pattern.exec_spec.partial_layout ==
+             dataflow::AggregatePartialLayoutKind::StateColumnar,
+         "dense single int64 count should expose state-columnar partial layout");
+  auto dense_count_out =
+      dataflow::executeAggregateTable(dense_sum_source, {0}, {dense_count_spec},
+                                      &dense_count_pattern.exec_spec);
+  dataflow::materializeRows(&dense_count_out);
+  expect(dense_count_out.rows.size() == 8, "dense count should group compact key domain");
+  expect(dense_count_out.columnar_cache != nullptr, "dense count should retain columnar cache");
+  dataflow::validateTableColumnarCache(dense_count_out, "dense int64 count aggregate");
+  const auto dense_count_idx = dense_count_out.schema.indexOf("row_count");
+  for (const auto& row : dense_count_out.rows) {
+    expect(row[dense_count_idx].asInt64() == 16,
+           "dense count should preserve row-count reducer semantics");
+  }
+
+  dataflow::AggregateSpec dense_avg_spec{dataflow::AggregateFunction::Avg, 1, "avg_amount"};
+  const auto dense_avg_pattern =
+      dataflow::analyzeAggregateExecution(dense_sum_source, {0}, {dense_avg_spec});
+  expect(dense_avg_pattern.exec_spec.impl_kind == dataflow::AggImplKind::Dense,
+         "compact int64 avg aggregate should use dense grouping");
+  expect(dense_avg_pattern.shape == dataflow::AggregateExecutionShape::AvgSingleInt64Key,
+         "dense single int64 avg should use typed avg runtime shape");
+  expect(dense_avg_pattern.exec_spec.partial_layout ==
+             dataflow::AggregatePartialLayoutKind::StateColumnar,
+         "dense single int64 avg should expose state-columnar partial layout");
+  auto dense_avg_out =
+      dataflow::executeAggregateTable(dense_sum_source, {0}, {dense_avg_spec},
+                                      &dense_avg_pattern.exec_spec);
+  dataflow::materializeRows(&dense_avg_out);
+  expect(dense_avg_out.rows.size() == 8, "dense avg should group compact key domain");
+  expect(dense_avg_out.columnar_cache != nullptr, "dense avg should retain columnar cache");
+  dataflow::validateTableColumnarCache(dense_avg_out, "dense int64 avg aggregate");
+  const auto dense_avg_idx = dense_avg_out.schema.indexOf("avg_amount");
+  for (const auto& row : dense_avg_out.rows) {
+    expect(row[dense_avg_idx].asDouble() == 2.0,
+           "dense avg should preserve numeric reducer semantics");
+  }
+
+  dataflow::Table extreme_int64_source(
+      dataflow::Schema({"bucket", "amount"}),
+      {{dataflow::Value(std::numeric_limits<int64_t>::min()), dataflow::Value(int64_t(1))},
+       {dataflow::Value(std::numeric_limits<int64_t>::max()), dataflow::Value(int64_t(2))}});
+  dataflow::AggregateSpec extreme_sum_spec{dataflow::AggregateFunction::Sum, 1,
+                                           "total_amount"};
+  dataflow::AggregateExecSpec forced_dense_spec;
+  forced_dense_spec.impl_kind = dataflow::AggImplKind::Dense;
+  auto extreme_sum_out =
+      dataflow::executeAggregateTable(extreme_int64_source, {0}, {extreme_sum_spec},
+                                      &forced_dense_spec);
+  dataflow::materializeRows(&extreme_sum_out);
+  expect(extreme_sum_out.rows.size() == 2,
+         "extreme int64 dense fallback should preserve both groups");
+  dataflow::validateTableColumnarCache(extreme_sum_out, "extreme int64 dense fallback");
+
+  dataflow::Table double_int64_sum_source(dataflow::Schema({"bucket", "shard", "amount"}), {});
+  double_int64_sum_source.rows.reserve(128);
+  for (std::size_t i = 0; i < 128; ++i) {
+    double_int64_sum_source.rows.push_back(
+        {dataflow::Value(static_cast<int64_t>(i % 4)),
+         dataflow::Value(static_cast<int64_t>((i / 4) % 2)), dataflow::Value(int64_t(3))});
+  }
+  dataflow::AggregateSpec double_int64_sum_spec{dataflow::AggregateFunction::Sum, 2,
+                                                "total_amount"};
+  const auto double_int64_sum_pattern =
+      dataflow::analyzeAggregateExecution(double_int64_sum_source, {0, 1},
+                                          {double_int64_sum_spec});
+  expect(double_int64_sum_pattern.exec_spec.impl_kind == dataflow::AggImplKind::HashPacked,
+         "two int64 key sum should keep packed hash grouping");
+  expect(double_int64_sum_pattern.shape == dataflow::AggregateExecutionShape::SumDoubleInt64Key,
+         "two int64 key sum should use typed double-int64 sum runtime shape");
+  expect(double_int64_sum_pattern.exec_spec.partial_layout ==
+             dataflow::AggregatePartialLayoutKind::StateColumnar,
+         "two int64 key sum should expose state-columnar partial layout");
+  auto double_int64_sum_out =
+      dataflow::executeAggregateTable(double_int64_sum_source, {0, 1},
+                                      {double_int64_sum_spec},
+                                      &double_int64_sum_pattern.exec_spec);
+  dataflow::materializeRows(&double_int64_sum_out);
+  expect(double_int64_sum_out.rows.size() == 8, "two int64 sum should group both keys");
+  expect(double_int64_sum_out.columnar_cache != nullptr,
+         "two int64 sum should retain columnar cache");
+  dataflow::validateTableColumnarCache(double_int64_sum_out, "two int64 sum aggregate");
+  const auto double_int64_sum_idx = double_int64_sum_out.schema.indexOf("total_amount");
+  for (const auto& row : double_int64_sum_out.rows) {
+    expect(row[double_int64_sum_idx].asDouble() == 48.0,
+           "two int64 sum should preserve numeric reducer semantics");
+  }
+
+  dataflow::AggregateSpec double_int64_count_spec{dataflow::AggregateFunction::Count, 0,
+                                                  "row_count"};
+  const auto double_int64_count_pattern =
+      dataflow::analyzeAggregateExecution(double_int64_sum_source, {0, 1},
+                                          {double_int64_count_spec});
+  expect(double_int64_count_pattern.exec_spec.impl_kind == dataflow::AggImplKind::HashPacked,
+         "two int64 key count should keep packed hash grouping");
+  expect(std::string(dataflow::aggregateExecutionShapeName(double_int64_count_pattern.shape)) ==
+             "count-double-int64-key",
+         "two int64 key count should use typed double-int64 count runtime shape");
+  expect(double_int64_count_pattern.exec_spec.partial_layout ==
+             dataflow::AggregatePartialLayoutKind::StateColumnar,
+         "two int64 key count should expose state-columnar partial layout");
+  auto double_int64_count_out =
+      dataflow::executeAggregateTable(double_int64_sum_source, {0, 1},
+                                      {double_int64_count_spec},
+                                      &double_int64_count_pattern.exec_spec);
+  dataflow::materializeRows(&double_int64_count_out);
+  expect(double_int64_count_out.rows.size() == 8, "two int64 count should group both keys");
+  dataflow::validateTableColumnarCache(double_int64_count_out, "two int64 count aggregate");
+  const auto double_int64_count_idx = double_int64_count_out.schema.indexOf("row_count");
+  for (const auto& row : double_int64_count_out.rows) {
+    expect(row[double_int64_count_idx].asInt64() == 16,
+           "two int64 count should preserve row-count reducer semantics");
+  }
+
+  dataflow::AggregateSpec double_int64_avg_spec{dataflow::AggregateFunction::Avg, 2,
+                                                "avg_amount"};
+  const auto double_int64_avg_pattern =
+      dataflow::analyzeAggregateExecution(double_int64_sum_source, {0, 1},
+                                          {double_int64_avg_spec});
+  expect(double_int64_avg_pattern.exec_spec.impl_kind == dataflow::AggImplKind::HashPacked,
+         "two int64 key avg should keep packed hash grouping");
+  expect(std::string(dataflow::aggregateExecutionShapeName(double_int64_avg_pattern.shape)) ==
+             "avg-double-int64-key",
+         "two int64 key avg should use typed double-int64 avg runtime shape");
+  expect(double_int64_avg_pattern.exec_spec.partial_layout ==
+             dataflow::AggregatePartialLayoutKind::StateColumnar,
+         "two int64 key avg should expose state-columnar partial layout");
+  auto double_int64_avg_out =
+      dataflow::executeAggregateTable(double_int64_sum_source, {0, 1},
+                                      {double_int64_avg_spec},
+                                      &double_int64_avg_pattern.exec_spec);
+  dataflow::materializeRows(&double_int64_avg_out);
+  expect(double_int64_avg_out.rows.size() == 8, "two int64 avg should group both keys");
+  dataflow::validateTableColumnarCache(double_int64_avg_out, "two int64 avg aggregate");
+  const auto double_int64_avg_idx = double_int64_avg_out.schema.indexOf("avg_amount");
+  for (const auto& row : double_int64_avg_out.rows) {
+    expect(row[double_int64_avg_idx].asDouble() == 3.0,
+           "two int64 avg should preserve numeric reducer semantics");
+  }
+
+  auto source_grp_a = std::make_shared<dataflow::PlanPredicateExpr>();
+  source_grp_a->kind = dataflow::PlanPredicateExprKind::Comparison;
+  source_grp_a->comparison = {1, dataflow::Value("A"), "="};
+  auto source_grp_c = std::make_shared<dataflow::PlanPredicateExpr>();
+  source_grp_c->kind = dataflow::PlanPredicateExprKind::Comparison;
+  source_grp_c->comparison = {1, dataflow::Value("C"), "="};
+  auto source_predicate = std::make_shared<dataflow::PlanPredicateExpr>();
+  source_predicate->kind = dataflow::PlanPredicateExprKind::Or;
+  source_predicate->left = source_grp_a;
+  source_predicate->right = source_grp_c;
+
+  dataflow::SourcePushdownSpec source_count_pushdown;
+  source_count_pushdown.predicate_expr = source_predicate;
+  source_count_pushdown.has_aggregate = true;
+  source_count_pushdown.aggregate.keys = {1};
+  source_count_pushdown.aggregate.aggregates = {
+      {dataflow::AggregateFunction::Count, 1, "cnt"},
+  };
+  expect(dataflow::classifySourcePushdownShape(source_count_pushdown) ==
+             dataflow::SourcePushdownShape::SingleKeyCount,
+         "single-key predicate source count should use typed count shape");
+
+  dataflow::SourcePushdownSpec source_sum_pushdown;
+  source_sum_pushdown.predicate_expr = source_predicate;
+  source_sum_pushdown.has_aggregate = true;
+  source_sum_pushdown.aggregate.keys = {1};
+  source_sum_pushdown.aggregate.aggregates = {
+      {dataflow::AggregateFunction::Sum, 2, "sum_val"},
+  };
+  expect(dataflow::classifySourcePushdownShape(source_sum_pushdown) ==
+             dataflow::SourcePushdownShape::SingleKeyNumericAggregate,
+         "single-key predicate source sum should use typed numeric shape");
 
   dataflow::Table empty_int64_source(dataflow::Schema({"user_id", "score"}), {});
   dataflow::PlanNodePtr empty_aggregate_plan =

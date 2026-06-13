@@ -150,10 +150,18 @@ int main(int argc, char** argv) {
 
   runScenario("single-int64-low-domain", makeSingleInt64LowDomainTable(rows), {0},
               {AggregateSpec{AggregateFunction::Sum, 1, "sum_v"}}, false, rounds);
+  runScenario("single-int64-low-domain-count", makeSingleInt64LowDomainTable(rows), {0},
+              {AggregateSpec{AggregateFunction::Count, 0, "count_v"}}, false, rounds);
+  runScenario("single-int64-low-domain-avg", makeSingleInt64LowDomainTable(rows), {0},
+              {AggregateSpec{AggregateFunction::Avg, 1, "avg_v"}}, false, rounds);
   runScenario("single-int64-high-domain", makeSingleInt64HighDomainTable(rows), {0},
               {AggregateSpec{AggregateFunction::Sum, 1, "sum_v"}}, false, rounds);
   runScenario("double-int64", makeDoubleInt64Table(rows), {0, 1},
               {AggregateSpec{AggregateFunction::Sum, 2, "sum_v"}}, false, rounds);
+  runScenario("double-int64-count", makeDoubleInt64Table(rows), {0, 1},
+              {AggregateSpec{AggregateFunction::Count, 0, "count_v"}}, false, rounds);
+  runScenario("double-int64-avg", makeDoubleInt64Table(rows), {0, 1},
+              {AggregateSpec{AggregateFunction::Avg, 2, "avg_v"}}, false, rounds);
   runScenario("mixed-string-int64", makeMixedStringInt64Table(rows), {0, 1},
               {AggregateSpec{AggregateFunction::Sum, 2, "sum_v"}}, false, rounds);
   runScenario("mixed-string-int64-nullable", makeMixedStringInt64NullableTable(rows), {0, 1},

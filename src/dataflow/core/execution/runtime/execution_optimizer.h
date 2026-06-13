@@ -48,6 +48,10 @@ enum class AggregateExecutionShape {
   SumNoKey = 5,
   SumSingleInt64Key = 6,
   SumDoubleInt64Key = 7,
+  CountSingleInt64Key = 10,
+  AvgSingleInt64Key = 11,
+  CountDoubleInt64Key = 12,
+  AvgDoubleInt64Key = 13,
 };
 
 struct AggregateExecutionPattern {
@@ -68,6 +72,7 @@ LimitExecutionPattern analyzeLimitExecution(const LimitPlan& plan);
 SourceExecutionPattern analyzeSourceExecution(const FileSourceConnectorSpec& spec,
                                              const Schema& schema,
                                              const SourcePushdownSpec& pushdown);
+SourcePushdownShape classifySourcePushdownShape(const SourcePushdownSpec& spec);
 const char* aggregateExecKindName(AggImplKind kind);
 const char* aggregatePartialLayoutName(AggregatePartialLayoutKind kind);
 const char* aggregateExecutionShapeName(AggregateExecutionShape shape);

@@ -154,7 +154,15 @@ The following pieces are already in place in the current repository state.
   - `AggImplKind::SortStreaming`
 - executor paths do not add benchmark-shape probes for a specific scenario
 - sort-streaming and dense aggregate outputs now keep columnar cache directly instead of rebuilding row output first
+- typed aggregate state is now explicit through `state-columnar` partial layout for:
+  - single-`INT64` key `SUM`
+  - single-`INT64` key `COUNT`
+  - single-`INT64` key `AVG`
+  - two-`INT64` key `SUM`
+  - two-`INT64` key `COUNT`
+  - two-`INT64` key `AVG`
 - the single-int64 sum shape uses an optimizer-informed non-null fixed-width key path, while nullable keys keep the conservative tagged-key path
+- two-int64 SUM/COUNT/AVG now reuse the existing hash-packed grouping decision but switch the reducer state from generic packed-key accumulators to typed double-int64 aggregate shapes
 - empty aggregate outputs are expected to retain a schema-aligned empty columnar cache
 
 ### Regression coverage already added
@@ -293,6 +301,14 @@ Target shape:
 - optimizer selects the typed path explicitly and falls back to the existing generic path when the shape is not supported
 
 This should be treated as a new execution-layer design task, not as another small local cleanup.
+
+Current implementation notes:
+
+- single-`INT64` dense aggregates already have typed `SUM` / `COUNT` / `AVG` state and measured local speedups
+- two-`INT64` grouped `SUM` / `COUNT` / `AVG` now have typed state-columnar paths and measured local speedups
+- source pushdown now classifies single-key `COUNT` and numeric `SUM` / `AVG` as typed shapes even when the filter is represented as a predicate expression; CSV uses the typed reducer path for those predicate aggregates, with measured improvements on CSV `OR` and mixed predicate group-count benchmark cases
+- a state-only mixed string/`INT64` SUM attempt was measured and rejected; mixed-key work needs dictionary/key-id encoding or a stronger key view before more typed reducer state
+- remaining reducer work should generalize this shape to multi-key source pushdown reducers and encoded mixed-key layouts without changing public APIs
 
 ## Related Historical Notes
 

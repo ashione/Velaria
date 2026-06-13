@@ -24,6 +24,9 @@
   - 当前 core runtime columnar 路线的状态板
   - 维护已实现项、明确不做项和下一阶段
   - 当前活跃的 core-runtime 路线应优先更新这份文档
+- [columnar-first-kernel-design.md](./columnar-first-kernel-design.md)
+  - 下一阶段 columnar-first kernel 的研究设计说明
+  - 记录范围、benchmark 基线、迁移风险、验证门槛和实现批准前的开放研究问题
 - [agentic-event-data-platform-v1.md](./agentic-event-data-platform-v1.md)
   - agentic / event 方向的总设计入口
 - [agentic-user-journeys-v1.md](./agentic-user-journeys-v1.md)

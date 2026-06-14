@@ -122,6 +122,12 @@ Two-key COUNT/AVG baseline after adding benchmark scenarios, before typed COUNT/
 - Final post-source-predicate-aggregate `git diff --check`: passed with no output.
 - Final post-overflow-fix `git diff --check`: passed with no output.
 - `scripts/validate-delivery-run.sh`: unavailable in this repository.
+- Phase 1 substrate follow-up added `ColumnarExecBatch`, `ColumnarExecColumn`, and `ColumnarExecView` under `src/dataflow/core/execution/columnar_exec.*`.
+- Post-substrate `bazel test //:columnar_batch_test --test_output=errors`: passed.
+- Post-substrate `bazel test //:planner_v03_test --test_output=errors`: passed after the second mixed-key dictionary-id reducer attempt was rejected and removed.
+- Post-substrate small gate smoke passed:
+  `VELARIA_COLUMNAR_GATE_BATCH_ROWS=65536 VELARIA_COLUMNAR_GATE_BATCH_ROUNDS=1 VELARIA_COLUMNAR_GATE_FILE_ROWS=20000 VELARIA_COLUMNAR_GATE_FILE_ROUNDS=1 VELARIA_COLUMNAR_GATE_STRING_ROWS=10000 VELARIA_COLUMNAR_GATE_STRING_ROUNDS=1 ./scripts/run_columnar_kernel_benchmark_gate.sh`.
+- Post-substrate `ColumnarExecView` empty-selection fix added explicit `has_selection` state so an empty selected result is no longer confused with an unfiltered view.
 
 ## Performance Evidence
 
@@ -210,6 +216,20 @@ Rejected mixed-key attempt:
   `key-columnar` at `308 ms`; nullable returned to `generic-packed-keys-2` /
   `key-columnar` at `299 ms`.
 
+Rejected mixed-key dictionary-id attempt:
+
+- A second attempt changed the mixed string/`INT64` reducer path toward dictionary-id style
+  typed state and added temporary planner expectations for `sum-dictionary-string-int64-key`
+  and `count-dictionary-string-int64-key`.
+- `bazel test //:planner_v03_test --test_output=errors` passed during the attempt, but the
+  performance result was not acceptable.
+- `bazel run //:batch_aggregate_benchmark -- 1048576 5` reported
+  `mixed-string-int64` at `634 ms` and `mixed-string-int64-nullable` at `301 ms`.
+- The non-null mixed scenario regressed too severely, so the dictionary-id reducer production
+  path and test expectations were removed.
+- The retained conclusion is unchanged: mixed string/int key work needs a stronger
+  dictionary/key-id view and bucket policy design before typed reducer state is useful.
+
 Source predicate aggregate pushdown comparison:
 
 - Baseline command before the source predicate aggregate change:
@@ -242,6 +262,10 @@ Final benchmark smoke after all source-predicate changes:
   averaged `132,732 us` versus `402,253 us` for `sql-plan-and-execute`.
 - Final `bazel run //:file_source_benchmark -- 200000 3`: passed; source predicate
   aggregate numbers are recorded in the table above.
+- Post-substrate benchmark gate script:
+  - Small smoke with reduced row counts passed and printed
+    `[summary] columnar kernel benchmark gate ok`.
+  - Full default gate passed and printed `[summary] columnar kernel benchmark gate ok`.
 
 ## Sensitivity and Limits
 
@@ -284,6 +308,19 @@ Final benchmark smoke after all source-predicate changes:
   - `sql-reused-plan`: `130,845 us`.
 - Final refined targeted `rg` scan after source predicate aggregate changes: no matches.
 - Final refined targeted `rg` scan after overflow fix and delivery-record updates: no matches.
+
+## 2026-06-14 Phase 1 Substrate Validation
+
+- `bazel test //:columnar_batch_test --test_output=errors`: passed.
+- `bazel test //:core_regression --test_output=errors`: passed, 11/11.
+- `bazel build //:sql_demo //:df_demo //:stream_demo`: passed.
+- `./scripts/run_columnar_kernel_benchmark_gate.sh`: passed with
+  `[summary] columnar kernel benchmark gate ok`.
+- `bazel test //:experimental_regression --test_output=errors`: passed.
+- `bazel run //:actor_rpc_smoke`: passed with
+  `[smoke] actor rpc codec roundtrip ok (control/data-batch)`.
+- `git diff --check`: passed with no output.
+- Final refined targeted secret-pattern scan over changed files: no matches.
 
 ## PR / CI
 

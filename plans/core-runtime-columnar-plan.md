@@ -90,6 +90,27 @@ The following pieces are already in place in the current repository state.
 - shared string kernels
 - some helper APIs still materialize full `ValueColumnBuffer` copies today; reducing those copies is part of the next-phase work rather than a completed item
 
+### Internal columnar execution substrate skeleton
+
+- an internal execution substrate now exists under:
+  - `src/dataflow/core/execution/columnar_exec.h`
+  - `src/dataflow/core/execution/columnar_exec.cc`
+- `ColumnarExecBatch` carries schema, row count, provenance, a source-cache owner, and execution columns
+- `ColumnarExecColumn` records type, encoding, row count, nullability, and a value access view
+- the initial encoding set covers:
+  - `flat`
+  - `constant`
+  - `dictionary-view`
+  - `arrow-backed`
+  - `value-fallback`
+- `ColumnarExecView` supports projection and explicit selection vectors, including empty selected results
+- adapters exist for:
+  - `Table` / retained `ColumnarTable` to `ColumnarExecBatch`
+  - `ColumnarExecBatch` to `Table`
+  - `ColumnarExecView` to `Table`
+- Arrow-backed input can remain Arrow-backed inside the execution batch until a value or row materialization boundary is explicitly requested
+- this is an internal substrate only; broad operator migration has not yet happened
+
 ### File-input pushdown and probed batch registration
 
 - explicit file readers now cover:
@@ -304,10 +325,12 @@ This should be treated as a new execution-layer design task, not as another smal
 
 Current implementation notes:
 
+- `ColumnarExecBatch` / `ColumnarExecColumn` / `ColumnarExecView` have landed as the first execution substrate skeleton behind the existing public `Table` contract
 - single-`INT64` dense aggregates already have typed `SUM` / `COUNT` / `AVG` state and measured local speedups
 - two-`INT64` grouped `SUM` / `COUNT` / `AVG` now have typed state-columnar paths and measured local speedups
 - source pushdown now classifies single-key `COUNT` and numeric `SUM` / `AVG` as typed shapes even when the filter is represented as a predicate expression; CSV uses the typed reducer path for those predicate aggregates, with measured improvements on CSV `OR` and mixed predicate group-count benchmark cases
-- a state-only mixed string/`INT64` SUM attempt was measured and rejected; mixed-key work needs dictionary/key-id encoding or a stronger key view before more typed reducer state
+- mixed string/`INT64` SUM attempts were measured and rejected twice: first as a state-only reducer change, then as a dictionary-id reducer path that regressed the non-null benchmark; mixed-key work needs a stronger key/view design before more typed reducer state
+- `scripts/run_columnar_kernel_benchmark_gate.sh` now checks the aggregate typed-shape selections, file-source pushdown ratios, and string builtin plan-reuse guardrail in one reproducible local gate
 - remaining reducer work should generalize this shape to multi-key source pushdown reducers and encoded mixed-key layouts without changing public APIs
 
 ## Related Historical Notes

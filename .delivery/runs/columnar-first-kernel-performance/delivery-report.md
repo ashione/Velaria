@@ -4,6 +4,8 @@
 
 Implemented the first columnar-first aggregate proof points: dense single-`INT64` group-key numeric `SUM`, `COUNT`, and `AVG`, plus two-`INT64` group-key numeric `SUM`, `COUNT`, and `AVG`, now use typed reducer state and report `state-columnar` partial layout instead of remaining on the generic accumulator shapes. Also extended typed source pushdown shape selection to single-key predicate aggregate `COUNT` and numeric `SUM` / `AVG`, with CSV predicate aggregate execution using the typed reducer path.
 
+Follow-up work added the Phase 1 internal execution substrate skeleton: `ColumnarExecBatch`, `ColumnarExecColumn`, and `ColumnarExecView`, including retained-cache adapters, explicit materialization boundaries, Arrow-backed preservation, and empty-selection view semantics. A columnar benchmark gate script now verifies the key aggregate shapes, file-source pushdown ratios, and string builtin plan-reuse guardrail.
+
 ## Changes
 
 - `execution_optimizer.cc`: dense single-int64 SUM/COUNT/AVG and two-int64 SUM/COUNT/AVG now select typed runtime shapes and `state-columnar` partial layout.
@@ -14,8 +16,11 @@ Implemented the first columnar-first aggregate proof points: dense single-`INT64
 - `batch_aggregate_benchmark.cc`: added `single-int64-low-domain-count`, `single-int64-low-domain-avg`, `double-int64-count`, and `double-int64-avg`.
 - `planner_v03_test.cc`: added failing-first coverage for optimizer selection, partial layout, aggregate result semantics, columnar cache validation, and source pushdown predicate aggregate shape classification.
 - `file_source_test.cc`: added CSV predicate aggregate COUNT/SUM coverage using typed source pushdown shape selection.
+- `columnar_exec.h/.cc`: added the internal batch/column/view substrate, encoding labels, retained-cache adapters, and explicit materialization boundaries.
+- `columnar_batch_test.cc`: added adapter, validation, projection/selection, empty-selection, and Arrow-backed execution-batch coverage.
+- `scripts/run_columnar_kernel_benchmark_gate.sh`: added a local benchmark gate for aggregate typed-shape selection, file-source pushdown ratios, and string builtin plan reuse.
 - `core-runtime-columnar-plan.md`: updated the current status board for typed state-columnar aggregate paths.
-- `plans/columnar-first-kernel-design.md`: recorded the implementation result and measured proof point.
+- `plans/columnar-first-kernel-design.md`: recorded the implementation results, measured proof points, Phase 1 substrate status, and rejected mixed-key paths.
 
 ## Verification
 
@@ -33,6 +38,15 @@ Implemented the first columnar-first aggregate proof points: dense single-`INT64
 - `bazel run //:file_source_benchmark -- 200000 3`: source predicate aggregate before/current branch measured.
 - Final post-rebase `bazel run //:file_source_benchmark -- 200000 3`: passed; CSV predicate aggregate ratios remained below `0.40`.
 - A mixed string/int64 state-only attempt and hash-packed reserve-cap attempt were measured, rejected, and removed from the production diff before final validation.
+- A second mixed string/int64 dictionary-id reducer attempt was measured, rejected, and removed after `mixed-string-int64` regressed to `634 ms`.
+- `bazel test //:columnar_batch_test --test_output=errors`: passed after adding the Phase 1 substrate skeleton and empty-selection fix.
+- `bazel test //:core_regression --test_output=errors`: passed after the Phase 1 substrate follow-up.
+- `bazel build //:sql_demo //:df_demo //:stream_demo`: passed after the Phase 1 substrate follow-up.
+- `./scripts/run_columnar_kernel_benchmark_gate.sh`: passed with `[summary] columnar kernel benchmark gate ok`.
+- `bazel test //:experimental_regression --test_output=errors`: passed after the Phase 1 substrate follow-up.
+- `bazel run //:actor_rpc_smoke`: passed after the Phase 1 substrate follow-up.
+- `git diff --check`: passed after the Phase 1 substrate follow-up.
+- Final refined targeted secret-pattern scan over changed files: no matches.
 - After PR CI exposed an already-merged `float_simd_benchmark` duplicate on the GitHub merge ref, the branch was rebased onto `origin/main`; post-rebase CI-equivalent local validation passed:
   `bazel build //:sql_demo //:stream_demo //:velaria_pyext && bazel test //:core_regression //:experimental_regression --test_output=errors`, plus the Python wrapper leak smoke with one stress/leak iteration.
 
@@ -120,8 +134,9 @@ The line/json predicate aggregate cases remained within the planned gate; line i
 
 - Scope is intentionally narrow; this does not prove broad operator migration yet.
 - State-columnar is now explicit for single-int64 SUM/COUNT/AVG and two-int64 SUM/COUNT/AVG, but string/mixed-key aggregate state still need the same treatment.
-- A mixed string/int64 state-only reducer attempt was measured and rejected because it did not produce reliable speedup and a bucket-reserve cap regressed the benchmark; this path was removed from production diff.
-- Source pushdown typed reducer is now started for single-key predicate aggregates, but multi-key/multi-aggregate source reducers and `ColumnarExecBatch`/`ColumnarExecView` remain the next generalization steps.
+- Mixed string/int64 reducer attempts were measured and rejected twice: state-only changes did not produce reliable speedup, and the later dictionary-id reducer attempt regressed the non-null benchmark to `634 ms`; both paths were removed from the production diff.
+- Source pushdown typed reducer is now started for single-key predicate aggregates, but multi-key/multi-aggregate source reducers still need a shared reducer interface.
+- `ColumnarExecBatch`/`ColumnarExecView` are now available as an internal substrate skeleton, but broad operator migration remains future work.
 - A per-scenario benchmark filter would make future performance gates less noisy.
 
 ## Gate Ledger

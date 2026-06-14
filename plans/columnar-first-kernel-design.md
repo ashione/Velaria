@@ -2,9 +2,9 @@
 
 ## 当前角色
 
-这份文档记录 Velaria core runtime 下一阶段 columnar-first kernel 的研究设计。
+这份文档记录 Velaria core runtime 下一阶段 columnar-first kernel 的研究设计与后续实现记录。
 
-它还不是实现计划。只有在本文的研究问题被确认或显式推迟，并且用户明确批准从研究进入实现后，才可以开始写实现代码。
+它最初不是实现计划；在研究问题被确认或显式推迟，并且用户明确批准从研究进入实现后，后续实现切片会记录在本文末尾的实现记录中。
 
 本文补充以下文档：
 
@@ -667,7 +667,7 @@ Benchmark guardrails：
 
 ## 开放研究问题
 
-1. `ColumnarExecBatch` 暂倾向新建 `columnar_exec.*`；仍需确认它与 `columnar_batch.*` 的 include 方向和 BUILD 依赖边界。
+1. `ColumnarExecBatch` 已落在相邻的 `columnar_exec.*`，当前 include 方向是 `columnar_exec.*` 复用 `columnar_batch.*` 的 cache/value view 能力，避免反向依赖。
 2. typed execution columns 应包装 `ValueColumnBuffer`，还是让 `ValueColumnBuffer` 退为 compatibility/fallback 表示？
 3. 什么 schema fingerprint 足以保证 bound-plan column access 安全？
 4. selection vector 是否应跨多个 operator 保持一等身份，还是 filter 在高选择率时立即 compact？
@@ -775,10 +775,52 @@ Two-key 场景使用同一 benchmark 里的 `double-int64` / `double-int64-count
 - 这还不是完整 columnar-first kernel。下一阶段仍应把 state-columnar layout、typed reducer
   interface、selection/dictionary view 和 explain diagnostics 做成可组合机制。
 
+## 2026-06-14 实现记录
+
+本轮把 Phase 1 的 internal execution substrate skeleton 落到代码中，但仍保持 public
+`DataflowSession` / `DataFrame` / `Table` contract 不变，也没有迁移广泛 operator。
+
+实现内容：
+
+- 新增 `src/dataflow/core/execution/columnar_exec.h` 与
+  `src/dataflow/core/execution/columnar_exec.cc`。
+- `ColumnarExecBatch` 显式携带 schema、row count、provenance、source-cache owner 和
+  execution columns。
+- `ColumnarExecColumn` 显式记录 type、encoding、row count、nullability 和 value access view。
+- 预留并实现基础 encoding 枚举：`flat`、`constant`、`dictionary-view`、
+  `arrow-backed`、`value-fallback`。
+- `ColumnarExecView` 支持 projection 与 selection vector；空 selection 作为合法过滤结果被
+  `has_selection` 明确区分，不再和“未过滤”混淆。
+- 新增 `Table` / retained `ColumnarTable` 到 `ColumnarExecBatch` 的 adapter，以及
+  `ColumnarExecBatch` / `ColumnarExecView` 到 `Table` 的显式 materialization boundary。
+- Arrow-backed lazy table 进入 `ColumnarExecBatch` 时保留 `arrow-backed` encoding；只有
+  `valueAt(...)` 或 row materialization 边界才按需读取值。
+- 新增 `scripts/run_columnar_kernel_benchmark_gate.sh`，把 batch aggregate typed-shape
+  selection、file-source pushdown ratio 和 string builtin plan-reuse guardrail 收敛成一个
+  可重复本地 gate。
+
+验证状态记录在 `.delivery/runs/columnar-first-kernel-performance/verification.md`。当前这一步的
+关键语义验收是：
+
+- `ColumnarExecBatch` 能从 value-backed `Table` 建立 flat execution columns。
+- `ColumnarExecView` 能表达 projection、非空 selection 和空 selection。
+- `ColumnarExecBatch::validate(...)` 能拒绝 row-count mismatch。
+- Arrow-backed lazy input 在 execution batch 内保持 `arrow-backed` encoding。
+
+被拒绝路径：
+
+- 第二次 mixed string/`INT64` dictionary-id reducer 尝试被 benchmark 否决。该尝试把
+  mixed key path 切到 dictionary-id style reducer，但 `batch_aggregate_benchmark -- 1048576 5`
+  中 `mixed-string-int64` 退化到 `634 ms`，nullable variant 为 `301 ms`，未能证明通用收益。
+- 该路径已经从生产 diff 和测试期望中移除；当前结论保持为：mixed string/int key 的收益点不应
+  只替换 reducer state，而要先设计稳定的 dictionary/key-id view、null identity 与 hash bucket
+  policy。
+
 ## 当前建议
 
 继续在现有 public `Table` contract 后推进 typed columnar execution substrate。当前 proof points
-已经验证 dense typed aggregate state 对 SUM / COUNT / AVG 有收益，但仍不应把方向退化为
+已经验证 dense typed aggregate state 对 SUM / COUNT / AVG 有收益，Phase 1 substrate skeleton
+也已经具备 adapter、view、Arrow-backed owner 和显式 materialization boundary；但仍不应把方向退化为
 operator-specific shortcut。
 
 下一条实现切片建议在两个方向中选一个：
@@ -790,4 +832,4 @@ operator-specific shortcut。
   state-columnar reducer，而不是让三个 scanner 各自维护一份状态机。
 
 无论选择哪条，都应保持所有 public APIs 与 row boundaries 稳定；`ColumnarExecBatch` /
-`ColumnarExecView` 仍应作为内部 substrate 逐步引入，而不是一次性重写 executor。
+`ColumnarExecView` 应继续作为内部 substrate 逐步接入 operator，而不是一次性重写 executor。

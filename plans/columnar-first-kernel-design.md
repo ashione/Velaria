@@ -799,8 +799,7 @@ Two-key 场景使用同一 benchmark 里的 `double-int64` / `double-int64-count
   selection、file-source pushdown ratio 和 string builtin plan-reuse guardrail 收敛成一个
   可重复本地 gate。
 
-验证状态记录在 `.delivery/runs/columnar-first-kernel-performance/verification.md`。当前这一步的
-关键语义验收是：
+当前这一步的关键语义验收是：
 
 - `ColumnarExecBatch` 能从 value-backed `Table` 建立 flat execution columns。
 - `ColumnarExecView` 能表达 projection、非空 selection 和空 selection。

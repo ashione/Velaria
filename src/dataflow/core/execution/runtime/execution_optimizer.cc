@@ -117,6 +117,18 @@ bool columnHasNulls(const ValueColumnBuffer& column) {
   return false;
 }
 
+uint64_t orderedInt64Key(int64_t value) {
+  return static_cast<uint64_t>(value) ^ (uint64_t{1} << 63);
+}
+
+uint64_t int64DomainSize(int64_t min_value, int64_t max_value) {
+  const uint64_t distance = orderedInt64Key(max_value) - orderedInt64Key(min_value);
+  if (distance == std::numeric_limits<uint64_t>::max()) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return distance + 1;
+}
+
 bool estimateLowCardinalitySingleInt64(const Table& input, std::size_t key_index,
                                        std::size_t* expected_groups) {
   const auto key_column = viewValueColumn(input, key_index);
@@ -153,7 +165,7 @@ bool estimateLowCardinalitySingleInt64(const Table& input, std::size_t key_index
     return false;
   }
 
-  const uint64_t domain_size = static_cast<uint64_t>(max_value - min_value) + 1;
+  const uint64_t domain_size = int64DomainSize(min_value, max_value);
   if (expected_groups != nullptr) {
     std::size_t projected_groups = distinct.size();
     if (row_count != inspect_rows) {

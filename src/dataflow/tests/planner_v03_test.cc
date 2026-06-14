@@ -261,6 +261,11 @@ int main() {
        {dataflow::Value(std::numeric_limits<int64_t>::max()), dataflow::Value(int64_t(2))}});
   dataflow::AggregateSpec extreme_sum_spec{dataflow::AggregateFunction::Sum, 1,
                                            "total_amount"};
+  const auto extreme_sum_pattern =
+      dataflow::analyzeAggregateExecution(extreme_int64_source, {0}, {extreme_sum_spec});
+  expect(extreme_sum_pattern.exec_spec.impl_kind != dataflow::AggImplKind::Dense,
+         "extreme int64 key domain should not select dense grouping");
+
   dataflow::AggregateExecSpec forced_dense_spec;
   forced_dense_spec.impl_kind = dataflow::AggImplKind::Dense;
   auto extreme_sum_out =

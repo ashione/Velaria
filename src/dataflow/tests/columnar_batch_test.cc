@@ -315,6 +315,26 @@ int main() {
   }
   expect(saw_invalid_exec_batch, "ColumnarExecBatch validation should reject row count mismatch");
 
+  dataflow::ValueColumnBuffer short_exec_buffer;
+  short_exec_buffer.values.push_back(dataflow::Value(int64_t(1)));
+  dataflow::ColumnarExecBatch invalid_exec_backing;
+  invalid_exec_backing.schema = dataflow::Schema({"id"});
+  invalid_exec_backing.row_count = 2;
+  dataflow::ColumnarExecColumn invalid_exec_column;
+  invalid_exec_column.type = dataflow::DataType::Int64;
+  invalid_exec_column.encoding = dataflow::ColumnarExecEncoding::Flat;
+  invalid_exec_column.row_count = 2;
+  invalid_exec_column.values.buffer = &short_exec_buffer;
+  invalid_exec_backing.columns.push_back(invalid_exec_column);
+  bool saw_invalid_exec_backing = false;
+  try {
+    invalid_exec_backing.validate("invalid exec backing");
+  } catch (const std::runtime_error&) {
+    saw_invalid_exec_backing = true;
+  }
+  expect(saw_invalid_exec_backing,
+         "ColumnarExecBatch validation should reject backing row count mismatch");
+
   dataflow::Table arrow_source(
       dataflow::Schema({"id", "name"}),
       {

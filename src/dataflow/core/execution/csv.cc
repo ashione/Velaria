@@ -1415,8 +1415,8 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           break;
         case AggregateFunction::Avg:
           result.columnar_cache->columns[1].values.push_back(
-              state.count == 0 ? Value()
-                               : Value(state.sum / static_cast<double>(state.count)));
+              Value(state.count == 0 ? 0.0
+                                      : state.sum / static_cast<double>(state.count)));
           break;
         case AggregateFunction::Min:
         case AggregateFunction::Max:

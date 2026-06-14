@@ -111,6 +111,11 @@ void ColumnarExecBatch::validate(const std::string& context) const {
     if (column.encoding != ColumnarExecEncoding::Constant && column.values.buffer == nullptr) {
       throw std::runtime_error(context + ": column missing value buffer");
     }
+    if (column.encoding != ColumnarExecEncoding::Constant &&
+        column.values.buffer != nullptr &&
+        valueColumnRowCount(*column.values.buffer) != column.row_count) {
+      throw std::runtime_error(context + ": backing column row count mismatch");
+    }
   }
 }
 

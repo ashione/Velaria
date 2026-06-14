@@ -121,12 +121,28 @@ def _runtime_from_args(args: AgentCommandArgs):
         config["runtime"] = args.runtime
         config["configured_runtime"] = args.runtime
     if args.model:
-        config["model"] = args.model
+        _apply_model_override(config, args.model)
     return create_runtime(config)
 
 
 def _controller_from_args(args: AgentCommandArgs) -> InteractiveController:
     return InteractiveController(_runtime_from_args(args))
+
+
+def _apply_model_override(config: dict[str, Any], model: str) -> None:
+    model = model.strip()
+    if not model:
+        return
+    config["model"] = model
+    runtime = str(config.get("runtime") or config.get("configured_runtime") or "codex").strip().lower()
+    if runtime == "claude":
+        config["claude_model"] = model
+        return
+    if runtime == "auto":
+        config["codex_model"] = model
+        config["claude_model"] = model
+        return
+    config["codex_model"] = model
 
 
 def _run_agent_print(args: AgentCommandArgs) -> int:

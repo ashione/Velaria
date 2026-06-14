@@ -143,6 +143,26 @@ class AgentCliTest(unittest.TestCase):
                 exit_code = velaria_cli.main(["agent", "--model", "gpt-custom", "--print", "say hello"])
         self.assertEqual(exit_code, 0)
         self.assertEqual(captured["config"]["model"], "gpt-custom")
+        self.assertEqual(captured["config"]["codex_model"], "gpt-custom")
+        self.assertEqual(stdout.getvalue(), "hello from velaria\n")
+
+    def test_agent_model_argument_overrides_claude_runtime_model(self):
+        fake = _FakeRuntime()
+        captured = {}
+
+        def fake_create_runtime(config):
+            captured["config"] = config
+            return fake
+
+        stdout = io.StringIO()
+        with mock.patch("velaria.ai_runtime.create_runtime", side_effect=fake_create_runtime):
+            with redirect_stdout(stdout):
+                exit_code = velaria_cli.main(
+                    ["agent", "--runtime", "claude", "--model", "claude-custom", "--print", "say hello"]
+                )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(captured["config"]["runtime"], "claude")
+        self.assertEqual(captured["config"]["claude_model"], "claude-custom")
         self.assertEqual(stdout.getvalue(), "hello from velaria\n")
 
     def test_agent_stream_json_outputs_turn_events(self):

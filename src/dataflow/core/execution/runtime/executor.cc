@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -386,6 +387,46 @@ void appendAggregateValues(ColumnarTable* cache, std::size_t* out_column_index,
   }
 }
 
+AggregateExecutionShape singleInt64ShapeForAggregates(const std::vector<AggregateSpec>& aggs) {
+  if (aggs.size() != 1) {
+    return AggregateExecutionShape::GenericSingleInt64Key;
+  }
+  switch (aggs.front().function) {
+    case AggregateFunction::Sum:
+      return AggregateExecutionShape::SumSingleInt64Key;
+    case AggregateFunction::Count:
+      return AggregateExecutionShape::CountSingleInt64Key;
+    case AggregateFunction::Avg:
+      return AggregateExecutionShape::AvgSingleInt64Key;
+    case AggregateFunction::Min:
+    case AggregateFunction::Max:
+      return AggregateExecutionShape::GenericSingleInt64Key;
+  }
+  return AggregateExecutionShape::GenericSingleInt64Key;
+}
+
+uint64_t orderedInt64Key(int64_t value) {
+  return static_cast<uint64_t>(value) ^ (uint64_t{1} << 63);
+}
+
+bool computeDenseInt64DomainSize(int64_t min_value, int64_t max_value,
+                                 std::size_t* domain_size) {
+  if (domain_size == nullptr || max_value < min_value) {
+    return false;
+  }
+  constexpr uint64_t kMaxDenseDomain = uint64_t{1} << 16;
+  const uint64_t distance = orderedInt64Key(max_value) - orderedInt64Key(min_value);
+  if (distance >= kMaxDenseDomain) {
+    return false;
+  }
+  *domain_size = static_cast<std::size_t>(distance + 1);
+  return true;
+}
+
+std::size_t denseInt64Slot(int64_t value, int64_t min_value) {
+  return static_cast<std::size_t>(orderedInt64Key(value) - orderedInt64Key(min_value));
+}
+
 Table executeSingleSumNoKeyTable(const Table& input, const AggregateSpec& agg) {
   Table out = makeAggregateOutputSchema(input, {}, std::vector<AggregateSpec>{agg});
   auto cache = std::make_shared<ColumnarTable>();
@@ -500,6 +541,392 @@ Table executeSingleSumSingleInt64KeyTable(const Table& input, std::size_t key_in
   return out;
 }
 
+Table executeDenseSingleInt64KeySumTable(const Table& input, std::size_t key_index,
+                                         const AggregateSpec& agg) {
+  Table out = makeAggregateOutputSchema(input, {key_index}, std::vector<AggregateSpec>{agg});
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = out.schema;
+  cache->columns.resize(2);
+  cache->arrow_formats.resize(2);
+  const auto row_count = input.rowCount();
+  if (row_count == 0) {
+    out.columnar_cache = std::move(cache);
+    return out;
+  }
+
+  const auto key_column = viewValueColumn(input, key_index);
+  const auto value_column = viewValueColumn(input, agg.value_index);
+  int64_t min_value = std::numeric_limits<int64_t>::max();
+  int64_t max_value = std::numeric_limits<int64_t>::min();
+  bool saw_value = false;
+  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+    if (valueColumnIsNullAt(*key_column.buffer, row_index)) {
+      return Table();
+    }
+    const auto value = valueColumnInt64At(*key_column.buffer, row_index);
+    min_value = std::min(min_value, value);
+    max_value = std::max(max_value, value);
+    saw_value = true;
+  }
+  if (!saw_value) {
+    out.columnar_cache = std::move(cache);
+    return out;
+  }
+
+  std::size_t domain_size = 0;
+  if (!computeDenseInt64DomainSize(min_value, max_value, &domain_size)) {
+    return Table();
+  }
+
+  std::vector<double> sums(domain_size, 0.0);
+  std::vector<uint8_t> seen(domain_size, 0);
+  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+    const auto value = valueColumnInt64At(*key_column.buffer, row_index);
+    const auto slot = denseInt64Slot(value, min_value);
+    seen[slot] = 1;
+    if (!valueColumnIsNullAt(*value_column.buffer, row_index)) {
+      sums[slot] += valueColumnDoubleAt(*value_column.buffer, row_index);
+    }
+  }
+
+  const auto reserve_groups = std::min<std::size_t>(domain_size, row_count);
+  cache->columns[0].values.reserve(reserve_groups);
+  cache->columns[1].values.reserve(reserve_groups);
+  for (std::size_t slot = 0; slot < seen.size(); ++slot) {
+    if (!seen[slot]) continue;
+    cache->columns[0].values.push_back(
+        Value(static_cast<int64_t>(min_value + static_cast<int64_t>(slot))));
+    cache->columns[1].values.push_back(Value(sums[slot]));
+    ++cache->row_count;
+  }
+  if (cache->row_count > 0) {
+    cache->batch_row_counts.push_back(cache->row_count);
+  }
+  out.columnar_cache = std::move(cache);
+  return out;
+}
+
+Table executeSingleCountSingleInt64KeyTable(const Table& input, std::size_t key_index,
+                                            const AggregateSpec& agg, bool nullable_key) {
+  const auto key_column = viewValueColumn(input, key_index);
+  const auto row_count = input.rowCount();
+  Table out = makeAggregateOutputSchema(input, {key_index}, std::vector<AggregateSpec>{agg});
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = out.schema;
+  cache->columns.resize(2);
+  cache->arrow_formats.resize(2);
+  if (row_count == 0) {
+    out.columnar_cache = std::move(cache);
+    return out;
+  }
+
+  if (!nullable_key) {
+    std::unordered_map<int64_t, std::size_t> key_to_index;
+    std::vector<int64_t> ordered_keys;
+    std::vector<int64_t> ordered_counts;
+    key_to_index.reserve(row_count);
+    ordered_keys.reserve(row_count);
+    ordered_counts.reserve(row_count);
+    for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+      if (valueColumnIsNullAt(*key_column.buffer, row_index)) {
+        return executeSingleCountSingleInt64KeyTable(input, key_index, agg, true);
+      }
+      const int64_t key = valueColumnInt64At(*key_column.buffer, row_index);
+      auto it = key_to_index.find(key);
+      if (it == key_to_index.end()) {
+        ordered_keys.push_back(key);
+        ordered_counts.push_back(0);
+        const auto index = ordered_counts.size() - 1;
+        it = key_to_index.emplace(key, index).first;
+      }
+      ++ordered_counts[it->second];
+    }
+
+    cache->row_count = ordered_keys.size();
+    cache->columns[0].values.reserve(ordered_keys.size());
+    cache->columns[1].values.reserve(ordered_keys.size());
+    for (std::size_t index = 0; index < ordered_keys.size(); ++index) {
+      cache->columns[0].values.push_back(Value(ordered_keys[index]));
+      cache->columns[1].values.push_back(Value(ordered_counts[index]));
+    }
+    if (!ordered_keys.empty()) {
+      cache->batch_row_counts.push_back(ordered_keys.size());
+    }
+    out.columnar_cache = std::move(cache);
+    return out;
+  }
+
+  std::unordered_map<Int64AggregateKey, std::size_t, Int64AggregateKeyHash> key_to_index;
+  std::vector<Int64AggregateKey> ordered_keys;
+  std::vector<int64_t> ordered_counts;
+  key_to_index.reserve(row_count);
+  ordered_keys.reserve(row_count);
+  ordered_counts.reserve(row_count);
+  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+    const Int64AggregateKey key{valueColumnIsNullAt(*key_column.buffer, row_index),
+                                valueColumnIsNullAt(*key_column.buffer, row_index)
+                                    ? 0
+                                    : valueColumnInt64At(*key_column.buffer, row_index)};
+    auto it = key_to_index.find(key);
+    if (it == key_to_index.end()) {
+      ordered_keys.push_back(key);
+      ordered_counts.push_back(0);
+      const auto index = ordered_counts.size() - 1;
+      it = key_to_index.emplace(key, index).first;
+    }
+    ++ordered_counts[it->second];
+  }
+
+  cache->row_count = ordered_keys.size();
+  cache->columns[0].values.reserve(ordered_keys.size());
+  cache->columns[1].values.reserve(ordered_keys.size());
+  for (std::size_t index = 0; index < ordered_keys.size(); ++index) {
+    const auto& key = ordered_keys[index];
+    cache->columns[0].values.push_back(key.is_null ? Value() : Value(key.value));
+    cache->columns[1].values.push_back(Value(ordered_counts[index]));
+  }
+  if (!ordered_keys.empty()) {
+    cache->batch_row_counts.push_back(ordered_keys.size());
+  }
+  out.columnar_cache = std::move(cache);
+  return out;
+}
+
+Table executeDenseSingleInt64KeyCountTable(const Table& input, std::size_t key_index,
+                                           const AggregateSpec& agg) {
+  Table out = makeAggregateOutputSchema(input, {key_index}, std::vector<AggregateSpec>{agg});
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = out.schema;
+  cache->columns.resize(2);
+  cache->arrow_formats.resize(2);
+  const auto row_count = input.rowCount();
+  if (row_count == 0) {
+    out.columnar_cache = std::move(cache);
+    return out;
+  }
+
+  const auto key_column = viewValueColumn(input, key_index);
+  int64_t min_value = std::numeric_limits<int64_t>::max();
+  int64_t max_value = std::numeric_limits<int64_t>::min();
+  bool saw_value = false;
+  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+    if (valueColumnIsNullAt(*key_column.buffer, row_index)) {
+      return Table();
+    }
+    const auto value = valueColumnInt64At(*key_column.buffer, row_index);
+    min_value = std::min(min_value, value);
+    max_value = std::max(max_value, value);
+    saw_value = true;
+  }
+  if (!saw_value) {
+    out.columnar_cache = std::move(cache);
+    return out;
+  }
+
+  std::size_t domain_size = 0;
+  if (!computeDenseInt64DomainSize(min_value, max_value, &domain_size)) {
+    return Table();
+  }
+
+  std::vector<int64_t> counts(domain_size, 0);
+  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+    const auto value = valueColumnInt64At(*key_column.buffer, row_index);
+    const auto slot = denseInt64Slot(value, min_value);
+    ++counts[slot];
+  }
+
+  const auto reserve_groups = std::min<std::size_t>(domain_size, row_count);
+  cache->columns[0].values.reserve(reserve_groups);
+  cache->columns[1].values.reserve(reserve_groups);
+  for (std::size_t slot = 0; slot < counts.size(); ++slot) {
+    if (counts[slot] == 0) continue;
+    cache->columns[0].values.push_back(
+        Value(static_cast<int64_t>(min_value + static_cast<int64_t>(slot))));
+    cache->columns[1].values.push_back(Value(counts[slot]));
+    ++cache->row_count;
+  }
+  if (cache->row_count > 0) {
+    cache->batch_row_counts.push_back(cache->row_count);
+  }
+  out.columnar_cache = std::move(cache);
+  return out;
+}
+
+Table executeSingleAvgSingleInt64KeyTable(const Table& input, std::size_t key_index,
+                                          const AggregateSpec& agg, bool nullable_key) {
+  const auto key_column = viewValueColumn(input, key_index);
+  const auto value_column = viewValueColumn(input, agg.value_index);
+  const auto row_count = input.rowCount();
+  Table out = makeAggregateOutputSchema(input, {key_index}, std::vector<AggregateSpec>{agg});
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = out.schema;
+  cache->columns.resize(2);
+  cache->arrow_formats.resize(2);
+  if (row_count == 0) {
+    out.columnar_cache = std::move(cache);
+    return out;
+  }
+
+  if (!nullable_key) {
+    std::unordered_map<int64_t, std::size_t> key_to_index;
+    std::vector<int64_t> ordered_keys;
+    std::vector<double> ordered_sums;
+    std::vector<int64_t> ordered_counts;
+    key_to_index.reserve(row_count);
+    ordered_keys.reserve(row_count);
+    ordered_sums.reserve(row_count);
+    ordered_counts.reserve(row_count);
+    for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+      if (valueColumnIsNullAt(*key_column.buffer, row_index)) {
+        return executeSingleAvgSingleInt64KeyTable(input, key_index, agg, true);
+      }
+      const int64_t key = valueColumnInt64At(*key_column.buffer, row_index);
+      auto it = key_to_index.find(key);
+      if (it == key_to_index.end()) {
+        ordered_keys.push_back(key);
+        ordered_sums.push_back(0.0);
+        ordered_counts.push_back(0);
+        const auto index = ordered_counts.size() - 1;
+        it = key_to_index.emplace(key, index).first;
+      }
+      if (!valueColumnIsNullAt(*value_column.buffer, row_index)) {
+        ordered_sums[it->second] += valueColumnDoubleAt(*value_column.buffer, row_index);
+        ++ordered_counts[it->second];
+      }
+    }
+
+    cache->row_count = ordered_keys.size();
+    cache->columns[0].values.reserve(ordered_keys.size());
+    cache->columns[1].values.reserve(ordered_keys.size());
+    for (std::size_t index = 0; index < ordered_keys.size(); ++index) {
+      cache->columns[0].values.push_back(Value(ordered_keys[index]));
+      const double avg =
+          ordered_counts[index] == 0 ? 0.0
+                                     : ordered_sums[index] /
+                                           static_cast<double>(ordered_counts[index]);
+      cache->columns[1].values.push_back(Value(avg));
+    }
+    if (!ordered_keys.empty()) {
+      cache->batch_row_counts.push_back(ordered_keys.size());
+    }
+    out.columnar_cache = std::move(cache);
+    return out;
+  }
+
+  std::unordered_map<Int64AggregateKey, std::size_t, Int64AggregateKeyHash> key_to_index;
+  std::vector<Int64AggregateKey> ordered_keys;
+  std::vector<double> ordered_sums;
+  std::vector<int64_t> ordered_counts;
+  key_to_index.reserve(row_count);
+  ordered_keys.reserve(row_count);
+  ordered_sums.reserve(row_count);
+  ordered_counts.reserve(row_count);
+  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+    const Int64AggregateKey key{valueColumnIsNullAt(*key_column.buffer, row_index),
+                                valueColumnIsNullAt(*key_column.buffer, row_index)
+                                    ? 0
+                                    : valueColumnInt64At(*key_column.buffer, row_index)};
+    auto it = key_to_index.find(key);
+    if (it == key_to_index.end()) {
+      ordered_keys.push_back(key);
+      ordered_sums.push_back(0.0);
+      ordered_counts.push_back(0);
+      const auto index = ordered_counts.size() - 1;
+      it = key_to_index.emplace(key, index).first;
+    }
+    if (!valueColumnIsNullAt(*value_column.buffer, row_index)) {
+      ordered_sums[it->second] += valueColumnDoubleAt(*value_column.buffer, row_index);
+      ++ordered_counts[it->second];
+    }
+  }
+
+  cache->row_count = ordered_keys.size();
+  cache->columns[0].values.reserve(ordered_keys.size());
+  cache->columns[1].values.reserve(ordered_keys.size());
+  for (std::size_t index = 0; index < ordered_keys.size(); ++index) {
+    const auto& key = ordered_keys[index];
+    cache->columns[0].values.push_back(key.is_null ? Value() : Value(key.value));
+    const double avg =
+        ordered_counts[index] == 0 ? 0.0
+                                   : ordered_sums[index] /
+                                         static_cast<double>(ordered_counts[index]);
+    cache->columns[1].values.push_back(Value(avg));
+  }
+  if (!ordered_keys.empty()) {
+    cache->batch_row_counts.push_back(ordered_keys.size());
+  }
+  out.columnar_cache = std::move(cache);
+  return out;
+}
+
+Table executeDenseSingleInt64KeyAvgTable(const Table& input, std::size_t key_index,
+                                         const AggregateSpec& agg) {
+  Table out = makeAggregateOutputSchema(input, {key_index}, std::vector<AggregateSpec>{agg});
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = out.schema;
+  cache->columns.resize(2);
+  cache->arrow_formats.resize(2);
+  const auto row_count = input.rowCount();
+  if (row_count == 0) {
+    out.columnar_cache = std::move(cache);
+    return out;
+  }
+
+  const auto key_column = viewValueColumn(input, key_index);
+  const auto value_column = viewValueColumn(input, agg.value_index);
+  int64_t min_value = std::numeric_limits<int64_t>::max();
+  int64_t max_value = std::numeric_limits<int64_t>::min();
+  bool saw_value = false;
+  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+    if (valueColumnIsNullAt(*key_column.buffer, row_index)) {
+      return Table();
+    }
+    const auto value = valueColumnInt64At(*key_column.buffer, row_index);
+    min_value = std::min(min_value, value);
+    max_value = std::max(max_value, value);
+    saw_value = true;
+  }
+  if (!saw_value) {
+    out.columnar_cache = std::move(cache);
+    return out;
+  }
+
+  std::size_t domain_size = 0;
+  if (!computeDenseInt64DomainSize(min_value, max_value, &domain_size)) {
+    return Table();
+  }
+
+  std::vector<double> sums(domain_size, 0.0);
+  std::vector<int64_t> counts(domain_size, 0);
+  std::vector<uint8_t> seen(domain_size, 0);
+  for (std::size_t row_index = 0; row_index < row_count; ++row_index) {
+    const auto value = valueColumnInt64At(*key_column.buffer, row_index);
+    const auto slot = denseInt64Slot(value, min_value);
+    seen[slot] = 1;
+    if (!valueColumnIsNullAt(*value_column.buffer, row_index)) {
+      sums[slot] += valueColumnDoubleAt(*value_column.buffer, row_index);
+      ++counts[slot];
+    }
+  }
+
+  const auto reserve_groups = std::min<std::size_t>(domain_size, row_count);
+  cache->columns[0].values.reserve(reserve_groups);
+  cache->columns[1].values.reserve(reserve_groups);
+  for (std::size_t slot = 0; slot < seen.size(); ++slot) {
+    if (!seen[slot]) continue;
+    cache->columns[0].values.push_back(
+        Value(static_cast<int64_t>(min_value + static_cast<int64_t>(slot))));
+    const double avg = counts[slot] == 0 ? 0.0 : sums[slot] / static_cast<double>(counts[slot]);
+    cache->columns[1].values.push_back(Value(avg));
+    ++cache->row_count;
+  }
+  if (cache->row_count > 0) {
+    cache->batch_row_counts.push_back(cache->row_count);
+  }
+  out.columnar_cache = std::move(cache);
+  return out;
+}
+
 Table executeSingleSumDoubleInt64KeyTable(const Table& input, std::size_t first_key_index,
                                           std::size_t second_key_index,
                                           const AggregateSpec& agg) {
@@ -549,6 +976,124 @@ Table executeSingleSumDoubleInt64KeyTable(const Table& input, std::size_t first_
     cache->columns[0].values.push_back(key.first.is_null ? Value() : Value(key.first.value));
     cache->columns[1].values.push_back(key.second.is_null ? Value() : Value(key.second.value));
     cache->columns[2].values.push_back(Value(ordered_sums[index]));
+  }
+  if (!ordered_keys.empty()) {
+    cache->batch_row_counts.push_back(ordered_keys.size());
+  }
+  out.columnar_cache = std::move(cache);
+  return out;
+}
+
+Table executeSingleCountDoubleInt64KeyTable(const Table& input, std::size_t first_key_index,
+                                            std::size_t second_key_index,
+                                            const AggregateSpec& agg) {
+  const auto first_key = viewValueColumn(input, first_key_index);
+  const auto second_key = viewValueColumn(input, second_key_index);
+  std::unordered_map<Int64PairAggregateKey, std::size_t, Int64PairAggregateKeyHash> key_to_index;
+  std::vector<int64_t> ordered_counts;
+  std::vector<Int64PairAggregateKey> ordered_keys;
+  key_to_index.reserve(input.rowCount());
+  ordered_keys.reserve(input.rowCount());
+  ordered_counts.reserve(input.rowCount());
+  for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
+    const Int64PairAggregateKey key{
+        {valueColumnIsNullAt(*first_key.buffer, row_index),
+         valueColumnIsNullAt(*first_key.buffer, row_index)
+             ? 0
+             : valueColumnInt64At(*first_key.buffer, row_index)},
+        {valueColumnIsNullAt(*second_key.buffer, row_index),
+         valueColumnIsNullAt(*second_key.buffer, row_index)
+             ? 0
+             : valueColumnInt64At(*second_key.buffer, row_index)}};
+    auto it = key_to_index.find(key);
+    if (it == key_to_index.end()) {
+      ordered_keys.push_back(key);
+      ordered_counts.push_back(0);
+      const auto index = ordered_counts.size() - 1;
+      it = key_to_index.emplace(key, index).first;
+    }
+    ++ordered_counts[it->second];
+  }
+
+  Table out = makeAggregateOutputSchema(input, {first_key_index, second_key_index},
+                                        std::vector<AggregateSpec>{agg});
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = out.schema;
+  cache->columns.resize(3);
+  cache->arrow_formats.resize(3);
+  cache->row_count = ordered_keys.size();
+  for (auto& column : cache->columns) {
+    column.values.reserve(ordered_keys.size());
+  }
+  for (std::size_t index = 0; index < ordered_keys.size(); ++index) {
+    const auto& key = ordered_keys[index];
+    cache->columns[0].values.push_back(key.first.is_null ? Value() : Value(key.first.value));
+    cache->columns[1].values.push_back(key.second.is_null ? Value() : Value(key.second.value));
+    cache->columns[2].values.push_back(Value(ordered_counts[index]));
+  }
+  if (!ordered_keys.empty()) {
+    cache->batch_row_counts.push_back(ordered_keys.size());
+  }
+  out.columnar_cache = std::move(cache);
+  return out;
+}
+
+Table executeSingleAvgDoubleInt64KeyTable(const Table& input, std::size_t first_key_index,
+                                          std::size_t second_key_index,
+                                          const AggregateSpec& agg) {
+  const auto first_key = viewValueColumn(input, first_key_index);
+  const auto second_key = viewValueColumn(input, second_key_index);
+  const auto value_column = viewValueColumn(input, agg.value_index);
+  std::unordered_map<Int64PairAggregateKey, std::size_t, Int64PairAggregateKeyHash> key_to_index;
+  std::vector<double> ordered_sums;
+  std::vector<int64_t> ordered_counts;
+  std::vector<Int64PairAggregateKey> ordered_keys;
+  key_to_index.reserve(input.rowCount());
+  ordered_keys.reserve(input.rowCount());
+  ordered_sums.reserve(input.rowCount());
+  ordered_counts.reserve(input.rowCount());
+  for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
+    const Int64PairAggregateKey key{
+        {valueColumnIsNullAt(*first_key.buffer, row_index),
+         valueColumnIsNullAt(*first_key.buffer, row_index)
+             ? 0
+             : valueColumnInt64At(*first_key.buffer, row_index)},
+        {valueColumnIsNullAt(*second_key.buffer, row_index),
+         valueColumnIsNullAt(*second_key.buffer, row_index)
+             ? 0
+             : valueColumnInt64At(*second_key.buffer, row_index)}};
+    auto it = key_to_index.find(key);
+    if (it == key_to_index.end()) {
+      ordered_keys.push_back(key);
+      ordered_sums.push_back(0.0);
+      ordered_counts.push_back(0);
+      const auto index = ordered_sums.size() - 1;
+      it = key_to_index.emplace(key, index).first;
+    }
+    if (!valueColumnIsNullAt(*value_column.buffer, row_index)) {
+      ordered_sums[it->second] += valueColumnDoubleAt(*value_column.buffer, row_index);
+      ++ordered_counts[it->second];
+    }
+  }
+
+  Table out = makeAggregateOutputSchema(input, {first_key_index, second_key_index},
+                                        std::vector<AggregateSpec>{agg});
+  auto cache = std::make_shared<ColumnarTable>();
+  cache->schema = out.schema;
+  cache->columns.resize(3);
+  cache->arrow_formats.resize(3);
+  cache->row_count = ordered_keys.size();
+  for (auto& column : cache->columns) {
+    column.values.reserve(ordered_keys.size());
+  }
+  for (std::size_t index = 0; index < ordered_keys.size(); ++index) {
+    const auto& key = ordered_keys[index];
+    const double avg = ordered_counts[index] == 0
+                           ? 0.0
+                           : ordered_sums[index] / static_cast<double>(ordered_counts[index]);
+    cache->columns[0].values.push_back(key.first.is_null ? Value() : Value(key.first.value));
+    cache->columns[1].values.push_back(key.second.is_null ? Value() : Value(key.second.value));
+    cache->columns[2].values.push_back(Value(avg));
   }
   if (!ordered_keys.empty()) {
     cache->batch_row_counts.push_back(ordered_keys.size());
@@ -647,22 +1192,22 @@ Table executeDenseSingleInt64KeyAggregateTable(
     return out;
   }
 
-  const uint64_t domain_size = static_cast<uint64_t>(max_value - min_value) + 1;
-  if (domain_size > (1u << 16)) {
+  std::size_t domain_size = 0;
+  if (!computeDenseInt64DomainSize(min_value, max_value, &domain_size)) {
     return Table();
   }
 
-  std::vector<AggregateAccumulator> slots(static_cast<std::size_t>(domain_size), initAccumulator(aggs));
-  std::vector<uint8_t> seen(static_cast<std::size_t>(domain_size), 0);
+  std::vector<AggregateAccumulator> slots(domain_size, initAccumulator(aggs));
+  std::vector<uint8_t> seen(domain_size, 0);
   for (std::size_t row_index = 0; row_index < input.rowCount(); ++row_index) {
     const auto value = valueColumnInt64At(*key_column.buffer, row_index);
-    const auto slot = static_cast<std::size_t>(value - min_value);
+    const auto slot = denseInt64Slot(value, min_value);
     seen[slot] = 1;
     updateAccumulator(&slots[slot], aggs, aggregate_columns, row_index);
   }
 
   const auto reserve_groups =
-      std::min<std::size_t>(static_cast<std::size_t>(domain_size), input.rowCount());
+      std::min<std::size_t>(domain_size, input.rowCount());
   for (auto& column : cache->columns) {
     column.values.reserve(reserve_groups);
   }
@@ -1084,27 +1629,6 @@ bool collectConjunctivePredicateFilters(const std::shared_ptr<PlanPredicateExpr>
          collectConjunctivePredicateFilters(expr->right, out);
 }
 
-SourcePushdownShape classifySourcePushdownShape(const SourcePushdownSpec& spec) {
-  if (spec.has_aggregate) {
-    if (spec.aggregate.keys.size() == 1 && spec.aggregate.aggregates.size() == 1 &&
-        !spec.predicate_expr) {
-      const auto& agg = spec.aggregate.aggregates.front();
-      if (agg.function == AggregateFunction::Count) {
-        return SourcePushdownShape::SingleKeyCount;
-      }
-      if (agg.function == AggregateFunction::Sum || agg.function == AggregateFunction::Avg ||
-          agg.function == AggregateFunction::Min || agg.function == AggregateFunction::Max) {
-        return SourcePushdownShape::SingleKeyNumericAggregate;
-      }
-    }
-    return SourcePushdownShape::Generic;
-  }
-  if (!spec.filters.empty() && !spec.predicate_expr) {
-    return SourcePushdownShape::ConjunctiveFilterOnly;
-  }
-  return SourcePushdownShape::Generic;
-}
-
 void collectPredicateColumns(const std::shared_ptr<PlanPredicateExpr>& expr,
                              std::vector<std::size_t>* columns) {
   if (!expr || columns == nullptr) {
@@ -1427,18 +1951,59 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
       aggregate_pattern.shape = AggregateExecutionShape::GenericSerializedKeys;
     } else if (preferred_exec_spec->impl_kind == AggImplKind::Dense &&
                key_indices.size() == 1) {
-      aggregate_pattern.shape = AggregateExecutionShape::GenericSingleInt64Key;
+      aggregate_pattern.shape = singleInt64ShapeForAggregates(aggs);
     }
   }
   switch (aggregate_pattern.shape) {
     case AggregateExecutionShape::SumNoKey:
       return executeSingleSumNoKeyTable(input, aggs.front());
     case AggregateExecutionShape::SumSingleInt64Key:
+      if (aggregate_pattern.exec_spec.impl_kind == AggImplKind::Dense) {
+        Table dense_sum =
+            executeDenseSingleInt64KeySumTable(input, key_indices[0], aggs.front());
+        if (!dense_sum.schema.fields.empty() &&
+            (dense_sum.rowCount() != 0 || input.rowCount() == 0)) {
+          return dense_sum;
+        }
+        return executeSingleSumSingleInt64KeyTable(input, key_indices[0], aggs.front(), true);
+      }
       return executeSingleSumSingleInt64KeyTable(
+          input, key_indices[0], aggs.front(),
+          aggregate_pattern.exec_spec.properties.has_nullable_keys);
+    case AggregateExecutionShape::CountSingleInt64Key:
+      if (aggregate_pattern.exec_spec.impl_kind == AggImplKind::Dense) {
+        Table dense_count =
+            executeDenseSingleInt64KeyCountTable(input, key_indices[0], aggs.front());
+        if (!dense_count.schema.fields.empty() &&
+            (dense_count.rowCount() != 0 || input.rowCount() == 0)) {
+          return dense_count;
+        }
+        return executeSingleCountSingleInt64KeyTable(input, key_indices[0], aggs.front(), true);
+      }
+      return executeSingleCountSingleInt64KeyTable(
+          input, key_indices[0], aggs.front(),
+          aggregate_pattern.exec_spec.properties.has_nullable_keys);
+    case AggregateExecutionShape::AvgSingleInt64Key:
+      if (aggregate_pattern.exec_spec.impl_kind == AggImplKind::Dense) {
+        Table dense_avg =
+            executeDenseSingleInt64KeyAvgTable(input, key_indices[0], aggs.front());
+        if (!dense_avg.schema.fields.empty() &&
+            (dense_avg.rowCount() != 0 || input.rowCount() == 0)) {
+          return dense_avg;
+        }
+        return executeSingleAvgSingleInt64KeyTable(input, key_indices[0], aggs.front(), true);
+      }
+      return executeSingleAvgSingleInt64KeyTable(
           input, key_indices[0], aggs.front(),
           aggregate_pattern.exec_spec.properties.has_nullable_keys);
     case AggregateExecutionShape::SumDoubleInt64Key:
       return executeSingleSumDoubleInt64KeyTable(input, key_indices[0], key_indices[1],
+                                                 aggs.front());
+    case AggregateExecutionShape::CountDoubleInt64Key:
+      return executeSingleCountDoubleInt64KeyTable(input, key_indices[0], key_indices[1],
+                                                   aggs.front());
+    case AggregateExecutionShape::AvgDoubleInt64Key:
+      return executeSingleAvgDoubleInt64KeyTable(input, key_indices[0], key_indices[1],
                                                  aggs.front());
     case AggregateExecutionShape::GenericNoKey:
     case AggregateExecutionShape::GenericSingleStringKey:

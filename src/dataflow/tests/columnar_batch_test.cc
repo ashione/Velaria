@@ -3,6 +3,7 @@
 #include <string>
 
 #include "src/dataflow/core/execution/columnar_batch.h"
+#include "src/dataflow/core/execution/columnar_exec.h"
 #include "src/dataflow/core/execution/nanoarrow_ipc_codec.h"
 
 namespace {
@@ -259,6 +260,81 @@ int main() {
   expect(upper_snapshot.values[0].toString() == "ALPHA",
          "appendNamedColumn should append cached values");
 
+  dataflow::Table exec_table(
+      dataflow::Schema({"id", "region", "score"}),
+      {
+          {dataflow::Value(int64_t(10)), dataflow::Value("west"), dataflow::Value(1.5)},
+          {dataflow::Value(int64_t(11)), dataflow::Value(), dataflow::Value(2.5)},
+          {dataflow::Value(int64_t(12)), dataflow::Value("east"), dataflow::Value()},
+      });
+  const auto exec_batch = dataflow::makeSharedColumnarExecBatch(exec_table, "columnar-test");
+  expect(exec_batch->row_count == 3, "ColumnarExecBatch row count mismatch");
+  expect(exec_batch->columnCount() == 3, "ColumnarExecBatch column count mismatch");
+  expect(exec_batch->columns[0].encoding == dataflow::ColumnarExecEncoding::Flat,
+         "ColumnarExecBatch should use flat encoding for value-backed input");
+  expect(exec_batch->columns[0].type == dataflow::DataType::Int64,
+         "ColumnarExecBatch should infer int64 type");
+  expect(exec_batch->columns[1].nullable, "ColumnarExecBatch should record nullability");
+  expect(exec_batch->columns[1].isNullAt(1), "ColumnarExecColumn should expose null checks");
+  expect(exec_batch->columns[2].valueAt(1).asDouble() == 2.5,
+         "ColumnarExecColumn valueAt mismatch");
+
+  const auto exec_view = dataflow::makeColumnarExecView(exec_batch, {1, 0}, {2, 0});
+  expect(exec_view.rowCount() == 2, "ColumnarExecView row count mismatch");
+  expect(exec_view.columnCount() == 2, "ColumnarExecView column count mismatch");
+  expect(exec_view.schema().fields[0] == "region", "ColumnarExecView projected schema mismatch");
+  expect(exec_view.valueAt(0, 0).toString() == "east",
+         "ColumnarExecView selected first row mismatch");
+  expect(exec_view.valueAt(1, 1).asInt64() == 10,
+         "ColumnarExecView selected second row mismatch");
+
+  const auto exec_view_table = dataflow::materializeColumnarExecView(exec_view, true);
+  expect(exec_view_table.rowCount() == 2, "ColumnarExecView materialized row count mismatch");
+  expect(exec_view_table.schema.fields[1] == "id",
+         "ColumnarExecView materialized schema mismatch");
+  expect(exec_view_table.rows[0][0].toString() == "east",
+         "ColumnarExecView materialized first value mismatch");
+  expect(exec_view_table.rows[1][1].asInt64() == 10,
+         "ColumnarExecView materialized second value mismatch");
+
+  const auto empty_exec_view = dataflow::makeColumnarExecView(exec_batch, {1, 0}, {}, true);
+  expect(empty_exec_view.rowCount() == 0, "ColumnarExecView should represent empty selection");
+  expect(empty_exec_view.columnCount() == 2, "empty ColumnarExecView column count mismatch");
+  const auto empty_exec_table = dataflow::materializeColumnarExecView(empty_exec_view, true);
+  expect(empty_exec_table.rowCount() == 0, "empty ColumnarExecView materialized row count mismatch");
+  expect(empty_exec_table.schema.fields[0] == "region",
+         "empty ColumnarExecView materialized schema mismatch");
+
+  dataflow::ColumnarExecBatch invalid_exec_batch = *exec_batch;
+  invalid_exec_batch.columns[0].row_count += 1;
+  bool saw_invalid_exec_batch = false;
+  try {
+    invalid_exec_batch.validate("invalid exec batch");
+  } catch (const std::runtime_error&) {
+    saw_invalid_exec_batch = true;
+  }
+  expect(saw_invalid_exec_batch, "ColumnarExecBatch validation should reject row count mismatch");
+
+  dataflow::ValueColumnBuffer short_exec_buffer;
+  short_exec_buffer.values.push_back(dataflow::Value(int64_t(1)));
+  dataflow::ColumnarExecBatch invalid_exec_backing;
+  invalid_exec_backing.schema = dataflow::Schema({"id"});
+  invalid_exec_backing.row_count = 2;
+  dataflow::ColumnarExecColumn invalid_exec_column;
+  invalid_exec_column.type = dataflow::DataType::Int64;
+  invalid_exec_column.encoding = dataflow::ColumnarExecEncoding::Flat;
+  invalid_exec_column.row_count = 2;
+  invalid_exec_column.values.buffer = &short_exec_buffer;
+  invalid_exec_backing.columns.push_back(invalid_exec_column);
+  bool saw_invalid_exec_backing = false;
+  try {
+    invalid_exec_backing.validate("invalid exec backing");
+  } catch (const std::runtime_error&) {
+    saw_invalid_exec_backing = true;
+  }
+  expect(saw_invalid_exec_backing,
+         "ColumnarExecBatch validation should reject backing row count mismatch");
+
   dataflow::Table arrow_source(
       dataflow::Schema({"id", "name"}),
       {
@@ -271,6 +347,15 @@ int main() {
   expect(arrow_lazy.columnar_cache != nullptr, "arrow lazy table should have columnar cache");
   expect(arrow_lazy.columnar_cache->columns[0].values.empty(),
          "arrow lazy table should not pre-materialize value cache");
+  const auto arrow_exec_batch = dataflow::makeSharedColumnarExecBatch(arrow_lazy, "arrow-lazy");
+  expect(arrow_exec_batch->columns[0].encoding == dataflow::ColumnarExecEncoding::ArrowBacked,
+         "ColumnarExecBatch should preserve arrow-backed numeric columns");
+  expect(arrow_exec_batch->columns[1].encoding == dataflow::ColumnarExecEncoding::ArrowBacked,
+         "ColumnarExecBatch should preserve arrow-backed string columns");
+  expect(arrow_exec_batch->columns[0].valueAt(1).asInt64() == 8,
+         "ColumnarExecBatch arrow-backed numeric value mismatch");
+  expect(arrow_exec_batch->columns[1].valueAt(0).toString() == "seven",
+         "ColumnarExecBatch arrow-backed string value mismatch");
   dataflow::materializeRows(&arrow_lazy);
   expect(arrow_lazy.rows.size() == 2, "arrow lazy table materialized row count mismatch");
   expect(arrow_lazy.rows[0][0].asInt64() == 7, "arrow lazy first id mismatch");

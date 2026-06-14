@@ -9,6 +9,7 @@
 #include "src/dataflow/core/contract/api/session.h"
 #include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/csv.h"
+#include "src/dataflow/core/execution/runtime/execution_optimizer.h"
 
 namespace {
 
@@ -336,6 +337,114 @@ int main() {
            "csv predicate sql first row mismatch");
     expect(predicate_sql.rows[1][0].asString() == predicate_result.rows[1][0].asString(),
            "csv predicate sql second row mismatch");
+
+    dataflow::SourcePushdownSpec csv_predicate_count_pushdown;
+    csv_predicate_count_pushdown.predicate_expr = predicate;
+    csv_predicate_count_pushdown.has_aggregate = true;
+    csv_predicate_count_pushdown.aggregate.keys = {0};
+    csv_predicate_count_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Count, 0, "cnt"},
+    };
+    csv_predicate_count_pushdown.shape =
+        dataflow::classifySourcePushdownShape(csv_predicate_count_pushdown);
+    expect(csv_predicate_count_pushdown.shape == dataflow::SourcePushdownShape::SingleKeyCount,
+           "csv predicate count should select typed source shape");
+    dataflow::Table csv_predicate_count_result;
+    expect(dataflow::execute_csv_source_pushdown(csv_logic_path, csv_logic_schema,
+                                                 csv_predicate_count_pushdown, ',',
+                                                 false, &csv_predicate_count_result),
+           "csv predicate count aggregate pushdown failed");
+    const auto csv_predicate_counts = count_by_group(csv_predicate_count_result, 0, 1);
+    expect(csv_predicate_counts.size() == 2,
+           "csv predicate count aggregate group count mismatch");
+    expect(csv_predicate_counts.at("A") == 1, "csv predicate count aggregate A mismatch");
+    expect(csv_predicate_counts.at("C") == 1, "csv predicate count aggregate C mismatch");
+
+    dataflow::SourcePushdownSpec csv_predicate_sum_pushdown;
+    csv_predicate_sum_pushdown.predicate_expr = predicate;
+    csv_predicate_sum_pushdown.has_aggregate = true;
+    csv_predicate_sum_pushdown.aggregate.keys = {0};
+    csv_predicate_sum_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Sum, 1, "sum_val"},
+    };
+    csv_predicate_sum_pushdown.shape =
+        dataflow::classifySourcePushdownShape(csv_predicate_sum_pushdown);
+    expect(csv_predicate_sum_pushdown.shape ==
+               dataflow::SourcePushdownShape::SingleKeyNumericAggregate,
+           "csv predicate sum should select typed source shape");
+    dataflow::Table csv_predicate_sum_result;
+    expect(dataflow::execute_csv_source_pushdown(csv_logic_path, csv_logic_schema,
+                                                 csv_predicate_sum_pushdown, ',',
+                                                 false, &csv_predicate_sum_result),
+           "csv predicate sum aggregate pushdown failed");
+    const auto csv_predicate_sums = double_by_group(csv_predicate_sum_result, 0, 1);
+    expect(csv_predicate_sums.size() == 2,
+           "csv predicate sum aggregate group count mismatch");
+    expect(csv_predicate_sums.at("A") == 20.0, "csv predicate sum aggregate A mismatch");
+    expect(csv_predicate_sums.at("C") == 30.0, "csv predicate sum aggregate C mismatch");
+
+    const auto csv_predicate_avg_path = make_temp_file("velaria-source-predicate-csv-avg");
+    write_file(csv_predicate_avg_path,
+               "grp,val,flag\nA,text,1\nB,5,0\nC,bad,1\n");
+    const auto csv_predicate_avg_schema = dataflow::read_csv_schema(csv_predicate_avg_path);
+    auto avg_grp_a = std::make_shared<dataflow::PlanPredicateExpr>();
+    avg_grp_a->kind = dataflow::PlanPredicateExprKind::Comparison;
+    avg_grp_a->comparison = {0, dataflow::Value("A"), "="};
+    auto avg_grp_c = std::make_shared<dataflow::PlanPredicateExpr>();
+    avg_grp_c->kind = dataflow::PlanPredicateExprKind::Comparison;
+    avg_grp_c->comparison = {0, dataflow::Value("C"), "="};
+    auto avg_grp_or = std::make_shared<dataflow::PlanPredicateExpr>();
+    avg_grp_or->kind = dataflow::PlanPredicateExprKind::Or;
+    avg_grp_or->left = avg_grp_a;
+    avg_grp_or->right = avg_grp_c;
+    auto avg_flag = std::make_shared<dataflow::PlanPredicateExpr>();
+    avg_flag->kind = dataflow::PlanPredicateExprKind::Comparison;
+    avg_flag->comparison = {2, dataflow::Value(int64_t(1)), "="};
+    auto avg_predicate = std::make_shared<dataflow::PlanPredicateExpr>();
+    avg_predicate->kind = dataflow::PlanPredicateExprKind::And;
+    avg_predicate->left = avg_grp_or;
+    avg_predicate->right = avg_flag;
+
+    dataflow::SourcePushdownSpec csv_predicate_avg_pushdown;
+    csv_predicate_avg_pushdown.predicate_expr = avg_predicate;
+    csv_predicate_avg_pushdown.has_aggregate = true;
+    csv_predicate_avg_pushdown.aggregate.keys = {0};
+    csv_predicate_avg_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Avg, 1, "avg_val"},
+    };
+    csv_predicate_avg_pushdown.shape =
+        dataflow::classifySourcePushdownShape(csv_predicate_avg_pushdown);
+    expect(csv_predicate_avg_pushdown.shape ==
+               dataflow::SourcePushdownShape::SingleKeyNumericAggregate,
+           "csv predicate avg should select typed source shape");
+    dataflow::Table csv_predicate_avg_typed_result;
+    expect(dataflow::execute_csv_source_pushdown(csv_predicate_avg_path,
+                                                 csv_predicate_avg_schema,
+                                                 csv_predicate_avg_pushdown, ',',
+                                                 false,
+                                                 &csv_predicate_avg_typed_result),
+           "csv predicate typed avg aggregate pushdown failed");
+
+    dataflow::SourcePushdownSpec csv_predicate_avg_generic_pushdown =
+        csv_predicate_avg_pushdown;
+    csv_predicate_avg_generic_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    dataflow::Table csv_predicate_avg_generic_result;
+    expect(dataflow::execute_csv_source_pushdown(csv_predicate_avg_path,
+                                                 csv_predicate_avg_schema,
+                                                 csv_predicate_avg_generic_pushdown, ',',
+                                                 false,
+                                                 &csv_predicate_avg_generic_result),
+           "csv predicate generic avg aggregate pushdown failed");
+    const auto csv_predicate_avg_typed =
+        double_by_group(csv_predicate_avg_typed_result, 0, 1);
+    const auto csv_predicate_avg_generic =
+        double_by_group(csv_predicate_avg_generic_result, 0, 1);
+    expect(csv_predicate_avg_typed == csv_predicate_avg_generic,
+           "csv predicate typed avg should match generic empty-numeric semantics");
+    expect(csv_predicate_avg_typed.at("A") == 0.0,
+           "csv predicate avg empty numeric A mismatch");
+    expect(csv_predicate_avg_typed.at("C") == 0.0,
+           "csv predicate avg empty numeric C mismatch");
 
     const auto csv_sparse_a_path = make_temp_file("velaria-source-sparse-filter-a");
     const auto csv_sparse_b_path = make_temp_file("velaria-source-sparse-filter-b");

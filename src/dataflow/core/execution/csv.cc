@@ -1118,8 +1118,7 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
   }
 
   if (pushdown.shape == SourcePushdownShape::SingleKeyCount && key_indices.size() == 1 &&
-      aggs.size() == 1 && aggs.front().function == AggregateFunction::Count &&
-      !pushdown.predicate_expr) {
+      aggs.size() == 1 && aggs.front().function == AggregateFunction::Count) {
     std::vector<uint8_t> capture_mask(last_required_column + 1, static_cast<uint8_t>(0));
     capture_mask[key_indices.front()] = 1;
     std::vector<std::vector<std::size_t>> filter_positions_by_column(last_required_column + 1);
@@ -1127,13 +1126,19 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
       capture_mask[filters[i].column_index] = 1;
       filter_positions_by_column[filters[i].column_index].push_back(i);
     }
+    for (const auto column_index : predicate_schema_indices) {
+      capture_mask[column_index] = 1;
+    }
 
     bool skip_header = true;
     bool filter_match = filters.empty();
     std::size_t logical_row_index = 0;
+    std::size_t row_generation = 0;
     bool current_row_selected = true;
     bool key_seen = false;
     std::string current_key;
+    std::vector<ParsedCell> predicate_values(predicate_schema_indices.size());
+    std::vector<std::size_t> predicate_generations(predicate_schema_indices.size(), 0);
     std::pmr::monotonic_buffer_resource key_resource;
     std::unordered_map<std::string_view, std::size_t, std::hash<std::string_view>> key_to_index;
     std::pmr::vector<std::pmr::string> ordered_keys(&key_resource);
@@ -1145,6 +1150,7 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
     scanCsvCells(
         &input, delimiter, last_required_column, &capture_mask,
         [&]() {
+          ++row_generation;
           current_row_selected = matched_rows.empty() ||
                                  (logical_row_index < matched_rows.size() &&
                                   matched_rows[logical_row_index] != 0);
@@ -1160,13 +1166,25 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
             current_key = cell;
             key_seen = true;
           }
-          if (column_index < filter_positions_by_column.size() &&
-              !filter_positions_by_column[column_index].empty()) {
-            const ParsedCell parsed = parseParsedCell(cell);
-            for (const auto filter_index : filter_positions_by_column[column_index]) {
-              const auto& filter = filters[filter_index];
-              filter_match =
-                  filter_match && tryMatchesParsedCellFilter(parsed, filter.value, filter.op);
+          const bool has_filter = column_index < filter_positions_by_column.size() &&
+                                  !filter_positions_by_column[column_index].empty();
+          const bool needed_for_predicate =
+              column_index < predicate_local_by_schema.size() &&
+              predicate_local_by_schema[column_index] >= 0;
+          if (has_filter || needed_for_predicate) {
+            ParsedCell parsed = parseParsedCell(cell);
+            if (has_filter) {
+              for (const auto filter_index : filter_positions_by_column[column_index]) {
+                const auto& filter = filters[filter_index];
+                filter_match =
+                    filter_match && tryMatchesParsedCellFilter(parsed, filter.value, filter.op);
+              }
+            }
+            if (needed_for_predicate) {
+              const auto predicate_local =
+                  static_cast<std::size_t>(predicate_local_by_schema[column_index]);
+              predicate_values[predicate_local] = persistParsedCell(std::move(parsed));
+              predicate_generations[predicate_local] = row_generation;
             }
           }
           return true;
@@ -1180,7 +1198,9 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
             ++logical_row_index;
             return true;
           }
-          if (total_columns < last_required_column + 1 || !filter_match || !key_seen) {
+          if (total_columns < last_required_column + 1 || !filter_match || !key_seen ||
+              !evaluatePredicateExprParsed(predicate_values, predicate_generations, row_generation,
+                                           predicate_local_by_schema, pushdown.predicate_expr)) {
             ++logical_row_index;
             return true;
           }
@@ -1219,8 +1239,7 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
   }
 
   if (pushdown.shape == SourcePushdownShape::SingleKeyNumericAggregate && key_indices.size() == 1 &&
-      aggs.size() == 1 && aggs.front().function != AggregateFunction::Count &&
-      !pushdown.predicate_expr) {
+      aggs.size() == 1 && aggs.front().function != AggregateFunction::Count) {
     const auto& agg = aggs.front();
     std::vector<uint8_t> capture_mask(last_required_column + 1, static_cast<uint8_t>(0));
     capture_mask[key_indices.front()] = 1;
@@ -1229,6 +1248,9 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
     for (std::size_t i = 0; i < filters.size(); ++i) {
       capture_mask[filters[i].column_index] = 1;
       filter_positions_by_column[filters[i].column_index].push_back(i);
+    }
+    for (const auto column_index : predicate_schema_indices) {
+      capture_mask[column_index] = 1;
     }
 
     struct NumericAggregateState {
@@ -1243,6 +1265,7 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
     bool skip_header = true;
     bool filter_match = filters.empty();
     std::size_t logical_row_index = 0;
+    std::size_t row_generation = 0;
     bool current_row_selected = true;
     bool key_seen = false;
     bool numeric_present = false;
@@ -1250,6 +1273,8 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
     bool numeric_is_int = false;
     int64_t int_value = 0;
     std::string current_key;
+    std::vector<ParsedCell> predicate_values(predicate_schema_indices.size());
+    std::vector<std::size_t> predicate_generations(predicate_schema_indices.size(), 0);
     std::pmr::monotonic_buffer_resource key_resource;
     std::unordered_map<std::string_view, std::size_t, std::hash<std::string_view>> key_to_index;
     std::pmr::vector<std::pmr::string> ordered_keys(&key_resource);
@@ -1261,6 +1286,7 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
     scanCsvCells(
         &input, delimiter, last_required_column, &capture_mask,
         [&]() {
+          ++row_generation;
           current_row_selected = matched_rows.empty() ||
                                  (logical_row_index < matched_rows.size() &&
                                   matched_rows[logical_row_index] != 0);
@@ -1282,9 +1308,12 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           }
           const bool has_filter = column_index < filter_positions_by_column.size() &&
                                   !filter_positions_by_column[column_index].empty();
+          const bool needed_for_predicate =
+              column_index < predicate_local_by_schema.size() &&
+              predicate_local_by_schema[column_index] >= 0;
           const bool needed_for_numeric = column_index == agg.value_index;
-          if (has_filter || needed_for_numeric) {
-            const ParsedCell parsed = parseParsedCell(cell);
+          if (has_filter || needed_for_predicate || needed_for_numeric) {
+            ParsedCell parsed = parseParsedCell(cell);
             if (has_filter) {
               for (const auto filter_index : filter_positions_by_column[column_index]) {
                 const auto& filter = filters[filter_index];
@@ -1304,6 +1333,12 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
                 numeric_value = parsed.double_value;
               }
             }
+            if (needed_for_predicate) {
+              const auto predicate_local =
+                  static_cast<std::size_t>(predicate_local_by_schema[column_index]);
+              predicate_values[predicate_local] = persistParsedCell(std::move(parsed));
+              predicate_generations[predicate_local] = row_generation;
+            }
           }
           return true;
         },
@@ -1316,7 +1351,9 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
             ++logical_row_index;
             return true;
           }
-          if (total_columns < last_required_column + 1 || !filter_match || !key_seen) {
+          if (total_columns < last_required_column + 1 || !filter_match || !key_seen ||
+              !evaluatePredicateExprParsed(predicate_values, predicate_generations, row_generation,
+                                           predicate_local_by_schema, pushdown.predicate_expr)) {
             ++logical_row_index;
             return true;
           }
@@ -1378,8 +1415,8 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           break;
         case AggregateFunction::Avg:
           result.columnar_cache->columns[1].values.push_back(
-              state.count == 0 ? Value()
-                               : Value(state.sum / static_cast<double>(state.count)));
+              Value(state.count == 0 ? 0.0
+                                      : state.sum / static_cast<double>(state.count)));
           break;
         case AggregateFunction::Min:
         case AggregateFunction::Max:

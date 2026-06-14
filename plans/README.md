@@ -24,6 +24,10 @@ Use this index to decide which plan document is authoritative for the question y
   - current status board for the core runtime columnar path
   - tracks implemented items, explicit non-goals, and next phases
   - this is the main plan document to update for the active core-runtime line
+- [columnar-first-kernel-design.md](./columnar-first-kernel-design.md)
+  - research design note for the next columnar-first kernel phase
+  - records scope, benchmark baselines, migration risks, validation gates, and
+    open research questions before implementation approval
 - [agentic-event-data-platform-v1.md](./agentic-event-data-platform-v1.md)
   - top-level design for the local agentic event data platform direction
 - [agentic-user-journeys-v1.md](./agentic-user-journeys-v1.md)

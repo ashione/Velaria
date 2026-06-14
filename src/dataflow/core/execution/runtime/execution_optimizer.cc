@@ -117,6 +117,18 @@ bool columnHasNulls(const ValueColumnBuffer& column) {
   return false;
 }
 
+uint64_t orderedInt64Key(int64_t value) {
+  return static_cast<uint64_t>(value) ^ (uint64_t{1} << 63);
+}
+
+uint64_t int64DomainSize(int64_t min_value, int64_t max_value) {
+  const uint64_t distance = orderedInt64Key(max_value) - orderedInt64Key(min_value);
+  if (distance == std::numeric_limits<uint64_t>::max()) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return distance + 1;
+}
+
 bool estimateLowCardinalitySingleInt64(const Table& input, std::size_t key_index,
                                        std::size_t* expected_groups) {
   const auto key_column = viewValueColumn(input, key_index);
@@ -153,7 +165,7 @@ bool estimateLowCardinalitySingleInt64(const Table& input, std::size_t key_index
     return false;
   }
 
-  const uint64_t domain_size = static_cast<uint64_t>(max_value - min_value) + 1;
+  const uint64_t domain_size = int64DomainSize(min_value, max_value);
   if (expected_groups != nullptr) {
     std::size_t projected_groups = distinct.size();
     if (row_count != inspect_rows) {
@@ -211,6 +223,29 @@ void appendRejectedCandidate(std::vector<std::string>* rejected, const std::stri
     return;
   }
   rejected->push_back(value);
+}
+
+AggregateExecutionShape singleInt64AggregateShape(bool single_sum, bool single_count,
+                                                  bool single_avg) {
+  if (single_sum) {
+    return AggregateExecutionShape::SumSingleInt64Key;
+  }
+  if (single_count) {
+    return AggregateExecutionShape::CountSingleInt64Key;
+  }
+  if (single_avg) {
+    return AggregateExecutionShape::AvgSingleInt64Key;
+  }
+  return AggregateExecutionShape::GenericSingleInt64Key;
+}
+
+bool isStateColumnarAggregateShape(AggregateExecutionShape shape) {
+  return shape == AggregateExecutionShape::SumSingleInt64Key ||
+         shape == AggregateExecutionShape::CountSingleInt64Key ||
+         shape == AggregateExecutionShape::AvgSingleInt64Key ||
+         shape == AggregateExecutionShape::SumDoubleInt64Key ||
+         shape == AggregateExecutionShape::CountDoubleInt64Key ||
+         shape == AggregateExecutionShape::AvgDoubleInt64Key;
 }
 
 bool sampleContainsByte(const std::string& path, char needle, std::size_t sample_bytes) {
@@ -300,6 +335,27 @@ SourceExecutionPattern analyzeSourceExecution(const FileSourceConnectorSpec& spe
   return pattern;
 }
 
+SourcePushdownShape classifySourcePushdownShape(const SourcePushdownSpec& spec) {
+  if (spec.has_aggregate) {
+    if (spec.aggregate.keys.size() == 1 && spec.aggregate.aggregates.size() == 1) {
+      const auto& agg = spec.aggregate.aggregates.front();
+      if (agg.function == AggregateFunction::Count) {
+        return SourcePushdownShape::SingleKeyCount;
+      }
+      if (agg.function == AggregateFunction::Sum || agg.function == AggregateFunction::Avg ||
+          (!spec.predicate_expr && (agg.function == AggregateFunction::Min ||
+                                    agg.function == AggregateFunction::Max))) {
+        return SourcePushdownShape::SingleKeyNumericAggregate;
+      }
+    }
+    return SourcePushdownShape::Generic;
+  }
+  if (!spec.filters.empty() && !spec.predicate_expr) {
+    return SourcePushdownShape::ConjunctiveFilterOnly;
+  }
+  return SourcePushdownShape::Generic;
+}
+
 const char* aggregateExecKindName(AggImplKind kind) {
   switch (kind) {
     case AggImplKind::Dense:
@@ -324,6 +380,8 @@ const char* aggregatePartialLayoutName(AggregatePartialLayoutKind kind) {
       return "generic-table";
     case AggregatePartialLayoutKind::KeyColumnar:
       return "key-columnar";
+    case AggregatePartialLayoutKind::StateColumnar:
+      return "state-columnar";
   }
   return "generic-table";
 }
@@ -350,6 +408,14 @@ const char* aggregateExecutionShapeName(AggregateExecutionShape shape) {
       return "sum-single-int64-key";
     case AggregateExecutionShape::SumDoubleInt64Key:
       return "sum-double-int64-key";
+    case AggregateExecutionShape::CountSingleInt64Key:
+      return "count-single-int64-key";
+    case AggregateExecutionShape::AvgSingleInt64Key:
+      return "avg-single-int64-key";
+    case AggregateExecutionShape::CountDoubleInt64Key:
+      return "count-double-int64-key";
+    case AggregateExecutionShape::AvgDoubleInt64Key:
+      return "avg-double-int64-key";
   }
   return "generic-serialized-keys";
 }
@@ -363,6 +429,10 @@ AggregateExecutionPattern analyzeAggregateExecution(
   AggregateExecutionPattern pattern;
   const bool single_sum =
       aggregates.size() == 1 && aggregates.front().function == AggregateFunction::Sum;
+  const bool single_count =
+      aggregates.size() == 1 && aggregates.front().function == AggregateFunction::Count;
+  const bool single_avg =
+      aggregates.size() == 1 && aggregates.front().function == AggregateFunction::Avg;
   std::size_t dense_groups = 0;
   pattern.exec_spec.properties =
       buildAggregateProperties(input, key_indices, ordered_input, partition_local, &dense_groups);
@@ -445,14 +515,18 @@ AggregateExecutionPattern analyzeAggregateExecution(
         return pattern;
       case KeyColumnShape::Int64:
         if (pattern.exec_spec.impl_kind == AggImplKind::Dense) {
-          pattern.shape = AggregateExecutionShape::GenericSingleInt64Key;
+          pattern.shape = singleInt64AggregateShape(single_sum, single_count, single_avg);
+          if (isStateColumnarAggregateShape(pattern.shape)) {
+            pattern.exec_spec.partial_layout = AggregatePartialLayoutKind::StateColumnar;
+          }
           pattern.exec_spec.reserved_buckets =
               pattern.exec_spec.expected_groups == 0 ? input.rowCount() : pattern.exec_spec.expected_groups;
           return pattern;
         }
-        pattern.shape =
-            single_sum ? AggregateExecutionShape::SumSingleInt64Key
-                       : AggregateExecutionShape::GenericSingleInt64Key;
+        pattern.shape = singleInt64AggregateShape(single_sum, single_count, single_avg);
+        if (isStateColumnarAggregateShape(pattern.shape)) {
+          pattern.exec_spec.partial_layout = AggregatePartialLayoutKind::StateColumnar;
+        }
         pattern.exec_spec.reserved_buckets = input.rowCount();
         return pattern;
       case KeyColumnShape::Double:
@@ -471,12 +545,19 @@ AggregateExecutionPattern analyzeAggregateExecution(
     const auto first_shape = analyzeKeyColumnShape(*first_key.buffer);
     const auto second_shape = analyzeKeyColumnShape(*second_key.buffer);
     if (first_shape == KeyColumnShape::Int64 && second_shape == KeyColumnShape::Int64) {
-      if (pattern.exec_spec.impl_kind == AggImplKind::HashPacked) {
+      if (single_sum) {
+        pattern.shape = AggregateExecutionShape::SumDoubleInt64Key;
+        pattern.exec_spec.partial_layout = AggregatePartialLayoutKind::StateColumnar;
+      } else if (single_count) {
+        pattern.shape = AggregateExecutionShape::CountDoubleInt64Key;
+        pattern.exec_spec.partial_layout = AggregatePartialLayoutKind::StateColumnar;
+      } else if (single_avg) {
+        pattern.shape = AggregateExecutionShape::AvgDoubleInt64Key;
+        pattern.exec_spec.partial_layout = AggregatePartialLayoutKind::StateColumnar;
+      } else if (pattern.exec_spec.impl_kind == AggImplKind::HashPacked) {
         pattern.shape = AggregateExecutionShape::GenericPackedKeys2;
       } else {
-        pattern.shape =
-            single_sum ? AggregateExecutionShape::SumDoubleInt64Key
-                       : AggregateExecutionShape::GenericDoubleInt64Key;
+        pattern.shape = AggregateExecutionShape::GenericDoubleInt64Key;
       }
       pattern.exec_spec.reserved_buckets = input.rowCount();
       return pattern;
@@ -494,9 +575,18 @@ AggregateExecutionPattern analyzeAggregateExecution(
       return pattern;
     }
     if (first_shape == KeyColumnShape::Int64 && second_shape == KeyColumnShape::Int64) {
-      pattern.shape =
-          single_sum ? AggregateExecutionShape::SumDoubleInt64Key
-                     : AggregateExecutionShape::GenericDoubleInt64Key;
+      if (single_sum) {
+        pattern.shape = AggregateExecutionShape::SumDoubleInt64Key;
+      } else if (single_count) {
+        pattern.shape = AggregateExecutionShape::CountDoubleInt64Key;
+      } else if (single_avg) {
+        pattern.shape = AggregateExecutionShape::AvgDoubleInt64Key;
+      } else {
+        pattern.shape = AggregateExecutionShape::GenericDoubleInt64Key;
+      }
+      if (isStateColumnarAggregateShape(pattern.shape)) {
+        pattern.exec_spec.partial_layout = AggregatePartialLayoutKind::StateColumnar;
+      }
       return pattern;
     }
   }

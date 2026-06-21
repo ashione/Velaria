@@ -17,8 +17,7 @@ class SourceTypedReducer {
 
   bool supported() const { return supported_; }
   void add(const std::vector<Value>& keys, const Value* aggregate_value);
-  bool hasEncodedKey(const std::string& encoded_key) const;
-  void addEncodedExisting(const std::string& encoded_key, const Value* aggregate_value);
+  bool addEncodedExisting(const std::string& encoded_key, const Value* aggregate_value);
   void addEncodedNew(std::string encoded_key, const std::vector<Value>& keys,
                      const Value* aggregate_value);
   Table finalize(bool materialize_rows = false) const;

@@ -50,6 +50,8 @@ struct ParsedScalar {
   Value full_value;
 };
 
+std::string_view parsedScalarText(const ParsedScalar& parsed);
+
 struct LineParsedScalar {
   std::string_view text;
   bool is_null = false;
@@ -340,6 +342,20 @@ std::string_view parsedScalarText(const ParsedScalar& parsed) {
   return parsed.owned_text.has_value() ? std::string_view(*parsed.owned_text) : parsed.text;
 }
 
+bool canUseEncodedParsedScalarKey(const ParsedScalar& parsed) {
+  if (parsed.is_null || parsed.is_bool || parsed.is_int64 || parsed.is_double ||
+      parsed.has_full_value) {
+    return false;
+  }
+  const auto text = parsedScalarText(parsed);
+  if (text == "null" || text == "true" || text == "false" || text.empty()) {
+    return false;
+  }
+  const char first = text.front();
+  return first != '-' && first != '+' && first != '[' &&
+         !std::isdigit(static_cast<unsigned char>(first));
+}
+
 void appendSizeToString(std::string* out, std::size_t value) {
   char buffer[32];
   const auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
@@ -349,20 +365,24 @@ void appendSizeToString(std::string* out, std::size_t value) {
   out->append(buffer, result.ptr);
 }
 
-void encodeParsedScalarGroupKeyRow(const std::vector<ParsedScalar>& values,
-                                   const std::vector<std::size_t>& key_indices,
-                                   std::string* out) {
+bool tryEncodeParsedScalarGroupKeyRow(const std::vector<ParsedScalar>& values,
+                                      const std::vector<std::size_t>& key_indices,
+                                      std::string* out) {
   if (out == nullptr) {
     throw std::invalid_argument("source group key output is null");
   }
   out->clear();
   out->reserve(std::max(out->capacity(), key_indices.size() * std::size_t(8)));
   for (const auto key_index : key_indices) {
+    if (!canUseEncodedParsedScalarKey(values[key_index])) {
+      return false;
+    }
     const auto text = parsedScalarText(values[key_index]);
     appendSizeToString(out, text.size());
     out->push_back(':');
     out->append(text.data(), text.size());
   }
+  return true;
 }
 
 void resetParsedScalarLight(ParsedScalar* parsed) {
@@ -2251,7 +2271,8 @@ bool try_execute_line_aggregate(const std::string& path, const Schema& schema,
       pushdown.aggregate.aggregates.size() == 1 &&
       pushdown.aggregate.aggregates.front().function != AggregateFunction::Count;
   // Line split/regex already has a lower-copy generic multi-key path. Keep it
-  // there until the shared reducer can beat the encoded-key implementation.
+  // there until a shared reducer can beat the encoded-key implementation
+  // consistently under repeated benchmark runs.
   const bool multi_key_typed_shape = false;
 
   std::regex line_regex;
@@ -2534,6 +2555,34 @@ bool try_execute_json_aggregate(const std::string& path, const Schema& schema,
   parsed_touched_indices.reserve(parsed_values.size());
   std::vector<uint8_t> predicate_scratch(access_plan.predicate_steps.size());
   std::string encoded_key_scratch;
+  auto add_multi_key_typed_row = [&](const std::vector<ParsedScalar>& row_values) {
+    Value aggregate_value;
+    const Value* aggregate_value_ptr = nullptr;
+    if (pushdown.aggregate.aggregates.front().function != AggregateFunction::Count) {
+      aggregate_value =
+          parsedScalarToValue(row_values[static_cast<std::size_t>(
+              access_plan.local_value_by_aggregate.front())]);
+      aggregate_value_ptr = &aggregate_value;
+    }
+    if (tryEncodeParsedScalarGroupKeyRow(row_values, access_plan.local_key_indices,
+                                         &encoded_key_scratch)) {
+      if (!typed_reducer.addEncodedExisting(encoded_key_scratch, aggregate_value_ptr)) {
+        std::vector<Value> keys;
+        keys.reserve(access_plan.local_key_indices.size());
+        for (const auto local_key_index : access_plan.local_key_indices) {
+          keys.push_back(parsedScalarToValue(row_values[local_key_index]));
+        }
+        typed_reducer.addEncodedNew(encoded_key_scratch, keys, aggregate_value_ptr);
+      }
+      return;
+    }
+    std::vector<Value> keys;
+    keys.reserve(access_plan.local_key_indices.size());
+    for (const auto local_key_index : access_plan.local_key_indices) {
+      keys.push_back(parsedScalarToValue(row_values[local_key_index]));
+    }
+    typed_reducer.add(keys, aggregate_value_ptr);
+  };
 
   if (options.format == JsonFileFormat::JsonLines) {
     std::string line;
@@ -2567,26 +2616,7 @@ bool try_execute_json_aggregate(const std::string& path, const Schema& schema,
             parsedScalarToValue(parsed_values[access_plan.local_key_indices.front()]);
         single_count_groups[key] += 1;
       } else if (multi_key_typed_shape) {
-        Value aggregate_value;
-        const Value* aggregate_value_ptr = nullptr;
-        if (pushdown.aggregate.aggregates.front().function != AggregateFunction::Count) {
-          aggregate_value =
-              parsedScalarToValue(parsed_values[static_cast<std::size_t>(
-                  access_plan.local_value_by_aggregate.front())]);
-          aggregate_value_ptr = &aggregate_value;
-        }
-        encodeParsedScalarGroupKeyRow(parsed_values, access_plan.local_key_indices,
-                                      &encoded_key_scratch);
-        if (typed_reducer.hasEncodedKey(encoded_key_scratch)) {
-          typed_reducer.addEncodedExisting(encoded_key_scratch, aggregate_value_ptr);
-        } else {
-          std::vector<Value> keys;
-          keys.reserve(access_plan.local_key_indices.size());
-          for (const auto local_key_index : access_plan.local_key_indices) {
-            keys.push_back(parsedScalarToValue(parsed_values[local_key_index]));
-          }
-          typed_reducer.addEncodedNew(encoded_key_scratch, keys, aggregate_value_ptr);
-        }
+        add_multi_key_typed_row(parsed_values);
       } else if (single_key_numeric_shape) {
         const Value key =
             parsedScalarToValue(parsed_values[access_plan.local_key_indices.front()]);
@@ -2684,26 +2714,7 @@ bool try_execute_json_aggregate(const std::string& path, const Schema& schema,
               parsedScalarToValue(parsed_values[access_plan.local_key_indices.front()]);
           single_count_groups[key] += 1;
         } else if (multi_key_typed_shape) {
-          Value aggregate_value;
-          const Value* aggregate_value_ptr = nullptr;
-          if (pushdown.aggregate.aggregates.front().function != AggregateFunction::Count) {
-            aggregate_value =
-                parsedScalarToValue(parsed_values[static_cast<std::size_t>(
-                    access_plan.local_value_by_aggregate.front())]);
-            aggregate_value_ptr = &aggregate_value;
-          }
-          encodeParsedScalarGroupKeyRow(parsed_values, access_plan.local_key_indices,
-                                        &encoded_key_scratch);
-          if (typed_reducer.hasEncodedKey(encoded_key_scratch)) {
-            typed_reducer.addEncodedExisting(encoded_key_scratch, aggregate_value_ptr);
-          } else {
-            std::vector<Value> keys;
-            keys.reserve(access_plan.local_key_indices.size());
-            for (const auto local_key_index : access_plan.local_key_indices) {
-              keys.push_back(parsedScalarToValue(parsed_values[local_key_index]));
-            }
-            typed_reducer.addEncodedNew(encoded_key_scratch, keys, aggregate_value_ptr);
-          }
+          add_multi_key_typed_row(parsed_values);
         } else if (single_key_numeric_shape) {
           const Value key =
               parsedScalarToValue(parsed_values[access_plan.local_key_indices.front()]);
@@ -3115,6 +3126,9 @@ bool includeRowForSelection(const std::vector<Value>& values,
       return false;
     }
   }
+  if (access_plan.predicate_steps.empty()) {
+    return true;
+  }
   return evaluateCompiledPredicateValues(values, access_plan.predicate_steps,
                                          predicate_scratch);
 }
@@ -3131,6 +3145,9 @@ bool includeParsedRowForSelection(const std::vector<ParsedScalar>& values,
       return false;
     }
   }
+  if (access_plan.predicate_steps.empty()) {
+    return true;
+  }
   return evaluateCompiledPredicateParsed(values, access_plan.predicate_steps,
                                          predicate_scratch);
 }
@@ -3146,6 +3163,9 @@ bool includeLineParsedRowForSelection(const std::vector<LineParsedScalar>& value
                                           filter.value, filter.op)) {
       return false;
     }
+  }
+  if (access_plan.predicate_steps.empty()) {
+    return true;
   }
   return evaluateCompiledPredicateLineParsed(values, access_plan.predicate_steps,
                                              predicate_scratch);
@@ -3215,7 +3235,8 @@ Table applyFilterAndLimit(const Table& input, const SourcePushdownSpec& pushdown
     if (!matches_filters) {
       continue;
     }
-    if (!evaluateCompiledPredicateRow(input, row_index, predicate_steps,
+    if (!predicate_steps.empty() &&
+        !evaluateCompiledPredicateRow(input, row_index, predicate_steps,
                                       &predicate_scratch)) {
       continue;
     }
@@ -3253,6 +3274,9 @@ bool valuesEqualForKey(const Value& lhs, const Value& rhs) {
 }
 
 std::size_t hashValueForKey(const Value& value) {
+  if (value.isNumber()) {
+    return hashCombine(17, std::hash<double>{}(value.asDouble()));
+  }
   std::size_t seed = static_cast<std::size_t>(value.type());
   switch (value.type()) {
     case DataType::Nil:
@@ -3261,6 +3285,7 @@ std::size_t hashValueForKey(const Value& value) {
       return hashCombine(seed, std::hash<bool>{}(value.asBool()));
     case DataType::Int64:
     case DataType::Double:
+    case DataType::Float32:
       return hashCombine(seed, std::hash<double>{}(value.asDouble()));
     case DataType::String:
       return hashCombine(seed, std::hash<std::string>{}(value.asString()));
@@ -3383,6 +3408,9 @@ bool includeRowForAggregate(const std::vector<Value>& values, const AggregateAcc
       return false;
     }
   }
+  if (access_plan.predicate_steps.empty()) {
+    return true;
+  }
   return evaluateCompiledPredicateValues(values, access_plan.predicate_steps,
                                          predicate_scratch);
 }
@@ -3398,6 +3426,9 @@ bool includeParsedRowForAggregate(const std::vector<ParsedScalar>& values,
       return false;
     }
   }
+  if (access_plan.predicate_steps.empty()) {
+    return true;
+  }
   return evaluateCompiledPredicateParsed(values, access_plan.predicate_steps,
                                          predicate_scratch);
 }
@@ -3412,6 +3443,9 @@ bool includeLineParsedRowForAggregate(const std::vector<LineParsedScalar>& value
                                           filter.value, filter.op)) {
       return false;
     }
+  }
+  if (access_plan.predicate_steps.empty()) {
+    return true;
   }
   return evaluateCompiledPredicateLineParsed(values, access_plan.predicate_steps,
                                              predicate_scratch);

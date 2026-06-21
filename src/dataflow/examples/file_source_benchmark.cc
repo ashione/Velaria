@@ -547,6 +547,19 @@ int main(int argc, char** argv) {
     }, rounds);
     emit_bench("read_csv_multi_key_aggregate_pushdown", rows, rounds,
                csv_multi_key_aggregate_us, 32, "source-pushdown-multi-key-aggregate");
+    const auto csv_multi_key_generic_us = run_bench_us([&](int) {
+      auto pushdown = multi_key_aggregate_pushdown(1, 2, 3);
+      pushdown.shape = dataflow::SourcePushdownShape::Generic;
+      dataflow::Table aggregated;
+      expect(dataflow::execute_csv_source_pushdown(
+                 csv_multi_key_path, csv_multi_key_schema, pushdown, ',', false, &aggregated),
+             "csv multi-key generic aggregate pushdown execution failed");
+      expect(aggregated.rowCount() == 32,
+             "csv multi-key generic aggregate pushdown row count mismatch");
+    }, rounds);
+    emit_compare("read_csv_multi_key_aggregate_pushdown", rows, rounds,
+                 csv_multi_key_generic_us, csv_multi_key_aggregate_us, "generic",
+                 "selected");
 
     const auto line_explicit_us = run_bench_us([&](int) {
       auto out = run_group_sum(session.read_line_file(line_path, line_options), "grp", "val");
@@ -607,6 +620,23 @@ int main(int argc, char** argv) {
     }, rounds);
     emit_bench("read_line_multi_key_aggregate_pushdown", rows, rounds,
                line_multi_key_aggregate_us, 32, "source-pushdown-multi-key-aggregate");
+    const auto line_multi_key_generic_us = run_bench_us([&](int) {
+      dataflow::FileSourceConnectorSpec spec;
+      spec.kind = dataflow::FileSourceKind::Line;
+      spec.path = line_multi_key_path;
+      spec.line_options = line_multi_key_options;
+      auto pushdown = multi_key_aggregate_pushdown(1, 2, 3);
+      pushdown.shape = dataflow::SourcePushdownShape::Generic;
+      dataflow::Table aggregated;
+      expect(dataflow::execute_file_source_pushdown(
+                 spec, line_multi_key_schema, pushdown, false, &aggregated),
+             "line multi-key generic aggregate pushdown execution failed");
+      expect(aggregated.rowCount() == 32,
+             "line multi-key generic aggregate pushdown row count mismatch");
+    }, rounds);
+    emit_compare("read_line_multi_key_aggregate_pushdown", rows, rounds,
+                 line_multi_key_generic_us, line_multi_key_aggregate_us, "generic",
+                 "selected");
 
     const auto line_regex_parse_us = run_bench_us([&](int) {
       auto out = session.read_line_file(line_regex_path, line_regex_options).limit(1).toTable();

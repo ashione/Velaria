@@ -54,6 +54,7 @@ Current file-source optimizer/executor layering:
 - executor lowering classifies source pushdown into `ConjunctiveFilterOnly`, `SingleKeyCount`, `SingleKeyNumericAggregate`, `MultiKeyCount`, `MultiKeyNumericAggregate`, or `Generic`
 - file sources use those shapes to select lighter fast paths where semantics allow
 - current fast paths are most effective for line split, line regex, JSON selected-field pushdown, JSON multi-key aggregate pushdown, and simple CSV single-key aggregate cases
+- the benchmark gate includes CSV/line multi-key selected-vs-generic guardrails so rejected shared-reducer routing does not accidentally return
 
 ## Latest Local Regression Snapshot
 

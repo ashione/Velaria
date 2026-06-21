@@ -127,17 +127,14 @@ void SourceTypedReducer::add(const std::vector<Value>& keys, const Value* aggreg
   update(&states_[it->second], aggregate_value);
 }
 
-bool SourceTypedReducer::hasEncodedKey(const std::string& encoded_key) const {
-  return encoded_groups_.find(encoded_key) != encoded_groups_.end();
-}
-
-void SourceTypedReducer::addEncodedExisting(const std::string& encoded_key,
+bool SourceTypedReducer::addEncodedExisting(const std::string& encoded_key,
                                             const Value* aggregate_value) {
   const auto it = encoded_groups_.find(encoded_key);
   if (it == encoded_groups_.end()) {
-    throw std::runtime_error("source typed reducer encoded key is missing");
+    return false;
   }
   update(&states_[it->second], aggregate_value);
+  return true;
 }
 
 void SourceTypedReducer::addEncodedNew(std::string encoded_key, const std::vector<Value>& keys,

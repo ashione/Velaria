@@ -671,6 +671,91 @@ int main() {
                count_by_two_groups(json_multi_count_generic_result, 0, 1, 2),
            "json multi-key typed count should match generic result");
 
+    const auto json_numeric_key_path =
+        make_temp_file("velaria-source-multi-key-json-numeric");
+    write_file(json_numeric_key_path,
+               "{\"region\":\"us\",\"bucket\":1,\"flag\":1}\n"
+               "{\"region\":\"us\",\"bucket\":1.0,\"flag\":1}\n"
+               "{\"region\":\"eu\",\"bucket\":2,\"flag\":1}\n");
+    dataflow::JsonFileOptions json_numeric_key_options;
+    json_numeric_key_options.format = dataflow::JsonFileFormat::JsonLines;
+    json_numeric_key_options.columns = {"region", "bucket", "flag"};
+    dataflow::FileSourceConnectorSpec json_numeric_key_spec;
+    json_numeric_key_spec.kind = dataflow::FileSourceKind::Json;
+    json_numeric_key_spec.path = json_numeric_key_path;
+    json_numeric_key_spec.json_options = json_numeric_key_options;
+    const auto json_numeric_key_schema =
+        dataflow::infer_json_file_schema(json_numeric_key_options);
+    auto numeric_flag = std::make_shared<dataflow::PlanPredicateExpr>();
+    numeric_flag->kind = dataflow::PlanPredicateExprKind::Comparison;
+    numeric_flag->comparison = {2, dataflow::Value(int64_t(1)), "="};
+    dataflow::SourcePushdownSpec json_numeric_count_pushdown;
+    json_numeric_count_pushdown.predicate_expr = numeric_flag;
+    json_numeric_count_pushdown.has_aggregate = true;
+    json_numeric_count_pushdown.aggregate.keys = {0, 1};
+    json_numeric_count_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Count, 0, "cnt"},
+    };
+    json_numeric_count_pushdown.shape =
+        dataflow::classifySourcePushdownShape(json_numeric_count_pushdown);
+    dataflow::Table json_numeric_count_typed_result;
+    expect(dataflow::execute_file_source_pushdown(json_numeric_key_spec,
+                                                  json_numeric_key_schema,
+                                                  json_numeric_count_pushdown, false,
+                                                  &json_numeric_count_typed_result),
+           "json numeric multi-key typed count aggregate pushdown failed");
+    dataflow::SourcePushdownSpec json_numeric_count_generic_pushdown =
+        json_numeric_count_pushdown;
+    json_numeric_count_generic_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    dataflow::Table json_numeric_count_generic_result;
+    expect(dataflow::execute_file_source_pushdown(json_numeric_key_spec,
+                                                  json_numeric_key_schema,
+                                                  json_numeric_count_generic_pushdown, false,
+                                                  &json_numeric_count_generic_result),
+           "json numeric multi-key generic count aggregate pushdown failed");
+    const auto json_numeric_counts =
+        count_by_two_groups(json_numeric_count_typed_result, 0, 1, 2);
+    expect(json_numeric_counts == count_by_two_groups(json_numeric_count_generic_result, 0, 1, 2),
+           "json numeric multi-key typed count should match generic result");
+    expect(json_numeric_counts.size() == 2,
+           "json numeric multi-key should coalesce int and double numeric keys");
+    expect(json_numeric_counts.at("us|1") == 2,
+           "json numeric multi-key us bucket count mismatch");
+
+    const auto json_array_multi_key_path =
+        make_temp_file("velaria-source-multi-key-json-array");
+    write_file(json_array_multi_key_path,
+               "["
+               "{\"region\":\"us\",\"svc\":\"api\",\"flag\":1},"
+               "{\"region\":\"us\",\"svc\":\"api\",\"flag\":1},"
+               "{\"region\":\"eu\",\"svc\":\"batch\",\"flag\":1}"
+               "]");
+    dataflow::JsonFileOptions json_array_multi_key_options = json_multi_key_options;
+    json_array_multi_key_options.format = dataflow::JsonFileFormat::JsonArray;
+    dataflow::FileSourceConnectorSpec json_array_multi_key_spec;
+    json_array_multi_key_spec.kind = dataflow::FileSourceKind::Json;
+    json_array_multi_key_spec.path = json_array_multi_key_path;
+    json_array_multi_key_spec.json_options = json_array_multi_key_options;
+    dataflow::Table json_array_multi_count_typed_result;
+    expect(dataflow::execute_file_source_pushdown(json_array_multi_key_spec,
+                                                  json_multi_key_schema,
+                                                  json_multi_count_pushdown, false,
+                                                  &json_array_multi_count_typed_result),
+           "json array multi-key typed count aggregate pushdown failed");
+    dataflow::SourcePushdownSpec json_array_multi_count_generic_pushdown =
+        json_multi_count_pushdown;
+    json_array_multi_count_generic_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    dataflow::Table json_array_multi_count_generic_result;
+    expect(dataflow::execute_file_source_pushdown(json_array_multi_key_spec,
+                                                  json_multi_key_schema,
+                                                  json_array_multi_count_generic_pushdown,
+                                                  false,
+                                                  &json_array_multi_count_generic_result),
+           "json array multi-key generic count aggregate pushdown failed");
+    expect(count_by_two_groups(json_array_multi_count_typed_result, 0, 1, 2) ==
+               count_by_two_groups(json_array_multi_count_generic_result, 0, 1, 2),
+           "json array multi-key typed count should match generic result");
+
     const auto csv_sparse_a_path = make_temp_file("velaria-source-sparse-filter-a");
     const auto csv_sparse_b_path = make_temp_file("velaria-source-sparse-filter-b");
     {

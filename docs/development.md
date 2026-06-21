@@ -24,7 +24,7 @@ uv run --project python python python/examples/demo_vector_search.py
 Tracked run examples:
 
 ```bash
-uv run --project python python python/velaria_cli.py -i
+uv run --project python python python/velaria_cli.py
 
 uv run --project python python python/velaria_cli.py run start -- file-sql \
   --run-name "score_demo" \
@@ -88,11 +88,8 @@ client -> scheduler(jobmaster) -> worker -> in-proc operator chain -> result
 
 ## Agent Runtime
 
-Codex runtime dependencies are part of the default Python package. Install
-Claude runtime support only when using Claude Code:
-
-```bash
-```
+Codex and Claude SDK adapter dependencies are declared by the Python package.
+Configure the Claude adapter only when you want `--runtime claude`.
 
 Configure the Agent provider. Both runtimes share the same `agent*` config keys
 and the same `~/.velaria/config.json` file.
@@ -135,8 +132,8 @@ EOF
 ```
 
 `agentRuntimePath` is optional. Codex can omit it and use the local
-`codex app-server` command; set `agentRuntimePath` / `agentCodexRuntimePath` only when
-overriding that executable. Claude Code runtime can use `agentClaudeRuntimePath`.
+`codex app-server` runtime bridge; set `agentRuntimePath` / `agentCodexRuntimePath` only when
+overriding that bridge. The Claude SDK adapter can use `agentClaudeRuntimePath`.
 `agentRuntimeWorkspace` is the runtime working directory used for
 agent threads, generated config, and MCP/function logs. If omitted, Velaria uses
 a project-scoped directory under `~/.velaria/ai-runtime/`. `agentReuseLocalConfig`
@@ -161,21 +158,23 @@ uv run --project python python python/velaria_cli.py ai generate-sql \
   --prompt "top 5 by score" --schema "name,score,region"
 ```
 
-Interactive mode:
+Agent mode:
 
 ```bash
-uv run --project python python python/velaria_cli.py -i
-› 找出分数最高的5个人
-› /status
-› :run list --limit 5
+uv run --project python python python/velaria_cli.py
+uv run --project python python python/velaria_cli.py agent --runtime claude
+uv run --project python python python/velaria_cli.py agent --print "找出分数最高的5个人"
+uv run --project python python python/velaria_cli.py agent --stream-json "summarize recent runs"
 ```
 
-The interactive CLI is an agent runtime wrapper. It starts a configured
-Codex/Claude runtime directly, exposes the Velaria usage skill and SQL catalog
-on demand through MCP resources/tools, and registers Velaria local functions
-through the runtime bridge / MCP server. `velaria_service`
-remains the HTTP sidecar for the desktop app and other app clients; it is not
-required for CLI interactive mode.
+The default Python CLI entry starts the Velaria-owned Agent TUI in a TTY. Codex
+or Claude provide runtime adapters underneath the Velaria controller; users
+remain inside the Velaria CLI surface. Headless Agent turns are available with
+`agent --print` or `agent --stream-json`. The Agent exposes the Velaria usage
+skill and SQL catalog on demand through MCP resources/tools, and registers
+Velaria local functions through the runtime bridge / MCP server.
+`velaria_service` remains the HTTP sidecar for the desktop app and other app
+clients; it is not required for CLI Agent mode.
 
 Build:
 

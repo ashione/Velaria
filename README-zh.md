@@ -143,7 +143,7 @@ Arrow / CSV / Python ingress
 - 桌面端导入流可以在保存同一份数据集后，异步构建可复用的 embedding 数据集与 keyword index
 - macOS 桌面原型打包，当前可产出 `.dmg`
 - 可通过正式支持的 Python 生态层接入 Velaria Agent，并利用 workspace 与 artifact 管理能力复用结果、管理本地数据
-- `velaria_cli.py -i` 提供交互式 Agent 模式，支持自然语言数据处理、Velaria local functions、runs、artifacts 与终端渲染
+- Python CLI 默认进入 Velaria 自有 Agent CLI/TUI，由 Codex 或 Claude runtime adapter 支撑，但不会把用户交给 provider CLI
 - Velaria usage skill 与 SQL catalog 通过 MCP resource/tool 按需暴露，不把完整内容内联进默认 prompt
 - CLI `ai` 子命令保留为非交互 SQL 生成与历史兼容入口
 - 桌面 app Analyze 页面内置 Agent SQL 助手与 session 管理
@@ -282,6 +282,8 @@ bazel run //:stream_demo
 bazel run //:file_source_benchmark -- 200000 3
 # 会输出 CSV / line / JSON file-source 子 case 的 JSON 行
 uv run --project python python python/velaria_cli.py --help
+uv run --project python python python/velaria_cli.py
+uv run --project python python python/velaria_cli.py agent --print "summarize recent runs"
 ./dist/velaria-cli --help
 ```
 

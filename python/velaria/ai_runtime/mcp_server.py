@@ -254,7 +254,7 @@ def main() -> int:
             raise
         print(
             "Velaria MCP bridge requires the 'mcp' package. "
-            "Run `uv sync --project python` before starting velaria_cli.py -i.",
+            "Run `uv sync --project python` before starting the Velaria Agent CLI.",
             file=sys.stderr,
             flush=True,
         )

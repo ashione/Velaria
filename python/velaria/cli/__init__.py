@@ -21,7 +21,6 @@ from velaria.cli._common import (  # noqa: F811
     _finalize_preview_payload,
     _infer_embedding_json_columns,
     _infer_format,
-    _interactive_banner,
     _json_dumps,
     _limit_preview_payload,
     _make_embedding_provider,
@@ -46,7 +45,6 @@ from velaria.cli._common import (  # noqa: F811
     _write_table,
 )
 
-from velaria.cli.interactive import _run_interactive_loop, _wants_interactive  # noqa: F401
 from velaria.cli.run_cmd import (  # noqa: F401
     _execute_stream_sql_once as _run_cmd_execute_stream_sql_once,
     _find_run_result_artifact,
@@ -68,6 +66,7 @@ from velaria.cli import embedding as _embedding
 from velaria.cli import run_cmd as _run_cmd
 from velaria.cli import artifacts as _artifacts
 from velaria.cli import agentic as _agentic
+from velaria.cli import agent as _agent
 from velaria.cli import ai_cmd as _ai_cmd
 from velaria.cli import datasets as _datasets
 from velaria.cli import finance as _finance
@@ -96,14 +95,14 @@ def _execute_stream_sql_once(*args: Any, **kwargs: Any) -> dict[str, Any]:
 
 def _build_parser():
     parser = JsonArgumentParser(
-        prog="velaria",
+        prog="velaria-cli",
         description="Velaria CLI for SQL query execution and workspace run management.",
     )
     parser.add_argument(
         "-i",
         "--interactive",
         action="store_true",
-        help="Enter interactive mode.",
+        help="Enter Velaria Agent mode.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -114,6 +113,7 @@ def _build_parser():
     _artifacts.register(subparsers)
     _datasets.register(subparsers)
     _finance.register(subparsers)
+    _agent.register(subparsers)
     _agentic.register(subparsers)
     _ai_cmd.register(subparsers)
 
@@ -123,11 +123,17 @@ def _build_parser():
 def main(argv: list[str] | None = None) -> int:
     argv = list(argv) if argv is not None else sys.argv[1:]
     _sync_compat_bindings()
-    if _wants_interactive(argv):
-        return _run_interactive_loop(argv)
+    if not argv:
+        return _agent.run_default_agent()
+    if _agent.wants_agent_alias(argv):
+        return _agent.run_agent_argv(argv)
     try:
         parser = _build_parser()
         args = parser.parse_args(argv)
+
+        handler = getattr(args, "_handler", None)
+        if handler is not None:
+            return handler(args)
 
         if args.command == "file-sql":
             return _file_sql._run_csv_sql(

@@ -143,7 +143,7 @@ Available today:
 - desktop import flow can asynchronously build reusable embedding datasets and keyword indexes from the same saved dataset
 - macOS desktop packaging prototype producing `.dmg`
 - Velaria Agent integration through the supported Python ecosystem layer, with workspace and artifact management for result reuse and local data management
-- interactive `velaria_cli.py -i` agent mode for natural language data work, Velaria local functions, runs, artifacts, and terminal rendering
+- Velaria-owned Agent CLI/TUI as the default Python CLI entry, backed by Codex or Claude runtime adapters without handing control to provider CLIs
 - on-demand Velaria usage skill and SQL catalog exposure through MCP resources/tools instead of prompt-inlining
 - CLI `ai` subcommand retained for non-interactive SQL generation and historical compatibility commands
 - desktop app Agent SQL assistant with session controls in Analyze page
@@ -284,6 +284,8 @@ bazel run //:stream_demo
 bazel run //:file_source_benchmark -- 200000 3
 # emits CSV / line / JSON file-source sub-cases as JSON lines
 uv run --project python python python/velaria_cli.py --help
+uv run --project python python python/velaria_cli.py
+uv run --project python python python/velaria_cli.py agent --print "summarize recent runs"
 ./dist/velaria-cli --help
 ```
 

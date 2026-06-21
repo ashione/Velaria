@@ -27,6 +27,12 @@ py_library(
         "velaria/__init__.py",
         "velaria/cli/__init__.py",
         "velaria/cli/_common.py",
+        "velaria/cli/agent/__init__.py",
+        "velaria/cli/agent/controller.py",
+        "velaria/cli/agent/entry.py",
+        "velaria/cli/agent/events.py",
+        "velaria/cli/agent/state.py",
+        "velaria/cli/agent/tui_app.py",
         "velaria/cli/agentic.py",
         "velaria/cli/ai_cmd.py",
         "velaria/cli/artifacts.py",
@@ -34,7 +40,6 @@ py_library(
         "velaria/cli/embedding.py",
         "velaria/cli/finance.py",
         "velaria/cli/file_sql.py",
-        "velaria/cli/interactive.py",
         "velaria/cli/run_cmd.py",
         "velaria/cli/vector_search.py",
         "velaria/_version.py",
@@ -78,9 +83,9 @@ py_library(
         requirement("mcp"),
         requirement("openpyxl"),
         requirement("pandas"),
-        requirement("prompt_toolkit"),
         requirement("pyarrow"),
         requirement("rich"),
+        requirement("textual"),
         requirement("xlrd"),
     ],
     visibility = ["//visibility:public"],
@@ -233,8 +238,8 @@ py_wheel(
         "openpyxl",
         "mcp",
         "codex-app-server-sdk",
-        "prompt-toolkit",
         "rich",
+        "textual",
         "xlrd",
     ],
 )
@@ -394,6 +399,17 @@ py_test(
 )
 
 py_test(
+    name = "agent_cli_test",
+    srcs = ["tests/test_agent_cli.py"],
+    main = "tests/test_agent_cli.py",
+    imports = ["."],
+    deps = [
+        ":velaria_cli_lib",
+        ":velaria_py_pkg",
+    ],
+)
+
+py_test(
     name = "ai_runtime_agent_test",
     srcs = ["tests/test_ai_runtime_agent.py"],
     main = "tests/test_ai_runtime_agent.py",
@@ -429,6 +445,7 @@ py_test(
 test_suite(
     name = "velaria_python_supported_regression",
     tests = [
+        ":agent_cli_test",
         ":arrow_stream_ingestion_test",
         ":artifact_index_test",
         ":ai_runtime_agent_test",

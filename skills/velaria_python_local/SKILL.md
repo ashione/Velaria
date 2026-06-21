@@ -71,10 +71,10 @@ print(result.to_pylist())
 
 所有 CLI 顶层命令和子命令都支持 `--help`，例如
 `uv run --project python python python/velaria_cli.py run diff --help`。
-`uv run --project python python python/velaria_cli.py -i` 可以进入交互式模式。
+`uv run --project python python python/velaria_cli.py` 会进入 Velaria Agent TUI。
 
 ```bash
-uv run --project python python python/velaria_cli.py -i
+uv run --project python python python/velaria_cli.py
 
 uv run --project python python python/velaria_cli.py run start -- file-sql \
   --run-name "regional_row_count" \
@@ -843,8 +843,13 @@ Velaria usage skill 与 SQL catalog 都是按需资源：需要 SQL 函数、能
 ### CLI 模式
 
 ```bash
-# 交互式 Agent：普通输入会直接发给 active agent thread
-uv run --project python python python/velaria_cli.py -i
+# Velaria Agent TUI
+uv run --project python python python/velaria_cli.py
+
+# TUI 内切换当前 runtime 的模型：Ctrl+M 打开选择器，或输入 /model <model-name>
+
+# 脚本化 Agent turn
+uv run --project python python python/velaria_cli.py agent --print "按地区统计平均分数"
 
 # 历史兼容的非交互 SQL 生成
 uv run --project python python python/velaria_cli.py ai generate-sql \
@@ -852,13 +857,12 @@ uv run --project python python python/velaria_cli.py ai generate-sql \
   --schema "name,score,region,department"
 ```
 
-### 交互模式
+### Agent 模式
 
 ```bash
-uv run --project python python python/velaria_cli.py -i
-› 找出每个部门分数最高的人
-› /status
-› :run list --limit 5
+uv run --project python python python/velaria_cli.py
+uv run --project python python python/velaria_cli.py agent --runtime claude
+uv run --project python python python/velaria_cli.py agent --stream-json "summarize recent runs"
 ```
 
 ### App 模式

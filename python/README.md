@@ -32,8 +32,8 @@ The supported Python ecosystem includes:
 - offline embedding pipeline helpers for versioned vector assets
 - offline keyword-index build helpers and reusable BM25 keyword-search assets
 - public-data finance helpers for A-share / U.S. stock history and quote ingestion
-- agent runtime wrapper for Codex App Server and Claude Code / Claude Agent SDK integration
-- interactive agent CLI via `velaria_cli.py -i`
+- Velaria-owned Agent CLI/TUI backed by Codex App Server or Claude Agent SDK runtime adapters
+- default Agent CLI via `velaria_cli.py`, with headless `agent --print` and `agent --stream-json` modes
 
 ### Examples
 
@@ -933,15 +933,15 @@ curl -sS http://127.0.0.1:37491/api/v1/runs/keyword-search \
 
 ### Agent Runtime (Optional)
 
-Codex runtime dependencies are installed with the default Python package. Install
-Claude runtime support only when using Claude Code:
-
-```bash
-```
+Codex and Claude SDK adapter dependencies are declared by the Python package.
+Configure the Claude adapter only when you want `--runtime claude`.
 
 The agent runtime provides:
 
-- Codex/Claude-backed interactive agent runtime via `velaria_cli.py -i`
+- Velaria-owned Agent CLI/TUI via `velaria_cli.py` or `velaria_cli.py agent`
+  with Codex/Claude used only as runtime adapters
+- Headless Agent turns via `velaria_cli.py agent --print ...` and JSONL event
+  streaming via `velaria_cli.py agent --stream-json ...`
 - Thread persistence under `agentRuntimeWorkspace`
 - On-demand exposure of the Velaria usage skill as an MCP resource
 - Velaria local functions exposed through the runtime bridge / MCP server:
@@ -955,7 +955,7 @@ The agent runtime provides:
   capabilities, scalar functions, and reusable query patterns
 - Natural language to SQL generation via `velaria_cli.py ai generate-sql`
 - Legacy compatibility commands under `velaria_cli.py ai ...`; new interactive
-  work should use `velaria_cli.py -i`
+  work should use the default Agent entry or `velaria_cli.py agent`
 
 Both runtimes use the same `~/.velaria/config.json` and `agent*` config keys.
 
@@ -994,7 +994,7 @@ Velaria creates a project-scoped directory under `~/.velaria/ai-runtime/`.
 `agentAuthMode: "local"` reuses the local login; use `agentAuthMode: "api_key"`
 with `agentApiKey` and `agentBaseUrl` for explicit credentials.
 Use `agentRuntimePath` / `agentCodexRuntimePath` only when overriding the local
-Codex executable. Use `agentClaudeRuntimePath` for Claude.
+Codex runtime bridge. Use `agentClaudeRuntimePath` for the Claude SDK adapter.
 Network access via `agentCodexNetworkAccess` (Codex) or `agentNetworkAccess`
 (Claude), both default `true`.
 The runtime inherits standard proxy environment variables such as `http_proxy`,
@@ -1010,16 +1010,26 @@ the default prompt. Use `velaria_sql_capabilities`,
 Agent CLI examples:
 
 ```bash
-uv run --project python python python/velaria_cli.py -i
+uv run --project python python python/velaria_cli.py
 
-# Inside interactive mode, plain text goes to the active agent thread.
-› 读取 data/sales.csv，按 region 汇总 amount，并保存 run
-› /status
-› :run list --limit 5
+uv run --project python python python/velaria_cli.py agent --runtime claude
+
+uv run --project python python python/velaria_cli.py agent --model gpt-5.4
+
+uv run --project python python python/velaria_cli.py agent --print \
+  "读取 data/sales.csv，按 region 汇总 amount，并保存 run"
+
+uv run --project python python python/velaria_cli.py agent --stream-json \
+  "summarize recent workspace runs"
 
 uv run --project python python python/velaria_cli.py ai generate-sql \
   --prompt "top 5 by score" --schema "name,score,region"
 ```
+
+Inside the Agent TUI, use `Ctrl+M` to open the model picker for the current
+runtime. Use `/model <model-name>` to switch to an arbitrary provider model
+name without restarting the CLI. Model switches start a fresh Agent session and
+are blocked while a turn is running or queued.
 
 Current SQL mapping carried by Python:
 
@@ -1280,7 +1290,9 @@ Repo-visible CLI entrypoints are:
 The global commands are expected only after installing the wheel or package into your environment.
 
 Every top-level command and subcommand supports `--help`.
-Use `velaria-cli -i` to enter interactive mode.
+Running `velaria-cli` without a subcommand starts the Velaria Agent TUI in a
+TTY. Use `velaria-cli agent --print "..."` or
+`velaria-cli agent --stream-json "..."` for script-friendly Agent turns.
 
 ### Workspace + Artifacts
 

@@ -89,6 +89,44 @@ std::unordered_map<std::string, double> double_by_group(const dataflow::Table& t
   return out;
 }
 
+std::string two_key_id(const dataflow::Value& first, const dataflow::Value& second) {
+  return first.toString() + "|" + second.toString();
+}
+
+std::unordered_map<std::string, int64_t> count_by_two_groups(const dataflow::Table& table,
+                                                             std::size_t first_key_column,
+                                                             std::size_t second_key_column,
+                                                             std::size_t value_column) {
+  expect(table.columnar_cache != nullptr, "columnar cache missing");
+  std::unordered_map<std::string, int64_t> out;
+  const auto& first_keys = table.columnar_cache->columns[first_key_column].values;
+  const auto& second_keys = table.columnar_cache->columns[second_key_column].values;
+  const auto& values = table.columnar_cache->columns[value_column].values;
+  expect(first_keys.size() == second_keys.size(), "first and second key size mismatch");
+  expect(first_keys.size() == values.size(), "two-key count column size mismatch");
+  for (std::size_t i = 0; i < first_keys.size(); ++i) {
+    out[two_key_id(first_keys[i], second_keys[i])] = values[i].asInt64();
+  }
+  return out;
+}
+
+std::unordered_map<std::string, double> double_by_two_groups(const dataflow::Table& table,
+                                                             std::size_t first_key_column,
+                                                             std::size_t second_key_column,
+                                                             std::size_t value_column) {
+  expect(table.columnar_cache != nullptr, "columnar cache missing");
+  std::unordered_map<std::string, double> out;
+  const auto& first_keys = table.columnar_cache->columns[first_key_column].values;
+  const auto& second_keys = table.columnar_cache->columns[second_key_column].values;
+  const auto& values = table.columnar_cache->columns[value_column].values;
+  expect(first_keys.size() == second_keys.size(), "first and second key size mismatch");
+  expect(first_keys.size() == values.size(), "two-key double column size mismatch");
+  for (std::size_t i = 0; i < first_keys.size(); ++i) {
+    out[two_key_id(first_keys[i], second_keys[i])] = values[i].asDouble();
+  }
+  return out;
+}
+
 }  // namespace
 
 int main() {
@@ -445,6 +483,193 @@ int main() {
            "csv predicate avg empty numeric A mismatch");
     expect(csv_predicate_avg_typed.at("C") == 0.0,
            "csv predicate avg empty numeric C mismatch");
+
+    const auto csv_multi_key_path = make_temp_file("velaria-source-multi-key-csv");
+    write_file(csv_multi_key_path,
+               "region,svc,val,flag\n"
+               "us,api,10,1\n"
+               "us,api,20,1\n"
+               "us,batch,5,0\n"
+               "eu,api,7,1\n"
+               "eu,batch,8,1\n");
+    const auto csv_multi_key_schema = dataflow::read_csv_schema(csv_multi_key_path);
+    auto multi_flag = std::make_shared<dataflow::PlanPredicateExpr>();
+    multi_flag->kind = dataflow::PlanPredicateExprKind::Comparison;
+    multi_flag->comparison = {3, dataflow::Value(int64_t(1)), "="};
+    dataflow::SourcePushdownSpec csv_multi_count_pushdown;
+    csv_multi_count_pushdown.predicate_expr = multi_flag;
+    csv_multi_count_pushdown.has_aggregate = true;
+    csv_multi_count_pushdown.aggregate.keys = {0, 1};
+    csv_multi_count_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Count, 0, "cnt"},
+    };
+    csv_multi_count_pushdown.shape =
+        dataflow::classifySourcePushdownShape(csv_multi_count_pushdown);
+    expect(csv_multi_count_pushdown.shape == dataflow::SourcePushdownShape::MultiKeyCount,
+           "csv multi-key count should select typed source shape");
+    dataflow::Table csv_multi_count_selected_result;
+    expect(dataflow::execute_csv_source_pushdown(csv_multi_key_path, csv_multi_key_schema,
+                                                 csv_multi_count_pushdown, ',',
+                                                 false, &csv_multi_count_selected_result),
+           "csv multi-key selected count aggregate pushdown failed");
+    dataflow::SourcePushdownSpec csv_multi_count_generic_pushdown = csv_multi_count_pushdown;
+    csv_multi_count_generic_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    dataflow::Table csv_multi_count_generic_result;
+    expect(dataflow::execute_csv_source_pushdown(csv_multi_key_path, csv_multi_key_schema,
+                                                 csv_multi_count_generic_pushdown, ',',
+                                                 false, &csv_multi_count_generic_result),
+           "csv multi-key generic count aggregate pushdown failed");
+    const auto csv_multi_counts =
+        count_by_two_groups(csv_multi_count_selected_result, 0, 1, 2);
+    expect(csv_multi_counts == count_by_two_groups(csv_multi_count_generic_result, 0, 1, 2),
+           "csv multi-key selected count should match generic result");
+    expect(csv_multi_counts.at("us|api") == 2, "csv multi-key count us api mismatch");
+    expect(csv_multi_counts.at("eu|api") == 1, "csv multi-key count eu api mismatch");
+    expect(csv_multi_counts.at("eu|batch") == 1, "csv multi-key count eu batch mismatch");
+
+    dataflow::SourcePushdownSpec csv_multi_sum_pushdown;
+    csv_multi_sum_pushdown.predicate_expr = multi_flag;
+    csv_multi_sum_pushdown.has_aggregate = true;
+    csv_multi_sum_pushdown.aggregate.keys = {0, 1};
+    csv_multi_sum_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Sum, 2, "sum_val"},
+    };
+    csv_multi_sum_pushdown.shape =
+        dataflow::classifySourcePushdownShape(csv_multi_sum_pushdown);
+    expect(csv_multi_sum_pushdown.shape ==
+               dataflow::SourcePushdownShape::MultiKeyNumericAggregate,
+           "csv multi-key sum should select typed source shape");
+    dataflow::Table csv_multi_sum_selected_result;
+    expect(dataflow::execute_csv_source_pushdown(csv_multi_key_path, csv_multi_key_schema,
+                                                 csv_multi_sum_pushdown, ',',
+                                                 false, &csv_multi_sum_selected_result),
+           "csv multi-key selected sum aggregate pushdown failed");
+    dataflow::SourcePushdownSpec csv_multi_sum_generic_pushdown = csv_multi_sum_pushdown;
+    csv_multi_sum_generic_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    dataflow::Table csv_multi_sum_generic_result;
+    expect(dataflow::execute_csv_source_pushdown(csv_multi_key_path, csv_multi_key_schema,
+                                                 csv_multi_sum_generic_pushdown, ',',
+                                                 false, &csv_multi_sum_generic_result),
+           "csv multi-key generic sum aggregate pushdown failed");
+    const auto csv_multi_sums =
+        double_by_two_groups(csv_multi_sum_selected_result, 0, 1, 2);
+    expect(csv_multi_sums == double_by_two_groups(csv_multi_sum_generic_result, 0, 1, 2),
+           "csv multi-key selected sum should match generic result");
+    expect(csv_multi_sums.at("us|api") == 30.0, "csv multi-key sum us api mismatch");
+    expect(csv_multi_sums.at("eu|api") == 7.0, "csv multi-key sum eu api mismatch");
+    expect(csv_multi_sums.at("eu|batch") == 8.0, "csv multi-key sum eu batch mismatch");
+
+    dataflow::SourcePushdownSpec csv_multi_avg_pushdown;
+    csv_multi_avg_pushdown.predicate_expr = multi_flag;
+    csv_multi_avg_pushdown.has_aggregate = true;
+    csv_multi_avg_pushdown.aggregate.keys = {0, 1};
+    csv_multi_avg_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Avg, 2, "avg_val"},
+    };
+    csv_multi_avg_pushdown.shape =
+        dataflow::classifySourcePushdownShape(csv_multi_avg_pushdown);
+    expect(csv_multi_avg_pushdown.shape ==
+               dataflow::SourcePushdownShape::MultiKeyNumericAggregate,
+           "csv multi-key avg should select typed source shape");
+    dataflow::Table csv_multi_avg_selected_result;
+    expect(dataflow::execute_csv_source_pushdown(csv_multi_key_path, csv_multi_key_schema,
+                                                 csv_multi_avg_pushdown, ',',
+                                                 false, &csv_multi_avg_selected_result),
+           "csv multi-key selected avg aggregate pushdown failed");
+    dataflow::SourcePushdownSpec csv_multi_avg_generic_pushdown = csv_multi_avg_pushdown;
+    csv_multi_avg_generic_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    dataflow::Table csv_multi_avg_generic_result;
+    expect(dataflow::execute_csv_source_pushdown(csv_multi_key_path, csv_multi_key_schema,
+                                                 csv_multi_avg_generic_pushdown, ',',
+                                                 false, &csv_multi_avg_generic_result),
+           "csv multi-key generic avg aggregate pushdown failed");
+    const auto csv_multi_avgs =
+        double_by_two_groups(csv_multi_avg_selected_result, 0, 1, 2);
+    expect(csv_multi_avgs == double_by_two_groups(csv_multi_avg_generic_result, 0, 1, 2),
+           "csv multi-key selected avg should match generic result");
+    expect(csv_multi_avgs.at("us|api") == 15.0, "csv multi-key avg us api mismatch");
+    expect(csv_multi_avgs.at("eu|api") == 7.0, "csv multi-key avg eu api mismatch");
+    expect(csv_multi_avgs.at("eu|batch") == 8.0, "csv multi-key avg eu batch mismatch");
+
+    const auto line_multi_key_path = make_temp_file("velaria-source-multi-key-line");
+    write_file(line_multi_key_path,
+               "us|api|10|1\n"
+               "us|api|20|1\n"
+               "us|batch|5|0\n"
+               "eu|api|7|1\n"
+               "eu|batch|8|1\n");
+    dataflow::LineFileOptions line_multi_key_options;
+    line_multi_key_options.mode = dataflow::LineParseMode::Split;
+    line_multi_key_options.split_delimiter = '|';
+    line_multi_key_options.mappings = {
+        {"region", 0},
+        {"svc", 1},
+        {"val", 2},
+        {"flag", 3},
+    };
+    dataflow::FileSourceConnectorSpec line_multi_key_spec;
+    line_multi_key_spec.kind = dataflow::FileSourceKind::Line;
+    line_multi_key_spec.path = line_multi_key_path;
+    line_multi_key_spec.line_options = line_multi_key_options;
+    const auto line_multi_key_schema =
+        dataflow::infer_line_file_schema(line_multi_key_options);
+    dataflow::SourcePushdownSpec line_multi_sum_pushdown = csv_multi_sum_pushdown;
+    line_multi_sum_pushdown.shape =
+        dataflow::classifySourcePushdownShape(line_multi_sum_pushdown);
+    dataflow::Table line_multi_sum_selected_result;
+    expect(dataflow::execute_file_source_pushdown(line_multi_key_spec,
+                                                  line_multi_key_schema,
+                                                  line_multi_sum_pushdown, false,
+                                                  &line_multi_sum_selected_result),
+           "line multi-key selected sum aggregate pushdown failed");
+    dataflow::SourcePushdownSpec line_multi_sum_generic_pushdown = line_multi_sum_pushdown;
+    line_multi_sum_generic_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    dataflow::Table line_multi_sum_generic_result;
+    expect(dataflow::execute_file_source_pushdown(line_multi_key_spec,
+                                                  line_multi_key_schema,
+                                                  line_multi_sum_generic_pushdown, false,
+                                                  &line_multi_sum_generic_result),
+           "line multi-key generic sum aggregate pushdown failed");
+    expect(double_by_two_groups(line_multi_sum_selected_result, 0, 1, 2) ==
+               double_by_two_groups(line_multi_sum_generic_result, 0, 1, 2),
+           "line multi-key selected sum should match generic result");
+
+    const auto json_multi_key_path = make_temp_file("velaria-source-multi-key-json");
+    write_file(json_multi_key_path,
+               "{\"region\":\"us\",\"svc\":\"api\",\"val\":10,\"flag\":1}\n"
+               "{\"region\":\"us\",\"svc\":\"api\",\"val\":20,\"flag\":1}\n"
+               "{\"region\":\"us\",\"svc\":\"batch\",\"val\":5,\"flag\":0}\n"
+               "{\"region\":\"eu\",\"svc\":\"api\",\"val\":7,\"flag\":1}\n"
+               "{\"region\":\"eu\",\"svc\":\"batch\",\"val\":8,\"flag\":1}\n");
+    dataflow::JsonFileOptions json_multi_key_options;
+    json_multi_key_options.format = dataflow::JsonFileFormat::JsonLines;
+    json_multi_key_options.columns = {"region", "svc", "val", "flag"};
+    dataflow::FileSourceConnectorSpec json_multi_key_spec;
+    json_multi_key_spec.kind = dataflow::FileSourceKind::Json;
+    json_multi_key_spec.path = json_multi_key_path;
+    json_multi_key_spec.json_options = json_multi_key_options;
+    const auto json_multi_key_schema =
+        dataflow::infer_json_file_schema(json_multi_key_options);
+    dataflow::SourcePushdownSpec json_multi_count_pushdown = csv_multi_count_pushdown;
+    json_multi_count_pushdown.shape =
+        dataflow::classifySourcePushdownShape(json_multi_count_pushdown);
+    dataflow::Table json_multi_count_typed_result;
+    expect(dataflow::execute_file_source_pushdown(json_multi_key_spec,
+                                                  json_multi_key_schema,
+                                                  json_multi_count_pushdown, false,
+                                                  &json_multi_count_typed_result),
+           "json multi-key typed count aggregate pushdown failed");
+    dataflow::SourcePushdownSpec json_multi_count_generic_pushdown = json_multi_count_pushdown;
+    json_multi_count_generic_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    dataflow::Table json_multi_count_generic_result;
+    expect(dataflow::execute_file_source_pushdown(json_multi_key_spec,
+                                                  json_multi_key_schema,
+                                                  json_multi_count_generic_pushdown, false,
+                                                  &json_multi_count_generic_result),
+           "json multi-key generic count aggregate pushdown failed");
+    expect(count_by_two_groups(json_multi_count_typed_result, 0, 1, 2) ==
+               count_by_two_groups(json_multi_count_generic_result, 0, 1, 2),
+           "json multi-key typed count should match generic result");
 
     const auto csv_sparse_a_path = make_temp_file("velaria-source-sparse-filter-a");
     const auto csv_sparse_b_path = make_temp_file("velaria-source-sparse-filter-b");

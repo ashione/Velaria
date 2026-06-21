@@ -337,14 +337,19 @@ SourceExecutionPattern analyzeSourceExecution(const FileSourceConnectorSpec& spe
 
 SourcePushdownShape classifySourcePushdownShape(const SourcePushdownSpec& spec) {
   if (spec.has_aggregate) {
-    if (spec.aggregate.keys.size() == 1 && spec.aggregate.aggregates.size() == 1) {
+    if (!spec.aggregate.keys.empty() && spec.aggregate.keys.size() <= 3 &&
+        spec.aggregate.aggregates.size() == 1) {
       const auto& agg = spec.aggregate.aggregates.front();
       if (agg.function == AggregateFunction::Count) {
-        return SourcePushdownShape::SingleKeyCount;
+        return spec.aggregate.keys.size() == 1 ? SourcePushdownShape::SingleKeyCount
+                                               : SourcePushdownShape::MultiKeyCount;
       }
-      if (agg.function == AggregateFunction::Sum || agg.function == AggregateFunction::Avg ||
-          (!spec.predicate_expr && (agg.function == AggregateFunction::Min ||
-                                    agg.function == AggregateFunction::Max))) {
+      if (agg.function == AggregateFunction::Sum || agg.function == AggregateFunction::Avg) {
+        return spec.aggregate.keys.size() == 1 ? SourcePushdownShape::SingleKeyNumericAggregate
+                                               : SourcePushdownShape::MultiKeyNumericAggregate;
+      }
+      if (spec.aggregate.keys.size() == 1 && !spec.predicate_expr &&
+          (agg.function == AggregateFunction::Min || agg.function == AggregateFunction::Max)) {
         return SourcePushdownShape::SingleKeyNumericAggregate;
       }
     }

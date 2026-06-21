@@ -49,9 +49,9 @@ perf report
 
 当前 file-source 的优化器/执行器分层：
 
-- executor lowering 会把 source pushdown 分类成 `ConjunctiveFilterOnly`、`SingleKeyCount`、`SingleKeyNumericAggregate`、`Generic`
+- executor lowering 会把 source pushdown 分类成 `ConjunctiveFilterOnly`、`SingleKeyCount`、`SingleKeyNumericAggregate`、`MultiKeyCount`、`MultiKeyNumericAggregate`、`Generic`
 - source 端会根据这些 `shape` 选择更轻的 fast path
-- 当前收益最明显的是 line split、line regex、JSON 按命中字段解析，以及简单 CSV 单 key aggregate
+- 当前收益最明显的是 line split、line regex、JSON 按命中字段解析、JSON multi-key aggregate pushdown，以及简单 CSV 单 key aggregate
 
 ## 最新本地回归快照
 

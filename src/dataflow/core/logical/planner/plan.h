@@ -156,6 +156,8 @@ enum class SourcePushdownShape {
   ConjunctiveFilterOnly = 1,
   SingleKeyCount = 2,
   SingleKeyNumericAggregate = 3,
+  MultiKeyCount = 4,
+  MultiKeyNumericAggregate = 5,
 };
 
 enum class PlanPredicateExprKind { Comparison, And, Or };

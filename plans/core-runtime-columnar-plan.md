@@ -329,9 +329,10 @@ Current implementation notes:
 - single-`INT64` dense aggregates already have typed `SUM` / `COUNT` / `AVG` state and measured local speedups
 - two-`INT64` grouped `SUM` / `COUNT` / `AVG` now have typed state-columnar paths and measured local speedups
 - source pushdown now classifies single-key `COUNT` and numeric `SUM` / `AVG` as typed shapes even when the filter is represented as a predicate expression; CSV uses the typed reducer path for those predicate aggregates, with measured improvements on CSV `OR` and mixed predicate group-count benchmark cases
+- source pushdown now also classifies 2-3 key `COUNT` and numeric `SUM` / `AVG` as multi-key source shapes; JSON line/array aggregate pushdown uses the shared typed reducer with encoded-key lookup, while CSV and line scanner routing stays on their existing encoded-key paths because the shared reducer attempts regressed local benchmarks
 - mixed string/`INT64` SUM attempts were measured and rejected twice: first as a state-only reducer change, then as a dictionary-id reducer path that regressed the non-null benchmark; mixed-key work needs a stronger key/view design before more typed reducer state
 - `scripts/run_columnar_kernel_benchmark_gate.sh` now checks the aggregate typed-shape selections, file-source pushdown ratios, and string builtin plan-reuse guardrail in one reproducible local gate
-- remaining reducer work should generalize this shape to multi-key source pushdown reducers and encoded mixed-key layouts without changing public APIs
+- remaining reducer work should generalize key ownership and dictionary/key-id views before trying to replace CSV or line multi-key reducers again
 
 ## Related Historical Notes
 

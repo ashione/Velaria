@@ -385,6 +385,7 @@ int main() {
     };
     csv_predicate_count_pushdown.shape =
         dataflow::classifySourcePushdownShape(csv_predicate_count_pushdown);
+    csv_predicate_count_pushdown.shape_is_explicit = true;
     expect(csv_predicate_count_pushdown.shape == dataflow::SourcePushdownShape::SingleKeyCount,
            "csv predicate count should select typed source shape");
     dataflow::Table csv_predicate_count_result;
@@ -407,6 +408,7 @@ int main() {
     };
     csv_predicate_sum_pushdown.shape =
         dataflow::classifySourcePushdownShape(csv_predicate_sum_pushdown);
+    csv_predicate_sum_pushdown.shape_is_explicit = true;
     expect(csv_predicate_sum_pushdown.shape ==
                dataflow::SourcePushdownShape::SingleKeyNumericAggregate,
            "csv predicate sum should select typed source shape");
@@ -452,6 +454,7 @@ int main() {
     };
     csv_predicate_avg_pushdown.shape =
         dataflow::classifySourcePushdownShape(csv_predicate_avg_pushdown);
+    csv_predicate_avg_pushdown.shape_is_explicit = true;
     expect(csv_predicate_avg_pushdown.shape ==
                dataflow::SourcePushdownShape::SingleKeyNumericAggregate,
            "csv predicate avg should select typed source shape");
@@ -466,6 +469,7 @@ int main() {
     dataflow::SourcePushdownSpec csv_predicate_avg_generic_pushdown =
         csv_predicate_avg_pushdown;
     csv_predicate_avg_generic_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    csv_predicate_avg_generic_pushdown.shape_is_explicit = true;
     dataflow::Table csv_predicate_avg_generic_result;
     expect(dataflow::execute_csv_source_pushdown(csv_predicate_avg_path,
                                                  csv_predicate_avg_schema,
@@ -505,8 +509,16 @@ int main() {
     };
     csv_multi_count_pushdown.shape =
         dataflow::classifySourcePushdownShape(csv_multi_count_pushdown);
+    csv_multi_count_pushdown.shape_is_explicit = true;
     expect(csv_multi_count_pushdown.shape == dataflow::SourcePushdownShape::MultiKeyCount,
-           "csv multi-key count should select typed source shape");
+           "csv multi-key count should classify as typed logical source shape");
+    expect(dataflow::selectSourcePushdownShapeForSource(
+               dataflow::FileSourceKind::Csv, csv_multi_count_pushdown) ==
+               dataflow::SourcePushdownShape::Generic,
+           "csv multi-key count should select generic source execution shape");
+    csv_multi_count_pushdown.shape = dataflow::selectSourcePushdownShapeForSource(
+        dataflow::FileSourceKind::Csv, csv_multi_count_pushdown);
+    csv_multi_count_pushdown.shape_is_explicit = true;
     dataflow::Table csv_multi_count_selected_result;
     expect(dataflow::execute_csv_source_pushdown(csv_multi_key_path, csv_multi_key_schema,
                                                  csv_multi_count_pushdown, ',',
@@ -514,6 +526,7 @@ int main() {
            "csv multi-key selected count aggregate pushdown failed");
     dataflow::SourcePushdownSpec csv_multi_count_generic_pushdown = csv_multi_count_pushdown;
     csv_multi_count_generic_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    csv_multi_count_generic_pushdown.shape_is_explicit = true;
     dataflow::Table csv_multi_count_generic_result;
     expect(dataflow::execute_csv_source_pushdown(csv_multi_key_path, csv_multi_key_schema,
                                                  csv_multi_count_generic_pushdown, ',',
@@ -536,9 +549,17 @@ int main() {
     };
     csv_multi_sum_pushdown.shape =
         dataflow::classifySourcePushdownShape(csv_multi_sum_pushdown);
+    csv_multi_sum_pushdown.shape_is_explicit = true;
     expect(csv_multi_sum_pushdown.shape ==
                dataflow::SourcePushdownShape::MultiKeyNumericAggregate,
-           "csv multi-key sum should select typed source shape");
+           "csv multi-key sum should classify as typed logical source shape");
+    expect(dataflow::selectSourcePushdownShapeForSource(
+               dataflow::FileSourceKind::Csv, csv_multi_sum_pushdown) ==
+               dataflow::SourcePushdownShape::Generic,
+           "csv multi-key sum should select generic source execution shape");
+    csv_multi_sum_pushdown.shape = dataflow::selectSourcePushdownShapeForSource(
+        dataflow::FileSourceKind::Csv, csv_multi_sum_pushdown);
+    csv_multi_sum_pushdown.shape_is_explicit = true;
     dataflow::Table csv_multi_sum_selected_result;
     expect(dataflow::execute_csv_source_pushdown(csv_multi_key_path, csv_multi_key_schema,
                                                  csv_multi_sum_pushdown, ',',
@@ -546,6 +567,7 @@ int main() {
            "csv multi-key selected sum aggregate pushdown failed");
     dataflow::SourcePushdownSpec csv_multi_sum_generic_pushdown = csv_multi_sum_pushdown;
     csv_multi_sum_generic_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    csv_multi_sum_generic_pushdown.shape_is_explicit = true;
     dataflow::Table csv_multi_sum_generic_result;
     expect(dataflow::execute_csv_source_pushdown(csv_multi_key_path, csv_multi_key_schema,
                                                  csv_multi_sum_generic_pushdown, ',',
@@ -568,9 +590,17 @@ int main() {
     };
     csv_multi_avg_pushdown.shape =
         dataflow::classifySourcePushdownShape(csv_multi_avg_pushdown);
+    csv_multi_avg_pushdown.shape_is_explicit = true;
     expect(csv_multi_avg_pushdown.shape ==
                dataflow::SourcePushdownShape::MultiKeyNumericAggregate,
-           "csv multi-key avg should select typed source shape");
+           "csv multi-key avg should classify as typed logical source shape");
+    expect(dataflow::selectSourcePushdownShapeForSource(
+               dataflow::FileSourceKind::Csv, csv_multi_avg_pushdown) ==
+               dataflow::SourcePushdownShape::Generic,
+           "csv multi-key avg should select generic source execution shape");
+    csv_multi_avg_pushdown.shape = dataflow::selectSourcePushdownShapeForSource(
+        dataflow::FileSourceKind::Csv, csv_multi_avg_pushdown);
+    csv_multi_avg_pushdown.shape_is_explicit = true;
     dataflow::Table csv_multi_avg_selected_result;
     expect(dataflow::execute_csv_source_pushdown(csv_multi_key_path, csv_multi_key_schema,
                                                  csv_multi_avg_pushdown, ',',
@@ -578,6 +608,7 @@ int main() {
            "csv multi-key selected avg aggregate pushdown failed");
     dataflow::SourcePushdownSpec csv_multi_avg_generic_pushdown = csv_multi_avg_pushdown;
     csv_multi_avg_generic_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    csv_multi_avg_generic_pushdown.shape_is_explicit = true;
     dataflow::Table csv_multi_avg_generic_result;
     expect(dataflow::execute_csv_source_pushdown(csv_multi_key_path, csv_multi_key_schema,
                                                  csv_multi_avg_generic_pushdown, ',',
@@ -616,6 +647,17 @@ int main() {
     dataflow::SourcePushdownSpec line_multi_sum_pushdown = csv_multi_sum_pushdown;
     line_multi_sum_pushdown.shape =
         dataflow::classifySourcePushdownShape(line_multi_sum_pushdown);
+    line_multi_sum_pushdown.shape_is_explicit = true;
+    expect(line_multi_sum_pushdown.shape ==
+               dataflow::SourcePushdownShape::MultiKeyNumericAggregate,
+           "line multi-key sum should classify as typed logical source shape");
+    expect(dataflow::selectSourcePushdownShapeForSource(
+               dataflow::FileSourceKind::Line, line_multi_sum_pushdown) ==
+               dataflow::SourcePushdownShape::Generic,
+           "line multi-key sum should select generic source execution shape");
+    line_multi_sum_pushdown.shape = dataflow::selectSourcePushdownShapeForSource(
+        dataflow::FileSourceKind::Line, line_multi_sum_pushdown);
+    line_multi_sum_pushdown.shape_is_explicit = true;
     dataflow::Table line_multi_sum_selected_result;
     expect(dataflow::execute_file_source_pushdown(line_multi_key_spec,
                                                   line_multi_key_schema,
@@ -624,6 +666,7 @@ int main() {
            "line multi-key selected sum aggregate pushdown failed");
     dataflow::SourcePushdownSpec line_multi_sum_generic_pushdown = line_multi_sum_pushdown;
     line_multi_sum_generic_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    line_multi_sum_generic_pushdown.shape_is_explicit = true;
     dataflow::Table line_multi_sum_generic_result;
     expect(dataflow::execute_file_source_pushdown(line_multi_key_spec,
                                                   line_multi_key_schema,
@@ -653,6 +696,16 @@ int main() {
     dataflow::SourcePushdownSpec json_multi_count_pushdown = csv_multi_count_pushdown;
     json_multi_count_pushdown.shape =
         dataflow::classifySourcePushdownShape(json_multi_count_pushdown);
+    json_multi_count_pushdown.shape_is_explicit = true;
+    expect(json_multi_count_pushdown.shape == dataflow::SourcePushdownShape::MultiKeyCount,
+           "json multi-key count should classify as typed logical source shape");
+    expect(dataflow::selectSourcePushdownShapeForSource(
+               dataflow::FileSourceKind::Json, json_multi_count_pushdown) ==
+               dataflow::SourcePushdownShape::MultiKeyCount,
+           "json multi-key count should select typed source execution shape");
+    json_multi_count_pushdown.shape = dataflow::selectSourcePushdownShapeForSource(
+        dataflow::FileSourceKind::Json, json_multi_count_pushdown);
+    json_multi_count_pushdown.shape_is_explicit = true;
     dataflow::Table json_multi_count_typed_result;
     expect(dataflow::execute_file_source_pushdown(json_multi_key_spec,
                                                   json_multi_key_schema,
@@ -661,6 +714,7 @@ int main() {
            "json multi-key typed count aggregate pushdown failed");
     dataflow::SourcePushdownSpec json_multi_count_generic_pushdown = json_multi_count_pushdown;
     json_multi_count_generic_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    json_multi_count_generic_pushdown.shape_is_explicit = true;
     dataflow::Table json_multi_count_generic_result;
     expect(dataflow::execute_file_source_pushdown(json_multi_key_spec,
                                                   json_multi_key_schema,
@@ -698,6 +752,14 @@ int main() {
     };
     json_numeric_count_pushdown.shape =
         dataflow::classifySourcePushdownShape(json_numeric_count_pushdown);
+    json_numeric_count_pushdown.shape_is_explicit = true;
+    expect(dataflow::selectSourcePushdownShapeForSource(
+               dataflow::FileSourceKind::Json, json_numeric_count_pushdown) ==
+               dataflow::SourcePushdownShape::MultiKeyCount,
+           "json numeric multi-key count should select typed source execution shape");
+    json_numeric_count_pushdown.shape = dataflow::selectSourcePushdownShapeForSource(
+        dataflow::FileSourceKind::Json, json_numeric_count_pushdown);
+    json_numeric_count_pushdown.shape_is_explicit = true;
     dataflow::Table json_numeric_count_typed_result;
     expect(dataflow::execute_file_source_pushdown(json_numeric_key_spec,
                                                   json_numeric_key_schema,
@@ -707,6 +769,7 @@ int main() {
     dataflow::SourcePushdownSpec json_numeric_count_generic_pushdown =
         json_numeric_count_pushdown;
     json_numeric_count_generic_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    json_numeric_count_generic_pushdown.shape_is_explicit = true;
     dataflow::Table json_numeric_count_generic_result;
     expect(dataflow::execute_file_source_pushdown(json_numeric_key_spec,
                                                   json_numeric_key_schema,
@@ -745,6 +808,7 @@ int main() {
     dataflow::SourcePushdownSpec json_array_multi_count_generic_pushdown =
         json_multi_count_pushdown;
     json_array_multi_count_generic_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    json_array_multi_count_generic_pushdown.shape_is_explicit = true;
     dataflow::Table json_array_multi_count_generic_result;
     expect(dataflow::execute_file_source_pushdown(json_array_multi_key_spec,
                                                   json_multi_key_schema,

@@ -73,6 +73,8 @@ SourceExecutionPattern analyzeSourceExecution(const FileSourceConnectorSpec& spe
                                              const Schema& schema,
                                              const SourcePushdownSpec& pushdown);
 SourcePushdownShape classifySourcePushdownShape(const SourcePushdownSpec& spec);
+SourcePushdownShape selectSourcePushdownShapeForSource(FileSourceKind kind,
+                                                       const SourcePushdownSpec& spec);
 const char* aggregateExecKindName(AggImplKind kind);
 const char* aggregatePartialLayoutName(AggregatePartialLayoutKind kind);
 const char* aggregateExecutionShapeName(AggregateExecutionShape shape);

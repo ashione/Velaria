@@ -242,6 +242,14 @@ dataflow::SourcePushdownSpec multi_key_aggregate_pushdown(std::size_t first_key_
   pushdown.aggregate.aggregates = {
       {dataflow::AggregateFunction::Sum, value_index, "sum_val"}};
   pushdown.shape = dataflow::classifySourcePushdownShape(pushdown);
+  pushdown.shape_is_explicit = true;
+  return pushdown;
+}
+
+dataflow::SourcePushdownSpec select_source_pushdown(
+    dataflow::FileSourceKind kind, dataflow::SourcePushdownSpec pushdown) {
+  pushdown.shape = dataflow::selectSourcePushdownShapeForSource(kind, pushdown);
+  pushdown.shape_is_explicit = true;
   return pushdown;
 }
 
@@ -541,7 +549,9 @@ int main(int argc, char** argv) {
       dataflow::Table aggregated;
       expect(dataflow::execute_csv_source_pushdown(
                  csv_multi_key_path, csv_multi_key_schema,
-                 multi_key_aggregate_pushdown(1, 2, 3), ',', false, &aggregated),
+                 select_source_pushdown(dataflow::FileSourceKind::Csv,
+                                        multi_key_aggregate_pushdown(1, 2, 3)),
+                 ',', false, &aggregated),
              "csv multi-key aggregate pushdown execution failed");
       expect(aggregated.rowCount() == 32, "csv multi-key aggregate pushdown row count mismatch");
     }, rounds);
@@ -550,6 +560,7 @@ int main(int argc, char** argv) {
     const auto csv_multi_key_generic_us = run_bench_us([&](int) {
       auto pushdown = multi_key_aggregate_pushdown(1, 2, 3);
       pushdown.shape = dataflow::SourcePushdownShape::Generic;
+      pushdown.shape_is_explicit = true;
       dataflow::Table aggregated;
       expect(dataflow::execute_csv_source_pushdown(
                  csv_multi_key_path, csv_multi_key_schema, pushdown, ',', false, &aggregated),
@@ -613,7 +624,9 @@ int main(int argc, char** argv) {
       spec.line_options = line_multi_key_options;
       dataflow::Table aggregated;
       expect(dataflow::execute_file_source_pushdown(
-                 spec, line_multi_key_schema, multi_key_aggregate_pushdown(1, 2, 3),
+                 spec, line_multi_key_schema,
+                 select_source_pushdown(dataflow::FileSourceKind::Line,
+                                        multi_key_aggregate_pushdown(1, 2, 3)),
                  false, &aggregated),
              "line multi-key aggregate pushdown execution failed");
       expect(aggregated.rowCount() == 32, "line multi-key aggregate pushdown row count mismatch");
@@ -627,6 +640,7 @@ int main(int argc, char** argv) {
       spec.line_options = line_multi_key_options;
       auto pushdown = multi_key_aggregate_pushdown(1, 2, 3);
       pushdown.shape = dataflow::SourcePushdownShape::Generic;
+      pushdown.shape_is_explicit = true;
       dataflow::Table aggregated;
       expect(dataflow::execute_file_source_pushdown(
                  spec, line_multi_key_schema, pushdown, false, &aggregated),
@@ -710,7 +724,9 @@ int main(int argc, char** argv) {
       spec.json_options = json_multi_key_options;
       dataflow::Table aggregated;
       expect(dataflow::execute_file_source_pushdown(
-                 spec, json_multi_key_schema, multi_key_aggregate_pushdown(1, 2, 3),
+                 spec, json_multi_key_schema,
+                 select_source_pushdown(dataflow::FileSourceKind::Json,
+                                        multi_key_aggregate_pushdown(1, 2, 3)),
                  false, &aggregated),
              "json multi-key aggregate pushdown execution failed");
       expect(aggregated.rowCount() == 32, "json multi-key aggregate pushdown row count mismatch");
@@ -724,6 +740,7 @@ int main(int argc, char** argv) {
       spec.json_options = json_multi_key_options;
       auto pushdown = multi_key_aggregate_pushdown(1, 2, 3);
       pushdown.shape = dataflow::SourcePushdownShape::Generic;
+      pushdown.shape_is_explicit = true;
       dataflow::Table aggregated;
       expect(dataflow::execute_file_source_pushdown(
                  spec, json_multi_key_schema, pushdown, false, &aggregated),

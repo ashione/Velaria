@@ -179,6 +179,8 @@ struct SourcePushdownSpec {
   bool has_aggregate = false;
   SourceAggregatePushdownSpec aggregate;
   SourcePushdownShape shape = SourcePushdownShape::Generic;
+  // Distinguishes an explicit optimizer/fallback choice from the default shape value.
+  bool shape_is_explicit = false;
 };
 
 struct ComputedColumnArg {

@@ -2270,10 +2270,10 @@ bool try_execute_line_aggregate(const std::string& path, const Schema& schema,
       pushdown.aggregate.keys.size() == 1 &&
       pushdown.aggregate.aggregates.size() == 1 &&
       pushdown.aggregate.aggregates.front().function != AggregateFunction::Count;
-  // Line split/regex already has a lower-copy generic multi-key path. Keep it
-  // there until a shared reducer can beat the encoded-key implementation
-  // consistently under repeated benchmark runs.
-  const bool multi_key_typed_shape = false;
+  const bool multi_key_typed_shape =
+      (pushdown.shape == SourcePushdownShape::MultiKeyCount ||
+       pushdown.shape == SourcePushdownShape::MultiKeyNumericAggregate) &&
+      sourceTypedReducerSupports(pushdown);
 
   std::regex line_regex;
   SimpleLineRegexPlan simple_plan;
@@ -4060,33 +4060,37 @@ bool execute_file_source_pushdown(const FileSourceConnectorSpec& spec, const Sch
   if (out == nullptr) {
     throw std::invalid_argument("source pushdown output cannot be null");
   }
+  SourcePushdownSpec planned_pushdown = pushdown;
+  planned_pushdown.shape = selectSourcePushdownShapeForSource(spec.kind, pushdown);
+  planned_pushdown.shape_is_explicit = true;
   if (spec.kind == FileSourceKind::Csv) {
-    const auto execution_pattern = analyzeSourceExecution(spec, schema, pushdown);
-    return execute_csv_source_pushdown(spec.path, schema, pushdown, spec.csv_delimiter,
+    const auto execution_pattern = analyzeSourceExecution(spec, schema, planned_pushdown);
+    return execute_csv_source_pushdown(spec.path, schema, planned_pushdown, spec.csv_delimiter,
                                        materialize_rows, out, &execution_pattern);
   }
-  if (pushdown.has_aggregate) {
+  if (planned_pushdown.has_aggregate) {
     if (spec.kind == FileSourceKind::Line) {
-      if (try_execute_line_aggregate(spec.path, schema, spec.line_options, pushdown, out)) {
+      if (try_execute_line_aggregate(spec.path, schema, spec.line_options, planned_pushdown, out)) {
         return true;
       }
     } else {
-      if (try_execute_json_aggregate(spec.path, schema, spec.json_options, pushdown, out)) {
+      if (try_execute_json_aggregate(spec.path, schema, spec.json_options, planned_pushdown, out)) {
         return true;
       }
     }
   }
   const bool has_selection_pushdown =
-      !pushdown.filters.empty() || static_cast<bool>(pushdown.predicate_expr) || pushdown.limit != 0;
+      !planned_pushdown.filters.empty() || static_cast<bool>(planned_pushdown.predicate_expr) ||
+      planned_pushdown.limit != 0;
   if (has_selection_pushdown) {
     if (spec.kind == FileSourceKind::Line) {
-      return executeLineSourcePushdown(spec.path, schema, spec.line_options, pushdown,
+      return executeLineSourcePushdown(spec.path, schema, spec.line_options, planned_pushdown,
                                        materialize_rows, out);
     }
-    return executeJsonSourcePushdown(spec.path, schema, spec.json_options, pushdown,
+    return executeJsonSourcePushdown(spec.path, schema, spec.json_options, planned_pushdown,
                                      materialize_rows, out);
   }
-  const auto captured_schema_indices = buildCapturedSchemaIndices(schema, pushdown);
+  const auto captured_schema_indices = buildCapturedSchemaIndices(schema, planned_pushdown);
   const bool use_columnar_capture =
       captured_schema_indices.size() < schema.fields.size();
   Table loaded =
@@ -4097,21 +4101,22 @@ bool execute_file_source_pushdown(const FileSourceConnectorSpec& spec, const Sch
           : (spec.kind == FileSourceKind::Line)
                 ? load_line_file(spec.path, spec.line_options)
                 : load_json_file(spec.path, spec.json_options);
-  if (!pushdown.filters.empty() || pushdown.predicate_expr || pushdown.limit != 0) {
-    loaded = applyFilterAndLimit(loaded, pushdown);
+  if (!planned_pushdown.filters.empty() || planned_pushdown.predicate_expr ||
+      planned_pushdown.limit != 0) {
+    loaded = applyFilterAndLimit(loaded, planned_pushdown);
   }
-  if (pushdown.has_aggregate) {
-    if (!applyAggregatePushdown(loaded, pushdown, &loaded)) {
+  if (planned_pushdown.has_aggregate) {
+    if (!applyAggregatePushdown(loaded, planned_pushdown, &loaded)) {
       return false;
     }
-    if (pushdown.limit != 0 && loaded.rowCount() > pushdown.limit) {
+    if (planned_pushdown.limit != 0 && loaded.rowCount() > planned_pushdown.limit) {
       Table limited;
       limited.schema = loaded.schema;
       limited.columnar_cache = std::make_shared<ColumnarTable>();
       limited.columnar_cache->schema = limited.schema;
       limited.columnar_cache->columns.resize(limited.schema.fields.size());
       limited.columnar_cache->arrow_formats.resize(limited.schema.fields.size());
-      for (std::size_t row_index = 0; row_index < pushdown.limit; ++row_index) {
+      for (std::size_t row_index = 0; row_index < planned_pushdown.limit; ++row_index) {
         Row row;
         row.reserve(limited.schema.fields.size());
         for (std::size_t col = 0; col < limited.schema.fields.size(); ++col) {
@@ -4127,7 +4132,7 @@ bool execute_file_source_pushdown(const FileSourceConnectorSpec& spec, const Sch
     *out = std::move(loaded);
     return true;
   }
-  loaded = projectTable(loaded, pushdown.projected_columns, materialize_rows);
+  loaded = projectTable(loaded, planned_pushdown.projected_columns, materialize_rows);
   *out = std::move(loaded);
   return true;
 }

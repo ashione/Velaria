@@ -50,6 +50,7 @@ perf report
 当前 file-source 的优化器/执行器分层：
 
 - executor lowering 会把 source pushdown 分类成 `ConjunctiveFilterOnly`、`SingleKeyCount`、`SingleKeyNumericAggregate`、`MultiKeyCount`、`MultiKeyNumericAggregate`、`Generic`
+- optimizer 的 source capability routing 再通过 `selectSourcePushdownShapeForSource(...)` 做执行选择：CSV 与 line multi-key 当前选择 `Generic`，JSON 保留已证明的 multi-key typed reducer 路径
 - source 端会根据这些 `shape` 选择更轻的 fast path
 - 当前收益最明显的是 line split、line regex、JSON 按命中字段解析、JSON multi-key aggregate pushdown，以及简单 CSV 单 key aggregate
 - benchmark gate 包含 CSV/line multi-key selected-vs-generic guardrail，防止已被否决的 shared reducer routing 被误接回主线

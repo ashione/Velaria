@@ -361,6 +361,27 @@ SourcePushdownShape classifySourcePushdownShape(const SourcePushdownSpec& spec) 
   return SourcePushdownShape::Generic;
 }
 
+SourcePushdownShape selectSourcePushdownShapeForSource(FileSourceKind kind,
+                                                       const SourcePushdownSpec& spec) {
+  const SourcePushdownShape logical_shape =
+      spec.shape_is_explicit ? spec.shape : classifySourcePushdownShape(spec);
+  switch (logical_shape) {
+    case SourcePushdownShape::MultiKeyCount:
+    case SourcePushdownShape::MultiKeyNumericAggregate:
+      // Multi-key typed source reduction is currently proven only for JSON,
+      // where parsed scalars can use semantic-safe encoded keys and fall back
+      // to Value keys for numeric/bool/null semantics. CSV and line keep their
+      // generic selected paths until a source-independent key view proves out.
+      return kind == FileSourceKind::Json ? logical_shape : SourcePushdownShape::Generic;
+    case SourcePushdownShape::Generic:
+    case SourcePushdownShape::ConjunctiveFilterOnly:
+    case SourcePushdownShape::SingleKeyCount:
+    case SourcePushdownShape::SingleKeyNumericAggregate:
+      return logical_shape;
+  }
+  return SourcePushdownShape::Generic;
+}
+
 const char* aggregateExecKindName(AggImplKind kind) {
   switch (kind) {
     case AggImplKind::Dense:

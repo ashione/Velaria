@@ -21,6 +21,7 @@
 #include "src/dataflow/core/execution/csv.h"
 #include "src/dataflow/core/execution/runtime/execution_optimizer.h"
 #include "src/dataflow/core/execution/runtime/simd_dispatch.h"
+#include "src/dataflow/core/execution/source_typed_reducer.h"
 #include "src/dataflow/core/logical/planner/plan.h"
 
 namespace dataflow {
@@ -48,6 +49,8 @@ struct ParsedScalar {
   bool has_full_value = false;
   Value full_value;
 };
+
+std::string_view parsedScalarText(const ParsedScalar& parsed);
 
 struct LineParsedScalar {
   std::string_view text;
@@ -337,6 +340,49 @@ LineParsedScalar parseLineParsedScalar(std::string_view raw_view) {
 
 std::string_view parsedScalarText(const ParsedScalar& parsed) {
   return parsed.owned_text.has_value() ? std::string_view(*parsed.owned_text) : parsed.text;
+}
+
+bool canUseEncodedParsedScalarKey(const ParsedScalar& parsed) {
+  if (parsed.is_null || parsed.is_bool || parsed.is_int64 || parsed.is_double ||
+      parsed.has_full_value) {
+    return false;
+  }
+  const auto text = parsedScalarText(parsed);
+  if (text == "null" || text == "true" || text == "false" || text.empty()) {
+    return false;
+  }
+  const char first = text.front();
+  return first != '-' && first != '+' && first != '[' &&
+         !std::isdigit(static_cast<unsigned char>(first));
+}
+
+void appendSizeToString(std::string* out, std::size_t value) {
+  char buffer[32];
+  const auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
+  if (result.ec != std::errc()) {
+    throw std::runtime_error("failed to encode source key length");
+  }
+  out->append(buffer, result.ptr);
+}
+
+bool tryEncodeParsedScalarGroupKeyRow(const std::vector<ParsedScalar>& values,
+                                      const std::vector<std::size_t>& key_indices,
+                                      std::string* out) {
+  if (out == nullptr) {
+    throw std::invalid_argument("source group key output is null");
+  }
+  out->clear();
+  out->reserve(std::max(out->capacity(), key_indices.size() * std::size_t(8)));
+  for (const auto key_index : key_indices) {
+    if (!canUseEncodedParsedScalarKey(values[key_index])) {
+      return false;
+    }
+    const auto text = parsedScalarText(values[key_index]);
+    appendSizeToString(out, text.size());
+    out->push_back(':');
+    out->append(text.data(), text.size());
+  }
+  return true;
 }
 
 void resetParsedScalarLight(ParsedScalar* parsed) {
@@ -2224,6 +2270,10 @@ bool try_execute_line_aggregate(const std::string& path, const Schema& schema,
       pushdown.aggregate.keys.size() == 1 &&
       pushdown.aggregate.aggregates.size() == 1 &&
       pushdown.aggregate.aggregates.front().function != AggregateFunction::Count;
+  const bool multi_key_typed_shape =
+      (pushdown.shape == SourcePushdownShape::MultiKeyCount ||
+       pushdown.shape == SourcePushdownShape::MultiKeyNumericAggregate) &&
+      sourceTypedReducerSupports(pushdown);
 
   std::regex line_regex;
   SimpleLineRegexPlan simple_plan;
@@ -2245,6 +2295,7 @@ bool try_execute_line_aggregate(const std::string& path, const Schema& schema,
   SingleAggregateGroupMap single_groups;
   SingleCountGroupMap single_count_groups;
   SingleNumericAggregateGroupMap single_numeric_groups;
+  SourceTypedReducer typed_reducer(schema, pushdown);
   if (single_key_aggregate) {
     single_groups.reserve(64);
     single_count_groups.reserve(64);
@@ -2305,6 +2356,21 @@ bool try_execute_line_aggregate(const std::string& path, const Schema& schema,
         const Value key =
             lineParsedScalarToValue(parsed_values[access_plan.local_key_indices.front()]);
         single_count_groups[key] += 1;
+      } else if (multi_key_typed_shape) {
+        std::vector<Value> keys;
+        keys.reserve(access_plan.local_key_indices.size());
+        for (const auto local_key_index : access_plan.local_key_indices) {
+          keys.push_back(lineParsedScalarToValue(parsed_values[local_key_index]));
+        }
+        Value aggregate_value;
+        const Value* aggregate_value_ptr = nullptr;
+        if (pushdown.aggregate.aggregates.front().function != AggregateFunction::Count) {
+          aggregate_value =
+              lineParsedScalarToValue(parsed_values[static_cast<std::size_t>(
+                  access_plan.local_value_by_aggregate.front())]);
+          aggregate_value_ptr = &aggregate_value;
+        }
+        typed_reducer.add(keys, aggregate_value_ptr);
       } else if (single_key_numeric_shape) {
         const Value key =
             lineParsedScalarToValue(parsed_values[access_plan.local_key_indices.front()]);
@@ -2376,6 +2442,18 @@ bool try_execute_line_aggregate(const std::string& path, const Schema& schema,
       if (single_key_count_shape) {
         const Value& key = values[access_plan.local_key_indices.front()];
         single_count_groups[key] += 1;
+      } else if (multi_key_typed_shape) {
+        std::vector<Value> keys;
+        keys.reserve(access_plan.local_key_indices.size());
+        for (const auto local_key_index : access_plan.local_key_indices) {
+          keys.push_back(values[local_key_index]);
+        }
+        const Value* aggregate_value = nullptr;
+        if (pushdown.aggregate.aggregates.front().function != AggregateFunction::Count) {
+          aggregate_value =
+              &values[static_cast<std::size_t>(access_plan.local_value_by_aggregate.front())];
+        }
+        typed_reducer.add(keys, aggregate_value);
       } else if (single_key_numeric_shape) {
         const Value& key = values[access_plan.local_key_indices.front()];
         auto& state = single_numeric_groups[key];
@@ -2414,14 +2492,16 @@ bool try_execute_line_aggregate(const std::string& path, const Schema& schema,
       }
     }
   }
-  *out = single_key_count_shape
+  *out = multi_key_typed_shape
+             ? typed_reducer.finalize(false)
+             : (single_key_count_shape
              ? finalizeSingleCountGroups(schema, pushdown, single_count_groups, false)
              : (single_key_numeric_shape
                     ? finalizeSingleNumericAggregateGroups(schema, pushdown,
                                                           single_numeric_groups, false)
                     : (single_key_aggregate
                            ? finalizeSingleKeyAggregatedGroups(schema, pushdown, single_groups, false)
-                           : finalizeAggregatedGroups(schema, pushdown, groups, false)));
+                           : finalizeAggregatedGroups(schema, pushdown, groups, false))));
   if (pushdown.limit != 0 && out->rowCount() > pushdown.limit) {
     *out = limitTable(*out, pushdown.limit, false);
   }
@@ -2451,12 +2531,17 @@ bool try_execute_json_aggregate(const std::string& path, const Schema& schema,
       pushdown.aggregate.keys.size() == 1 &&
       pushdown.aggregate.aggregates.size() == 1 &&
       pushdown.aggregate.aggregates.front().function != AggregateFunction::Count;
+  const bool multi_key_typed_shape =
+      (pushdown.shape == SourcePushdownShape::MultiKeyCount ||
+       pushdown.shape == SourcePushdownShape::MultiKeyNumericAggregate) &&
+      sourceTypedReducerSupports(pushdown);
 
   const bool single_key_aggregate = pushdown.aggregate.keys.size() == 1;
   AggregateGroupMap groups;
   SingleAggregateGroupMap single_groups;
   SingleCountGroupMap single_count_groups;
   SingleNumericAggregateGroupMap single_numeric_groups;
+  SourceTypedReducer typed_reducer(schema, pushdown);
   if (single_key_aggregate) {
     single_groups.reserve(64);
     single_count_groups.reserve(64);
@@ -2469,6 +2554,35 @@ bool try_execute_json_aggregate(const std::string& path, const Schema& schema,
   std::vector<std::size_t> parsed_touched_indices;
   parsed_touched_indices.reserve(parsed_values.size());
   std::vector<uint8_t> predicate_scratch(access_plan.predicate_steps.size());
+  std::string encoded_key_scratch;
+  auto add_multi_key_typed_row = [&](const std::vector<ParsedScalar>& row_values) {
+    Value aggregate_value;
+    const Value* aggregate_value_ptr = nullptr;
+    if (pushdown.aggregate.aggregates.front().function != AggregateFunction::Count) {
+      aggregate_value =
+          parsedScalarToValue(row_values[static_cast<std::size_t>(
+              access_plan.local_value_by_aggregate.front())]);
+      aggregate_value_ptr = &aggregate_value;
+    }
+    if (tryEncodeParsedScalarGroupKeyRow(row_values, access_plan.local_key_indices,
+                                         &encoded_key_scratch)) {
+      if (!typed_reducer.addEncodedExisting(encoded_key_scratch, aggregate_value_ptr)) {
+        std::vector<Value> keys;
+        keys.reserve(access_plan.local_key_indices.size());
+        for (const auto local_key_index : access_plan.local_key_indices) {
+          keys.push_back(parsedScalarToValue(row_values[local_key_index]));
+        }
+        typed_reducer.addEncodedNew(encoded_key_scratch, keys, aggregate_value_ptr);
+      }
+      return;
+    }
+    std::vector<Value> keys;
+    keys.reserve(access_plan.local_key_indices.size());
+    for (const auto local_key_index : access_plan.local_key_indices) {
+      keys.push_back(parsedScalarToValue(row_values[local_key_index]));
+    }
+    typed_reducer.add(keys, aggregate_value_ptr);
+  };
 
   if (options.format == JsonFileFormat::JsonLines) {
     std::string line;
@@ -2501,6 +2615,8 @@ bool try_execute_json_aggregate(const std::string& path, const Schema& schema,
         const Value key =
             parsedScalarToValue(parsed_values[access_plan.local_key_indices.front()]);
         single_count_groups[key] += 1;
+      } else if (multi_key_typed_shape) {
+        add_multi_key_typed_row(parsed_values);
       } else if (single_key_numeric_shape) {
         const Value key =
             parsedScalarToValue(parsed_values[access_plan.local_key_indices.front()]);
@@ -2597,6 +2713,8 @@ bool try_execute_json_aggregate(const std::string& path, const Schema& schema,
           const Value key =
               parsedScalarToValue(parsed_values[access_plan.local_key_indices.front()]);
           single_count_groups[key] += 1;
+        } else if (multi_key_typed_shape) {
+          add_multi_key_typed_row(parsed_values);
         } else if (single_key_numeric_shape) {
           const Value key =
               parsedScalarToValue(parsed_values[access_plan.local_key_indices.front()]);
@@ -2671,14 +2789,16 @@ bool try_execute_json_aggregate(const std::string& path, const Schema& schema,
     }
   }
 
-  *out = single_key_count_shape
+  *out = multi_key_typed_shape
+             ? typed_reducer.finalize(false)
+             : (single_key_count_shape
              ? finalizeSingleCountGroups(schema, pushdown, single_count_groups, false)
              : (single_key_numeric_shape
                     ? finalizeSingleNumericAggregateGroups(schema, pushdown,
                                                           single_numeric_groups, false)
                     : (single_key_aggregate
                            ? finalizeSingleKeyAggregatedGroups(schema, pushdown, single_groups, false)
-                           : finalizeAggregatedGroups(schema, pushdown, groups, false)));
+                           : finalizeAggregatedGroups(schema, pushdown, groups, false))));
   if (pushdown.limit != 0 && out->rowCount() > pushdown.limit) {
     *out = limitTable(*out, pushdown.limit, false);
   }
@@ -3006,6 +3126,9 @@ bool includeRowForSelection(const std::vector<Value>& values,
       return false;
     }
   }
+  if (access_plan.predicate_steps.empty()) {
+    return true;
+  }
   return evaluateCompiledPredicateValues(values, access_plan.predicate_steps,
                                          predicate_scratch);
 }
@@ -3022,6 +3145,9 @@ bool includeParsedRowForSelection(const std::vector<ParsedScalar>& values,
       return false;
     }
   }
+  if (access_plan.predicate_steps.empty()) {
+    return true;
+  }
   return evaluateCompiledPredicateParsed(values, access_plan.predicate_steps,
                                          predicate_scratch);
 }
@@ -3037,6 +3163,9 @@ bool includeLineParsedRowForSelection(const std::vector<LineParsedScalar>& value
                                           filter.value, filter.op)) {
       return false;
     }
+  }
+  if (access_plan.predicate_steps.empty()) {
+    return true;
   }
   return evaluateCompiledPredicateLineParsed(values, access_plan.predicate_steps,
                                              predicate_scratch);
@@ -3106,7 +3235,8 @@ Table applyFilterAndLimit(const Table& input, const SourcePushdownSpec& pushdown
     if (!matches_filters) {
       continue;
     }
-    if (!evaluateCompiledPredicateRow(input, row_index, predicate_steps,
+    if (!predicate_steps.empty() &&
+        !evaluateCompiledPredicateRow(input, row_index, predicate_steps,
                                       &predicate_scratch)) {
       continue;
     }
@@ -3144,6 +3274,9 @@ bool valuesEqualForKey(const Value& lhs, const Value& rhs) {
 }
 
 std::size_t hashValueForKey(const Value& value) {
+  if (value.isNumber()) {
+    return hashCombine(17, std::hash<double>{}(value.asDouble()));
+  }
   std::size_t seed = static_cast<std::size_t>(value.type());
   switch (value.type()) {
     case DataType::Nil:
@@ -3152,6 +3285,7 @@ std::size_t hashValueForKey(const Value& value) {
       return hashCombine(seed, std::hash<bool>{}(value.asBool()));
     case DataType::Int64:
     case DataType::Double:
+    case DataType::Float32:
       return hashCombine(seed, std::hash<double>{}(value.asDouble()));
     case DataType::String:
       return hashCombine(seed, std::hash<std::string>{}(value.asString()));
@@ -3274,6 +3408,9 @@ bool includeRowForAggregate(const std::vector<Value>& values, const AggregateAcc
       return false;
     }
   }
+  if (access_plan.predicate_steps.empty()) {
+    return true;
+  }
   return evaluateCompiledPredicateValues(values, access_plan.predicate_steps,
                                          predicate_scratch);
 }
@@ -3289,6 +3426,9 @@ bool includeParsedRowForAggregate(const std::vector<ParsedScalar>& values,
       return false;
     }
   }
+  if (access_plan.predicate_steps.empty()) {
+    return true;
+  }
   return evaluateCompiledPredicateParsed(values, access_plan.predicate_steps,
                                          predicate_scratch);
 }
@@ -3303,6 +3443,9 @@ bool includeLineParsedRowForAggregate(const std::vector<LineParsedScalar>& value
                                           filter.value, filter.op)) {
       return false;
     }
+  }
+  if (access_plan.predicate_steps.empty()) {
+    return true;
   }
   return evaluateCompiledPredicateLineParsed(values, access_plan.predicate_steps,
                                              predicate_scratch);
@@ -3917,33 +4060,37 @@ bool execute_file_source_pushdown(const FileSourceConnectorSpec& spec, const Sch
   if (out == nullptr) {
     throw std::invalid_argument("source pushdown output cannot be null");
   }
+  SourcePushdownSpec planned_pushdown = pushdown;
+  planned_pushdown.shape = selectSourcePushdownShapeForSource(spec.kind, pushdown);
+  planned_pushdown.shape_is_explicit = true;
   if (spec.kind == FileSourceKind::Csv) {
-    const auto execution_pattern = analyzeSourceExecution(spec, schema, pushdown);
-    return execute_csv_source_pushdown(spec.path, schema, pushdown, spec.csv_delimiter,
+    const auto execution_pattern = analyzeSourceExecution(spec, schema, planned_pushdown);
+    return execute_csv_source_pushdown(spec.path, schema, planned_pushdown, spec.csv_delimiter,
                                        materialize_rows, out, &execution_pattern);
   }
-  if (pushdown.has_aggregate) {
+  if (planned_pushdown.has_aggregate) {
     if (spec.kind == FileSourceKind::Line) {
-      if (try_execute_line_aggregate(spec.path, schema, spec.line_options, pushdown, out)) {
+      if (try_execute_line_aggregate(spec.path, schema, spec.line_options, planned_pushdown, out)) {
         return true;
       }
     } else {
-      if (try_execute_json_aggregate(spec.path, schema, spec.json_options, pushdown, out)) {
+      if (try_execute_json_aggregate(spec.path, schema, spec.json_options, planned_pushdown, out)) {
         return true;
       }
     }
   }
   const bool has_selection_pushdown =
-      !pushdown.filters.empty() || static_cast<bool>(pushdown.predicate_expr) || pushdown.limit != 0;
+      !planned_pushdown.filters.empty() || static_cast<bool>(planned_pushdown.predicate_expr) ||
+      planned_pushdown.limit != 0;
   if (has_selection_pushdown) {
     if (spec.kind == FileSourceKind::Line) {
-      return executeLineSourcePushdown(spec.path, schema, spec.line_options, pushdown,
+      return executeLineSourcePushdown(spec.path, schema, spec.line_options, planned_pushdown,
                                        materialize_rows, out);
     }
-    return executeJsonSourcePushdown(spec.path, schema, spec.json_options, pushdown,
+    return executeJsonSourcePushdown(spec.path, schema, spec.json_options, planned_pushdown,
                                      materialize_rows, out);
   }
-  const auto captured_schema_indices = buildCapturedSchemaIndices(schema, pushdown);
+  const auto captured_schema_indices = buildCapturedSchemaIndices(schema, planned_pushdown);
   const bool use_columnar_capture =
       captured_schema_indices.size() < schema.fields.size();
   Table loaded =
@@ -3954,21 +4101,22 @@ bool execute_file_source_pushdown(const FileSourceConnectorSpec& spec, const Sch
           : (spec.kind == FileSourceKind::Line)
                 ? load_line_file(spec.path, spec.line_options)
                 : load_json_file(spec.path, spec.json_options);
-  if (!pushdown.filters.empty() || pushdown.predicate_expr || pushdown.limit != 0) {
-    loaded = applyFilterAndLimit(loaded, pushdown);
+  if (!planned_pushdown.filters.empty() || planned_pushdown.predicate_expr ||
+      planned_pushdown.limit != 0) {
+    loaded = applyFilterAndLimit(loaded, planned_pushdown);
   }
-  if (pushdown.has_aggregate) {
-    if (!applyAggregatePushdown(loaded, pushdown, &loaded)) {
+  if (planned_pushdown.has_aggregate) {
+    if (!applyAggregatePushdown(loaded, planned_pushdown, &loaded)) {
       return false;
     }
-    if (pushdown.limit != 0 && loaded.rowCount() > pushdown.limit) {
+    if (planned_pushdown.limit != 0 && loaded.rowCount() > planned_pushdown.limit) {
       Table limited;
       limited.schema = loaded.schema;
       limited.columnar_cache = std::make_shared<ColumnarTable>();
       limited.columnar_cache->schema = limited.schema;
       limited.columnar_cache->columns.resize(limited.schema.fields.size());
       limited.columnar_cache->arrow_formats.resize(limited.schema.fields.size());
-      for (std::size_t row_index = 0; row_index < pushdown.limit; ++row_index) {
+      for (std::size_t row_index = 0; row_index < planned_pushdown.limit; ++row_index) {
         Row row;
         row.reserve(limited.schema.fields.size());
         for (std::size_t col = 0; col < limited.schema.fields.size(); ++col) {
@@ -3984,7 +4132,7 @@ bool execute_file_source_pushdown(const FileSourceConnectorSpec& spec, const Sch
     *out = std::move(loaded);
     return true;
   }
-  loaded = projectTable(loaded, pushdown.projected_columns, materialize_rows);
+  loaded = projectTable(loaded, planned_pushdown.projected_columns, materialize_rows);
   *out = std::move(loaded);
   return true;
 }

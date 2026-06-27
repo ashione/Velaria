@@ -16,6 +16,7 @@
 #include "src/dataflow/core/contract/api/session.h"
 #include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/csv.h"
+#include "src/dataflow/core/execution/runtime/execution_optimizer.h"
 
 namespace {
 
@@ -55,6 +56,38 @@ void write_fixtures(const std::string& csv_path, const std::string& line_path,
                << ((i % 2) == 0 ? "true" : "false")
                << " note=path_" << (i % 128) << "\\\\segment" << "\n";
     jsonl << "{\"id\":" << i << ",\"grp\":\"g" << grp << "\",\"val\":" << val << "}\n";
+  }
+}
+
+void write_multi_key_csv_fixture(const std::string& path, std::size_t rows) {
+  std::ofstream csv(path);
+  if (!csv.is_open()) {
+    throw std::runtime_error("cannot open multi-key benchmark fixture file");
+  }
+  csv << "id,grp,svc,val\n";
+  for (std::size_t i = 0; i < rows; ++i) {
+    const int grp = static_cast<int>(i % 16);
+    const int svc = static_cast<int>((i / 16) % 2);
+    const int val = static_cast<int>((i * 37) % 1000);
+    csv << i << ",g" << grp << ",s" << svc << "," << val << "\n";
+  }
+}
+
+void write_multi_key_line_json_fixtures(const std::string& line_path,
+                                        const std::string& jsonl_path,
+                                        std::size_t rows) {
+  std::ofstream line(line_path);
+  std::ofstream jsonl(jsonl_path);
+  if (!line.is_open() || !jsonl.is_open()) {
+    throw std::runtime_error("cannot open multi-key line/json benchmark fixture file");
+  }
+  for (std::size_t i = 0; i < rows; ++i) {
+    const int grp = static_cast<int>(i % 16);
+    const int svc = static_cast<int>((i / 16) % 2);
+    const int val = static_cast<int>((i * 37) % 1000);
+    line << i << "|g" << grp << "|s" << svc << "|" << val << "\n";
+    jsonl << "{\"id\":" << i << ",\"grp\":\"g" << grp << "\",\"svc\":\"s" << svc
+          << "\",\"val\":" << val << "}\n";
   }
 }
 
@@ -196,6 +229,27 @@ dataflow::SourcePushdownSpec aggregate_pushdown(std::size_t key_index,
   pushdown.aggregate.keys = {key_index};
   pushdown.aggregate.aggregates = {
       {dataflow::AggregateFunction::Sum, value_index, "sum_val"}};
+  return pushdown;
+}
+
+dataflow::SourcePushdownSpec multi_key_aggregate_pushdown(std::size_t first_key_index,
+                                                          std::size_t second_key_index,
+                                                          std::size_t value_index) {
+  dataflow::SourcePushdownSpec pushdown;
+  pushdown.filters.push_back({value_index, dataflow::Value(int64_t(500)), ">"});
+  pushdown.has_aggregate = true;
+  pushdown.aggregate.keys = {first_key_index, second_key_index};
+  pushdown.aggregate.aggregates = {
+      {dataflow::AggregateFunction::Sum, value_index, "sum_val"}};
+  pushdown.shape = dataflow::classifySourcePushdownShape(pushdown);
+  pushdown.shape_is_explicit = true;
+  return pushdown;
+}
+
+dataflow::SourcePushdownSpec select_source_pushdown(
+    dataflow::FileSourceKind kind, dataflow::SourcePushdownSpec pushdown) {
+  pushdown.shape = dataflow::selectSourcePushdownShapeForSource(kind, pushdown);
+  pushdown.shape_is_explicit = true;
   return pushdown;
 }
 
@@ -362,10 +416,15 @@ int main(int argc, char** argv) {
     }
 
     const auto csv_path = make_temp_file("velaria-bench-csv");
+    const auto csv_multi_key_path = make_temp_file("velaria-bench-csv-multi-key");
     const auto line_path = make_temp_file("velaria-bench-line");
+    const auto line_multi_key_path = make_temp_file("velaria-bench-line-multi-key");
     const auto line_regex_path = make_temp_file("velaria-bench-line-regex");
     const auto jsonl_path = make_temp_file("velaria-bench-jsonl");
+    const auto jsonl_multi_key_path = make_temp_file("velaria-bench-jsonl-multi-key");
     write_fixtures(csv_path, line_path, line_regex_path, jsonl_path, rows);
+    write_multi_key_csv_fixture(csv_multi_key_path, rows);
+    write_multi_key_line_json_fixtures(line_multi_key_path, jsonl_multi_key_path, rows);
 
     dataflow::LineFileOptions line_options;
     line_options.mode = dataflow::LineParseMode::Split;
@@ -375,8 +434,17 @@ int main(int argc, char** argv) {
     dataflow::JsonFileOptions json_options;
     json_options.format = dataflow::JsonFileFormat::JsonLines;
     json_options.columns = {"id", "grp", "val"};
+    dataflow::LineFileOptions line_multi_key_options;
+    line_multi_key_options.mode = dataflow::LineParseMode::Split;
+    line_multi_key_options.split_delimiter = '|';
+    line_multi_key_options.mappings = {{"id", 0}, {"grp", 1}, {"svc", 2}, {"val", 3}};
+    dataflow::JsonFileOptions json_multi_key_options;
+    json_multi_key_options.format = dataflow::JsonFileFormat::JsonLines;
+    json_multi_key_options.columns = {"id", "grp", "svc", "val"};
     const auto line_schema = dataflow::infer_line_file_schema(line_options);
     const auto json_schema = dataflow::infer_json_file_schema(json_options);
+    const auto line_multi_key_schema = dataflow::infer_line_file_schema(line_multi_key_options);
+    const auto json_multi_key_schema = dataflow::infer_json_file_schema(json_multi_key_options);
     dataflow::LineFileOptions line_regex_options;
     line_regex_options.mode = dataflow::LineParseMode::Regex;
     line_regex_options.regex_pattern =
@@ -384,6 +452,7 @@ int main(int argc, char** argv) {
     line_regex_options.mappings = {{"id", 1}, {"grp", 2}, {"val", 3}, {"ok", 4}, {"note", 5}};
 
     const auto csv_probe = session.probe(csv_path);
+    const auto csv_multi_key_schema = dataflow::read_csv_schema(csv_multi_key_path);
     const auto line_probe = session.probe(line_path);
     const auto json_probe = session.probe(jsonl_path);
     expect(csv_probe.kind == dataflow::FileSourceKind::Csv, "csv probe benchmark kind mismatch");
@@ -476,6 +545,32 @@ int main(int argc, char** argv) {
     }, rounds);
     emit_bench("read_csv_aggregate_pushdown", rows, rounds, csv_aggregate_only_us, 16,
                "source-pushdown-aggregate");
+    const auto csv_multi_key_aggregate_us = run_bench_us([&](int) {
+      dataflow::Table aggregated;
+      expect(dataflow::execute_csv_source_pushdown(
+                 csv_multi_key_path, csv_multi_key_schema,
+                 select_source_pushdown(dataflow::FileSourceKind::Csv,
+                                        multi_key_aggregate_pushdown(1, 2, 3)),
+                 ',', false, &aggregated),
+             "csv multi-key aggregate pushdown execution failed");
+      expect(aggregated.rowCount() == 32, "csv multi-key aggregate pushdown row count mismatch");
+    }, rounds);
+    emit_bench("read_csv_multi_key_aggregate_pushdown", rows, rounds,
+               csv_multi_key_aggregate_us, 32, "source-pushdown-multi-key-aggregate");
+    const auto csv_multi_key_generic_us = run_bench_us([&](int) {
+      auto pushdown = multi_key_aggregate_pushdown(1, 2, 3);
+      pushdown.shape = dataflow::SourcePushdownShape::Generic;
+      pushdown.shape_is_explicit = true;
+      dataflow::Table aggregated;
+      expect(dataflow::execute_csv_source_pushdown(
+                 csv_multi_key_path, csv_multi_key_schema, pushdown, ',', false, &aggregated),
+             "csv multi-key generic aggregate pushdown execution failed");
+      expect(aggregated.rowCount() == 32,
+             "csv multi-key generic aggregate pushdown row count mismatch");
+    }, rounds);
+    emit_compare("read_csv_multi_key_aggregate_pushdown", rows, rounds,
+                 csv_multi_key_generic_us, csv_multi_key_aggregate_us, "generic",
+                 "selected");
 
     const auto line_explicit_us = run_bench_us([&](int) {
       auto out = run_group_sum(session.read_line_file(line_path, line_options), "grp", "val");
@@ -522,6 +617,40 @@ int main(int argc, char** argv) {
     }, rounds);
     emit_bench("read_line_aggregate_pushdown", rows, rounds, line_aggregate_only_us, 16,
                "source-pushdown-aggregate");
+    const auto line_multi_key_aggregate_us = run_bench_us([&](int) {
+      dataflow::FileSourceConnectorSpec spec;
+      spec.kind = dataflow::FileSourceKind::Line;
+      spec.path = line_multi_key_path;
+      spec.line_options = line_multi_key_options;
+      dataflow::Table aggregated;
+      expect(dataflow::execute_file_source_pushdown(
+                 spec, line_multi_key_schema,
+                 select_source_pushdown(dataflow::FileSourceKind::Line,
+                                        multi_key_aggregate_pushdown(1, 2, 3)),
+                 false, &aggregated),
+             "line multi-key aggregate pushdown execution failed");
+      expect(aggregated.rowCount() == 32, "line multi-key aggregate pushdown row count mismatch");
+    }, rounds);
+    emit_bench("read_line_multi_key_aggregate_pushdown", rows, rounds,
+               line_multi_key_aggregate_us, 32, "source-pushdown-multi-key-aggregate");
+    const auto line_multi_key_generic_us = run_bench_us([&](int) {
+      dataflow::FileSourceConnectorSpec spec;
+      spec.kind = dataflow::FileSourceKind::Line;
+      spec.path = line_multi_key_path;
+      spec.line_options = line_multi_key_options;
+      auto pushdown = multi_key_aggregate_pushdown(1, 2, 3);
+      pushdown.shape = dataflow::SourcePushdownShape::Generic;
+      pushdown.shape_is_explicit = true;
+      dataflow::Table aggregated;
+      expect(dataflow::execute_file_source_pushdown(
+                 spec, line_multi_key_schema, pushdown, false, &aggregated),
+             "line multi-key generic aggregate pushdown execution failed");
+      expect(aggregated.rowCount() == 32,
+             "line multi-key generic aggregate pushdown row count mismatch");
+    }, rounds);
+    emit_compare("read_line_multi_key_aggregate_pushdown", rows, rounds,
+                 line_multi_key_generic_us, line_multi_key_aggregate_us, "generic",
+                 "selected");
 
     const auto line_regex_parse_us = run_bench_us([&](int) {
       auto out = session.read_line_file(line_regex_path, line_regex_options).limit(1).toTable();
@@ -588,6 +717,40 @@ int main(int argc, char** argv) {
     }, rounds);
     emit_bench("read_json_aggregate_pushdown", rows, rounds, json_aggregate_only_us, 16,
                "source-pushdown-aggregate");
+    const auto json_multi_key_aggregate_us = run_bench_us([&](int) {
+      dataflow::FileSourceConnectorSpec spec;
+      spec.kind = dataflow::FileSourceKind::Json;
+      spec.path = jsonl_multi_key_path;
+      spec.json_options = json_multi_key_options;
+      dataflow::Table aggregated;
+      expect(dataflow::execute_file_source_pushdown(
+                 spec, json_multi_key_schema,
+                 select_source_pushdown(dataflow::FileSourceKind::Json,
+                                        multi_key_aggregate_pushdown(1, 2, 3)),
+                 false, &aggregated),
+             "json multi-key aggregate pushdown execution failed");
+      expect(aggregated.rowCount() == 32, "json multi-key aggregate pushdown row count mismatch");
+    }, rounds);
+    emit_bench("read_json_multi_key_aggregate_pushdown", rows, rounds,
+               json_multi_key_aggregate_us, 32, "source-pushdown-multi-key-aggregate");
+    const auto json_multi_key_generic_us = run_bench_us([&](int) {
+      dataflow::FileSourceConnectorSpec spec;
+      spec.kind = dataflow::FileSourceKind::Json;
+      spec.path = jsonl_multi_key_path;
+      spec.json_options = json_multi_key_options;
+      auto pushdown = multi_key_aggregate_pushdown(1, 2, 3);
+      pushdown.shape = dataflow::SourcePushdownShape::Generic;
+      pushdown.shape_is_explicit = true;
+      dataflow::Table aggregated;
+      expect(dataflow::execute_file_source_pushdown(
+                 spec, json_multi_key_schema, pushdown, false, &aggregated),
+             "json multi-key generic aggregate pushdown execution failed");
+      expect(aggregated.rowCount() == 32,
+             "json multi-key generic aggregate pushdown row count mismatch");
+    }, rounds);
+    emit_compare("read_json_multi_key_aggregate_pushdown", rows, rounds,
+                 json_multi_key_generic_us, json_multi_key_aggregate_us, "generic",
+                 "typed");
 
     const auto sql_probe_create_us = run_bench_us([&](int round) {
       const auto table_name = table_name_for("file_probe_input", round);

@@ -51,9 +51,11 @@ The file-input benchmark emits JSON rows for:
 
 Current file-source optimizer/executor layering:
 
-- executor lowering classifies source pushdown into `ConjunctiveFilterOnly`, `SingleKeyCount`, `SingleKeyNumericAggregate`, or `Generic`
+- executor lowering classifies source pushdown into `ConjunctiveFilterOnly`, `SingleKeyCount`, `SingleKeyNumericAggregate`, `MultiKeyCount`, `MultiKeyNumericAggregate`, or `Generic`
+- optimizer source capability routing then applies `selectSourcePushdownShapeForSource(...)`: CSV and line multi-key shapes currently select `Generic`, while JSON keeps the proven multi-key typed reducer path
 - file sources use those shapes to select lighter fast paths where semantics allow
-- current fast paths are most effective for line split, line regex, JSON selected-field pushdown, and simple CSV single-key aggregate cases
+- current fast paths are most effective for line split, line regex, JSON selected-field pushdown, JSON multi-key aggregate pushdown, and simple CSV single-key aggregate cases
+- the benchmark gate includes CSV/line multi-key selected-vs-generic guardrails so rejected shared-reducer routing does not accidentally return
 
 ## Latest Local Regression Snapshot
 

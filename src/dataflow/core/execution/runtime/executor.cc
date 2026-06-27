@@ -1737,6 +1737,7 @@ bool buildSourcePushdownSpec(const PlanNodePtr& plan, const SourceRequirementMap
       SourcePushdownSpec spec;
       spec.projected_columns = requestedSourceColumns(*source, requirements);
       spec.shape = classifySourcePushdownShape(spec);
+      spec.shape_is_explicit = true;
       *source_out = source;
       *pushdown_out = std::move(spec);
       return true;
@@ -1767,6 +1768,7 @@ bool buildSourcePushdownSpec(const PlanNodePtr& plan, const SourceRequirementMap
         spec.predicate_expr = std::move(combined);
       }
       spec.shape = classifySourcePushdownShape(spec);
+      spec.shape_is_explicit = true;
       *source_out = source;
       *pushdown_out = std::move(spec);
       return true;
@@ -1780,6 +1782,7 @@ bool buildSourcePushdownSpec(const PlanNodePtr& plan, const SourceRequirementMap
       }
       spec.limit = spec.limit == 0 ? node->n : std::min(spec.limit, node->n);
       spec.shape = classifySourcePushdownShape(spec);
+      spec.shape_is_explicit = true;
       *source_out = source;
       *pushdown_out = std::move(spec);
       return true;
@@ -1798,6 +1801,7 @@ bool buildSourcePushdownSpec(const PlanNodePtr& plan, const SourceRequirementMap
       spec.aggregate.keys = node->keys;
       spec.aggregate.aggregates = node->aggregates;
       spec.shape = classifySourcePushdownShape(spec);
+      spec.shape_is_explicit = true;
       *source_out = source;
       *pushdown_out = std::move(spec);
       return true;

@@ -76,6 +76,49 @@ compare = {
     for row in file_rows
     if row.get("bench") == "file-input-compare"
 }
+file_input = {
+    row["case"]: row
+    for row in file_rows
+    if row.get("bench") == "file-input"
+}
+for multi_key_name in (
+    "read_csv_multi_key_aggregate_pushdown",
+    "read_line_multi_key_aggregate_pushdown",
+    "read_json_multi_key_aggregate_pushdown",
+):
+    multi_key_case = file_input.get(multi_key_name)
+    if multi_key_case is None:
+        raise SystemExit(f"missing file-source multi-key aggregate pushdown case: {multi_key_name}")
+    if multi_key_case.get("result_rows") != 32:
+        raise SystemExit(
+            f"{multi_key_name} expected 32 result rows, got {multi_key_case.get('result_rows')}"
+        )
+    if multi_key_case.get("best_us", 0) <= 0:
+        raise SystemExit(f"{multi_key_name} reported non-positive best_us")
+for guardrail_name in (
+    "read_csv_multi_key_aggregate_pushdown",
+    "read_line_multi_key_aggregate_pushdown",
+):
+    guardrail = compare.get(guardrail_name)
+    if guardrail is None:
+        raise SystemExit(f"missing {guardrail_name} selected-vs-generic comparison")
+    ratio = guardrail.get("ratio")
+    if ratio is None:
+        raise SystemExit(f"{guardrail_name} comparison missing ratio")
+    if ratio >= 1.15:
+        raise SystemExit(
+            f"{guardrail_name} selected path should not regress generic path, got ratio {ratio}"
+        )
+json_multi_key_compare = compare.get("read_json_multi_key_aggregate_pushdown")
+if json_multi_key_compare is None:
+    raise SystemExit("missing json multi-key typed-vs-generic comparison")
+json_multi_key_ratio = json_multi_key_compare.get("ratio")
+if json_multi_key_ratio is None:
+    raise SystemExit("json multi-key comparison missing ratio")
+if json_multi_key_ratio >= 0.98:
+    raise SystemExit(
+        f"json multi-key typed reducer should beat generic path, got ratio {json_multi_key_ratio}"
+    )
 required_pushdown = {
     "sql_csv_predicate_and_group_count",
     "sql_csv_predicate_or_group_count",

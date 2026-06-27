@@ -337,14 +337,19 @@ SourceExecutionPattern analyzeSourceExecution(const FileSourceConnectorSpec& spe
 
 SourcePushdownShape classifySourcePushdownShape(const SourcePushdownSpec& spec) {
   if (spec.has_aggregate) {
-    if (spec.aggregate.keys.size() == 1 && spec.aggregate.aggregates.size() == 1) {
+    if (!spec.aggregate.keys.empty() && spec.aggregate.keys.size() <= 3 &&
+        spec.aggregate.aggregates.size() == 1) {
       const auto& agg = spec.aggregate.aggregates.front();
       if (agg.function == AggregateFunction::Count) {
-        return SourcePushdownShape::SingleKeyCount;
+        return spec.aggregate.keys.size() == 1 ? SourcePushdownShape::SingleKeyCount
+                                               : SourcePushdownShape::MultiKeyCount;
       }
-      if (agg.function == AggregateFunction::Sum || agg.function == AggregateFunction::Avg ||
-          (!spec.predicate_expr && (agg.function == AggregateFunction::Min ||
-                                    agg.function == AggregateFunction::Max))) {
+      if (agg.function == AggregateFunction::Sum || agg.function == AggregateFunction::Avg) {
+        return spec.aggregate.keys.size() == 1 ? SourcePushdownShape::SingleKeyNumericAggregate
+                                               : SourcePushdownShape::MultiKeyNumericAggregate;
+      }
+      if (spec.aggregate.keys.size() == 1 && !spec.predicate_expr &&
+          (agg.function == AggregateFunction::Min || agg.function == AggregateFunction::Max)) {
         return SourcePushdownShape::SingleKeyNumericAggregate;
       }
     }
@@ -352,6 +357,27 @@ SourcePushdownShape classifySourcePushdownShape(const SourcePushdownSpec& spec) 
   }
   if (!spec.filters.empty() && !spec.predicate_expr) {
     return SourcePushdownShape::ConjunctiveFilterOnly;
+  }
+  return SourcePushdownShape::Generic;
+}
+
+SourcePushdownShape selectSourcePushdownShapeForSource(FileSourceKind kind,
+                                                       const SourcePushdownSpec& spec) {
+  const SourcePushdownShape logical_shape =
+      spec.shape_is_explicit ? spec.shape : classifySourcePushdownShape(spec);
+  switch (logical_shape) {
+    case SourcePushdownShape::MultiKeyCount:
+    case SourcePushdownShape::MultiKeyNumericAggregate:
+      // Multi-key typed source reduction is currently proven only for JSON,
+      // where parsed scalars can use semantic-safe encoded keys and fall back
+      // to Value keys for numeric/bool/null semantics. CSV and line keep their
+      // generic selected paths until a source-independent key view proves out.
+      return kind == FileSourceKind::Json ? logical_shape : SourcePushdownShape::Generic;
+    case SourcePushdownShape::Generic:
+    case SourcePushdownShape::ConjunctiveFilterOnly:
+    case SourcePushdownShape::SingleKeyCount:
+    case SourcePushdownShape::SingleKeyNumericAggregate:
+      return logical_shape;
   }
   return SourcePushdownShape::Generic;
 }

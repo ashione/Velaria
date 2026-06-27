@@ -329,9 +329,11 @@ Current implementation notes:
 - single-`INT64` dense aggregates already have typed `SUM` / `COUNT` / `AVG` state and measured local speedups
 - two-`INT64` grouped `SUM` / `COUNT` / `AVG` now have typed state-columnar paths and measured local speedups
 - source pushdown now classifies single-key `COUNT` and numeric `SUM` / `AVG` as typed shapes even when the filter is represented as a predicate expression; CSV uses the typed reducer path for those predicate aggregates, with measured improvements on CSV `OR` and mixed predicate group-count benchmark cases
+- source pushdown now also classifies 2-3 key `COUNT` and numeric `SUM` / `AVG` as multi-key source shapes; `selectSourcePushdownShapeForSource(...)` keeps the source capability choice in the optimizer layer, so JSON line/array aggregate pushdown uses the shared typed reducer with semantic-safe encoded-key lookup while CSV and line select the existing generic paths because the shared reducer attempts regressed local benchmarks
+- JSON dictionary/packed-key lookup and line split encoded-reducer routing were implemented and measured as candidate v2 paths, then removed because repeated local benchmark runs did not prove stable wins; the retained v2 changes are numeric key hash correctness, JSON numeric-key semantic coverage, selected-vs-generic guardrails, and filter-only predicate short-circuiting
 - mixed string/`INT64` SUM attempts were measured and rejected twice: first as a state-only reducer change, then as a dictionary-id reducer path that regressed the non-null benchmark; mixed-key work needs a stronger key/view design before more typed reducer state
-- `scripts/run_columnar_kernel_benchmark_gate.sh` now checks the aggregate typed-shape selections, file-source pushdown ratios, and string builtin plan-reuse guardrail in one reproducible local gate
-- remaining reducer work should generalize this shape to multi-key source pushdown reducers and encoded mixed-key layouts without changing public APIs
+- `scripts/run_columnar_kernel_benchmark_gate.sh` now checks the aggregate typed-shape selections, file-source pushdown ratios, CSV/line multi-key selected-vs-generic guardrails, JSON multi-key typed-vs-generic ratio, and string builtin plan-reuse guardrail in one reproducible local gate
+- remaining reducer work should generalize key ownership and dictionary/key-id views before trying to replace CSV or line multi-key reducers again
 
 ## Related Historical Notes
 

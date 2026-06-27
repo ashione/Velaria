@@ -826,9 +826,12 @@ operator-specific shortcut。
 
 - 继续 multi-key reducer generalization：先做 string dictionary/key encoding 或 key-id
   view，再评估 mixed string/int key 的 typed state；不要再只替换 reducer state。
-- 继续推进 source pushdown typed reducer interface：当前 single-key predicate aggregate
-  已接入 typed shape，下一步应把 CSV、line、JSON 的多聚合/多 key reducer 收敛到共享
-  state-columnar reducer，而不是让三个 scanner 各自维护一份状态机。
+- source pushdown typed reducer interface 已完成第一条保留路径：JSON multi-key aggregate
+  使用共享 typed reducer 与 semantic-safe encoded-key lookup。source capability 选择集中在
+  optimizer 的 `selectSourcePushdownShapeForSource(...)`，CSV 与 line 的共享 reducer routing
+  已被 benchmark 否决并选择 `Generic`，由 selected-vs-generic guardrail 固化。JSON dictionary/packed-key
+  lookup 与 line split encoded-reducer routing 已实践但未保留，因为复测没有证明稳定收益；
+  下一步不要强行统一 scanner，而应先解决 key view / key ownership 后再评估。
 
 无论选择哪条，都应保持所有 public APIs 与 row boundaries 稳定；`ColumnarExecBatch` /
 `ColumnarExecView` 应继续作为内部 substrate 逐步接入 operator，而不是一次性重写 executor。

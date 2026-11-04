@@ -1241,6 +1241,48 @@ int main() {
     check_csv_many_numeric_keys(csv_many_numeric_sum_result,
                                 "csv many numeric keys typed sum");
 
+    const auto csv_high_cardinality_path =
+        make_temp_file("velaria-source-csv-high-cardinality");
+    std::string csv_high_cardinality_data = "k,v\n";
+    for (int i = 0; i < 5000; ++i) {
+      csv_high_cardinality_data += std::to_string(2000000LL + i) + ",1\n";
+    }
+    write_file(csv_high_cardinality_path, csv_high_cardinality_data);
+    const auto csv_high_cardinality_schema =
+        dataflow::read_csv_schema(csv_high_cardinality_path);
+    dataflow::SourcePushdownSpec csv_high_cardinality_count_pushdown;
+    csv_high_cardinality_count_pushdown.has_aggregate = true;
+    csv_high_cardinality_count_pushdown.aggregate.keys = {0};
+    csv_high_cardinality_count_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Count, 0, "cnt"},
+    };
+    csv_high_cardinality_count_pushdown.shape =
+        dataflow::SourcePushdownShape::SingleKeyCount;
+    csv_high_cardinality_count_pushdown.shape_is_explicit = true;
+    dataflow::Table csv_high_cardinality_count_result;
+    expect(dataflow::execute_csv_source_pushdown(
+               csv_high_cardinality_path, csv_high_cardinality_schema,
+               csv_high_cardinality_count_pushdown, ',', false,
+               &csv_high_cardinality_count_result),
+           "csv high cardinality count pushdown failed");
+    expect(csv_high_cardinality_count_result.columnar_cache != nullptr,
+           "csv high cardinality cache missing");
+    expect(csv_high_cardinality_count_result.columnar_cache->row_count == 5000,
+           "csv high cardinality should keep 5000 groups");
+    const auto& csv_high_cardinality_keys =
+        csv_high_cardinality_count_result.columnar_cache->columns[0].values;
+    const auto& csv_high_cardinality_counts =
+        csv_high_cardinality_count_result.columnar_cache->columns[1].values;
+    expect(csv_high_cardinality_keys.size() == 5000 &&
+               csv_high_cardinality_counts.size() == 5000,
+           "csv high cardinality output shape mismatch");
+    for (std::size_t i = 0; i < csv_high_cardinality_counts.size(); ++i) {
+      expect(csv_high_cardinality_keys[i].isNumber(),
+             "csv high cardinality numeric key expected");
+      expect(csv_high_cardinality_counts[i].asDouble() == 1.0,
+             "csv high cardinality count mismatch");
+    }
+
     const auto csv_multi_key_semantics_path =
         make_temp_file("velaria-source-csv-multi-key-semantics");
     write_file(csv_multi_key_semantics_path,

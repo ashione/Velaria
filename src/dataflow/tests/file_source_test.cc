@@ -1078,16 +1078,22 @@ int main() {
                "True,9\n"
                "True,10\n"
                ".5,11\n"
-               ".50,12\n");
+               ".50,12\n"
+               "1000,13\n"
+               "1e3,14\n"
+               "1000.0,15\n"
+               "1000000000000000,16\n"
+               "1e15,17\n"
+               "2.0,18\n");
     const auto csv_key_semantics_schema = dataflow::read_csv_schema(csv_key_semantics_path);
     auto check_csv_key_semantics = [](const dataflow::Table& table,
-                                      const std::array<double, 6>& expected,
+                                      const std::array<double, 9>& expected,
                                       const std::string& label) {
       expect(table.columnar_cache != nullptr, label + " columnar cache missing");
       const auto& keys = table.columnar_cache->columns[0].values;
       const auto& values = table.columnar_cache->columns[1].values;
-      expect(keys.size() == 6, label + " should coalesce key spellings");
-      std::array<double, 6> totals{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+      expect(keys.size() == 9, label + " should coalesce key spellings");
+      std::array<double, 9> totals{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
       for (std::size_t i = 0; i < keys.size(); ++i) {
         const auto& key = keys[i];
         if (key.type() == dataflow::DataType::Bool) {
@@ -1103,6 +1109,14 @@ int main() {
           totals[4] += values[i].asDouble();
         } else if (key.isNumber() && key.asDouble() == 0.5) {
           totals[5] += values[i].asDouble();
+        } else if (key.isNumber() && key.asDouble() == 1000.0) {
+          totals[6] += values[i].asDouble();
+        } else if (key.isNumber() && key.asDouble() == 1000000000000000.0) {
+          totals[7] += values[i].asDouble();
+        } else if (key.isNumber() && key.asDouble() == 2.0) {
+          expect(key.type() == dataflow::DataType::Double,
+                 label + " should keep the first-seen double key type");
+          totals[8] += values[i].asDouble();
         } else {
           expect(false, label + " unexpected key value");
         }
@@ -1122,7 +1136,7 @@ int main() {
                                                  csv_key_count_pushdown, ',', false,
                                                  &csv_key_count_result),
            "csv generic single-key count pushdown failed");
-    check_csv_key_semantics(csv_key_count_result, {2.0, 2.0, 2.0, 2.0, 2.0, 2.0},
+    check_csv_key_semantics(csv_key_count_result, {2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 3.0, 2.0, 1.0},
                             "csv generic single-key count");
 
     dataflow::SourcePushdownSpec csv_key_count_typed_pushdown = csv_key_count_pushdown;
@@ -1134,7 +1148,7 @@ int main() {
                                                  csv_key_count_typed_pushdown, ',', false,
                                                  &csv_key_count_typed_result),
            "csv typed single-key count pushdown failed");
-    check_csv_key_semantics(csv_key_count_typed_result, {2.0, 2.0, 2.0, 2.0, 2.0, 2.0},
+    check_csv_key_semantics(csv_key_count_typed_result, {2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 3.0, 2.0, 1.0},
                             "csv typed single-key count");
 
     dataflow::SourcePushdownSpec csv_key_sum_pushdown = csv_key_count_pushdown;
@@ -1149,10 +1163,10 @@ int main() {
                                                  csv_key_sum_pushdown, ',', false,
                                                  &csv_key_sum_result),
            "csv typed single-key sum pushdown failed");
-    check_csv_key_semantics(csv_key_sum_result, {3.0, 11.0, 7.0, 15.0, 19.0, 23.0},
+    check_csv_key_semantics(csv_key_sum_result, {3.0, 11.0, 7.0, 15.0, 19.0, 23.0, 42.0, 33.0, 18.0},
                             "csv typed single-key sum");
 
-    // More than 64 distinct canonical numeric keys force the key vector to grow.
+    // More than 64 distinct short numeric keys force the key storage to grow.
     // Those keys fit the small-string buffer, so any move would invalidate the
     // string_view keys held by the group index and split a group on a second pass.
     const auto csv_many_numeric_keys_path =
@@ -1161,7 +1175,7 @@ int main() {
     for (int pass = 0; pass < 2; ++pass) {
       for (int i = 0; i < 70; ++i) {
         csv_many_numeric_keys_data +=
-            std::to_string(1000000000000000LL + i) + ",1\n";
+            std::to_string(1000LL + i) + ",1\n";
       }
     }
     write_file(csv_many_numeric_keys_path, csv_many_numeric_keys_data);
@@ -1258,13 +1272,13 @@ int main() {
                 csv_key_semantics_path + "')");
     auto csv_key_sql_result =
         session.sql("SELECT k, COUNT(*) AS cnt FROM csv_key_semantics_v1 GROUP BY k").toTable();
-    expect(csv_key_sql_result.rowCount() == 6,
+    expect(csv_key_sql_result.rowCount() == 9,
            "csv sql group by should coalesce key spellings");
     int64_t csv_key_sql_total = 0;
     for (const auto& row : csv_key_sql_result.rows) {
       csv_key_sql_total += row[1].asInt64();
     }
-    expect(csv_key_sql_total == 12, "csv sql group by coalesced count total mismatch");
+    expect(csv_key_sql_total == 18, "csv sql group by coalesced count total mismatch");
 
     std::cout << "[test] file source split/regex/json array/jsonl ok" << std::endl;
     return 0;

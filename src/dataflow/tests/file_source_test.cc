@@ -1152,6 +1152,81 @@ int main() {
     check_csv_key_semantics(csv_key_sum_result, {3.0, 11.0, 7.0, 15.0, 19.0, 23.0},
                             "csv typed single-key sum");
 
+    // More than 64 distinct canonical numeric keys force the key vector to grow.
+    // Those keys fit the small-string buffer, so any move would invalidate the
+    // string_view keys held by the group index and split a group on a second pass.
+    const auto csv_many_numeric_keys_path =
+        make_temp_file("velaria-source-csv-many-numeric-keys");
+    std::string csv_many_numeric_keys_data = "k,v\n";
+    for (int pass = 0; pass < 2; ++pass) {
+      for (int i = 0; i < 70; ++i) {
+        csv_many_numeric_keys_data +=
+            std::to_string(1000000000000000LL + i) + ",1\n";
+      }
+    }
+    write_file(csv_many_numeric_keys_path, csv_many_numeric_keys_data);
+    const auto csv_many_numeric_keys_schema =
+        dataflow::read_csv_schema(csv_many_numeric_keys_path);
+    auto check_csv_many_numeric_keys = [](const dataflow::Table& table,
+                                          const std::string& label) {
+      expect(table.columnar_cache != nullptr, label + " columnar cache missing");
+      expect(table.columnar_cache->row_count == 70,
+             label + " should keep one row per numeric key");
+      const auto& keys = table.columnar_cache->columns[0].values;
+      const auto& values = table.columnar_cache->columns[1].values;
+      expect(keys.size() == 70 && values.size() == 70, label + " output shape mismatch");
+      for (std::size_t i = 0; i < keys.size(); ++i) {
+        expect(keys[i].isNumber(), label + " numeric key expected");
+        expect(values[i].asDouble() == 2.0, label + " aggregate value mismatch");
+      }
+    };
+
+    dataflow::SourcePushdownSpec csv_many_numeric_count_pushdown;
+    csv_many_numeric_count_pushdown.has_aggregate = true;
+    csv_many_numeric_count_pushdown.aggregate.keys = {0};
+    csv_many_numeric_count_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Count, 0, "cnt"},
+    };
+    dataflow::Table csv_many_numeric_count_result;
+    expect(dataflow::execute_csv_source_pushdown(
+               csv_many_numeric_keys_path, csv_many_numeric_keys_schema,
+               csv_many_numeric_count_pushdown, ',', false,
+               &csv_many_numeric_count_result),
+           "csv many numeric keys generic count pushdown failed");
+    check_csv_many_numeric_keys(csv_many_numeric_count_result,
+                                "csv many numeric keys generic count");
+
+    dataflow::SourcePushdownSpec csv_many_numeric_count_typed_pushdown =
+        csv_many_numeric_count_pushdown;
+    csv_many_numeric_count_typed_pushdown.shape =
+        dataflow::SourcePushdownShape::SingleKeyCount;
+    csv_many_numeric_count_typed_pushdown.shape_is_explicit = true;
+    dataflow::Table csv_many_numeric_count_typed_result;
+    expect(dataflow::execute_csv_source_pushdown(
+               csv_many_numeric_keys_path, csv_many_numeric_keys_schema,
+               csv_many_numeric_count_typed_pushdown, ',', false,
+               &csv_many_numeric_count_typed_result),
+           "csv many numeric keys typed count pushdown failed");
+    check_csv_many_numeric_keys(csv_many_numeric_count_typed_result,
+                                "csv many numeric keys typed count");
+
+    dataflow::SourcePushdownSpec csv_many_numeric_sum_pushdown =
+        csv_many_numeric_count_pushdown;
+    csv_many_numeric_sum_pushdown.shape =
+        dataflow::SourcePushdownShape::SingleKeyNumericAggregate;
+    csv_many_numeric_sum_pushdown.shape_is_explicit = true;
+    csv_many_numeric_sum_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Sum, 1, "sum_v"},
+    };
+    dataflow::Table csv_many_numeric_sum_result;
+    expect(dataflow::execute_csv_source_pushdown(
+               csv_many_numeric_keys_path, csv_many_numeric_keys_schema,
+               csv_many_numeric_sum_pushdown, ',', false,
+               &csv_many_numeric_sum_result),
+           "csv many numeric keys typed sum pushdown failed");
+    check_csv_many_numeric_keys(csv_many_numeric_sum_result,
+                                "csv many numeric keys typed sum");
+
     const auto csv_multi_key_semantics_path =
         make_temp_file("velaria-source-csv-multi-key-semantics");
     write_file(csv_multi_key_semantics_path,

@@ -6,6 +6,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
@@ -1313,11 +1314,13 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
     std::vector<std::size_t> predicate_generations(predicate_schema_indices.size(), 0);
     std::pmr::monotonic_buffer_resource key_resource;
     std::unordered_map<std::string_view, std::size_t, std::hash<std::string_view>> key_to_index;
-    std::pmr::vector<std::pmr::string> ordered_keys(&key_resource);
+    // `key_to_index` stores views into `ordered_keys`; keep the key storage
+    // address-stable when groups are appended so small-string keys do not
+    // leave dangling views after a vector reallocation.
+    std::pmr::deque<std::pmr::string> ordered_keys(&key_resource);
     std::vector<Value> ordered_key_values;
     std::vector<std::size_t> counts;
     key_to_index.reserve(64);
-    ordered_keys.reserve(64);
     ordered_key_values.reserve(64);
     counts.reserve(64);
 
@@ -1468,11 +1471,13 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
     std::vector<std::size_t> predicate_generations(predicate_schema_indices.size(), 0);
     std::pmr::monotonic_buffer_resource key_resource;
     std::unordered_map<std::string_view, std::size_t, std::hash<std::string_view>> key_to_index;
-    std::pmr::vector<std::pmr::string> ordered_keys(&key_resource);
+    // `key_to_index` stores views into `ordered_keys`; keep the key storage
+    // address-stable when groups are appended so small-string keys do not
+    // leave dangling views after a vector reallocation.
+    std::pmr::deque<std::pmr::string> ordered_keys(&key_resource);
     std::vector<Value> ordered_key_values;
     std::vector<NumericAggregateState> states;
     key_to_index.reserve(64);
-    ordered_keys.reserve(64);
     ordered_key_values.reserve(64);
     states.reserve(64);
 
@@ -1716,11 +1721,13 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
     std::size_t row_generation = 0;
 
     std::pmr::monotonic_buffer_resource key_resource;
-    std::pmr::vector<std::pmr::string> ordered_keys(&key_resource);
+    // `key_to_index` stores views into `ordered_keys`; keep the key storage
+    // address-stable when groups are appended so small-string keys do not
+    // leave dangling views after a vector reallocation.
+    std::pmr::deque<std::pmr::string> ordered_keys(&key_resource);
     std::unordered_map<std::string_view, std::size_t, std::hash<std::string_view>> key_to_index;
     std::vector<Value> ordered_key_values;
     std::vector<AggregateState> ordered_states;
-    ordered_keys.reserve(64);
     ordered_key_values.reserve(64);
     key_to_index.reserve(64);
     ordered_states.reserve(64);

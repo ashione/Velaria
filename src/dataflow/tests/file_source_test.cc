@@ -1076,16 +1076,18 @@ int main() {
                "001,7\n"
                "001,8\n"
                "True,9\n"
-               "True,10\n");
+               "True,10\n"
+               ".5,11\n"
+               ".50,12\n");
     const auto csv_key_semantics_schema = dataflow::read_csv_schema(csv_key_semantics_path);
     auto check_csv_key_semantics = [](const dataflow::Table& table,
-                                      const std::array<double, 5>& expected,
+                                      const std::array<double, 6>& expected,
                                       const std::string& label) {
       expect(table.columnar_cache != nullptr, label + " columnar cache missing");
       const auto& keys = table.columnar_cache->columns[0].values;
       const auto& values = table.columnar_cache->columns[1].values;
-      expect(keys.size() == 5, label + " should coalesce key spellings");
-      std::array<double, 5> totals{0.0, 0.0, 0.0, 0.0, 0.0};
+      expect(keys.size() == 6, label + " should coalesce key spellings");
+      std::array<double, 6> totals{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
       for (std::size_t i = 0; i < keys.size(); ++i) {
         const auto& key = keys[i];
         if (key.type() == dataflow::DataType::Bool) {
@@ -1099,6 +1101,8 @@ int main() {
           totals[3] += values[i].asDouble();
         } else if (key.type() == dataflow::DataType::String && key.asString() == "True") {
           totals[4] += values[i].asDouble();
+        } else if (key.isNumber() && key.asDouble() == 0.5) {
+          totals[5] += values[i].asDouble();
         } else {
           expect(false, label + " unexpected key value");
         }
@@ -1118,7 +1122,7 @@ int main() {
                                                  csv_key_count_pushdown, ',', false,
                                                  &csv_key_count_result),
            "csv generic single-key count pushdown failed");
-    check_csv_key_semantics(csv_key_count_result, {2.0, 2.0, 2.0, 2.0, 2.0},
+    check_csv_key_semantics(csv_key_count_result, {2.0, 2.0, 2.0, 2.0, 2.0, 2.0},
                             "csv generic single-key count");
 
     dataflow::SourcePushdownSpec csv_key_count_typed_pushdown = csv_key_count_pushdown;
@@ -1130,7 +1134,7 @@ int main() {
                                                  csv_key_count_typed_pushdown, ',', false,
                                                  &csv_key_count_typed_result),
            "csv typed single-key count pushdown failed");
-    check_csv_key_semantics(csv_key_count_typed_result, {2.0, 2.0, 2.0, 2.0, 2.0},
+    check_csv_key_semantics(csv_key_count_typed_result, {2.0, 2.0, 2.0, 2.0, 2.0, 2.0},
                             "csv typed single-key count");
 
     dataflow::SourcePushdownSpec csv_key_sum_pushdown = csv_key_count_pushdown;
@@ -1145,7 +1149,7 @@ int main() {
                                                  csv_key_sum_pushdown, ',', false,
                                                  &csv_key_sum_result),
            "csv typed single-key sum pushdown failed");
-    check_csv_key_semantics(csv_key_sum_result, {3.0, 11.0, 7.0, 15.0, 19.0},
+    check_csv_key_semantics(csv_key_sum_result, {3.0, 11.0, 7.0, 15.0, 19.0, 23.0},
                             "csv typed single-key sum");
 
     const auto csv_multi_key_semantics_path =
@@ -1179,13 +1183,13 @@ int main() {
                 csv_key_semantics_path + "')");
     auto csv_key_sql_result =
         session.sql("SELECT k, COUNT(*) AS cnt FROM csv_key_semantics_v1 GROUP BY k").toTable();
-    expect(csv_key_sql_result.rowCount() == 5,
+    expect(csv_key_sql_result.rowCount() == 6,
            "csv sql group by should coalesce key spellings");
     int64_t csv_key_sql_total = 0;
     for (const auto& row : csv_key_sql_result.rows) {
       csv_key_sql_total += row[1].asInt64();
     }
-    expect(csv_key_sql_total == 10, "csv sql group by coalesced count total mismatch");
+    expect(csv_key_sql_total == 12, "csv sql group by coalesced count total mismatch");
 
     std::cout << "[test] file source split/regex/json array/jsonl ok" << std::endl;
     return 0;

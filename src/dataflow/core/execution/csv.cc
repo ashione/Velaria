@@ -287,7 +287,8 @@ bool isPlainCsvStringKey(std::string_view cell) {
   if (static_cast<unsigned char>(first) < 0x20) {
     return false;
   }
-  return !((first >= '0' && first <= '9') || first == '+' || first == '-' || first == '[');
+  return !((first >= '0' && first <= '9') || first == '+' || first == '-' || first == '.' ||
+           first == '[');
 }
 
 void appendCanonicalParsedCellKey(const ParsedCell& parsed, std::string* out) {

@@ -1310,6 +1310,35 @@ int main() {
     expect(csv_multi_key_semantics_result.columnar_cache->columns[2].values[0].asInt64() == 2,
            "csv multi-key coalesced count mismatch");
 
+    const auto csv_non_finite_key_path =
+        make_temp_file("velaria-source-csv-non-finite-keys");
+    write_file(csv_non_finite_key_path,
+               "k,v\n"
+               "-inf,1\n"
+               "-infinity,2\n"
+               "-nan,3\n");
+    const auto csv_non_finite_key_schema = dataflow::read_csv_schema(csv_non_finite_key_path);
+    dataflow::SourcePushdownSpec csv_non_finite_key_pushdown;
+    csv_non_finite_key_pushdown.has_aggregate = true;
+    csv_non_finite_key_pushdown.aggregate.keys = {0};
+    csv_non_finite_key_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Count, 0, "cnt"},
+    };
+    csv_non_finite_key_pushdown.shape = dataflow::SourcePushdownShape::SingleKeyCount;
+    csv_non_finite_key_pushdown.shape_is_explicit = true;
+    dataflow::Table csv_non_finite_key_result;
+    expect(dataflow::execute_csv_source_pushdown(
+               csv_non_finite_key_path, csv_non_finite_key_schema,
+               csv_non_finite_key_pushdown, ',', false, &csv_non_finite_key_result),
+           "csv non-finite key count pushdown failed");
+    expect(csv_non_finite_key_result.rowCount() == 3,
+           "csv non-finite key spellings must stay distinct strings");
+    for (const auto& row : csv_non_finite_key_result.rows) {
+      expect(row[0].type() == dataflow::DataType::String,
+             "csv non-finite key must keep string type");
+      expect(row[1].asInt64() == 1, "csv non-finite key count mismatch");
+    }
+
     const auto csv_many_multi_key_path =
         make_temp_file("velaria-source-csv-many-multi-key");
     std::string csv_many_multi_key_data = "k1,k2,v\n";

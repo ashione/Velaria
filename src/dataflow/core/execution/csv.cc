@@ -423,6 +423,12 @@ bool tryParseCanonicalDoubleText(std::string_view cell, double* out) {
   if (!((first >= '0' && first <= '9') || first == '.' || first == '+' || first == '-')) {
     return false;
   }
+  // `from_chars` accepts `inf`/`infinity`, which `parseParsedCell` keeps as
+  // strings because they fail this lexical check. Reject them here so the fast
+  // path cannot merge a string key with a numeric key.
+  if (!mightBeDoubleLexically(cell)) {
+    return false;
+  }
   return parseDoubleText(cell, out);
 }
 

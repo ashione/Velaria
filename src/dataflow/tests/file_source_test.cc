@@ -1310,6 +1310,57 @@ int main() {
     expect(csv_multi_key_semantics_result.columnar_cache->columns[2].values[0].asInt64() == 2,
            "csv multi-key coalesced count mismatch");
 
+    const auto csv_many_multi_key_path =
+        make_temp_file("velaria-source-csv-many-multi-key");
+    std::string csv_many_multi_key_data = "k1,k2,v\n";
+    for (int i = 0; i < 100; ++i) {
+      csv_many_multi_key_data += "a" + std::to_string(i) + ",b" + std::to_string(i) + ",1\n";
+    }
+    write_file(csv_many_multi_key_path, csv_many_multi_key_data);
+    const auto csv_many_multi_key_schema =
+        dataflow::read_csv_schema(csv_many_multi_key_path);
+    dataflow::SourcePushdownSpec csv_many_multi_key_count_pushdown;
+    csv_many_multi_key_count_pushdown.has_aggregate = true;
+    csv_many_multi_key_count_pushdown.aggregate.keys = {0, 1};
+    csv_many_multi_key_count_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Count, 0, "cnt"},
+    };
+    csv_many_multi_key_count_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    dataflow::Table csv_many_multi_key_count_result;
+    expect(dataflow::execute_csv_source_pushdown(
+               csv_many_multi_key_path, csv_many_multi_key_schema,
+               csv_many_multi_key_count_pushdown, ',', false,
+               &csv_many_multi_key_count_result),
+           "csv many multi-key count pushdown failed");
+    expect(csv_many_multi_key_count_result.columnar_cache != nullptr,
+           "csv many multi-key cache missing");
+    expect(csv_many_multi_key_count_result.columnar_cache->row_count == 100,
+           "csv many multi-key should keep 100 groups");
+    for (const auto& value : csv_many_multi_key_count_result.columnar_cache->columns[2].values) {
+      expect(value.asInt64() == 1, "csv many multi-key count mismatch");
+    }
+
+    dataflow::SourcePushdownSpec csv_many_generic_key_count_pushdown;
+    csv_many_generic_key_count_pushdown.has_aggregate = true;
+    csv_many_generic_key_count_pushdown.aggregate.keys = {0};
+    csv_many_generic_key_count_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Count, 0, "cnt"},
+    };
+    csv_many_generic_key_count_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    dataflow::Table csv_many_generic_key_count_result;
+    expect(dataflow::execute_csv_source_pushdown(
+               csv_many_multi_key_path, csv_many_multi_key_schema,
+               csv_many_generic_key_count_pushdown, ',', false,
+               &csv_many_generic_key_count_result),
+           "csv many generic single-key count pushdown failed");
+    expect(csv_many_generic_key_count_result.columnar_cache != nullptr,
+           "csv many generic single-key cache missing");
+    expect(csv_many_generic_key_count_result.columnar_cache->row_count == 100,
+           "csv many generic single-key should keep 100 groups");
+    for (const auto& value : csv_many_generic_key_count_result.columnar_cache->columns[1].values) {
+      expect(value.asInt64() == 1, "csv many generic single-key count mismatch");
+    }
+
     session.sql("CREATE TABLE csv_key_semantics_v1 USING csv OPTIONS(path: '" +
                 csv_key_semantics_path + "')");
     auto csv_key_sql_result =

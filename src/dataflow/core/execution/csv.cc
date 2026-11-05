@@ -687,9 +687,10 @@ void encodeParsedGroupKeyRow(const std::vector<ParsedCell>& key_cells, std::stri
   }
 }
 
-// Length-prefixed raw key used only as an alias cache. The type tag keeps
-// null, bool, integer, double and string cells from sharing an alias before
-// canonicalization, while preserving the exact raw spelling on cache hits.
+// Length-prefixed raw key used only as an alias cache. Numeric and boolean
+// cells are encoded from their parsed values because their text view may point
+// into the scanner's reusable cell buffer; string cells are persisted by
+// `persistParsedCell`, so their text is safe to use.
 void encodeRawParsedGroupKeyRow(const std::vector<ParsedCell>& key_cells, std::string* out) {
   if (out == nullptr) {
     throw std::invalid_argument("raw group key output is null");
@@ -702,11 +703,22 @@ void encodeRawParsedGroupKeyRow(const std::vector<ParsedCell>& key_cells, std::s
                      : cell.is_int64 ? 'I'
                      : cell.is_double ? 'D'
                                       : 'S';
-    const std::string_view text = parsedCellText(cell);
-    const std::uint64_t size = static_cast<std::uint64_t>(text.size());
     out->push_back(tag);
-    out->append(reinterpret_cast<const char*>(&size), sizeof(size));
-    out->append(text.data(), text.size());
+    if (tag == 'B') {
+      const std::uint8_t value = cell.bool_value ? 1 : 0;
+      out->append(reinterpret_cast<const char*>(&value), sizeof(value));
+    } else if (tag == 'I') {
+      out->append(reinterpret_cast<const char*>(&cell.int64_value),
+                  sizeof(cell.int64_value));
+    } else if (tag == 'D') {
+      out->append(reinterpret_cast<const char*>(&cell.double_value),
+                  sizeof(cell.double_value));
+    } else if (tag == 'S') {
+      const std::string_view text = parsedCellText(cell);
+      const std::uint64_t size = static_cast<std::uint64_t>(text.size());
+      out->append(reinterpret_cast<const char*>(&size), sizeof(size));
+      out->append(text.data(), text.size());
+    }
   }
 }
 

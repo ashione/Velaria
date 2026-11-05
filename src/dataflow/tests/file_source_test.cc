@@ -1312,6 +1312,32 @@ int main() {
     expect(csv_multi_key_semantics_result.columnar_cache->columns[2].values[0].asInt64() == 4,
            "csv multi-key coalesced count mismatch");
 
+    const auto csv_quoted_numeric_key_path =
+        make_temp_file("velaria-source-csv-quoted-numeric-keys");
+    write_file(csv_quoted_numeric_key_path,
+               "k1,k2,v\n"
+               "\"1\",\"TRUE\",1\n"
+               "\"2\",\"TRUE\",2\n");
+    const auto csv_quoted_numeric_key_schema =
+        dataflow::read_csv_schema(csv_quoted_numeric_key_path);
+    dataflow::SourcePushdownSpec csv_quoted_numeric_key_pushdown;
+    csv_quoted_numeric_key_pushdown.has_aggregate = true;
+    csv_quoted_numeric_key_pushdown.aggregate.keys = {0, 1};
+    csv_quoted_numeric_key_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Count, 0, "cnt"},
+    };
+    csv_quoted_numeric_key_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    dataflow::Table csv_quoted_numeric_key_result;
+    expect(dataflow::execute_csv_source_pushdown(
+               csv_quoted_numeric_key_path, csv_quoted_numeric_key_schema,
+               csv_quoted_numeric_key_pushdown, ',', false,
+               &csv_quoted_numeric_key_result),
+           "csv quoted numeric key count pushdown failed");
+    expect(csv_quoted_numeric_key_result.columnar_cache != nullptr,
+           "csv quoted numeric key cache missing");
+    expect(csv_quoted_numeric_key_result.columnar_cache->row_count == 2,
+           "csv quoted numeric keys must stay distinct groups");
+
     const auto csv_multi_key_cache_overflow_path =
         make_temp_file("velaria-source-csv-multi-key-cache-overflow");
     std::string csv_multi_key_cache_overflow_data = "k1,k2,v\n";

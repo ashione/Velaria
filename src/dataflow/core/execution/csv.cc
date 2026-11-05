@@ -423,6 +423,12 @@ bool tryParseCanonicalDoubleText(std::string_view cell, double* out) {
   if (!((first >= '0' && first <= '9') || first == '.' || first == '+' || first == '-')) {
     return false;
   }
+  // `from_chars` accepts `inf`/`infinity`, which `parseParsedCell` keeps as
+  // strings because they fail this lexical check. Reject them here so the fast
+  // path cannot merge a string key with a numeric key.
+  if (!mightBeDoubleLexically(cell)) {
+    return false;
+  }
   return parseDoubleText(cell, out);
 }
 
@@ -2311,14 +2317,13 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
   };
 
   std::pmr::monotonic_buffer_resource key_resource;
-  std::unordered_map<std::string_view, std::size_t, std::hash<std::string_view>>
-      single_key_entry_index;
-  std::unordered_map<std::string, std::size_t> multi_key_entry_index;
-  std::pmr::vector<std::pmr::string> single_key_storage(&key_resource);
+  StringViewIndex single_key_entry_index;
+  StringViewIndex multi_key_entry_index;
+  std::pmr::deque<std::pmr::string> single_key_storage(&key_resource);
+  std::pmr::deque<std::pmr::string> multi_key_storage(&key_resource);
   std::vector<AggregateEntry> ordered_entries;
-  single_key_entry_index.reserve(64);
-  multi_key_entry_index.reserve(64);
-  single_key_storage.reserve(64);
+  single_key_entry_index.reserve(estimateCsvGroupReserve(path));
+  multi_key_entry_index.reserve(estimateCsvGroupReserve(path));
   ordered_entries.reserve(64);
   std::vector<uint8_t> capture_mask(last_required_column + 1, static_cast<uint8_t>(0));
   std::vector<std::size_t> key_position_by_column(last_required_column + 1,
@@ -2451,8 +2456,7 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
         std::size_t entry_pos = 0;
         if (key_cells.size() == 1) {
           const auto key_text = parsedCellText(key_cells.front());
-          auto it = single_key_entry_index.find(key_text);
-          if (it == single_key_entry_index.end()) {
+          if (!single_key_entry_index.find(key_text, &entry_pos)) {
             AggregateEntry entry;
             entry.key_values.reserve(1);
             entry.key_values.push_back(parsedCellToValue(key_cells.front()));
@@ -2460,14 +2464,11 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
             ordered_entries.push_back(std::move(entry));
             entry_pos = ordered_entries.size() - 1;
             single_key_storage.emplace_back(key_text.data(), key_text.size());
-            single_key_entry_index.emplace(std::string_view(single_key_storage.back()), entry_pos);
-          } else {
-            entry_pos = it->second;
+            single_key_entry_index.insert(std::string_view(single_key_storage.back()), entry_pos);
           }
         } else {
           encodeParsedGroupKeyRow(key_cells, &encoded_key_scratch);
-          auto it = multi_key_entry_index.find(encoded_key_scratch);
-          if (it == multi_key_entry_index.end()) {
+          if (!multi_key_entry_index.find(encoded_key_scratch, &entry_pos)) {
             AggregateEntry entry;
             entry.key_values.reserve(key_cells.size());
             for (const auto& key_cell : key_cells) {
@@ -2476,9 +2477,8 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
             entry.state = init_state();
             ordered_entries.push_back(std::move(entry));
             entry_pos = ordered_entries.size() - 1;
-            multi_key_entry_index.emplace(encoded_key_scratch, entry_pos);
-          } else {
-            entry_pos = it->second;
+            multi_key_storage.emplace_back(encoded_key_scratch.data(), encoded_key_scratch.size());
+            multi_key_entry_index.insert(std::string_view(multi_key_storage.back()), entry_pos);
           }
         }
         auto& state = ordered_entries[entry_pos].state;

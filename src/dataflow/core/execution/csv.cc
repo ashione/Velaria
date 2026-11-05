@@ -6,6 +6,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstring>
+#include <cstdint>
 #include <deque>
 #include <cstdlib>
 #include <filesystem>
@@ -683,6 +684,29 @@ void encodeParsedGroupKeyRow(const std::vector<ParsedCell>& key_cells, std::stri
   out->reserve(std::max(out->capacity(), key_cells.size() * std::size_t(12)));
   for (const auto& cell : key_cells) {
     appendCanonicalParsedCellKey(cell, out);
+  }
+}
+
+// Length-prefixed raw key used only as an alias cache. The type tag keeps
+// null, bool, integer, double and string cells from sharing an alias before
+// canonicalization, while preserving the exact raw spelling on cache hits.
+void encodeRawParsedGroupKeyRow(const std::vector<ParsedCell>& key_cells, std::string* out) {
+  if (out == nullptr) {
+    throw std::invalid_argument("raw group key output is null");
+  }
+  out->clear();
+  out->reserve(std::max(out->capacity(), key_cells.size() * std::size_t(16)));
+  for (const auto& cell : key_cells) {
+    const char tag = cell.is_null    ? 'N'
+                     : cell.is_bool  ? 'B'
+                     : cell.is_int64 ? 'I'
+                     : cell.is_double ? 'D'
+                                      : 'S';
+    const std::string_view text = parsedCellText(cell);
+    const std::uint64_t size = static_cast<std::uint64_t>(text.size());
+    out->push_back(tag);
+    out->append(reinterpret_cast<const char*>(&size), sizeof(size));
+    out->append(text.data(), text.size());
   }
 }
 
@@ -2319,11 +2343,14 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
   std::pmr::monotonic_buffer_resource key_resource;
   StringViewIndex single_key_entry_index;
   StringViewIndex multi_key_entry_index;
+  StringViewIndex raw_multi_key_entry_index;
   std::pmr::deque<std::pmr::string> single_key_storage(&key_resource);
   std::pmr::deque<std::pmr::string> multi_key_storage(&key_resource);
+  std::pmr::deque<std::pmr::string> raw_multi_key_storage(&key_resource);
   std::vector<AggregateEntry> ordered_entries;
   single_key_entry_index.reserve(estimateCsvGroupReserve(path));
   multi_key_entry_index.reserve(estimateCsvGroupReserve(path));
+  raw_multi_key_entry_index.reserve(kMaxCachedRawKeys);
   ordered_entries.reserve(64);
   std::vector<uint8_t> capture_mask(last_required_column + 1, static_cast<uint8_t>(0));
   std::vector<std::size_t> key_position_by_column(last_required_column + 1,
@@ -2362,6 +2389,7 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
   std::vector<std::size_t> numeric_generations(aggs.size(), 0);
   std::vector<std::size_t> predicate_generations(predicate_schema_indices.size(), 0);
   std::string encoded_key_scratch;
+  std::string raw_key_scratch;
   std::size_t row_generation = 0;
 
   scanCsvCells(
@@ -2467,18 +2495,31 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
             single_key_entry_index.insert(std::string_view(single_key_storage.back()), entry_pos);
           }
         } else {
-          encodeParsedGroupKeyRow(key_cells, &encoded_key_scratch);
-          if (!multi_key_entry_index.find(encoded_key_scratch, &entry_pos)) {
-            AggregateEntry entry;
-            entry.key_values.reserve(key_cells.size());
-            for (const auto& key_cell : key_cells) {
-              entry.key_values.push_back(parsedCellToValue(key_cell));
+          const bool cache_raw = multi_key_entry_index.size() < kMaxCachedRawKeys;
+          bool raw_hit = false;
+          if (cache_raw) {
+            encodeRawParsedGroupKeyRow(key_cells, &raw_key_scratch);
+            raw_hit = raw_multi_key_entry_index.find(raw_key_scratch, &entry_pos);
+          }
+          if (!raw_hit) {
+            encodeParsedGroupKeyRow(key_cells, &encoded_key_scratch);
+            if (!multi_key_entry_index.find(encoded_key_scratch, &entry_pos)) {
+              AggregateEntry entry;
+              entry.key_values.reserve(key_cells.size());
+              for (const auto& key_cell : key_cells) {
+                entry.key_values.push_back(parsedCellToValue(key_cell));
+              }
+              entry.state = init_state();
+              ordered_entries.push_back(std::move(entry));
+              entry_pos = ordered_entries.size() - 1;
+              multi_key_storage.emplace_back(encoded_key_scratch.data(), encoded_key_scratch.size());
+              multi_key_entry_index.insert(std::string_view(multi_key_storage.back()), entry_pos);
             }
-            entry.state = init_state();
-            ordered_entries.push_back(std::move(entry));
-            entry_pos = ordered_entries.size() - 1;
-            multi_key_storage.emplace_back(encoded_key_scratch.data(), encoded_key_scratch.size());
-            multi_key_entry_index.insert(std::string_view(multi_key_storage.back()), entry_pos);
+            if (cache_raw && raw_multi_key_entry_index.size() < kMaxCachedRawKeys) {
+              raw_multi_key_storage.emplace_back(raw_key_scratch.data(), raw_key_scratch.size());
+              raw_multi_key_entry_index.insert(
+                  std::string_view(raw_multi_key_storage.back()), entry_pos);
+            }
           }
         }
         auto& state = ordered_entries[entry_pos].state;

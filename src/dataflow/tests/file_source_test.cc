@@ -1288,7 +1288,9 @@ int main() {
     write_file(csv_multi_key_semantics_path,
                "k1,k2,v\n"
                "TRUE,1.50,1\n"
-               "true,1.5,2\n");
+               "true,1.5,2\n"
+               "TRUE,1.500,3\n"
+               "TRUE,1.50,4\n");
     const auto csv_multi_key_semantics_schema =
         dataflow::read_csv_schema(csv_multi_key_semantics_path);
     dataflow::SourcePushdownSpec csv_multi_key_semantics_pushdown;
@@ -1307,8 +1309,36 @@ int main() {
            "csv multi-key semantics count pushdown failed");
     expect(csv_multi_key_semantics_result.rowCount() == 1,
            "csv multi-key should coalesce boolean and numeric key spellings");
-    expect(csv_multi_key_semantics_result.columnar_cache->columns[2].values[0].asInt64() == 2,
+    expect(csv_multi_key_semantics_result.columnar_cache->columns[2].values[0].asInt64() == 4,
            "csv multi-key coalesced count mismatch");
+
+    const auto csv_multi_key_cache_overflow_path =
+        make_temp_file("velaria-source-csv-multi-key-cache-overflow");
+    std::string csv_multi_key_cache_overflow_data = "k1,k2,v\n";
+    for (int i = 0; i < 4200; ++i) {
+      csv_multi_key_cache_overflow_data +=
+          "a" + std::to_string(i) + ",b" + std::to_string(i) + ",1\n";
+    }
+    write_file(csv_multi_key_cache_overflow_path, csv_multi_key_cache_overflow_data);
+    const auto csv_multi_key_cache_overflow_schema =
+        dataflow::read_csv_schema(csv_multi_key_cache_overflow_path);
+    dataflow::SourcePushdownSpec csv_multi_key_cache_overflow_pushdown;
+    csv_multi_key_cache_overflow_pushdown.has_aggregate = true;
+    csv_multi_key_cache_overflow_pushdown.aggregate.keys = {0, 1};
+    csv_multi_key_cache_overflow_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Count, 0, "cnt"},
+    };
+    csv_multi_key_cache_overflow_pushdown.shape = dataflow::SourcePushdownShape::Generic;
+    dataflow::Table csv_multi_key_cache_overflow_result;
+    expect(dataflow::execute_csv_source_pushdown(
+               csv_multi_key_cache_overflow_path, csv_multi_key_cache_overflow_schema,
+               csv_multi_key_cache_overflow_pushdown, ',', false,
+               &csv_multi_key_cache_overflow_result),
+           "csv multi-key cache overflow pushdown failed");
+    expect(csv_multi_key_cache_overflow_result.columnar_cache != nullptr,
+           "csv multi-key cache overflow cache missing");
+    expect(csv_multi_key_cache_overflow_result.columnar_cache->row_count == 4200,
+           "csv multi-key cache overflow should keep 4200 groups");
 
     const auto csv_non_finite_key_path =
         make_temp_file("velaria-source-csv-non-finite-keys");

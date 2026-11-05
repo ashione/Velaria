@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <iomanip>
 #include <limits>
@@ -169,12 +170,56 @@ class Value {
   std::string s_;
   std::vector<float> vec_;
 
+  static int compareDoubles(double lhs, double rhs) {
+    if (lhs < rhs) return -1;
+    if (lhs > rhs) return 1;
+    if (lhs == rhs) return 0;
+    const bool lhs_nan = std::isnan(lhs);
+    const bool rhs_nan = std::isnan(rhs);
+    return lhs_nan == rhs_nan ? 0 : (lhs_nan ? 1 : -1);
+  }
+
+  // Compares an exact int64 with a double without first rounding the int64 to
+  // double. Doubles outside the int64 range are ordered by range; in-range
+  // doubles are truncated so the integer parts can be compared exactly.
+  static int compareInt64ToDouble(int64_t lhs, double rhs) {
+    if (std::isnan(rhs)) return -1;
+    constexpr double kMinInt64 = -9223372036854775808.0;
+    constexpr double kMaxInt64Exclusive = 9223372036854775808.0;
+    if (rhs >= kMaxInt64Exclusive) return -1;
+    if (rhs < kMinInt64) return 1;
+    const int64_t truncated = static_cast<int64_t>(rhs);
+    if (lhs < truncated) return -1;
+    if (lhs > truncated) return 1;
+    const double truncated_double = static_cast<double>(truncated);
+    if (truncated_double < rhs) return -1;
+    if (truncated_double > rhs) return 1;
+    return 0;
+  }
+
+  static double numericAsDouble(const Value& value) {
+    return value.type_ == DataType::Int64 ? static_cast<double>(value.i64_)
+           : value.type_ == DataType::Float32 ? static_cast<double>(value.f32_)
+                                              : value.d_;
+  }
+
+  int compareNumbers(const Value& rhs) const {
+    if (type_ == DataType::Int64 && rhs.type_ == DataType::Int64) {
+      return (i64_ < rhs.i64_) ? -1 : (i64_ > rhs.i64_ ? 1 : 0);
+    }
+    if (type_ == DataType::Int64) {
+      return compareInt64ToDouble(i64_, numericAsDouble(rhs));
+    }
+    if (rhs.type_ == DataType::Int64) {
+      return -compareInt64ToDouble(rhs.i64_, numericAsDouble(*this));
+    }
+    return compareDoubles(numericAsDouble(*this), numericAsDouble(rhs));
+  }
+
   int compare(const Value& rhs) const {
     if (type_ != rhs.type_) {
       if (isNumber() && rhs.isNumber()) {
-        const auto lhs = asDouble();
-        const auto rr = rhs.asDouble();
-        return (lhs < rr) ? -1 : (lhs > rr ? 1 : 0);
+        return compareNumbers(rhs);
       }
       throw std::runtime_error("type mismatch in compare");
     }
@@ -186,9 +231,9 @@ class Value {
       case DataType::Int64:
         return (i64_ < rhs.i64_) ? -1 : (i64_ > rhs.i64_ ? 1 : 0);
       case DataType::Float32:
-        return (f32_ < rhs.f32_) ? -1 : (f32_ > rhs.f32_ ? 1 : 0);
+        return compareDoubles(static_cast<double>(f32_), static_cast<double>(rhs.f32_));
       case DataType::Double:
-        return (d_ < rhs.d_) ? -1 : (d_ > rhs.d_ ? 1 : 0);
+        return compareDoubles(d_, rhs.d_);
       case DataType::String:
         return (s_ < rhs.s_) ? -1 : (s_ > rhs.s_ ? 1 : 0);
       case DataType::FixedVector: {

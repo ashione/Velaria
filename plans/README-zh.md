@@ -16,10 +16,15 @@
   - [../docs/agentic-service-api.md](../docs/agentic-service-api.md)
   - [../docs/streaming_runtime_design.md](../docs/streaming_runtime_design.md)
 - 当前维护中的工作计划：
+  - [roadmap-v1.md](./roadmap-v1.md)
   - [core-runtime-columnar-plan.md](./core-runtime-columnar-plan.md)
 
 ## 当前有效计划
 
+- [roadmap-v1.md](./roadmap-v1.md)
+  - 下一阶段仓库里程碑（M0–M6）的排序层
+  - 只负责里程碑顺序、退出标准和版本映射
+  - 不是状态板；已实现状态以 `core-runtime-columnar-plan.md` 为准
 - [core-runtime-columnar-plan.md](./core-runtime-columnar-plan.md)
   - 当前 core runtime columnar 路线的状态板
   - 维护已实现项、明确不做项和下一阶段

@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
+#include <cmath>
 #include <cstring>
+#include <deque>
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
@@ -124,6 +127,18 @@ bool parseDouble(std::string_view s, double* out) {
   return end != owned.c_str() && *end == '\0';
 }
 
+// libc++ (including Xcode 15.4) does not implement floating-point
+// `std::from_chars`; keep the fast path on libstdc++ and use the existing
+// locale-independent wrapper elsewhere.
+bool parseDoubleText(std::string_view text, double* out) {
+#if defined(__APPLE__) || defined(_LIBCPP_VERSION)
+  return parseDouble(text, out);
+#else
+  const auto result = std::from_chars(text.data(), text.data() + text.size(), *out);
+  return result.ec == std::errc() && result.ptr == text.data() + text.size();
+#endif
+}
+
 Value parseCell(std::string_view cell) {
   if (cell.empty()) return Value();
   if (cell == kTrueLower || cell == kTrueUpper) return Value(true);
@@ -239,17 +254,429 @@ void appendSizeToString(std::string* out, std::size_t value) {
   out->append(buffer, result.ptr);
 }
 
+// Canonical group-key components are namespace-tagged. Plain string keys in the
+// single-key fast paths are stored as raw bytes, so every tag stays below 0x20
+// and cannot collide with a normal CSV key (control-led strings take the tagged
+// string path instead).
+constexpr char kCanonicalNullTag = '\x01';
+constexpr char kCanonicalBoolTag = '\x02';
+constexpr char kCanonicalDoubleTag = '\x03';
+constexpr char kCanonicalInt64Tag = '\x04';
+constexpr char kCanonicalStringTag = '\x05';
+constexpr char kCanonicalVectorTag = '\x06';
+
+void appendCanonicalDoubleKey(double value, std::string* out) {
+  if (std::isnan(value)) {
+    value = std::numeric_limits<double>::quiet_NaN();
+  } else if (value == 0.0) {
+    value = 0.0;
+  }
+  const uint64_t bits = std::bit_cast<uint64_t>(value);
+  out->push_back(kCanonicalDoubleTag);
+  out->append(reinterpret_cast<const char*>(&bits), sizeof(bits));
+}
+
+void appendCanonicalInt64Key(int64_t value, std::string* out) {
+  const double as_double = static_cast<double>(value);
+  constexpr double kTwoTo63 = 9223372036854775808.0;
+  constexpr double kNegTwoTo63 = -9223372036854775808.0;
+  if (as_double >= kNegTwoTo63 && as_double < kTwoTo63 &&
+      static_cast<int64_t>(as_double) == value) {
+    appendCanonicalDoubleKey(as_double, out);
+    return;
+  }
+  out->push_back(kCanonicalInt64Tag);
+  out->append(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+
+// Open-addressing index for `string_view` group keys. `std::unordered_map`
+// allocates a node per group and rehashes repeatedly for high-cardinality
+// GROUP BY; this flat table keeps the common lookup path in one allocation.
+class StringViewIndex {
+ public:
+  void reserve(std::size_t expected) {
+    std::size_t capacity = 16;
+    while (capacity < expected + expected / 8) {
+      capacity <<= 1;
+    }
+    if (capacity > entries_.size()) {
+      rehash(capacity);
+    }
+  }
+
+  bool find(std::string_view key, std::size_t* value) const {
+    if (entries_.empty()) {
+      return false;
+    }
+    std::size_t slot = hashKey(key) & mask_;
+    while (entries_[slot].value_plus_one != 0) {
+      if (entries_[slot].key == key) {
+        *value = entries_[slot].value_plus_one - 1;
+        return true;
+      }
+      slot = (slot + 1) & mask_;
+    }
+    return false;
+  }
+
+  void insert(std::string_view key, std::size_t value) {
+    if (entries_.empty()) {
+      rehash(16);
+    }
+    if ((size_ + 1) * 10 > entries_.size() * 8) {
+      rehash(entries_.size() * 2);
+    }
+    std::size_t slot = hashKey(key) & mask_;
+    while (entries_[slot].value_plus_one != 0) {
+      if (entries_[slot].key == key) {
+        entries_[slot].value_plus_one = value + 1;
+        return;
+      }
+      slot = (slot + 1) & mask_;
+    }
+    entries_[slot] = Entry{key, value + 1};
+    ++size_;
+  }
+
+  void clear() {
+    for (auto& entry : entries_) {
+      entry.value_plus_one = 0;
+    }
+    size_ = 0;
+  }
+
+  std::size_t size() const { return size_; }
+
+ private:
+  struct Entry {
+    std::string_view key;
+    std::size_t value_plus_one = 0;
+  };
+
+  static std::size_t hashKey(std::string_view key) {
+    return std::hash<std::string_view>{}(key);
+  }
+
+  void rehash(std::size_t capacity) {
+    std::vector<Entry> old = std::move(entries_);
+    entries_.assign(capacity, Entry{});
+    mask_ = capacity - 1;
+    size_ = 0;
+    for (const auto& entry : old) {
+      if (entry.value_plus_one == 0) {
+        continue;
+      }
+      std::size_t slot = hashKey(entry.key) & mask_;
+      while (entries_[slot].value_plus_one != 0) {
+        slot = (slot + 1) & mask_;
+      }
+      entries_[slot] = entry;
+      ++size_;
+    }
+  }
+
+  std::vector<Entry> entries_;
+  std::size_t mask_ = 0;
+  std::size_t size_ = 0;
+};
+
+std::size_t estimateCsvGroupReserve(const std::string& path) {
+  std::error_code error;
+  const auto size = std::filesystem::file_size(path, error);
+  if (error) {
+    return 64;
+  }
+  // Approximate one row per 30 bytes; cap the estimate so a large file with
+  // few groups does not allocate an unbounded index.
+  return std::min<std::size_t>(100000, std::max<std::size_t>(64, size / 30));
+}
+
+// Cells that parseParsedCell would classify as an ordinary string. Keeping the
+// raw bytes avoids parsing and re-encoding the common string-key case.
+bool isPlainCsvStringKey(std::string_view cell) {
+  if (cell.empty()) {
+    return false;
+  }
+  const char first = cell.front();
+  if (static_cast<unsigned char>(first) < 0x20) {
+    return false;
+  }
+  if ((first >= '0' && first <= '9') || first == '+' || first == '-' || first == '.' ||
+      first == '[') {
+    return false;
+  }
+  if (first == 't' || first == 'T' || first == 'f' || first == 'F') {
+    return cell != kTrueLower && cell != kTrueUpper && cell != kFalseLower &&
+           cell != kFalseUpper;
+  }
+  return true;
+}
+
+// Fast path for ordinary numeric CSV cells. It deliberately mirrors
+// `parseParsedCell`: leading-zero spellings stay strings, and a failed
+// `from_chars` parse falls back to the full parser for the remaining forms.
+bool tryParseCanonicalDoubleText(std::string_view cell, double* out) {
+  if (cell.empty() || hasSignificantLeadingZero(cell)) {
+    return false;
+  }
+  const char first = cell.front();
+  if (!((first >= '0' && first <= '9') || first == '.' || first == '+' || first == '-')) {
+    return false;
+  }
+  return parseDoubleText(cell, out);
+}
+
+// Bound the raw-spelling cache so high-cardinality GROUP BY work falls back to
+// the canonical path instead of paying a second key copy and index for every
+// distinct value.
+constexpr std::size_t kMaxCachedRawKeys = 4096;
+
+// Integer spellings that parseParsedCell accepts as Int64 and that need no
+// canonical re-encoding: the raw digits are already a stable group key. Reject
+// leading zeros (those parse as strings) and the sign-only form.
+bool isCanonicalIntegerText(std::string_view cell) {
+  if (cell.empty()) {
+    return false;
+  }
+  std::size_t pos = 0;
+  if (cell.front() == '-') {
+    pos = 1;
+  }
+  if (pos >= cell.size()) {
+    return false;
+  }
+  if (pos + 1 < cell.size() && cell[pos] == '0') {
+    return false;
+  }
+  for (; pos < cell.size(); ++pos) {
+    if (cell[pos] < '0' || cell[pos] > '9') {
+      return false;
+    }
+  }
+  return true;
+}
+
+void appendInt64GroupKey(int64_t value, std::string* out) {
+  char buffer[32];
+  const auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
+  if (result.ec != std::errc()) {
+    throw std::runtime_error("failed to encode integer group key");
+  }
+  out->append(buffer, result.ptr);
+}
+
+// Integral doubles share the integer spelling so `1` and `1.0` coalesce.
+// Other finite doubles use the canonical binary tag, avoiding decimal
+// formatting on every distinct key; NaN and infinity keep their canonical tag.
+void appendDoubleGroupKey(double value, std::string* out) {
+  if (std::isnan(value) || std::isinf(value)) {
+    appendCanonicalDoubleKey(value, out);
+    return;
+  }
+  if (value == 0.0) {
+    value = 0.0;
+  }
+  constexpr double kTwoTo63 = 9223372036854775808.0;
+  constexpr double kNegTwoTo63 = -9223372036854775808.0;
+  if (value >= kNegTwoTo63 && value < kTwoTo63) {
+    const int64_t int_value = static_cast<int64_t>(value);
+    if (static_cast<double>(int_value) == value) {
+      appendInt64GroupKey(int_value, out);
+      return;
+    }
+  }
+  appendCanonicalDoubleKey(value, out);
+}
+
+void appendCanonicalParsedCellKey(const ParsedCell& parsed, std::string* out);
+
+void captureCanonicalSingleKey(std::string_view cell, std::string* key, Value* key_value,
+                               bool* key_value_ready, bool* key_value_is_double) {
+  *key_value_is_double = false;
+  if (isCanonicalIntegerText(cell)) {
+    if (cell == "-0") {
+      key->push_back('0');
+    } else {
+      key->assign(cell.data(), cell.size());
+    }
+    *key_value_ready = false;
+    return;
+  }
+  double double_value = 0.0;
+  if (tryParseCanonicalDoubleText(cell, &double_value)) {
+    appendDoubleGroupKey(double_value, key);
+    *key_value = Value(double_value);
+    *key_value_ready = true;
+    *key_value_is_double = true;
+    return;
+  }
+  const ParsedCell parsed_key = parseParsedCell(cell);
+  if (parsed_key.is_int64) {
+    appendInt64GroupKey(parsed_key.int64_value, key);
+    *key_value = Value(parsed_key.int64_value);
+    *key_value_ready = true;
+    return;
+  }
+  if (parsed_key.is_double) {
+    appendDoubleGroupKey(parsed_key.double_value, key);
+    *key_value = Value(parsed_key.double_value);
+    *key_value_ready = true;
+    *key_value_is_double = true;
+    return;
+  }
+  appendCanonicalParsedCellKey(parsed_key, key);
+  *key_value_ready = parsed_key.is_null || parsed_key.is_bool;
+  if (*key_value_ready) {
+    *key_value = parsedCellToValue(parsed_key);
+  }
+}
+
+void appendCanonicalParsedCellKey(const ParsedCell& parsed, std::string* out) {
+  if (out == nullptr) {
+    throw std::invalid_argument("group key output is null");
+  }
+  if (parsed.is_null) {
+    out->push_back(kCanonicalNullTag);
+    return;
+  }
+  if (parsed.is_bool) {
+    out->push_back(kCanonicalBoolTag);
+    out->push_back(parsed.bool_value ? '1' : '0');
+    return;
+  }
+  if (parsed.is_int64) {
+    appendCanonicalInt64Key(parsed.int64_value, out);
+    return;
+  }
+  if (parsed.is_double) {
+    appendCanonicalDoubleKey(parsed.double_value, out);
+    return;
+  }
+  const auto text = parsedCellText(parsed);
+  if (text.size() >= 2 && text.front() == '[' && text.back() == ']') {
+    const auto vec = Value::parseFixedVector(std::string(text));
+    if (!vec.empty()) {
+      out->push_back(kCanonicalVectorTag);
+      appendSizeToString(out, vec.size());
+      out->push_back(':');
+      for (const float item : vec) {
+        const uint32_t bits = std::bit_cast<uint32_t>(item);
+        out->append(reinterpret_cast<const char*>(&bits), sizeof(bits));
+      }
+      return;
+    }
+  }
+  out->push_back(kCanonicalStringTag);
+  appendSizeToString(out, text.size());
+  out->push_back(':');
+  out->append(text.data(), text.size());
+}
+
+std::size_t readCanonicalKeySize(std::string_view key, std::size_t* cursor) {
+  if (cursor == nullptr || *cursor >= key.size()) {
+    throw std::runtime_error("invalid canonical group key size prefix");
+  }
+  const auto colon = key.find(':', *cursor);
+  if (colon == std::string_view::npos) {
+    throw std::runtime_error("invalid canonical group key size prefix");
+  }
+  std::size_t value = 0;
+  const auto result =
+      std::from_chars(key.data() + *cursor, key.data() + colon, value);
+  if (result.ec != std::errc() || result.ptr != key.data() + colon) {
+    throw std::runtime_error("invalid canonical group key size prefix");
+  }
+  *cursor = colon + 1;
+  return value;
+}
+
+// Reconstructs the first-seen key value for single-key aggregate output. Raw
+// bytes are plain string keys; tagged keys need their original value type for
+// the result schema to match the pre-canonicalization behavior.
+Value decodeCanonicalSingleKey(std::string_view key) {
+  if (key.empty()) {
+    throw std::runtime_error("empty canonical group key");
+  }
+  const auto tag = static_cast<unsigned char>(key.front());
+  if (tag >= 0x20) {
+    if ((tag >= '0' && tag <= '9') || tag == '-') {
+      return parseCell(key);
+    }
+    return Value(std::string(key));
+  }
+  std::size_t cursor = 1;
+  switch (tag) {
+    case static_cast<unsigned char>(kCanonicalNullTag):
+      return Value();
+    case static_cast<unsigned char>(kCanonicalBoolTag):
+      if (key.size() != 2) {
+        throw std::runtime_error("invalid canonical boolean group key");
+      }
+      return Value(key[1] == '1');
+    case static_cast<unsigned char>(kCanonicalInt64Tag): {
+      if (key.size() != 1 + sizeof(int64_t)) {
+        throw std::runtime_error("invalid canonical int64 group key");
+      }
+      int64_t value = 0;
+      std::memcpy(&value, key.data() + 1, sizeof(value));
+      return Value(value);
+    }
+    case static_cast<unsigned char>(kCanonicalDoubleTag): {
+      if (key.size() != 1 + sizeof(double)) {
+        throw std::runtime_error("invalid canonical double group key");
+      }
+      double value = 0.0;
+      std::memcpy(&value, key.data() + 1, sizeof(value));
+      return Value(value);
+    }
+    case static_cast<unsigned char>(kCanonicalStringTag): {
+      const auto size = readCanonicalKeySize(key, &cursor);
+      if (cursor + size != key.size()) {
+        throw std::runtime_error("invalid canonical string group key");
+      }
+      return Value(std::string(key.substr(cursor, size)));
+    }
+    case static_cast<unsigned char>(kCanonicalVectorTag): {
+      const auto count = readCanonicalKeySize(key, &cursor);
+      if (count > (key.size() - cursor) / sizeof(float) ||
+          cursor + count * sizeof(float) != key.size()) {
+        throw std::runtime_error("invalid canonical vector group key");
+      }
+      std::vector<float> values(count);
+      for (std::size_t i = 0; i < count; ++i) {
+        uint32_t bits = 0;
+        std::memcpy(&bits, key.data() + cursor + i * sizeof(float), sizeof(bits));
+        values[i] = std::bit_cast<float>(bits);
+      }
+      return Value(std::move(values));
+    }
+    default:
+      throw std::runtime_error("unknown canonical group key type");
+  }
+}
+
+// Decode a canonical key once when the result table is materialized. The
+// `is_double` flag restores a first-seen integral double (`2.0`) that shares
+// the integer spelling with `2`.
+Value decodeSingleKeyValue(std::string_view key, bool is_double) {
+  if (!is_double || key.empty() || static_cast<unsigned char>(key.front()) < 0x20) {
+    return decodeCanonicalSingleKey(key);
+  }
+  double value = 0.0;
+  if (!parseDoubleText(key, &value)) {
+    throw std::runtime_error("invalid canonical double group key");
+  }
+  return Value(value);
+}
+
 void encodeParsedGroupKeyRow(const std::vector<ParsedCell>& key_cells, std::string* out) {
   if (out == nullptr) {
     throw std::invalid_argument("group key output is null");
   }
   out->clear();
-  out->reserve(std::max(out->capacity(), key_cells.size() * std::size_t(8)));
+  out->reserve(std::max(out->capacity(), key_cells.size() * std::size_t(12)));
   for (const auto& cell : key_cells) {
-    const auto text = parsedCellText(cell);
-    appendSizeToString(out, text.size());
-    out->push_back(':');
-    out->append(text.data(), text.size());
+    appendCanonicalParsedCellKey(cell, out);
   }
 }
 
@@ -1137,14 +1564,32 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
     bool current_row_selected = true;
     bool key_seen = false;
     std::string current_key;
+    Value current_key_value;
+    bool current_key_value_ready = false;
+    bool current_key_value_is_double = false;
+    bool current_key_cached = false;
+    std::size_t current_key_cached_index = 0;
+    bool current_raw_key_pending = false;
+    bool raw_cache_enabled = true;
     std::vector<ParsedCell> predicate_values(predicate_schema_indices.size());
     std::vector<std::size_t> predicate_generations(predicate_schema_indices.size(), 0);
     std::pmr::monotonic_buffer_resource key_resource;
-    std::unordered_map<std::string_view, std::size_t, std::hash<std::string_view>> key_to_index;
-    std::pmr::vector<std::pmr::string> ordered_keys(&key_resource);
+    StringViewIndex key_to_index;
+    // `key_to_index` stores views into `ordered_keys`; keep the key storage
+    // address-stable when groups are appended so small-string keys do not
+    // leave dangling views after a vector reallocation.
+    std::pmr::deque<std::pmr::string> ordered_keys(&key_resource);
+    std::pmr::string current_raw_key(&key_resource);
+    // Cache the raw spelling of non-plain keys so repeated numeric keys skip
+    // parsing and canonical re-encoding; aliases still point at the canonical
+    // group index, so distinct spellings of the same number coalesce.
+    std::pmr::deque<std::pmr::string> raw_key_storage(&key_resource);
+    StringViewIndex raw_key_to_index;
+    std::vector<uint8_t> ordered_key_types;
     std::vector<std::size_t> counts;
-    key_to_index.reserve(64);
-    ordered_keys.reserve(64);
+    key_to_index.reserve(estimateCsvGroupReserve(path));
+    raw_key_to_index.reserve(kMaxCachedRawKeys);
+    ordered_key_types.reserve(64);
     counts.reserve(64);
 
     scanCsvCells(
@@ -1157,13 +1602,41 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           filter_match = current_row_selected;
           key_seen = false;
           current_key.clear();
+          current_key_cached = false;
+          current_raw_key_pending = false;
+          current_key_value_is_double = false;
         },
         [&](std::size_t column_index, std::string_view cell) {
           if (!current_row_selected) {
             return true;
           }
           if (column_index == key_indices.front()) {
-            current_key = cell;
+            if (isPlainCsvStringKey(cell)) {
+              current_key.assign(cell.data(), cell.size());
+              current_key_value_ready = false;
+              current_key_value_is_double = false;
+            } else {
+              bool cached_key = false;
+              if (raw_cache_enabled) {
+                std::size_t cached_index = 0;
+                if (raw_key_to_index.find(cell, &cached_index)) {
+                  current_key_cached = true;
+                  current_key_cached_index = cached_index;
+                  current_key_value_ready = false;
+                  current_key_value_is_double = false;
+                  cached_key = true;
+                }
+              }
+              if (!cached_key) {
+                captureCanonicalSingleKey(cell, &current_key, &current_key_value,
+                                          &current_key_value_ready,
+                                          &current_key_value_is_double);
+                if (raw_cache_enabled && raw_key_to_index.size() < kMaxCachedRawKeys) {
+                  current_raw_key.assign(cell.data(), cell.size());
+                  current_raw_key_pending = true;
+                }
+              }
+            }
             key_seen = true;
           }
           const bool has_filter = column_index < filter_positions_by_column.size() &&
@@ -1204,14 +1677,30 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
             ++logical_row_index;
             return true;
           }
-          auto it = key_to_index.find(current_key);
-          if (it == key_to_index.end()) {
-            const std::size_t index = ordered_keys.size();
-            ordered_keys.emplace_back(current_key.data(), current_key.size());
-            counts.push_back(1);
-            key_to_index.emplace(std::string_view(ordered_keys.back()), index);
+          if (current_key_cached) {
+            counts[current_key_cached_index] += 1;
           } else {
-            counts[it->second] += 1;
+            std::size_t group_index = 0;
+            if (!key_to_index.find(current_key, &group_index)) {
+              group_index = ordered_keys.size();
+              ordered_keys.emplace_back(current_key.data(), current_key.size());
+              ordered_key_types.push_back(current_key_value_is_double ? 1 : 0);
+              counts.push_back(1);
+              key_to_index.insert(std::string_view(ordered_keys.back()), group_index);
+            } else {
+              counts[group_index] += 1;
+            }
+            if (current_raw_key_pending) {
+              raw_key_storage.emplace_back(current_raw_key.data(), current_raw_key.size());
+              raw_key_to_index.insert(std::string_view(raw_key_storage.back()), group_index);
+              current_raw_key_pending = false;
+            }
+            if (raw_cache_enabled && ordered_keys.size() > kMaxCachedRawKeys) {
+              raw_cache_enabled = false;
+              raw_key_to_index.clear();
+              raw_key_storage.clear();
+              current_raw_key_pending = false;
+            }
           }
           ++logical_row_index;
           return true;
@@ -1224,7 +1713,8 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
       column.values.reserve(ordered_keys.size());
     }
     for (std::size_t i = 0; i < ordered_keys.size(); ++i) {
-      result.columnar_cache->columns[0].values.push_back(parseCell(ordered_keys[i]));
+      result.columnar_cache->columns[0].values.push_back(
+          decodeSingleKeyValue(ordered_keys[i], ordered_key_types[i] != 0));
       result.columnar_cache->columns[1].values.push_back(
           Value(static_cast<int64_t>(counts[i])));
     }
@@ -1273,14 +1763,32 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
     bool numeric_is_int = false;
     int64_t int_value = 0;
     std::string current_key;
+    Value current_key_value;
+    bool current_key_value_ready = false;
+    bool current_key_value_is_double = false;
+    bool current_key_cached = false;
+    std::size_t current_key_cached_index = 0;
+    bool current_raw_key_pending = false;
+    bool raw_cache_enabled = true;
     std::vector<ParsedCell> predicate_values(predicate_schema_indices.size());
     std::vector<std::size_t> predicate_generations(predicate_schema_indices.size(), 0);
     std::pmr::monotonic_buffer_resource key_resource;
-    std::unordered_map<std::string_view, std::size_t, std::hash<std::string_view>> key_to_index;
-    std::pmr::vector<std::pmr::string> ordered_keys(&key_resource);
+    StringViewIndex key_to_index;
+    // `key_to_index` stores views into `ordered_keys`; keep the key storage
+    // address-stable when groups are appended so small-string keys do not
+    // leave dangling views after a vector reallocation.
+    std::pmr::deque<std::pmr::string> ordered_keys(&key_resource);
+    std::pmr::string current_raw_key(&key_resource);
+    // Cache the raw spelling of non-plain keys so repeated numeric keys skip
+    // parsing and canonical re-encoding; aliases still point at the canonical
+    // group index, so distinct spellings of the same number coalesce.
+    std::pmr::deque<std::pmr::string> raw_key_storage(&key_resource);
+    StringViewIndex raw_key_to_index;
+    std::vector<uint8_t> ordered_key_types;
     std::vector<NumericAggregateState> states;
-    key_to_index.reserve(64);
-    ordered_keys.reserve(64);
+    key_to_index.reserve(estimateCsvGroupReserve(path));
+    raw_key_to_index.reserve(kMaxCachedRawKeys);
+    ordered_key_types.reserve(64);
     states.reserve(64);
 
     scanCsvCells(
@@ -1297,13 +1805,41 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           numeric_is_int = false;
           int_value = 0;
           current_key.clear();
+          current_key_cached = false;
+          current_raw_key_pending = false;
+          current_key_value_is_double = false;
         },
         [&](std::size_t column_index, std::string_view cell) {
           if (!current_row_selected) {
             return true;
           }
           if (column_index == key_indices.front()) {
-            current_key = cell;
+            if (isPlainCsvStringKey(cell)) {
+              current_key.assign(cell.data(), cell.size());
+              current_key_value_ready = false;
+              current_key_value_is_double = false;
+            } else {
+              bool cached_key = false;
+              if (raw_cache_enabled) {
+                std::size_t cached_index = 0;
+                if (raw_key_to_index.find(cell, &cached_index)) {
+                  current_key_cached = true;
+                  current_key_cached_index = cached_index;
+                  current_key_value_ready = false;
+                  current_key_value_is_double = false;
+                  cached_key = true;
+                }
+              }
+              if (!cached_key) {
+                captureCanonicalSingleKey(cell, &current_key, &current_key_value,
+                                          &current_key_value_ready,
+                                          &current_key_value_is_double);
+                if (raw_cache_enabled && raw_key_to_index.size() < kMaxCachedRawKeys) {
+                  current_raw_key.assign(cell.data(), cell.size());
+                  current_raw_key_pending = true;
+                }
+              }
+            }
             key_seen = true;
           }
           const bool has_filter = column_index < filter_positions_by_column.size() &&
@@ -1357,14 +1893,30 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
             ++logical_row_index;
             return true;
           }
-          auto it = key_to_index.find(current_key);
-          if (it == key_to_index.end()) {
-            const std::size_t index = ordered_keys.size();
-            ordered_keys.emplace_back(current_key.data(), current_key.size());
-            states.push_back(NumericAggregateState{});
-            it = key_to_index.emplace(std::string_view(ordered_keys.back()), index).first;
+          std::size_t group_index = 0;
+          if (current_key_cached) {
+            group_index = current_key_cached_index;
+          } else {
+            if (!key_to_index.find(current_key, &group_index)) {
+              group_index = ordered_keys.size();
+              ordered_keys.emplace_back(current_key.data(), current_key.size());
+              ordered_key_types.push_back(current_key_value_is_double ? 1 : 0);
+              states.push_back(NumericAggregateState{});
+              key_to_index.insert(std::string_view(ordered_keys.back()), group_index);
+            }
+            if (current_raw_key_pending) {
+              raw_key_storage.emplace_back(current_raw_key.data(), current_raw_key.size());
+              raw_key_to_index.insert(std::string_view(raw_key_storage.back()), group_index);
+              current_raw_key_pending = false;
+            }
+            if (raw_cache_enabled && ordered_keys.size() > kMaxCachedRawKeys) {
+              raw_cache_enabled = false;
+              raw_key_to_index.clear();
+              raw_key_storage.clear();
+              current_raw_key_pending = false;
+            }
           }
-          auto& state = states[it->second];
+          auto& state = states[group_index];
           switch (agg.function) {
             case AggregateFunction::Sum:
               if (numeric_present) {
@@ -1407,7 +1959,8 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
       column.values.reserve(ordered_keys.size());
     }
     for (std::size_t i = 0; i < ordered_keys.size(); ++i) {
-      result.columnar_cache->columns[0].values.push_back(parseCell(ordered_keys[i]));
+      result.columnar_cache->columns[0].values.push_back(
+          decodeSingleKeyValue(ordered_keys[i], ordered_key_types[i] != 0));
       const auto& state = states[i];
       switch (agg.function) {
         case AggregateFunction::Sum:
@@ -1497,6 +2050,13 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
     bool current_row_selected = true;
     bool key_seen = false;
     std::string current_key;
+    Value current_key_value;
+    bool current_key_value_ready = false;
+    bool current_key_value_is_double = false;
+    bool current_key_cached = false;
+    std::size_t current_key_cached_index = 0;
+    bool current_raw_key_pending = false;
+    bool raw_cache_enabled = true;
     std::vector<double> numeric_values(aggs.size(), 0.0);
     std::vector<bool> numeric_is_int(aggs.size(), false);
     std::vector<int64_t> int_values(aggs.size(), 0);
@@ -1506,11 +2066,22 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
     std::size_t row_generation = 0;
 
     std::pmr::monotonic_buffer_resource key_resource;
-    std::pmr::vector<std::pmr::string> ordered_keys(&key_resource);
-    std::unordered_map<std::string_view, std::size_t, std::hash<std::string_view>> key_to_index;
+    // `key_to_index` stores views into `ordered_keys`; keep the key storage
+    // address-stable when groups are appended so small-string keys do not
+    // leave dangling views after a vector reallocation.
+    std::pmr::deque<std::pmr::string> ordered_keys(&key_resource);
+    std::pmr::string current_raw_key(&key_resource);
+    // Cache the raw spelling of non-plain keys so repeated numeric keys skip
+    // parsing and canonical re-encoding; aliases still point at the canonical
+    // group index, so distinct spellings of the same number coalesce.
+    std::pmr::deque<std::pmr::string> raw_key_storage(&key_resource);
+    StringViewIndex raw_key_to_index;
+    StringViewIndex key_to_index;
+    std::vector<uint8_t> ordered_key_types;
     std::vector<AggregateState> ordered_states;
-    ordered_keys.reserve(64);
-    key_to_index.reserve(64);
+    ordered_key_types.reserve(64);
+    key_to_index.reserve(estimateCsvGroupReserve(path));
+    raw_key_to_index.reserve(kMaxCachedRawKeys);
     ordered_states.reserve(64);
 
     scanCsvCells(
@@ -1523,13 +2094,41 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
           filter_match = current_row_selected;
           key_seen = false;
           current_key.clear();
+          current_key_cached = false;
+          current_raw_key_pending = false;
+          current_key_value_is_double = false;
         },
         [&](std::size_t column_index, std::string_view cell) {
           if (!current_row_selected) {
             return true;
           }
           if (column_index == key_column_index) {
-            current_key.assign(cell.data(), cell.size());
+            if (isPlainCsvStringKey(cell)) {
+              current_key.assign(cell.data(), cell.size());
+              current_key_value_ready = false;
+              current_key_value_is_double = false;
+            } else {
+              bool cached_key = false;
+              if (raw_cache_enabled) {
+                std::size_t cached_index = 0;
+                if (raw_key_to_index.find(cell, &cached_index)) {
+                  current_key_cached = true;
+                  current_key_cached_index = cached_index;
+                  current_key_value_ready = false;
+                  current_key_value_is_double = false;
+                  cached_key = true;
+                }
+              }
+              if (!cached_key) {
+                captureCanonicalSingleKey(cell, &current_key, &current_key_value,
+                                          &current_key_value_ready,
+                                          &current_key_value_is_double);
+                if (raw_cache_enabled && raw_key_to_index.size() < kMaxCachedRawKeys) {
+                  current_raw_key.assign(cell.data(), cell.size());
+                  current_raw_key_pending = true;
+                }
+              }
+            }
             key_seen = true;
           }
           ParsedCell parsed;
@@ -1590,15 +2189,31 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
             ++logical_row_index;
             return true;
           }
-          const std::string_view current_key_view(current_key);
-          auto it = key_to_index.find(current_key_view);
-          if (it == key_to_index.end()) {
-            const std::size_t index = ordered_keys.size();
-            ordered_keys.emplace_back(current_key.data(), current_key.size());
-            ordered_states.push_back(init_state());
-            it = key_to_index.emplace(std::string_view(ordered_keys.back()), index).first;
+          std::size_t group_index = 0;
+          if (current_key_cached) {
+            group_index = current_key_cached_index;
+          } else {
+            const std::string_view current_key_view(current_key);
+            if (!key_to_index.find(current_key_view, &group_index)) {
+              group_index = ordered_keys.size();
+              ordered_keys.emplace_back(current_key.data(), current_key.size());
+              ordered_key_types.push_back(current_key_value_is_double ? 1 : 0);
+              ordered_states.push_back(init_state());
+              key_to_index.insert(std::string_view(ordered_keys.back()), group_index);
+            }
+            if (current_raw_key_pending) {
+              raw_key_storage.emplace_back(current_raw_key.data(), current_raw_key.size());
+              raw_key_to_index.insert(std::string_view(raw_key_storage.back()), group_index);
+              current_raw_key_pending = false;
+            }
+            if (raw_cache_enabled && ordered_keys.size() > kMaxCachedRawKeys) {
+              raw_cache_enabled = false;
+              raw_key_to_index.clear();
+              raw_key_storage.clear();
+              current_raw_key_pending = false;
+            }
           }
-          auto& state = ordered_states[it->second];
+          auto& state = ordered_states[group_index];
           for (std::size_t i = 0; i < aggs.size(); ++i) {
             const auto& agg = aggs[i];
             const bool has_numeric = numeric_generations[i] == row_generation;
@@ -1655,7 +2270,8 @@ bool try_execute_csv_aggregate(const std::string& path, const Schema& schema,
       column.values.reserve(ordered_keys.size());
     }
     for (std::size_t index = 0; index < ordered_keys.size(); ++index) {
-      cache->columns[0].values.push_back(parseCell(std::string_view(ordered_keys[index])));
+      cache->columns[0].values.push_back(
+          decodeSingleKeyValue(ordered_keys[index], ordered_key_types[index] != 0));
       const auto& state = ordered_states[index];
       for (std::size_t i = 0; i < aggs.size(); ++i) {
         Value value;

@@ -1,3 +1,4 @@
+#include <array>
 #include <fstream>
 #include <unordered_map>
 #include <iostream>
@@ -1062,6 +1063,264 @@ int main() {
     expect(json_sums.size() == 2, "json predicate sum aggregate group count mismatch");
     expect(json_sums.at("A") == 20.0, "json predicate sum aggregate A mismatch");
     expect(json_sums.at("C") == 30.0, "json predicate sum aggregate C mismatch");
+
+    const auto csv_key_semantics_path = make_temp_file("velaria-source-csv-key-semantics");
+    write_file(csv_key_semantics_path,
+               "k,v\n"
+               "TRUE,1\n"
+               "true,2\n"
+               "1.50,3\n"
+               "1.5,4\n"
+               "1,5\n"
+               "1.0,6\n"
+               "001,7\n"
+               "001,8\n"
+               "True,9\n"
+               "True,10\n"
+               ".5,11\n"
+               ".50,12\n"
+               "1000,13\n"
+               "1e3,14\n"
+               "1000.0,15\n"
+               "1000000000000000,16\n"
+               "1e15,17\n"
+               "2.0,18\n");
+    const auto csv_key_semantics_schema = dataflow::read_csv_schema(csv_key_semantics_path);
+    auto check_csv_key_semantics = [](const dataflow::Table& table,
+                                      const std::array<double, 9>& expected,
+                                      const std::string& label) {
+      expect(table.columnar_cache != nullptr, label + " columnar cache missing");
+      const auto& keys = table.columnar_cache->columns[0].values;
+      const auto& values = table.columnar_cache->columns[1].values;
+      expect(keys.size() == 9, label + " should coalesce key spellings");
+      std::array<double, 9> totals{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+      for (std::size_t i = 0; i < keys.size(); ++i) {
+        const auto& key = keys[i];
+        if (key.type() == dataflow::DataType::Bool) {
+          expect(key.asBool(), label + " boolean key value mismatch");
+          totals[0] += values[i].asDouble();
+        } else if (key.isNumber() && key.asDouble() == 1.0) {
+          totals[1] += values[i].asDouble();
+        } else if (key.isNumber() && key.asDouble() == 1.5) {
+          totals[2] += values[i].asDouble();
+        } else if (key.type() == dataflow::DataType::String && key.asString() == "001") {
+          totals[3] += values[i].asDouble();
+        } else if (key.type() == dataflow::DataType::String && key.asString() == "True") {
+          totals[4] += values[i].asDouble();
+        } else if (key.isNumber() && key.asDouble() == 0.5) {
+          totals[5] += values[i].asDouble();
+        } else if (key.isNumber() && key.asDouble() == 1000.0) {
+          totals[6] += values[i].asDouble();
+        } else if (key.isNumber() && key.asDouble() == 1000000000000000.0) {
+          totals[7] += values[i].asDouble();
+        } else if (key.isNumber() && key.asDouble() == 2.0) {
+          expect(key.type() == dataflow::DataType::Double,
+                 label + " should keep the first-seen double key type");
+          totals[8] += values[i].asDouble();
+        } else {
+          expect(false, label + " unexpected key value");
+        }
+      }
+      expect(totals == expected, label + " aggregate totals mismatch");
+    };
+
+    dataflow::SourcePushdownSpec csv_key_count_pushdown;
+    csv_key_count_pushdown.has_aggregate = true;
+    csv_key_count_pushdown.aggregate.keys = {0};
+    csv_key_count_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Count, 0, "cnt"},
+    };
+    dataflow::Table csv_key_count_result;
+    expect(dataflow::execute_csv_source_pushdown(csv_key_semantics_path,
+                                                 csv_key_semantics_schema,
+                                                 csv_key_count_pushdown, ',', false,
+                                                 &csv_key_count_result),
+           "csv generic single-key count pushdown failed");
+    check_csv_key_semantics(csv_key_count_result, {2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 3.0, 2.0, 1.0},
+                            "csv generic single-key count");
+
+    dataflow::SourcePushdownSpec csv_key_count_typed_pushdown = csv_key_count_pushdown;
+    csv_key_count_typed_pushdown.shape = dataflow::SourcePushdownShape::SingleKeyCount;
+    csv_key_count_typed_pushdown.shape_is_explicit = true;
+    dataflow::Table csv_key_count_typed_result;
+    expect(dataflow::execute_csv_source_pushdown(csv_key_semantics_path,
+                                                 csv_key_semantics_schema,
+                                                 csv_key_count_typed_pushdown, ',', false,
+                                                 &csv_key_count_typed_result),
+           "csv typed single-key count pushdown failed");
+    check_csv_key_semantics(csv_key_count_typed_result, {2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 3.0, 2.0, 1.0},
+                            "csv typed single-key count");
+
+    dataflow::SourcePushdownSpec csv_key_sum_pushdown = csv_key_count_pushdown;
+    csv_key_sum_pushdown.shape = dataflow::SourcePushdownShape::SingleKeyNumericAggregate;
+    csv_key_sum_pushdown.shape_is_explicit = true;
+    csv_key_sum_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Sum, 1, "sum_v"},
+    };
+    dataflow::Table csv_key_sum_result;
+    expect(dataflow::execute_csv_source_pushdown(csv_key_semantics_path,
+                                                 csv_key_semantics_schema,
+                                                 csv_key_sum_pushdown, ',', false,
+                                                 &csv_key_sum_result),
+           "csv typed single-key sum pushdown failed");
+    check_csv_key_semantics(csv_key_sum_result, {3.0, 11.0, 7.0, 15.0, 19.0, 23.0, 42.0, 33.0, 18.0},
+                            "csv typed single-key sum");
+
+    // More than 64 distinct short numeric keys force the key storage to grow.
+    // Those keys fit the small-string buffer, so any move would invalidate the
+    // string_view keys held by the group index and split a group on a second pass.
+    const auto csv_many_numeric_keys_path =
+        make_temp_file("velaria-source-csv-many-numeric-keys");
+    std::string csv_many_numeric_keys_data = "k,v\n";
+    for (int pass = 0; pass < 2; ++pass) {
+      for (int i = 0; i < 70; ++i) {
+        csv_many_numeric_keys_data +=
+            std::to_string(1000LL + i) + ",1\n";
+      }
+    }
+    write_file(csv_many_numeric_keys_path, csv_many_numeric_keys_data);
+    const auto csv_many_numeric_keys_schema =
+        dataflow::read_csv_schema(csv_many_numeric_keys_path);
+    auto check_csv_many_numeric_keys = [](const dataflow::Table& table,
+                                          const std::string& label) {
+      expect(table.columnar_cache != nullptr, label + " columnar cache missing");
+      expect(table.columnar_cache->row_count == 70,
+             label + " should keep one row per numeric key");
+      const auto& keys = table.columnar_cache->columns[0].values;
+      const auto& values = table.columnar_cache->columns[1].values;
+      expect(keys.size() == 70 && values.size() == 70, label + " output shape mismatch");
+      for (std::size_t i = 0; i < keys.size(); ++i) {
+        expect(keys[i].isNumber(), label + " numeric key expected");
+        expect(values[i].asDouble() == 2.0, label + " aggregate value mismatch");
+      }
+    };
+
+    dataflow::SourcePushdownSpec csv_many_numeric_count_pushdown;
+    csv_many_numeric_count_pushdown.has_aggregate = true;
+    csv_many_numeric_count_pushdown.aggregate.keys = {0};
+    csv_many_numeric_count_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Count, 0, "cnt"},
+    };
+    dataflow::Table csv_many_numeric_count_result;
+    expect(dataflow::execute_csv_source_pushdown(
+               csv_many_numeric_keys_path, csv_many_numeric_keys_schema,
+               csv_many_numeric_count_pushdown, ',', false,
+               &csv_many_numeric_count_result),
+           "csv many numeric keys generic count pushdown failed");
+    check_csv_many_numeric_keys(csv_many_numeric_count_result,
+                                "csv many numeric keys generic count");
+
+    dataflow::SourcePushdownSpec csv_many_numeric_count_typed_pushdown =
+        csv_many_numeric_count_pushdown;
+    csv_many_numeric_count_typed_pushdown.shape =
+        dataflow::SourcePushdownShape::SingleKeyCount;
+    csv_many_numeric_count_typed_pushdown.shape_is_explicit = true;
+    dataflow::Table csv_many_numeric_count_typed_result;
+    expect(dataflow::execute_csv_source_pushdown(
+               csv_many_numeric_keys_path, csv_many_numeric_keys_schema,
+               csv_many_numeric_count_typed_pushdown, ',', false,
+               &csv_many_numeric_count_typed_result),
+           "csv many numeric keys typed count pushdown failed");
+    check_csv_many_numeric_keys(csv_many_numeric_count_typed_result,
+                                "csv many numeric keys typed count");
+
+    dataflow::SourcePushdownSpec csv_many_numeric_sum_pushdown =
+        csv_many_numeric_count_pushdown;
+    csv_many_numeric_sum_pushdown.shape =
+        dataflow::SourcePushdownShape::SingleKeyNumericAggregate;
+    csv_many_numeric_sum_pushdown.shape_is_explicit = true;
+    csv_many_numeric_sum_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Sum, 1, "sum_v"},
+    };
+    dataflow::Table csv_many_numeric_sum_result;
+    expect(dataflow::execute_csv_source_pushdown(
+               csv_many_numeric_keys_path, csv_many_numeric_keys_schema,
+               csv_many_numeric_sum_pushdown, ',', false,
+               &csv_many_numeric_sum_result),
+           "csv many numeric keys typed sum pushdown failed");
+    check_csv_many_numeric_keys(csv_many_numeric_sum_result,
+                                "csv many numeric keys typed sum");
+
+    const auto csv_high_cardinality_path =
+        make_temp_file("velaria-source-csv-high-cardinality");
+    std::string csv_high_cardinality_data = "k,v\n";
+    for (int i = 0; i < 5000; ++i) {
+      csv_high_cardinality_data += std::to_string(2000000LL + i) + ",1\n";
+    }
+    write_file(csv_high_cardinality_path, csv_high_cardinality_data);
+    const auto csv_high_cardinality_schema =
+        dataflow::read_csv_schema(csv_high_cardinality_path);
+    dataflow::SourcePushdownSpec csv_high_cardinality_count_pushdown;
+    csv_high_cardinality_count_pushdown.has_aggregate = true;
+    csv_high_cardinality_count_pushdown.aggregate.keys = {0};
+    csv_high_cardinality_count_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Count, 0, "cnt"},
+    };
+    csv_high_cardinality_count_pushdown.shape =
+        dataflow::SourcePushdownShape::SingleKeyCount;
+    csv_high_cardinality_count_pushdown.shape_is_explicit = true;
+    dataflow::Table csv_high_cardinality_count_result;
+    expect(dataflow::execute_csv_source_pushdown(
+               csv_high_cardinality_path, csv_high_cardinality_schema,
+               csv_high_cardinality_count_pushdown, ',', false,
+               &csv_high_cardinality_count_result),
+           "csv high cardinality count pushdown failed");
+    expect(csv_high_cardinality_count_result.columnar_cache != nullptr,
+           "csv high cardinality cache missing");
+    expect(csv_high_cardinality_count_result.columnar_cache->row_count == 5000,
+           "csv high cardinality should keep 5000 groups");
+    const auto& csv_high_cardinality_keys =
+        csv_high_cardinality_count_result.columnar_cache->columns[0].values;
+    const auto& csv_high_cardinality_counts =
+        csv_high_cardinality_count_result.columnar_cache->columns[1].values;
+    expect(csv_high_cardinality_keys.size() == 5000 &&
+               csv_high_cardinality_counts.size() == 5000,
+           "csv high cardinality output shape mismatch");
+    for (std::size_t i = 0; i < csv_high_cardinality_counts.size(); ++i) {
+      expect(csv_high_cardinality_keys[i].isNumber(),
+             "csv high cardinality numeric key expected");
+      expect(csv_high_cardinality_counts[i].asDouble() == 1.0,
+             "csv high cardinality count mismatch");
+    }
+
+    const auto csv_multi_key_semantics_path =
+        make_temp_file("velaria-source-csv-multi-key-semantics");
+    write_file(csv_multi_key_semantics_path,
+               "k1,k2,v\n"
+               "TRUE,1.50,1\n"
+               "true,1.5,2\n");
+    const auto csv_multi_key_semantics_schema =
+        dataflow::read_csv_schema(csv_multi_key_semantics_path);
+    dataflow::SourcePushdownSpec csv_multi_key_semantics_pushdown;
+    csv_multi_key_semantics_pushdown.has_aggregate = true;
+    csv_multi_key_semantics_pushdown.aggregate.keys = {0, 1};
+    csv_multi_key_semantics_pushdown.aggregate.aggregates = {
+        {dataflow::AggregateFunction::Count, 0, "cnt"},
+    };
+    csv_multi_key_semantics_pushdown.shape = dataflow::SourcePushdownShape::MultiKeyCount;
+    csv_multi_key_semantics_pushdown.shape_is_explicit = true;
+    dataflow::Table csv_multi_key_semantics_result;
+    expect(dataflow::execute_csv_source_pushdown(csv_multi_key_semantics_path,
+                                                 csv_multi_key_semantics_schema,
+                                                 csv_multi_key_semantics_pushdown, ',', false,
+                                                 &csv_multi_key_semantics_result),
+           "csv multi-key semantics count pushdown failed");
+    expect(csv_multi_key_semantics_result.rowCount() == 1,
+           "csv multi-key should coalesce boolean and numeric key spellings");
+    expect(csv_multi_key_semantics_result.columnar_cache->columns[2].values[0].asInt64() == 2,
+           "csv multi-key coalesced count mismatch");
+
+    session.sql("CREATE TABLE csv_key_semantics_v1 USING csv OPTIONS(path: '" +
+                csv_key_semantics_path + "')");
+    auto csv_key_sql_result =
+        session.sql("SELECT k, COUNT(*) AS cnt FROM csv_key_semantics_v1 GROUP BY k").toTable();
+    expect(csv_key_sql_result.rowCount() == 9,
+           "csv sql group by should coalesce key spellings");
+    int64_t csv_key_sql_total = 0;
+    for (const auto& row : csv_key_sql_result.rows) {
+      csv_key_sql_total += row[1].asInt64();
+    }
+    expect(csv_key_sql_total == 18, "csv sql group by coalesced count total mismatch");
 
     std::cout << "[test] file source split/regex/json array/jsonl ok" << std::endl;
     return 0;

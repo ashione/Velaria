@@ -16,10 +16,15 @@ Use this index to decide which plan document is authoritative for the question y
   - [../docs/agentic-service-api.md](../docs/agentic-service-api.md)
   - [../docs/streaming_runtime_design.md](../docs/streaming_runtime_design.md)
 - current maintained working plan:
+  - [roadmap-v1.md](./roadmap-v1.md)
   - [core-runtime-columnar-plan.md](./core-runtime-columnar-plan.md)
 
 ## Current Working Plan
 
+- [roadmap-v1.md](./roadmap-v1.md)
+  - sequencing layer for the next repository milestones (M0–M6)
+  - owns milestone order, exit criteria, and release mapping only
+  - not a status board; use `core-runtime-columnar-plan.md` for implemented status
 - [core-runtime-columnar-plan.md](./core-runtime-columnar-plan.md)
   - current status board for the core runtime columnar path
   - tracks implemented items, explicit non-goals, and next phases

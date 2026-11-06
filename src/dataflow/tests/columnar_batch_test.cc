@@ -1,5 +1,6 @@
 #include <stdexcept>
 #include <cmath>
+#include <limits>
 #include <string>
 
 #include "src/dataflow/core/execution/columnar_batch.h"
@@ -21,6 +22,63 @@ bool gteValue(const dataflow::Value& lhs, const dataflow::Value& rhs) {
 }  // namespace
 
 int main() {
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double inf = std::numeric_limits<double>::infinity();
+  expect(dataflow::Value(int64_t(9007199254740993)) !=
+             dataflow::Value(9007199254740992.0),
+         "int64 above 2^53 must not round to the adjacent double");
+  expect(dataflow::Value(int64_t(9007199254740992)) == dataflow::Value(9007199254740992.0),
+         "int64 at 2^53 should equal its exact double");
+  expect(dataflow::Value(int64_t(3)) < dataflow::Value(3.5),
+         "int64 below an in-range fractional double must be less");
+  expect(dataflow::Value(int64_t(4)) > dataflow::Value(3.5),
+         "int64 above an in-range fractional double must be greater");
+  expect(dataflow::Value(int64_t(-3)) > dataflow::Value(-3.5),
+         "negative int64 above an in-range fractional double must be greater");
+  expect(dataflow::Value(int64_t(-4)) < dataflow::Value(-3.5),
+         "negative int64 below an in-range fractional double must be less");
+  expect(dataflow::Value(int64_t(0)) == dataflow::Value(-0.0),
+         "zero int64 must equal negative zero double");
+  expect(dataflow::Value(0.0) == dataflow::Value(-0.0),
+         "positive and negative zero doubles must compare equal");
+  expect(dataflow::Value(nan) == dataflow::Value(nan),
+         "NaN must compare equal to NaN for a stable total order");
+  expect(dataflow::Value(nan) > dataflow::Value(inf),
+         "NaN must sort after positive infinity");
+  expect(dataflow::Value(nan) > dataflow::Value(int64_t(0)),
+         "NaN must sort after integers");
+  expect(dataflow::Value(-inf) < dataflow::Value(int64_t(0)),
+         "negative infinity must sort before integers");
+  expect(dataflow::Value(inf) > dataflow::Value(int64_t(9223372036854775807LL)),
+         "positive infinity must sort after the maximum int64");
+  expect(dataflow::Value(int64_t(9223372036854775807LL)) <
+             dataflow::Value(9223372036854775808.0),
+         "maximum int64 must sort before 2^63");
+  expect(dataflow::Value(int64_t(1)) == dataflow::Value(1.0),
+         "integer and integral double must compare equal");
+  expect(dataflow::Value(int64_t(1)) == dataflow::Value(1e0),
+         "integer and exponent-form double must compare equal");
+
+  expect(dataflow::Value(int64_t(1)).keyEquals(dataflow::Value(1.0)),
+         "group-key identity must merge int64 and integral double");
+  expect(dataflow::Value(int64_t(1)).keyHash() == dataflow::Value(1.0).keyHash(),
+         "equal group keys must hash equally");
+  expect(dataflow::Value(int64_t(9007199254740993))
+                 .keyEquals(dataflow::Value(9007199254740992.0)) == false,
+         "group-key identity must not round int64 above 2^53");
+  expect(dataflow::Value(nan).keyEquals(dataflow::Value(nan)),
+         "all NaN group keys must compare equal");
+  expect(dataflow::Value(nan).keyHash() == dataflow::Value(nan).keyHash(),
+         "all NaN group keys must hash equally");
+  expect(dataflow::Value(0.0).keyEquals(dataflow::Value(-0.0)),
+         "positive and negative zero must be one group key");
+  expect(dataflow::Value(0.0).keyHash() == dataflow::Value(-0.0).keyHash(),
+         "positive and negative zero must hash equally");
+  expect(dataflow::Value(int64_t(0)).keyHash() == dataflow::Value(-0.0).keyHash(),
+         "zero int64 and negative zero must hash equally");
+  expect(dataflow::Value("1").keyEquals(dataflow::Value(int64_t(1))) == false,
+         "string and numeric group keys must stay distinct");
+
   dataflow::Table table(
       dataflow::Schema({"region", "n", "needle"}),
       {

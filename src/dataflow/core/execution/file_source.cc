@@ -3264,40 +3264,11 @@ std::size_t hashCombine(std::size_t seed, std::size_t value) {
 }
 
 bool valuesEqualForKey(const Value& lhs, const Value& rhs) {
-  if (lhs.type() == rhs.type()) {
-    return lhs == rhs;
-  }
-  if (lhs.isNumber() && rhs.isNumber()) {
-    return lhs.asDouble() == rhs.asDouble();
-  }
-  return false;
+  return lhs.keyEquals(rhs);
 }
 
 std::size_t hashValueForKey(const Value& value) {
-  if (value.isNumber()) {
-    return hashCombine(17, std::hash<double>{}(value.asDouble()));
-  }
-  std::size_t seed = static_cast<std::size_t>(value.type());
-  switch (value.type()) {
-    case DataType::Nil:
-      return hashCombine(seed, 0);
-    case DataType::Bool:
-      return hashCombine(seed, std::hash<bool>{}(value.asBool()));
-    case DataType::Int64:
-    case DataType::Double:
-    case DataType::Float32:
-      return hashCombine(seed, std::hash<double>{}(value.asDouble()));
-    case DataType::String:
-      return hashCombine(seed, std::hash<std::string>{}(value.asString()));
-    case DataType::FixedVector: {
-      std::size_t vec_seed = seed;
-      for (const auto item : value.asFixedVector()) {
-        vec_seed = hashCombine(vec_seed, std::hash<float>{}(item));
-      }
-      return vec_seed;
-    }
-  }
-  return seed;
+  return value.keyHash();
 }
 
 std::size_t GroupKeyHash::operator()(const GroupKey& key) const {

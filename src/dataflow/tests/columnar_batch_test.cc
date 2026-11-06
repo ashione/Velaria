@@ -59,6 +59,32 @@ int main() {
   expect(dataflow::Value(int64_t(1)) == dataflow::Value(1e0),
          "integer and exponent-form double must compare equal");
 
+  expect(dataflow::Value(int64_t(1)).keyEquals(dataflow::Value(1.0)),
+         "group-key identity must merge int64 and integral double");
+  expect(dataflow::Value(int64_t(1)).keyHash() == dataflow::Value(1.0).keyHash(),
+         "equal group keys must hash equally");
+  expect(dataflow::Value(int64_t(9007199254740993))
+                 .keyEquals(dataflow::Value(9007199254740992.0)) == false,
+         "group-key identity must not round int64 above 2^53");
+  expect(dataflow::Value(nan).keyEquals(dataflow::Value(nan)),
+         "all NaN group keys must compare equal");
+  expect(dataflow::Value(nan).keyHash() == dataflow::Value(nan).keyHash(),
+         "all NaN group keys must hash equally");
+  expect(dataflow::Value(0.0).keyEquals(dataflow::Value(-0.0)),
+         "positive and negative zero must be one group key");
+  expect(dataflow::Value(0.0).keyHash() == dataflow::Value(-0.0).keyHash(),
+         "positive and negative zero must hash equally");
+  expect(dataflow::Value(int64_t(0)).keyHash() == dataflow::Value(-0.0).keyHash(),
+         "zero int64 and negative zero must hash equally");
+  expect(dataflow::Value(int64_t(0)).keyHash() == dataflow::Value(0.0).keyHash(),
+         "zero int64 and positive zero must hash equally");
+  expect(dataflow::Value(0.0).keyEquals(dataflow::Value(int64_t(0))),
+         "positive zero double and zero int64 must be one group key");
+  expect(dataflow::Value(-0.0).keyEquals(dataflow::Value(int64_t(0))),
+         "negative zero double and zero int64 must be one group key");
+  expect(dataflow::Value("1").keyEquals(dataflow::Value(int64_t(1))) == false,
+         "string and numeric group keys must stay distinct");
+
   dataflow::Table table(
       dataflow::Schema({"region", "n", "needle"}),
       {

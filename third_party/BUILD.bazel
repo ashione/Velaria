@@ -1,0 +1,4 @@
+exports_files(
+    ["libpg_query_macos15_strchrnul.patch"],
+    visibility = ["//visibility:public"],
+)

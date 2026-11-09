@@ -165,6 +165,12 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 """,
+    patches = [
+        # macOS 15.4+ SDKs declare strchrnul, which conflicts with
+        # libpg_query's static fallback when HAVE_STRCHRNUL is unset.
+        "//third_party:libpg_query_macos15_strchrnul.patch",
+    ],
+    patch_args = ["-p1"],
     sha256 = "31f25b573da1c966bc762b0313b0a50cdd03aabdbaf666d90469eddcb1656df7",
     strip_prefix = "libpg_query-16-5.1.0",
     type = "tar.gz",

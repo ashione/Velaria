@@ -2813,7 +2813,7 @@ void appendColumn(Table* table, std::vector<Value>&& values, bool materialize_ro
   std::lock_guard<std::mutex> lock(table->columnar_cache_mu);
   if (table->columnar_cache) {
     auto cache = table->columnar_cache;
-    if (!cache.unique()) {
+    if (cache.use_count() != 1) {
       cache = std::make_shared<ColumnarTable>(*cache);
     }
     cache->schema = table->schema;
@@ -2859,7 +2859,7 @@ void appendColumn(Table* table, ValueColumnBuffer&& column, bool materialize_row
   std::lock_guard<std::mutex> lock(table->columnar_cache_mu);
   if (table->columnar_cache) {
     auto cache = table->columnar_cache;
-    if (!cache.unique()) {
+    if (cache.use_count() != 1) {
       cache = std::make_shared<ColumnarTable>(*cache);
     }
     cache->schema = table->schema;

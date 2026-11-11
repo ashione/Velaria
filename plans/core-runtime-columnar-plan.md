@@ -184,6 +184,7 @@ The following pieces are already in place in the current repository state.
   - two-`INT64` key `AVG`
 - the single-int64 sum shape uses an optimizer-informed non-null fixed-width key path, while nullable keys keep the conservative tagged-key path
 - two-int64 SUM/COUNT/AVG now reuse the existing hash-packed grouping decision but switch the reducer state from generic packed-key accumulators to typed double-int64 aggregate shapes
+- batch group-key identity follows `Value` numeric comparison in both the packed and serialized key paths: integral doubles coalesce with `Int64`, `+0.0`/`-0.0` share a key, all NaNs share a key, `Bool` stays distinct from numeric keys, and equal keys hash equally
 - empty aggregate outputs are expected to retain a schema-aligned empty columnar cache
 
 ### Regression coverage already added

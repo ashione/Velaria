@@ -2209,6 +2209,9 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
   struct PackedAggregateKey {
     // Up to 3 components; only first (arity) elements are meaningful.
     // String views borrow from the input table/cache and are consumed before input lifetime ends.
+    // Tags 1 and 3 are storage tags for Int64 and floating values; key identity
+    // for both follows Value comparison, so an integral double and an int64 are
+    // one key. Tag 4 is Bool, which Value comparison keeps distinct from numbers.
     uint8_t arity = 0;
     std::array<uint8_t, 3> tag{};
     std::array<int64_t, 3> i64{};
@@ -2218,25 +2221,28 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
     bool operator==(const PackedAggregateKey& other) const {
       if (arity != other.arity) return false;
       for (uint8_t i = 0; i < arity; ++i) {
-        if (tag[i] != other.tag[i]) return false;
-        switch (tag[i]) {
-          case 0:
-            break;
-          case 1:
-            if (i64[i] != other.i64[i]) return false;
-            break;
-          case 2:
-            if (sv[i] != other.sv[i]) return false;
-            break;
-          case 3: {
-            // NaN must compare equal to NaN even though IEEE 754 says NaN != NaN.
-            const double a = f64[i], b = other.f64[i];
-            if (a != b && !(std::isnan(a) && std::isnan(b))) return false;
-            break;
-          }
-          default:
-            return false;
+        const uint8_t left_tag = tag[i];
+        const uint8_t right_tag = other.tag[i];
+        const bool left_numeric = left_tag == 1 || left_tag == 3;
+        const bool right_numeric = right_tag == 1 || right_tag == 3;
+        if (left_numeric || right_numeric) {
+          if (!left_numeric || !right_numeric) return false;
+          const Value left = left_tag == 1 ? Value(i64[i]) : Value(f64[i]);
+          const Value right = right_tag == 1 ? Value(other.i64[i]) : Value(other.f64[i]);
+          if (!left.keyEquals(right)) return false;
+          continue;
         }
+        if (left_tag != right_tag) return false;
+        if (left_tag == 0) continue;
+        if (left_tag == 2) {
+          if (sv[i] != other.sv[i]) return false;
+          continue;
+        }
+        if (left_tag == 4) {
+          if (i64[i] != other.i64[i]) return false;
+          continue;
+        }
+        return false;
       }
       return true;
     }
@@ -2251,26 +2257,20 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
       };
       mix(key.arity);
       for (uint8_t i = 0; i < key.arity; ++i) {
-        mix(key.tag[i]);
-        switch (key.tag[i]) {
-          case 0:
-            break;
-          case 1:
-            mix(static_cast<uint64_t>(key.i64[i]));
-            break;
-          case 2: {
-            mix(std::hash<std::string_view>{}(key.sv[i]));
-            break;
-          }
-          case 3: {
-            // Normalize 0.0 so that +0.0 and -0.0 hash identically.
-            double v = key.f64[i];
-            if (v == 0.0) v = 0.0;
-            mix(std::bit_cast<uint64_t>(v));
-            break;
-          }
-          default:
-            break;
+        const uint8_t tag = key.tag[i];
+        if (tag == 1 || tag == 3) {
+          // Numeric components use Value::keyHash() so equal int64 and double
+          // keys hash equally; the shared marker keeps them in one hash family.
+          mix(1);
+          mix(static_cast<uint64_t>(
+              tag == 1 ? Value(key.i64[i]).keyHash() : Value(key.f64[i]).keyHash()));
+          continue;
+        }
+        mix(tag);
+        if (tag == 2) {
+          mix(std::hash<std::string_view>{}(key.sv[i]));
+        } else if (tag == 4) {
+          mix(static_cast<uint64_t>(std::hash<int64_t>{}(key.i64[i])));
         }
       }
       return h;
@@ -2316,7 +2316,7 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
           return true;
         }
         if (value.type() == DataType::Bool) {
-          out_key->tag[idx] = 1;
+          out_key->tag[idx] = 4;
           out_key->i64[idx] = value.asBool() ? 1 : 0;
           return true;
         }
@@ -2338,6 +2338,12 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
         if (isArrowUtf8Format(format)) {
           out_key->tag[idx] = 2;
           out_key->sv[idx] = valueColumnStringViewAt(buffer, row);
+          return true;
+        }
+        if (format == kArrowFormatBool) {
+          const auto* bits = static_cast<const uint8_t*>(buffer.arrow_backing->value_buffer.get());
+          out_key->tag[idx] = 4;
+          out_key->i64[idx] = ((bits[row >> 3] >> (row & 7)) & 0x01u) != 0 ? 1 : 0;
           return true;
         }
         if (isArrowIntegerLikeFormat(format)) {
@@ -2363,7 +2369,7 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
         return true;
       }
       if (value.type() == DataType::Bool) {
-        out_key->tag[idx] = 1;
+        out_key->tag[idx] = 4;
         out_key->i64[idx] = value.asBool() ? 1 : 0;
         return true;
       }
@@ -2427,6 +2433,9 @@ Table executeAggregateTable(const Table& input, const std::vector<size_t>& key_i
             break;
           case 3:
             cache->columns[out_column_index++].values.push_back(Value(key.f64[i]));
+            break;
+          case 4:
+            cache->columns[out_column_index++].values.push_back(Value(key.i64[i] != 0));
             break;
           default:
             cache->columns[out_column_index++].values.push_back(Value());

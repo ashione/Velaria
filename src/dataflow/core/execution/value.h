@@ -12,6 +12,28 @@
 
 namespace dataflow {
 
+// Shared numeric key identity for comparison, hashing and key serialization:
+// zero (including -0.0) canonicalizes to int64 0, and a finite double with an
+// exact int64 value canonicalizes to that int64. NaN, non-integral and
+// out-of-range doubles are not integral keys.
+inline bool canonicalIntegralKeyValue(double value, int64_t* out) {
+  if (std::isnan(value)) return false;
+  if (value == 0.0) {
+    *out = 0;
+    return true;
+  }
+  constexpr double kMinInt64 = -9223372036854775808.0;
+  constexpr double kMaxInt64Exclusive = 9223372036854775808.0;
+  if (value >= kMinInt64 && value < kMaxInt64Exclusive) {
+    const int64_t integral = static_cast<int64_t>(value);
+    if (static_cast<double>(integral) == value) {
+      *out = integral;
+      return true;
+    }
+  }
+  return false;
+}
+
 enum class DataType { Nil = 0, Bool = 1, Int64 = 2, Double = 3, String = 4, FixedVector = 5, Float32 = 6 };
 
 class Value {
@@ -179,24 +201,15 @@ class Value {
     if (isNumber()) {
       // Integral numeric values share an int64 hash so 1 and 1.0 collide by
       // equality rather than by a rounded double. Non-integral values use a
-      // canonical double hash; NaN and zero are normalized first.
+      // canonical double hash; NaN is normalized first.
       if (type_ != DataType::Int64) {
         double value = asDouble();
         if (std::isnan(value)) {
           value = std::numeric_limits<double>::quiet_NaN();
-        } else if (value == 0.0) {
-          // Zero must use the same int64 hash as Value(int64_t(0)); relying
-          // on hash<double>(0.0) being equal to hash<int64_t>(0) is not
-          // portable and would break the hash/equality contract.
-          return std::hash<int64_t>{}(0);
         } else {
-          constexpr double kMinInt64 = -9223372036854775808.0;
-          constexpr double kMaxInt64Exclusive = 9223372036854775808.0;
-          if (value >= kMinInt64 && value < kMaxInt64Exclusive) {
-            const int64_t integral = static_cast<int64_t>(value);
-            if (static_cast<double>(integral) == value) {
-              return std::hash<int64_t>{}(integral);
-            }
+          int64_t integral = 0;
+          if (canonicalIntegralKeyValue(value, &integral)) {
+            return std::hash<int64_t>{}(integral);
           }
         }
         return std::hash<double>{}(value);

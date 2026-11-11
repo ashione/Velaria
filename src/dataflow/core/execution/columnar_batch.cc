@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <charconv>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -9,6 +10,8 @@
 #include <span>
 #include <ctime>
 #include <iomanip>
+#include <limits>
+#include <locale>
 #include <sstream>
 #include <stdexcept>
 
@@ -1229,6 +1232,120 @@ std::vector<ValueColumnBuffer> materializeValueColumns(const Table& table,
   return out;
 }
 
+void appendCanonicalInt64GroupKey(int64_t value, std::string* out) {
+  char buffer[32];
+  const auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
+  if (result.ec != std::errc()) {
+    throw std::runtime_error("failed to encode integer group key");
+  }
+  out->append(buffer, result.ptr);
+}
+
+void appendCanonicalUInt64GroupKey(uint64_t value, std::string* out) {
+  char buffer[32];
+  const auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
+  if (result.ec != std::errc()) {
+    throw std::runtime_error("failed to encode unsigned integer group key");
+  }
+  out->append(buffer, result.ptr);
+}
+
+// Serialized group keys use the same numeric identity as Value comparison:
+// integral doubles share the integer spelling, +0.0 and -0.0 are one key, and
+// every NaN shares one spelling.
+void appendCanonicalDoubleGroupKey(double value, std::string* out) {
+  if (std::isnan(value)) {
+    out->append("nan");
+    return;
+  }
+  int64_t integral = 0;
+  if (canonicalIntegralKeyValue(value, &integral)) {
+    appendCanonicalInt64GroupKey(integral, out);
+    return;
+  }
+#if defined(__APPLE__)
+  // Apple libc++ only exposes the floating-point overload of std::to_chars
+  // when the deployment target is macOS 13.3 or newer. The default Bazel
+  // deployment target is older, so use a classic-locale stream with enough
+  // precision to round-trip instead.
+  std::ostringstream stream;
+  stream.imbue(std::locale::classic());
+  stream << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+  out->append(stream.str());
+#else
+  char buffer[64];
+  const auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
+  if (result.ec != std::errc()) {
+    throw std::runtime_error("failed to encode double group key");
+  }
+  out->append(buffer, result.ptr);
+#endif
+}
+
+void appendCanonicalValueGroupKey(const Value& value, std::string* out) {
+  switch (value.type()) {
+    case DataType::Nil:
+      out->append("null");
+      return;
+    case DataType::Bool:
+      out->append(value.asBool() ? "true" : "false");
+      return;
+    case DataType::Int64:
+      appendCanonicalInt64GroupKey(value.asInt64(), out);
+      return;
+    case DataType::Float32:
+      appendCanonicalDoubleGroupKey(static_cast<double>(value.asFloat()), out);
+      return;
+    case DataType::Double:
+      appendCanonicalDoubleGroupKey(value.asDouble(), out);
+      return;
+    case DataType::String:
+      out->append(value.asString());
+      return;
+    case DataType::FixedVector:
+      out->append(value.toString());
+      return;
+  }
+}
+
+void appendCanonicalColumnGroupKey(const ValueColumnBuffer& buffer, std::size_t row_index,
+                                   bool is_string_col, std::string* out) {
+  if (is_string_col) {
+    out->append(valueColumnStringViewAt(buffer, row_index));
+    return;
+  }
+  if (buffer.arrow_backing != nullptr) {
+    if (valueColumnIsNullAt(buffer, row_index)) {
+      out->append("null");
+      return;
+    }
+    const auto& format = buffer.arrow_backing->format;
+    if (format == kArrowFormatBool) {
+      const auto* bits = static_cast<const uint8_t*>(buffer.arrow_backing->value_buffer.get());
+      out->append(((bits[row_index >> 3] >> (row_index & 7)) & 0x01u) != 0 ? "true" : "false");
+      return;
+    }
+    if (format == kArrowFormatUInt64) {
+      const auto* values = static_cast<const uint64_t*>(buffer.arrow_backing->value_buffer.get());
+      appendCanonicalUInt64GroupKey(values[row_index], out);
+      return;
+    }
+    if (isArrowIntegerLikeFormat(format)) {
+      appendCanonicalInt64GroupKey(valueColumnInt64At(buffer, row_index), out);
+      return;
+    }
+    if (isArrowFloatingPointFormat(format)) {
+      appendCanonicalDoubleGroupKey(valueColumnDoubleAt(buffer, row_index), out);
+      return;
+    }
+  }
+  if (!buffer.values.empty()) {
+    appendCanonicalValueGroupKey(buffer.values[row_index], out);
+    return;
+  }
+  out->append(valueColumnStringAt(buffer, row_index));
+}
+
 std::vector<std::string> materializeSerializedKeys(const Table& table,
                                                    const std::vector<std::size_t>& indices) {
   const auto columns = viewValueColumns(table, indices);
@@ -1248,11 +1365,7 @@ std::vector<std::string> materializeSerializedKeys(const Table& table,
       if (i > 0) {
         key.push_back(kGroupDelim);
       }
-      if (is_string_col[i]) {
-        key.append(valueColumnStringViewAt(*columns[i].buffer, row_index));
-      } else {
-        key += valueColumnStringAt(*columns[i].buffer, row_index);
-      }
+      appendCanonicalColumnGroupKey(*columns[i].buffer, row_index, is_string_col[i], &key);
     }
     out.push_back(std::move(key));
   }

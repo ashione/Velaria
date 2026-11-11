@@ -1,0 +1,28 @@
+--- a/src/postgres/src_port_snprintf.c
++++ b/src/postgres/src_port_snprintf.c
+@@ -371,7 +371,7 @@
+ #ifndef HAVE_STRCHRNUL
+ 
+ static inline const char *
+-strchrnul(const char *s, int c)
++pg_strchrnul(const char *s, int c)
+ {
+ 	while (*s != '\0' && *s != c)
+ 		s++;
+@@ -389,6 +389,7 @@
+ #ifndef _GNU_SOURCE
+ extern char *strchrnul(const char *s, int c);
+ #endif
++#define pg_strchrnul strchrnul
+ 
+ #endif							/* HAVE_STRCHRNUL */
+ 
+@@ -435,7 +436,7 @@
+ 		if (*format != '%')
+ 		{
+ 			/* Scan to next '%' or end of string */
+-			const char *next_pct = strchrnul(format + 1, '%');
++			const char *next_pct = pg_strchrnul(format + 1, '%');
+ 
+ 			/* Dump literal data we just scanned over */
+ 			dostr(format, next_pct - format, target);

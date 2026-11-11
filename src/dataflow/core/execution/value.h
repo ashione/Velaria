@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -160,6 +162,79 @@ class Value {
   bool operator<(const Value& rhs) const { return compare(rhs) < 0; }
   bool operator>(const Value& rhs) const { return compare(rhs) > 0; }
 
+  // Key identity follows Value numeric comparison rather than raw type tags:
+  // integral doubles and int64s compare equal, -0.0 equals 0, and all NaNs
+  // are one key. Hash and equality must stay paired for unordered group maps.
+  bool keyEquals(const Value& rhs) const {
+    if (isNumber() && rhs.isNumber()) {
+      return compareNumbers(rhs) == 0;
+    }
+    if (type_ != rhs.type_) {
+      return false;
+    }
+    return compare(rhs) == 0;
+  }
+
+  std::size_t keyHash() const {
+    if (isNumber()) {
+      // Integral numeric values share an int64 hash so 1 and 1.0 collide by
+      // equality rather than by a rounded double. Non-integral values use a
+      // canonical double hash; NaN and zero are normalized first.
+      if (type_ != DataType::Int64) {
+        double value = asDouble();
+        if (std::isnan(value)) {
+          value = std::numeric_limits<double>::quiet_NaN();
+        } else if (value == 0.0) {
+          // Zero must use the same int64 hash as Value(int64_t(0)); relying
+          // on hash<double>(0.0) being equal to hash<int64_t>(0) is not
+          // portable and would break the hash/equality contract.
+          return std::hash<int64_t>{}(0);
+        } else {
+          constexpr double kMinInt64 = -9223372036854775808.0;
+          constexpr double kMaxInt64Exclusive = 9223372036854775808.0;
+          if (value >= kMinInt64 && value < kMaxInt64Exclusive) {
+            const int64_t integral = static_cast<int64_t>(value);
+            if (static_cast<double>(integral) == value) {
+              return std::hash<int64_t>{}(integral);
+            }
+          }
+        }
+        return std::hash<double>{}(value);
+      }
+      return std::hash<int64_t>{}(i64_);
+    }
+    const std::size_t seed = static_cast<std::size_t>(type_);
+    switch (type_) {
+      case DataType::Nil:
+        return seed;
+      case DataType::Bool:
+        return seed ^ (std::hash<bool>{}(b_) + 0x9e3779b97f4a7c15ULL + (seed << 6) +
+                       (seed >> 2));
+      case DataType::String:
+        return seed ^ (std::hash<std::string>{}(s_) + 0x9e3779b97f4a7c15ULL + (seed << 6) +
+                       (seed >> 2));
+      case DataType::FixedVector: {
+        std::size_t result = seed;
+        for (const float raw_item : vec_) {
+          float item = raw_item;
+          if (std::isnan(item)) {
+            item = std::numeric_limits<float>::quiet_NaN();
+          } else if (item == 0.0f) {
+            item = 0.0f;
+          }
+          result ^= std::hash<float>{}(item) + 0x9e3779b97f4a7c15ULL + (result << 6) +
+                    (result >> 2);
+        }
+        return result;
+      }
+      case DataType::Int64:
+      case DataType::Double:
+      case DataType::Float32:
+        break;
+    }
+    return seed;
+  }
+
  private:
   DataType type_;
   bool b_;
@@ -169,12 +244,56 @@ class Value {
   std::string s_;
   std::vector<float> vec_;
 
+  static int compareDoubles(double lhs, double rhs) {
+    if (lhs < rhs) return -1;
+    if (lhs > rhs) return 1;
+    if (lhs == rhs) return 0;
+    const bool lhs_nan = std::isnan(lhs);
+    const bool rhs_nan = std::isnan(rhs);
+    return lhs_nan == rhs_nan ? 0 : (lhs_nan ? 1 : -1);
+  }
+
+  // Compares an exact int64 with a double without first rounding the int64 to
+  // double. Doubles outside the int64 range are ordered by range; in-range
+  // doubles are truncated so the integer parts can be compared exactly.
+  static int compareInt64ToDouble(int64_t lhs, double rhs) {
+    if (std::isnan(rhs)) return -1;
+    constexpr double kMinInt64 = -9223372036854775808.0;
+    constexpr double kMaxInt64Exclusive = 9223372036854775808.0;
+    if (rhs >= kMaxInt64Exclusive) return -1;
+    if (rhs < kMinInt64) return 1;
+    const int64_t truncated = static_cast<int64_t>(rhs);
+    if (lhs < truncated) return -1;
+    if (lhs > truncated) return 1;
+    const double truncated_double = static_cast<double>(truncated);
+    if (truncated_double < rhs) return -1;
+    if (truncated_double > rhs) return 1;
+    return 0;
+  }
+
+  static double numericAsDouble(const Value& value) {
+    return value.type_ == DataType::Int64 ? static_cast<double>(value.i64_)
+           : value.type_ == DataType::Float32 ? static_cast<double>(value.f32_)
+                                              : value.d_;
+  }
+
+  int compareNumbers(const Value& rhs) const {
+    if (type_ == DataType::Int64 && rhs.type_ == DataType::Int64) {
+      return (i64_ < rhs.i64_) ? -1 : (i64_ > rhs.i64_ ? 1 : 0);
+    }
+    if (type_ == DataType::Int64) {
+      return compareInt64ToDouble(i64_, numericAsDouble(rhs));
+    }
+    if (rhs.type_ == DataType::Int64) {
+      return -compareInt64ToDouble(rhs.i64_, numericAsDouble(*this));
+    }
+    return compareDoubles(numericAsDouble(*this), numericAsDouble(rhs));
+  }
+
   int compare(const Value& rhs) const {
     if (type_ != rhs.type_) {
       if (isNumber() && rhs.isNumber()) {
-        const auto lhs = asDouble();
-        const auto rr = rhs.asDouble();
-        return (lhs < rr) ? -1 : (lhs > rr ? 1 : 0);
+        return compareNumbers(rhs);
       }
       throw std::runtime_error("type mismatch in compare");
     }
@@ -186,9 +305,9 @@ class Value {
       case DataType::Int64:
         return (i64_ < rhs.i64_) ? -1 : (i64_ > rhs.i64_ ? 1 : 0);
       case DataType::Float32:
-        return (f32_ < rhs.f32_) ? -1 : (f32_ > rhs.f32_ ? 1 : 0);
+        return compareDoubles(static_cast<double>(f32_), static_cast<double>(rhs.f32_));
       case DataType::Double:
-        return (d_ < rhs.d_) ? -1 : (d_ > rhs.d_ ? 1 : 0);
+        return compareDoubles(d_, rhs.d_);
       case DataType::String:
         return (s_ < rhs.s_) ? -1 : (s_ > rhs.s_ ? 1 : 0);
       case DataType::FixedVector: {
@@ -196,8 +315,9 @@ class Value {
           return vec_.size() < rhs.vec_.size() ? -1 : 1;
         }
         for (std::size_t i = 0; i < vec_.size(); ++i) {
-          if (vec_[i] < rhs.vec_[i]) return -1;
-          if (vec_[i] > rhs.vec_[i]) return 1;
+          const int item_compare =
+              compareDoubles(static_cast<double>(vec_[i]), static_cast<double>(rhs.vec_[i]));
+          if (item_compare != 0) return item_compare;
         }
         return 0;
       }

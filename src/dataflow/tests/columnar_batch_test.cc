@@ -1,8 +1,12 @@
 #include <stdexcept>
 #include <cmath>
+#include <cstdint>
 #include <limits>
+#include <memory>
 #include <string>
+#include <vector>
 
+#include "src/dataflow/core/execution/arrow_format.h"
 #include "src/dataflow/core/execution/columnar_batch.h"
 #include "src/dataflow/core/execution/columnar_exec.h"
 #include "src/dataflow/core/execution/nanoarrow_ipc_codec.h"
@@ -276,6 +280,29 @@ int main() {
   expect(buckets.size() == 3, "hash bucket size mismatch");
   expect(buckets.at(std::string("EMEA") + '\x1f' + "M").size() == 1,
          "hash bucket entry mismatch");
+
+  dataflow::Table uint64_key_table;
+  uint64_key_table.schema = dataflow::Schema({"u"});
+  auto uint64_backing = std::make_shared<dataflow::ArrowColumnBacking>();
+  uint64_backing->format = dataflow::kArrowFormatUInt64;
+  uint64_backing->length = 2;
+  auto uint64_values = std::make_shared<std::vector<uint64_t>>(
+      std::initializer_list<uint64_t>{std::numeric_limits<uint64_t>::max(), uint64_t(1)});
+  uint64_backing->value_buffer =
+      std::shared_ptr<void>(uint64_values, uint64_values->data());
+  auto uint64_cache = std::make_shared<dataflow::ColumnarTable>();
+  uint64_cache->schema = uint64_key_table.schema;
+  uint64_cache->row_count = 2;
+  uint64_cache->columns.resize(1);
+  uint64_cache->columns[0].arrow_backing = uint64_backing;
+  uint64_cache->arrow_formats = {dataflow::kArrowFormatUInt64};
+  uint64_cache->batch_row_counts = {2};
+  uint64_key_table.columnar_cache = uint64_cache;
+  const auto uint64_keys = dataflow::materializeSerializedKeys(uint64_key_table, {0});
+  expect(uint64_keys.size() == 2, "uint64 serialized key count mismatch");
+  expect(uint64_keys[0] == "18446744073709551615",
+         "uint64 serialized key should keep the unsigned spelling");
+  expect(uint64_keys[1] == "1", "uint64 serialized key small value mismatch");
 
   dataflow::Table lazy_cache_table(
       dataflow::Schema({"id", "label"}),

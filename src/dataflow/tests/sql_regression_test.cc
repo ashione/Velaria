@@ -1,8 +1,10 @@
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -1332,6 +1334,89 @@ void runBatchExplainRegression() {
          "batch_group_by_preserves_leading_zero_hour_groups");
 }
 
+void runAggregateNumericKeyRegression() {
+  DataflowSession& session = DataflowSession::builder();
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const int64_t large_int_key = 9007199254740993;  // 2^53 + 1, not representable as double
+  const double large_double_key = 9007199254740992.0;  // 2^53
+
+  Table packed_input(
+      Schema({"k", "bucket", "v"}),
+      {Row({Value(1.0), Value(int64_t(10)), Value(int64_t(1))}),
+       Row({Value(int64_t(1)), Value(int64_t(10)), Value(int64_t(2))}),
+       Row({Value(-0.0), Value(int64_t(10)), Value(int64_t(3))}),
+       Row({Value(int64_t(0)), Value(int64_t(10)), Value(int64_t(4))}),
+       Row({Value(nan), Value(int64_t(10)), Value(int64_t(5))}),
+       Row({Value(nan), Value(int64_t(10)), Value(int64_t(6))}),
+       Row({Value(large_int_key), Value(int64_t(10)), Value(int64_t(40))}),
+       Row({Value(large_double_key), Value(int64_t(10)), Value(int64_t(80))}),
+       Row({Value(true), Value(int64_t(10)), Value(int64_t(160))})});
+  session.createTempView("agg_numeric_packed", DataFrame(packed_input));
+
+  const std::string packed_explain = session.explainSql(
+      "SELECT k, bucket, SUM(v) AS total "
+      "FROM agg_numeric_packed GROUP BY k, bucket");
+  expect(explainFieldValue(packed_explain, "selected_impl") == "hash-packed",
+         "packed_numeric_keys_use_hash_packed");
+  expect(explainFieldValue(packed_explain, "runtime_shape") == "generic-packed-keys-2",
+         "packed_numeric_keys_use_packed_shape");
+
+  Table packed_out = session.submit(
+      "SELECT k, bucket, SUM(v) AS total "
+      "FROM agg_numeric_packed GROUP BY k, bucket");
+  dataflow::materializeRows(&packed_out);
+  expect(packed_out.rows.size() == 6, "packed_numeric_keys_group_count");
+  std::vector<int64_t> packed_totals;
+  bool saw_bool_key = false;
+  for (const auto& row : packed_out.rows) {
+    packed_totals.push_back(row[2].asInt64());
+    if (row[0].type() == dataflow::DataType::Bool) {
+      saw_bool_key = true;
+      expect(row[0].asBool(), "packed_bool_key_keeps_bool_value");
+    }
+  }
+  std::sort(packed_totals.begin(), packed_totals.end());
+  expect(packed_totals == std::vector<int64_t>({3, 7, 11, 40, 80, 160}),
+         "packed_numeric_keys_coalesce_equal_values_only");
+  expect(saw_bool_key, "packed_bool_key_stays_distinct_from_numeric_one");
+
+  Table serialized_input(
+      Schema({"k", "v"}),
+      {Row({Value(1.0), Value(int64_t(1))}),
+       Row({Value(int64_t(1)), Value(int64_t(2))}),
+       Row({Value(-0.0), Value(int64_t(3))}),
+       Row({Value(int64_t(0)), Value(int64_t(4))}),
+       Row({Value(nan), Value(int64_t(5))}),
+       Row({Value(nan), Value(int64_t(6))}),
+       Row({Value(large_int_key), Value(int64_t(40))}),
+       Row({Value(large_double_key), Value(int64_t(80))}),
+       Row({Value(true), Value(int64_t(160))})});
+  session.createTempView("agg_numeric_serialized", DataFrame(serialized_input));
+
+  const std::string serialized_explain = session.explainSql(
+      "SELECT k, SUM(v) AS total FROM agg_numeric_serialized GROUP BY k");
+  expect(explainFieldValue(serialized_explain, "runtime_shape") ==
+             "generic-serialized-keys",
+         "serialized_numeric_keys_use_serialized_shape");
+
+  Table serialized_out = session.submit(
+      "SELECT k, SUM(v) AS total FROM agg_numeric_serialized GROUP BY k");
+  dataflow::materializeRows(&serialized_out);
+  expect(serialized_out.rows.size() == 6, "serialized_numeric_keys_group_count");
+  std::vector<int64_t> serialized_totals;
+  bool saw_serialized_bool_key = false;
+  for (const auto& row : serialized_out.rows) {
+    serialized_totals.push_back(row[1].asInt64());
+    if (row[0].asString() == "true") {
+      saw_serialized_bool_key = true;
+    }
+  }
+  std::sort(serialized_totals.begin(), serialized_totals.end());
+  expect(serialized_totals == packed_totals,
+         "serialized_numeric_keys_match_packed_identity");
+  expect(saw_serialized_bool_key, "serialized_bool_key_stays_distinct_from_numeric_one");
+}
+
 void runColumnarFallbackExplainRegression() {
   DataflowSession session;
   Table invalid_cache_table(
@@ -2033,6 +2118,7 @@ int main() {
   runComplexDmlRegression();
   runPlannerPlanRegression();
   runBatchExplainRegression();
+  runAggregateNumericKeyRegression();
   runColumnarFallbackExplainRegression();
   runAfterParseRewriteRegression();
   runStreamSqlRegression();
